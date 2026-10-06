@@ -2403,6 +2403,9 @@ pub struct LineTrainEntryRow {
     pub uid: Option<String>,
     /// The entry's `calling_points` as raw JSON text, `None` when absent.
     pub calling_points_json: Option<String>,
+    /// The entry's CIF `train_status` (one character), when present -- the
+    /// service-mode fallback when `schedule_services` has no row.
+    pub train_status: Option<String>,
     /// `tiploc` of the first/last element of `calling_points`, when
     /// `calling_points` is an array and that element's `tiploc` is a string
     /// -- exactly `routes::lines::first_and_last_tiploc`'s old contract.
@@ -2438,6 +2441,60 @@ pub struct LineTrainEntries {
 /// filter); anything but an array does not.
 const POPULATION_HAS_SCOPE_SQL: &str = "(jsonb_typeof(p.population) = 'array' \
      AND COALESCE((p.population -> 0) ? 'scope', true))";
+
+/// One decoded row of [`list_line_train_entries`]'s SQL, column for column.
+type LineTrainEntryTuple = (
+    Option<i64>,
+    Option<String>,
+    Option<String>,
+    Option<String>,
+    Option<String>,
+    Option<String>,
+    bool,
+    Option<String>,
+    Option<String>,
+    Option<String>,
+    Option<String>,
+    Option<String>,
+    Option<i32>,
+    Option<String>,
+);
+
+/// [`LineTrainEntryTuple`] as a [`LineTrainEntryRow`] (the ordinal and the
+/// population-wide `has_scope` flag dropped).
+fn line_train_entry_row(
+    (
+        _,
+        uid_json,
+        uid,
+        calling_points_json,
+        first_tiploc,
+        last_tiploc,
+        _,
+        scope,
+        direction,
+        run_first_crs,
+        run_last_crs,
+        line_due_time,
+        line_due_day_offset,
+        train_status,
+    ): LineTrainEntryTuple,
+) -> LineTrainEntryRow {
+    LineTrainEntryRow {
+        uid_json,
+        uid,
+        calling_points_json,
+        train_status,
+        first_tiploc,
+        last_tiploc,
+        scope,
+        direction,
+        run_first_crs,
+        run_last_crs,
+        line_due_time,
+        line_due_day_offset,
+    }
+}
 
 /// A CTE `pop` holding one line's population row for `($1, $2)`: the
 /// population as an array (`'[]'` for anything else) and
@@ -2480,25 +2537,7 @@ pub async fn list_line_train_entries(
     service_date: chrono::NaiveDate,
     scopes: Option<&[String]>,
 ) -> Result<Option<LineTrainEntries>> {
-    #[expect(
-        clippy::type_complexity,
-        reason = "the tuple mirrors the columns of the SQL row it decodes"
-    )]
-    let rows: Vec<(
-        Option<i64>,
-        Option<String>,
-        Option<String>,
-        Option<String>,
-        Option<String>,
-        Option<String>,
-        bool,
-        Option<String>,
-        Option<String>,
-        Option<String>,
-        Option<String>,
-        Option<String>,
-        Option<i32>,
-    )> = sqlx::query_as(&format!(
+    let rows: Vec<LineTrainEntryTuple> = sqlx::query_as(&format!(
         r"
         WITH {POPULATION_CTE_SQL}
         SELECT x.ord,
@@ -2518,7 +2557,9 @@ pub async fn list_line_train_entries(
                x.e ->> 'run_last_crs',
                x.e -> 'line_due' ->> 'time',
                CASE WHEN jsonb_typeof(x.e -> 'line_due' -> 'day_offset') = 'number'
-                    THEN (x.e -> 'line_due' ->> 'day_offset')::int END
+                    THEN (x.e -> 'line_due' ->> 'day_offset')::int END,
+               CASE WHEN jsonb_typeof(x.e -> 'train_status') = 'string'
+                    THEN x.e ->> 'train_status' END
         FROM pop
         LEFT JOIN LATERAL jsonb_array_elements(pop.population) WITH ORDINALITY AS x(e, ord)
           -- The scope filter lives in the join, not the WHERE, so a filter
@@ -2543,35 +2584,7 @@ pub async fn list_line_train_entries(
         .into_iter()
         // The LEFT JOIN's one all-NULL row for an empty population.
         .filter(|row| row.0.is_some())
-        .map(
-            |(
-                _,
-                uid_json,
-                uid,
-                calling_points_json,
-                first_tiploc,
-                last_tiploc,
-                _,
-                scope,
-                direction,
-                run_first_crs,
-                run_last_crs,
-                line_due_time,
-                line_due_day_offset,
-            )| LineTrainEntryRow {
-                uid_json,
-                uid,
-                calling_points_json,
-                first_tiploc,
-                last_tiploc,
-                scope,
-                direction,
-                run_first_crs,
-                run_last_crs,
-                line_due_time,
-                line_due_day_offset,
-            },
-        )
+        .map(line_train_entry_row)
         .collect();
     Ok(Some(LineTrainEntries { entries, has_scope }))
 }
@@ -7132,7 +7145,40 @@ pub async fn station_names_for_crs_batch(
             .bind(&upper)
             .fetch_all(pool)
             .await?;
-    Ok(rows.into_iter().collect())
+    let mut names: HashMap<String, String> = rows.into_iter().collect();
+
+    // A destination with no CRS is keyed by its terminus TIPLOC instead
+    // (`schedule_query`'s `unresolved_destination_key`): `tiploc:HTRBUS3`,
+    // or `~HTRBUS3` in rows published before 2026-10-07. Those get their
+    // `tiploc_locations` display name, under the key as given and its
+    // upper-cased form, so every caller's lookup finds it.
+    let by_tiploc: Vec<(&String, String)> = crs_codes
+        .iter()
+        .filter_map(|code| tiploc_of_destination_key(code).map(|tiploc| (code, tiploc)))
+        .collect();
+    if !by_tiploc.is_empty() {
+        let tiplocs: Vec<String> = by_tiploc.iter().map(|(_, t)| t.clone()).collect();
+        let locations =
+            crate::data::tiploc_locations::locations_for_tiplocs(pool, &tiplocs).await?;
+        for (code, tiploc) in by_tiploc {
+            if let Some(location) = locations.get(&tiploc) {
+                names.insert(code.clone(), location.display_name.clone());
+                names.insert(normalize_code(code), location.display_name.clone());
+            }
+        }
+    }
+    Ok(names)
+}
+
+/// The TIPLOC in a TIPLOC-keyed destination (`tiploc:HTRBUS3`, or the
+/// pre-2026-10-07 `~HTRBUS3`); `None` for a CRS.
+pub fn tiploc_of_destination_key(code: &str) -> Option<String> {
+    let code = code.trim();
+    if let Some(tiploc) = code.strip_prefix('~') {
+        let tiploc = tiploc.trim().to_ascii_uppercase();
+        return (!tiploc.is_empty()).then_some(tiploc);
+    }
+    common::location_naming::tiploc_from_code(code)
 }
 
 #[cfg(test)]

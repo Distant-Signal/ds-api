@@ -11,6 +11,7 @@
 mod alf;
 mod config;
 mod discovery;
+mod locations;
 mod parser;
 
 use std::time::Duration;
@@ -443,14 +444,16 @@ mod telemetry {
     const OUTCOMES: [&str; 4] = [PUBLISHED, RETRYABLE, PERMANENT, REJECTED];
 
     /// Every `product` label value [`product_kind`] can return.
-    const PRODUCT_KINDS: [&str; 9] = [
+    const PRODUCT_KINDS: [&str; 11] = [
         "stanox_crs",
         "tiploc_crs",
+        "tiploc_locations",
         "fixed_links",
         "schedule_line_population",
         "schedule_network_departures",
         "schedule_destination_departures",
         "schedule_calling_points_full",
+        "schedule_services",
         "all_cif_derived",
         "other",
     ];
@@ -525,6 +528,7 @@ mod telemetry {
 mod product {
     pub(crate) const STANOX_CRS: &str = "stanox_crs";
     pub(crate) const TIPLOC_CRS: &str = "tiploc_crs";
+    pub(crate) const TIPLOC_LOCATIONS: &str = "tiploc_locations";
     pub(crate) const FIXED_LINKS: &str = "fixed_links";
 
     pub(crate) fn line_population(line_id: &str, date: chrono::NaiveDate) -> String {
@@ -541,6 +545,10 @@ mod product {
 
     pub(crate) fn calling_points_full(date: chrono::NaiveDate) -> String {
         format!("schedule_calling_points_full/{date}")
+    }
+
+    pub(crate) fn services(date: chrono::NaiveDate) -> String {
+        format!("schedule_services/{date}")
     }
 }
 
@@ -774,6 +782,20 @@ async fn poll_once(
         }
     }
 
+    if !outcome.is_published(product::TIPLOC_LOCATIONS) {
+        publish_tiploc_locations(
+            client,
+            config,
+            &delivery.mca_path,
+            &ti_records,
+            &a_text,
+            internal_oauth,
+            source_sequence,
+            &mut outcome,
+        )
+        .await;
+    }
+
     if outcome.is_published(product::FIXED_LINKS) {
         tracing::debug!("fixed links already published for this delivery; skipping");
     } else if let Some(alf_path) = &delivery.alf_path {
@@ -885,6 +907,81 @@ async fn record_completed_publish(
              still not republish it, but a restart before the next delivery will (wasteful, not \
              incorrect)"
         ),
+    }
+}
+
+/// Builds and POSTs `tiploc_locations` (see [`locations`]): a name, a
+/// location type and, for a bus stop or ferry terminal, a parent station
+/// for every `TI` record. Needs one streamed pass over the `MCA` file for
+/// the per-TIPLOC service-mode tally; a failed read is retryable, like an
+/// unreadable ALF file. An empty result (no `TI` records at all) is never
+/// sent: the route replaces the whole table, so it would wipe it.
+#[expect(
+    clippy::too_many_arguments,
+    reason = "each argument is an independent input from the single caller; a struct would only wrap them"
+)]
+async fn publish_tiploc_locations(
+    client: &Client,
+    config: &Config,
+    mca_path: &std::path::Path,
+    ti_records: &[parser::TiRecord],
+    msn_text: &str,
+    internal_oauth: &common::oauth_client::OAuthTokenCache,
+    source_sequence: i32,
+    outcome: &mut CycleOutcome,
+) {
+    let tally = match locations::ModeTally::from_mca(mca_path) {
+        Ok(tally) => tally,
+        Err(err) => {
+            tracing::error!(error = ?err, path = ?mca_path, "failed to read the MCA file for the tiploc_locations mode tally");
+            outcome.retryable("tiploc_locations (MCA read failed)");
+            return;
+        }
+    };
+    let records = locations::build_location_records(
+        ti_records,
+        &locations::parse_msn_records(msn_text),
+        &tally,
+        &locations::checked_in_curated_parents(),
+        source_sequence,
+    );
+    if records.is_empty() {
+        tracing::error!("no TI records to publish as tiploc_locations; leaving the previous rows");
+        outcome.permanent("tiploc_locations (no TI records)");
+        return;
+    }
+    let road_or_water = records
+        .iter()
+        .filter(|r| r.location_type.is_road_or_water())
+        .count();
+    let parented = records
+        .iter()
+        .filter(|r| r.location_type.is_road_or_water() && r.parent_crs.is_some())
+        .count();
+    tracing::info!(
+        count = records.len(),
+        road_or_water,
+        parented,
+        "built tiploc_locations"
+    );
+    match publish_with_retry(
+        &config.publish_retry,
+        product::TIPLOC_LOCATIONS,
+        async || {
+            common::ingest::post_batch(
+                client,
+                &config.tiploc_locations_url,
+                internal_oauth,
+                &records,
+                "tiploc location rows",
+            )
+            .await
+        },
+    )
+    .await
+    {
+        Ok(()) => outcome.succeeded(product::TIPLOC_LOCATIONS),
+        Err(err) => outcome.failed(product::TIPLOC_LOCATIONS, &err),
     }
 }
 
@@ -1270,6 +1367,7 @@ async fn publish_cif_derived_products(
             [
                 product::destination_departures(date),
                 product::calling_points_full(date),
+                product::services(date),
             ]
         }))
         .collect();
@@ -1382,6 +1480,18 @@ async fn publish_cif_derived_products(
         // directly above -- one pass, multiple outputs, this file's own
         // established precedent.
         publish_schedule_calling_points_full(
+            client,
+            config,
+            &index,
+            date,
+            internal_oauth,
+            window_has_schedules,
+            outcome,
+        )
+        .await;
+        // Fifth: every schedule's service mode for the date, so `api` can
+        // label buses and ferries (TRUST never reports them).
+        publish_schedule_services(
             client,
             config,
             &index,
@@ -2171,6 +2281,105 @@ async fn publish_schedule_calling_points_full(
             "schedule-derived full calling-point rows",
             FINAL_CHUNK_REQUEST_TIMEOUT,
             empty_publish(date, window_has_schedules),
+        )
+        .await
+    })
+    .await;
+    match result {
+        Ok(()) => outcome.succeeded(key),
+        Err(err) => outcome.failed(key, &err),
+    }
+}
+
+/// One `schedule_services` row per non-cancelled schedule running on
+/// `date` -- the STP winner's service mode (see
+/// [`schedule_query::service_mode`]) and the CIF facts it was derived from.
+/// Sorted by uid so a republish of an unchanged day is byte-identical.
+fn schedule_services_rows(
+    index: &schedule_query::ScheduleIndex,
+    date: chrono::NaiveDate,
+) -> Vec<serde_json::Value> {
+    let mut resolved: Vec<schedule_query::ResolvedSchedule> = index
+        .uids()
+        .filter_map(|uid| index.schedule_for_uid(uid, date))
+        .filter(|resolved| !resolved.cancelled)
+        .collect();
+    resolved.sort_unstable_by(|a, b| a.uid.cmp(&b.uid));
+    resolved
+        .iter()
+        .map(|resolved| {
+            serde_json::json!({
+                "service_date": date,
+                "uid": resolved.uid,
+                "mode": resolved.service_mode().as_str(),
+                "train_status": resolved.train_status.map(String::from),
+                "train_category": resolved.train_category.as_deref(),
+                "headcode": resolved.headcode,
+                "rsid": resolved.rsid,
+                "operator_atoc": resolved.operator_atoc,
+                "stp": stp_code(resolved.stp_indicator),
+            })
+        })
+        .collect()
+}
+
+/// The CIF letter for a published (never cancelled) STP indicator.
+fn stp_code(stp: schedule_query::StpIndicator) -> &'static str {
+    match stp {
+        schedule_query::StpIndicator::Permanent => "P",
+        schedule_query::StpIndicator::Overlay => "O",
+        schedule_query::StpIndicator::New => "N",
+        schedule_query::StpIndicator::Cancellation => "C",
+    }
+}
+
+/// Publishes [`schedule_services_rows`] for `date` in one request (a day is
+/// ~30k narrow rows; `api` replaces the date atomically). An empty day is
+/// published as empty only when the window has schedules at all (PL-14,
+/// the same guard as the chunked products); otherwise nothing is sent, the
+/// previous rows stay, and the product is recorded as failed.
+async fn publish_schedule_services(
+    client: &Client,
+    config: &Config,
+    index: &schedule_query::ScheduleIndex,
+    date: chrono::NaiveDate,
+    internal_oauth: &common::oauth_client::OAuthTokenCache,
+    window_has_schedules: bool,
+    outcome: &mut CycleOutcome,
+) {
+    let key = product::services(date);
+    if outcome.is_published(&key) {
+        return;
+    }
+    let rows = schedule_services_rows(index, date);
+    if rows.is_empty() && !window_has_schedules {
+        outcome.failed(
+            key,
+            &anyhow::Error::new(RefusedToClear(
+                "no schedule_services rows for this date or any date of the publish window; \
+                 not clearing the date's previous rows"
+                    .to_string(),
+            )),
+        );
+        return;
+    }
+    let separator = if config.schedule_services_url.contains('?') {
+        '&'
+    } else {
+        '?'
+    };
+    let url = format!(
+        "{}{separator}service_date={date}",
+        config.schedule_services_url
+    );
+    let result = publish_with_retry(&config.publish_retry, &key, async || {
+        common::ingest::post_batch_with_timeout(
+            client,
+            &url,
+            internal_oauth,
+            &rows,
+            "schedule service-mode rows",
+            Some(FINAL_CHUNK_REQUEST_TIMEOUT),
         )
         .await
     })
@@ -3626,6 +3835,62 @@ mod poll_once_tests {
     /// trip-planning connections graph reads, and before this fix it
     /// included every CIF calling point regardless of public/non-public
     /// Activity code).
+    mod schedule_services_rows_tests {
+        use super::*;
+
+        const BS_C00573_PERMANENT: &str =
+            "BSNC005732605172612060000001 PXX1S003101121194800 DMU    125      S A T        P";
+        const LO_EUSTON: &str = "LOEUSTON  0822 08227  C      TB";
+        const LT_EUSTON: &str = "LTEUSTON  0804 08079     TF";
+
+        /// The real C30818 bus `BS` prefix (status `B`, category `BS`,
+        /// headcode `0B00`) with its dates/days widened to cover the
+        /// C00573 fixture's Sunday, blank-padded to 80 bytes.
+        fn bs_bus() -> String {
+            let line = format!("{}{:>44}", "BSNC308182605172612111111111 BBS0B00", "P");
+            assert_eq!(line.len(), 80);
+            line
+        }
+
+        #[test]
+        fn one_row_per_running_schedule_with_its_mode() {
+            let text = format!(
+                "{BS_C00573_PERMANENT}\n{LO_EUSTON}\n{LT_EUSTON}\n{}\n{LO_EUSTON}\n{LT_EUSTON}",
+                bs_bus()
+            );
+            let index = schedule_query::ScheduleIndex::from_text(&text);
+            let rows = schedule_services_rows(
+                &index,
+                chrono::NaiveDate::from_ymd_opt(2026, 5, 17).unwrap(),
+            );
+            assert_eq!(rows.len(), 2, "{rows:?}");
+            assert_eq!(rows[0]["uid"], "C00573");
+            assert_eq!(rows[0]["mode"], "train");
+            assert_eq!(rows[0]["train_status"], "P");
+            assert_eq!(rows[0]["train_category"], "XX");
+            assert_eq!(rows[0]["headcode"], "1S00");
+            assert_eq!(rows[0]["stp"], "P");
+            assert_eq!(rows[1]["uid"], "C30818");
+            assert_eq!(rows[1]["mode"], "bus");
+            assert_eq!(rows[1]["train_status"], "B");
+            assert_eq!(rows[1]["train_category"], "BS");
+            assert_eq!(rows[1]["headcode"], "0B00");
+            assert_eq!(rows[1]["service_date"], "2026-05-17");
+        }
+
+        #[test]
+        fn a_day_the_schedules_do_not_run_has_no_rows() {
+            let text = format!("{BS_C00573_PERMANENT}\n{LO_EUSTON}\n{LT_EUSTON}");
+            let index = schedule_query::ScheduleIndex::from_text(&text);
+            // 2026-05-18 is a Monday; C00573 runs Sundays only.
+            let rows = schedule_services_rows(
+                &index,
+                chrono::NaiveDate::from_ymd_opt(2026, 5, 18).unwrap(),
+            );
+            assert!(rows.is_empty());
+        }
+    }
+
     mod schedule_calling_points_full_rows_tests {
         use super::*;
 
@@ -3876,6 +4141,7 @@ LTWVRMPTN 2211 22113     TF";
             to: &str,
         ) -> Option<trip_planner::Journey> {
             let interchange = schedule_query::InterchangeData {
+                modal_change: schedule_query::ModalChangeBuffer::default(),
                 change_time_by_tiploc: std::collections::HashMap::new(),
                 tiploc_to_crs: std::collections::HashMap::new(),
                 crs_to_tiplocs: std::collections::HashMap::new(),
@@ -4059,7 +4325,9 @@ LTWVRMPTN 2211 22113     TF";
             schedule_calling_points_full_url: format!(
                 "{base}/private/schedule-calling-points-full"
             ),
+            schedule_services_url: format!("{base}/private/schedule-services"),
             tiploc_crs_url: format!("{base}/private/tiploc-crs"),
+            tiploc_locations_url: format!("{base}/private/tiploc-locations"),
             schedule_reference_publishes_url: format!(
                 "{base}/private/schedule-reference-publishes"
             ),
@@ -4539,10 +4807,12 @@ mod poll_once_retry_tests {
         for path in [
             "/private/stanox-crs",
             "/private/tiploc-crs",
+            "/private/tiploc-locations",
             "/private/schedule-line-population",
             "/private/schedule-network-departures",
             "/private/schedule-destination-departures",
             "/private/schedule-calling-points-full",
+            "/private/schedule-services",
             "/private/schedule-reference-publishes",
         ] {
             wiremock::Mock::given(wiremock::matchers::method("POST"))

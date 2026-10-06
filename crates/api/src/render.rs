@@ -494,8 +494,10 @@ pub(crate) fn line_train_json(
     live: Option<&crate::data::trains::PublicTrainState>,
     schedule_route: &ScheduleRouteEndpoints,
     membership: LineMembershipJson,
+    service_mode: crate::data::schedule_services::ServiceMode,
 ) -> LineTrainJson {
     LineTrainJson {
+        service: crate::data::schedule_services::ServiceModeFields(service_mode),
         uid,
         calling_points,
         membership,
@@ -548,6 +550,10 @@ pub(crate) struct LineTrainJson {
     live_status: Option<Value>,
     #[serde(flatten)]
     membership: LineMembershipJson,
+    /// `serviceMode`/`liveTracking` for the entry itself, so a bus with no
+    /// `liveStatus` (it never has one) is still labelled.
+    #[serde(flatten)]
+    service: crate::data::schedule_services::ServiceModeFields,
 }
 
 /// A line train's membership of the line, from its population entry
@@ -1582,6 +1588,20 @@ mod tests {
         live: Option<&crate::data::trains::PublicTrainState>,
         schedule_route: &ScheduleRouteEndpoints,
     ) -> Value {
+        render_line_train_as(
+            entry,
+            live,
+            schedule_route,
+            crate::data::schedule_services::ServiceMode::Train,
+        )
+    }
+
+    fn render_line_train_as(
+        entry: &Value,
+        live: Option<&crate::data::trains::PublicTrainState>,
+        schedule_route: &ScheduleRouteEndpoints,
+        mode: crate::data::schedule_services::ServiceMode,
+    ) -> Value {
         let raw = |key: &str| {
             serde_json::value::to_raw_value(entry.get(key).unwrap_or(&Value::Null)).unwrap()
         };
@@ -1591,8 +1611,63 @@ mod tests {
             live,
             schedule_route,
             LineMembershipJson::default(),
+            mode,
         ))
         .unwrap()
+    }
+
+    #[test]
+    fn line_train_json_carries_service_mode_and_live_tracking() {
+        let entry = serde_json::json!({ "uid": "C30818", "calling_points": [] });
+        let route = ScheduleRouteEndpoints {
+            origin_crs: None,
+            origin_name: None,
+            destination_crs: None,
+            destination_name: None,
+        };
+        let train = render_line_train(&entry, None, &route);
+        assert_eq!(train["serviceMode"], "train");
+        assert_eq!(train["liveTracking"], true);
+        let bus = render_line_train_as(
+            &entry,
+            None,
+            &route,
+            crate::data::schedule_services::ServiceMode::ReplacementBus,
+        );
+        assert_eq!(bus["serviceMode"], "replacementBus");
+        assert_eq!(bus["liveTracking"], false);
+        assert_eq!(bus["uid"], "C30818");
+        assert!(bus["liveStatus"].is_null());
+    }
+
+    /// A line's bus carries its membership (`shared`: buses are never a
+    /// line's own trains) and its service mode side by side.
+    #[test]
+    fn line_train_json_flattens_membership_and_service_mode_together() {
+        let json = serde_json::to_value(line_train_json(
+            serde_json::value::to_raw_value("C30818").unwrap(),
+            serde_json::value::to_raw_value(&serde_json::json!([])).unwrap(),
+            None,
+            &ScheduleRouteEndpoints::default(),
+            LineMembershipJson {
+                scope: Some("shared".to_owned()),
+                direction: Some("down".to_owned()),
+                run_first_crs: Some("WAT".to_owned()),
+                run_last_crs: Some("WEY".to_owned()),
+                line_due: Some(LineDueJson {
+                    time: "23:35:00".to_owned(),
+                    day_offset: 0,
+                }),
+            },
+            crate::data::schedule_services::ServiceMode::ReplacementBus,
+        ))
+        .unwrap();
+        assert_eq!(json["scope"], "shared");
+        assert_eq!(json["direction"], "down");
+        assert_eq!(json["runFirstCrs"], "WAT");
+        assert_eq!(json["lineDue"]["time"], "23:35:00");
+        assert_eq!(json["serviceMode"], "replacementBus");
+        assert_eq!(json["liveTracking"], false);
     }
 
     #[test]
@@ -1633,6 +1708,7 @@ mod tests {
 
         let entry = serde_json::json!({"uid": "C10002", "calling_points": []});
         let live = PublicTrainState {
+            service: crate::data::schedule_services::ServiceModeFields::default(),
             trains_id: 42,
             train_uid: "C10002".to_string(),
             service_date: "2026-09-09".parse().unwrap(),

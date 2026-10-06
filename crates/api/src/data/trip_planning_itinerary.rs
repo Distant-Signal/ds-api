@@ -109,6 +109,13 @@ pub enum PlannedLeg {
         /// `trip_leg_details::attach_leg_details`; `None` when unknown or
         /// when the stored rows disagree. NOT the TRUST 10-char train id.
         headcode: Option<String>,
+        /// `serviceMode` (`train`/`replacementBus`/`bus`/`ferry`) and
+        /// `liveTracking` (additive, 2026-10-06). `kind` stays `"train"` for
+        /// a bus or ferry leg so existing clients keep working; these say
+        /// what the vehicle really is. Filled in by
+        /// `trip_leg_details::attach_leg_details`; a train until then.
+        #[serde(flatten)]
+        service: crate::data::schedule_services::ServiceModeFields,
         /// Internal (never serialized): the boarding/alighting TIPLOCs and
         /// raw minutes-from-service-day-midnight the planner produced, so
         /// waypoint chaining and the live overlay can work on exact values
@@ -279,6 +286,7 @@ fn planned_leg(leg: &JourneyLeg, date: NaiveDate, interchange: &InterchangeData)
                 public_arrival_day_offset: None,
                 operator: None,
                 headcode: None,
+                service: crate::data::schedule_services::ServiceModeFields::default(),
                 from_tiploc: train.from_tiploc.clone(),
                 to_tiploc: train.to_tiploc.clone(),
                 departure_min: train.departure_min,
@@ -367,16 +375,15 @@ fn resolve_segment_tiplocs(
     origin_crs: &str,
     destination_crs: &str,
 ) -> Result<(Vec<String>, Vec<String>), String> {
-    let from_tiplocs = interchange
-        .crs_to_tiplocs
-        .get(&origin_crs.to_ascii_uppercase())
-        .cloned()
-        .unwrap_or_default();
-    let to_tiplocs = interchange
-        .crs_to_tiplocs
-        .get(&destination_crs.to_ascii_uppercase())
-        .cloned()
-        .unwrap_or_default();
+    let lookup = |code: &str| {
+        interchange
+            .crs_to_tiplocs
+            .get(&common::location_naming::normalize_location_code(code))
+            .cloned()
+            .unwrap_or_default()
+    };
+    let from_tiplocs = lookup(origin_crs);
+    let to_tiplocs = lookup(destination_crs);
     if from_tiplocs.is_empty() {
         return Err(format!(
             "'{origin_crs}' is not a recognised station CRS code"
@@ -1717,6 +1724,7 @@ mod tests {
         change_times: &[(&str, i32)],
     ) -> InterchangeData {
         let mut data = InterchangeData {
+            modal_change: schedule_query::ModalChangeBuffer::default(),
             change_time_by_tiploc: HashMap::new(),
             tiploc_to_crs: HashMap::new(),
             crs_to_tiplocs: HashMap::new(),

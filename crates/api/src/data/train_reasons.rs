@@ -495,6 +495,8 @@ mod tests {
         crate::data::journey::JourneyStop {
             crs: None,
             name: None,
+            location_type: None,
+            parent_crs: None,
             tiploc: None,
             kind: None,
             scheduled_arrival: at,
@@ -552,6 +554,7 @@ mod tests {
         stops[0].actual_departure = stops[0].scheduled_departure;
         let state = |status: &str, stops: Vec<crate::data::journey::JourneyStop>| {
             crate::data::trains::PublicTrainState {
+                service: crate::data::schedule_services::ServiceModeFields::default(),
                 trains_id,
                 train_uid: "TRSN03".to_string(),
                 service_date: date,
@@ -641,6 +644,7 @@ mod tests {
         stops: Option<Vec<crate::data::journey::JourneyStop>>,
     ) -> crate::data::train_tracking::TrackedTrainState {
         crate::data::train_tracking::TrackedTrainState {
+            service: crate::data::schedule_services::ServiceModeFields::default(),
             id,
             service_date,
             pin_origin_crs: None,

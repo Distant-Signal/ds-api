@@ -120,6 +120,17 @@ pub(crate) struct Config {
     )]
     pub schedule_calling_points_full_url: String,
 
+    /// The `api` crate's ingestion endpoint for the per-date service-mode
+    /// publish (`schedule_services`: train, replacement bus, bus or ferry per
+    /// schedule). POST-only, one request per service date with
+    /// `?service_date=`, same writer credential as every publish above.
+    #[arg(
+        env = "SCHEDULE_SERVICES_URL",
+        long,
+        default_value = "http://api:8080/private/schedule-services"
+    )]
+    pub schedule_services_url: String,
+
     /// The `api` crate's ingestion endpoint for this service's seventh
     /// responsibility (Task 4 of the TIPLOC-primary CRS crosswalk plan): the
     /// richer, TIPLOC-primary CRS crosswalk publish, run alongside (not
@@ -136,6 +147,17 @@ pub(crate) struct Config {
         default_value = "http://api:8080/private/tiploc-crs"
     )]
     pub tiploc_crs_url: String,
+
+    /// The `api` crate's ingestion endpoint for `tiploc_locations`: every
+    /// TIPLOC's name, location type and parent station (see
+    /// `crate::locations`). POST-only, same writer credential as
+    /// `tiploc_crs_url`.
+    #[arg(
+        env = "TIPLOC_LOCATIONS_URL",
+        long,
+        default_value = "http://api:8080/private/tiploc-locations"
+    )]
+    pub tiploc_locations_url: String,
 
     /// The static line catalogue -- same `--lines-dir`/`LINES_DIR`
     /// `value_parser` pattern as `crates/aggregator/src/config.rs`'s own
