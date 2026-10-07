@@ -18,7 +18,7 @@
 # resolves to the same rustc 1.88 requirement by way of the icu_* chain
 # above (api additionally hits it via `home`).
 #
-# This image carries FIVE binaries: `api` (the ENTRYPOINT), `corpus_compare`
+# This image carries SIX binaries: `api` (the ENTRYPOINT), `corpus_compare`
 # (a read-only CORPUS report, see crates/api/src/bin/corpus_compare.rs),
 # `backfill_trains`, the one-off, idempotent shared-train-identity backfill
 # that MUST be run before this image is first started against a database
@@ -26,7 +26,8 @@
 # the one-off, idempotent `incidents.affected_lines` backfill (see
 # docs/incident-affected-lines-backfill.md -- optional, but the incident
 # archive's Line filter returns nothing for pre-existing rows until it has
-# run), and `replay_uidless_movements` (one-off, idempotent, see below).
+# run), `replay_uidless_movements` (one-off, idempotent, see below) and
+# `backfill_line_train_summaries` (optional, idempotent, see below).
 # `api`'s own startup enforces that
 # ordering (it refuses to apply `20260906140000_drop_legacy_columns.sql`
 # while unbackfilled rows remain), so shipping both here is what makes the
@@ -81,17 +82,42 @@ RUN --mount=type=cache,id=cargo-registry,target=/usr/local/cargo/registry,sharin
     --mount=type=cache,id=cargo-git,target=/usr/local/cargo/git,sharing=locked \
     --mount=type=cache,id=cargo-target-1.88,target=/app/target,sharing=locked \
     if [ "${CARGO_PROFILE}" = "release" ]; then \
-      cargo build --release --bin api --bin backfill_trains --bin backfill_incident_lines --bin corpus_compare --bin replay_uidless_movements; \
+      cargo build --release --bin api --bin backfill_trains --bin backfill_incident_lines --bin corpus_compare --bin replay_uidless_movements --bin backfill_line_train_summaries; \
     else \
-      cargo build --bin api --bin backfill_trains --bin backfill_incident_lines --bin corpus_compare --bin replay_uidless_movements; \
+      cargo build --bin api --bin backfill_trains --bin backfill_incident_lines --bin corpus_compare --bin replay_uidless_movements --bin backfill_line_train_summaries; \
     fi \
     && cp "/app/target/${CARGO_PROFILE}/api" /usr/local/bin/api \
     && cp "/app/target/${CARGO_PROFILE}/backfill_trains" /usr/local/bin/backfill_trains \
     && cp "/app/target/${CARGO_PROFILE}/backfill_incident_lines" /usr/local/bin/backfill_incident_lines \
     && cp "/app/target/${CARGO_PROFILE}/corpus_compare" /usr/local/bin/corpus_compare \
-    && cp "/app/target/${CARGO_PROFILE}/replay_uidless_movements" /usr/local/bin/replay_uidless_movements
+    && cp "/app/target/${CARGO_PROFILE}/replay_uidless_movements" /usr/local/bin/replay_uidless_movements \
+    && cp "/app/target/${CARGO_PROFILE}/backfill_line_train_summaries" /usr/local/bin/backfill_line_train_summaries
 
 FROM debian:bookworm-slim@sha256:3783cc01769c7b2b1b83a5c5ad96c815348e28ed7da68e2e3687004faa906251
+
+# tini is PID 1, not the service binary. A process running as PID 1 gets no
+# default signal handling from the kernel: SIGTERM without a handler of its
+# own is ignored, so on every rollout or drain the container sat out the
+# whole terminationGracePeriodSeconds and was SIGKILLed. tini forwards
+# SIGTERM/SIGINT to the binary (which then exits, or shuts down gracefully
+# where it installs a handler, e.g. notifier) and exits with its exit code,
+# and it reaps orphaned children (api's own `parse-ticket` re-exec,
+# `kubectl exec` helpers) instead of leaving zombies. No `-g`: only the
+# binary is signalled, as in the pgBackRest image (docs/postgres-pitr.md,
+# "Why tini"). A chart or `kubectl run --command` override of `command:`
+# replaces this ENTRYPOINT outright, tini included; that is fine for the
+# one-shot tools those overrides run.
+#
+# Debian bookworm's tini, pinned to its source version. The trailing `*` in
+# the install matches Debian's binNMU suffix (`+b3` today): the archive keeps
+# only the current rebuild, so an exact `+bN` pin would stop installing at
+# the next rebuild (the DL3008 reason in .hadolint.yaml). apt verifies the
+# .deb's SHA-256 against the base image's signed archive index, and the base
+# image is digest-pinned. Upstream tini has been 0.19.0 since 2020; a new
+# Debian source version only arrives with a new Debian release, and then
+# the install fails loudly until this is bumped. Not tracked by Renovate:
+# a deb datasource would propose exact `+bN` pins.
+ARG TINI_VERSION=0.19.0-1
 
 # sqlx's tls-native-tls feature verifies the Postgres connection's cert (when
 # TLS is in play) against the system store, so the runtime image needs a CA
@@ -100,8 +126,9 @@ FROM debian:bookworm-slim@sha256:3783cc01769c7b2b1b83a5c5ad96c815348e28ed7da68e2
 # HEALTHCHECK can probe `GET /public/health` from inside the container.
 # hadolint ignore=DL3008 # apt versions unpinned on purpose; see .hadolint.yaml
 RUN apt-get update \
-    && apt-get install -y --no-install-recommends ca-certificates curl \
+    && apt-get install -y --no-install-recommends ca-certificates curl "tini=${TINI_VERSION}*" \
     && rm -rf /var/lib/apt/lists/* \
+    && tini --version \
     && groupadd --system --gid 1000 api \
     && useradd --system --no-create-home --shell /usr/sbin/nologin --uid 1000 --gid 1000 api
 
@@ -133,6 +160,11 @@ COPY --from=builder /usr/local/bin/corpus_compare /usr/local/bin/corpus_compare
 # from trust_event_backlog (kept a day), with the api pod's DATABASE_URL:
 #   kubectl exec deploy/<api deployment> -c api -- replay_uidless_movements [<since, RFC 3339>]
 COPY --from=builder /usr/local/bin/replay_uidless_movements /usr/local/bin/replay_uidless_movements
+# Optional, idempotent: derives `line_train_summaries` for line populations
+# stored before the table existed (or derived against an older catalogue);
+# until then the line page reads the population JSONB. Reads /app/lines:
+#   kubectl exec deploy/<api deployment> -c api -- backfill_line_train_summaries
+COPY --from=builder /usr/local/bin/backfill_line_train_summaries /usr/local/bin/backfill_line_train_summaries
 COPY --chown=api:api lines/ /app/lines/
 
 # Numeric USER, not the `api` name useradd created above: Kubernetes'
@@ -153,4 +185,4 @@ USER 1000:1000
 # the chart's securityContext (readOnlyRootFilesystem, drop ALL,
 # RuntimeDefault seccomp) needs to change for it. Keep the binary at this
 # path and don't replace it in a running container.
-ENTRYPOINT ["/usr/local/bin/api"]
+ENTRYPOINT ["/usr/bin/tini", "--", "/usr/local/bin/api"]

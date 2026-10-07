@@ -3,6 +3,159 @@
 Changes to the Distant Signal (DS) HTTP API that a client such as DS-MCP
 needs to know about. Newest first. Field names are as served (camelCase).
 
+## 2026-10-07: walks between bus stops and their stations in the planner
+
+Design: `docs/superpowers/specs/2026-10-06-tiploc-locations-design.md`
+("Walking links to the parent station").
+
+### Changed behaviour (`GET /Trips/plan`, no new fields)
+
+- A journey can now change between a bus stop or ferry terminal and its
+  parent station (`parentCrs`): bus, then walk, then train, and the reverse.
+  The walk is an ordinary transfer leg: `{"kind": "transfer", "mode":
+  "WALK", "originCrs": "tiploc:HTRBUS2", "destinationCrs": "HXX",
+  "minutes": 5}`. So a transfer leg's `originCrs`/`destinationCrs` can now
+  be a `tiploc:` code, as train legs' already could. Clients that branch
+  on `leg.kind` need no change.
+- Walking on from a bus or ferry is now a change off it. It owes the same
+  5-minute buffer (configurable) as changing at the stop, before the walk
+  starts. This applies to every walking or transfer link (e.g. a
+  rail-replacement bus, then a walk to the Underground), and arrive-by
+  already charged it. `minutes` is the walk alone. The buffer shows only
+  in the times.
+
+## 2026-10-07: Delay Repay borderline zone, outcome, ticket-aware bands and schemes
+
+Design: `docs/superpowers/specs/2026-10-01-working-vs-public-times-design.md`,
+"Decisions (2026-10-07)". Applies to `GET /Train/{trackingId}/tickets/{ticketId}/delay-repay`
+and to every item of `GET /Train/tickets/mine` (the two now serve the same
+fields from one function).
+
+### New fields on the response (and each ticket list item)
+
+- `outcome`: `arrived`, `departedOnly` or `notReached`; `null` while not
+  known yet (en route, or a destination that reports nothing).
+  - `departedOnly`: TRUST reported only a departure at the destination;
+    the delay is final, measured on that departure.
+  - `notReached`: cancelled before the destination (TRUST `0002` at origin,
+    on call, out of plan, or en route from an earlier call), a TRUST pass
+    through it, or Darwin's cancelled call once TRUST has reported the
+    train beyond it. `delayMinutes`, `delayBasis` and `estimate` are then
+    `null` and `provisional` is `false`; `measuredAtCrs` still names the
+    destination. Show no percentage: eligibility depends on the
+    replacement journey.
+- `measuredAtName`: `measuredAtCrs`'s station name, when known.
+- `ownScheme`: `true` for an operator running its own compensation scheme
+  (Elizabeth line, London Overground, Merseyrail, Grand Central). `estimate`
+  is then `null`; show the claim link only.
+- `schemeOperator`: the operator the scheme was matched to (`"LNER"`,
+  `"Caledonian Sleeper"`, ...), or `null` for the DR15 default.
+- `rulesCheckedOn`: `YYYY-MM-DD` the scheme table was last checked
+  (`2026-10-07`).
+
+### Changed and new fields on `estimate`
+
+- **`percentage` is now nullable**: `null` exactly when `borderline`.
+- `borderline` (bool) and `thresholdMinutes`: while provisional, a
+  projection less than 3 minutes above a band threshold (15–17, 30–32,
+  60–62, 120–122; Heathrow Express 31–33, 61–63) is borderline. Show
+  "could go either way" with the threshold, not a percentage. Final
+  estimates are never borderline.
+- `scheme` may also be `HX` (Heathrow Express's own scheme: 25% of the
+  ticket for more than 30 minutes, 50% for more than 60; `bandMinutes` 30
+  or 60 meaning "more than").
+- `ticketKind`: `single`, `return` or `unknown`, from the ticket's
+  free-text type (whole words `return`/`rtn`, `single`/`sgl`/`sngl`).
+- `fareBasis` may also be `ticket` (Heathrow Express). At 120+ minutes it
+  is `single` for a single ticket (already refunded in full from 60
+  minutes) and `return` otherwise.
+- `roomSupplementPercentage`: Caledonian Sleeper only, 50 at 30–59
+  minutes and 100 at 60+; else `null`.
+
+### Changed behaviour
+
+- Scheme table: DR30 now also covers Caledonian Sleeper, Hull Trains and
+  Lumo (with LNER, CrossCountry, ScotRail); Heathrow Express has its own
+  scheme; the four own-scheme operators above get no estimate. Each has its
+  own `claimUrl`.
+- When the ticket's `operator` text names no known operator, the train's
+  CIF ATOC code decides the scheme (before falling back to DR15). A ticket
+  without an operator now gets an estimate when the train's code is known.
+
+## 2026-10-07: a line's full-day timetable; `running` follows each train's whole run
+
+Design: `docs/superpowers/specs/2026-10-06-line-page-trains-design.md` §5.
+
+### New: `GET /public/lines/{id}/timetable`
+
+One page of the line's trains for a service date, cursor-paged. Same read
+gate, date default (London today) and `404` (no population for the date)
+as `/trains`. Parameters (all optional):
+
+| parameter | meaning |
+|-----------|---------|
+| `date` | `YYYY-MM-DD` |
+| `scope` | as `/trains`; **default `line,shared`** |
+| `dir` | `up`, `down`, `loop` (comma list); `direction` is accepted too |
+| `from` | a station CRS: only trains with a public call there, listed (and paged) by their departure from it |
+| `to` | a station CRS: only trains with a public call there -- after `from` when both are given (`to` must differ from `from`) |
+| `at` | `HH:MM` (hours `00`–`47`): trains from this time on |
+| `after` | the previous page's `nextCursor`, unchanged |
+| `limit` | 1–200, default 50 |
+
+```json
+{
+  "lineId": "swr-south-west-main",
+  "date": "2026-10-07",
+  "scopeApplied": true,
+  "scopes": ["line", "shared"],
+  "directions": ["down"],
+  "from": "WOK",
+  "to": "WEY",
+  "at": "09:00",
+  "stations": [{"crs": "WAT", "name": "London Waterloo", "role": "terminus"}],
+  "counts": {"line": {"down": 41, "up": 40}, "shared": {"down": 12}},
+  "trains": [{
+    "uid": "L80147", "operator": "SW", "serviceMode": "train", "liveTracking": true,
+    "scope": "line", "direction": "down",
+    "lineDue": {"time": "08:35", "dayOffset": 0},
+    "origin": {"crs": "WAT", "name": "London Waterloo"},
+    "destination": {"crs": "WEY", "name": "Weymouth"},
+    "onLineStops": [{"crs": "WAT", "time": "08:35", "dayOffset": 0}],
+    "live": null,
+    "time": {"time": "09:02", "dayOffset": 0},
+    "arrival": {"time": "11:10", "dayOffset": 0}
+  }],
+  "nextCursor": "542.L80151"
+}
+```
+
+- Each train is a `view=summary` train plus `time` (its departure from
+  `from`, else its `lineDue`) and `arrival` (its arrival at `to`, `null`
+  without `to`). Trains are ordered by `time`, then `uid`; a train with no
+  public call on the line is not listed.
+- `nextCursor`: pass it back as `after` with the same other parameters
+  for the next page; `null` on the last page. Opaque -- don't build one.
+- `counts`: the whole day's trains under `scope`, `from` and `to`, per
+  scope and direction (`none` without one) -- before `dir`, `at` and the
+  cursor, for direction tabs.
+- `live` is looked up for the page's trains only.
+- A malformed parameter is a `400`.
+
+### Changed: `view=summary`'s `running`
+
+`running` used to consider only trains that reached the line in the six
+hours before `at`, so a long run (Edinburgh to Plymouth) dropped out of
+it. It now uses each train's whole on-line run: due on the line at or
+before `at`, last on-line call no more than three hours (the late-running
+grace, as before) before it. Without a window (`from`/`to`), every listed
+train now carries its `onLineStops`, `origin` and `destination` (they
+were only filled for trains near `at`).
+
+Both views now read a table derived from the population at publish time
+when it has the line and date (`line_train_summaries`), and the
+population itself otherwise; the responses are the same either way.
+
 ## 2026-10-07: named bus stops and timing points; bus stops in the planner
 
 Design: `docs/superpowers/specs/2026-10-06-tiploc-locations-design.md`.
