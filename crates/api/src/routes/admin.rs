@@ -61,6 +61,8 @@ struct RevokeRequest {
 struct RevokeResponse {
     user_id: String,
     sessions_revoked: u64,
+    /// Delegated-access grants ended with the sessions.
+    grants_revoked: u64,
 }
 
 fn error(status: StatusCode, code: &str) -> Response {
@@ -141,19 +143,28 @@ async fn revoke_user_sessions(
         }
     };
 
-    match users::revoke_all_sessions(&app.database, &target).await {
-        Ok(Some(sessions_revoked)) => {
+    // Also ends the user's delegated-access grants (spec 2026-10-14 §5.9).
+    match users::revoke_all_sessions(
+        &app.database,
+        &target,
+        crate::data::delegated::RevokeReason::Admin,
+    )
+    .await
+    {
+        Ok(Some(revoked)) => {
             tracing::warn!(
                 audit = true,
                 event = "admin_session_revoke",
                 admin_user_id = %caller.id,
                 target_user_id = %target,
-                sessions_revoked,
-                "admin revoked all of a user's sessions"
+                sessions_revoked = revoked.sessions_deleted,
+                grants_revoked = revoked.grants_revoked,
+                "admin revoked all of a user's sessions and app grants"
             );
             Json(RevokeResponse {
                 user_id: target,
-                sessions_revoked,
+                sessions_revoked: revoked.sessions_deleted,
+                grants_revoked: revoked.grants_revoked,
             })
             .into_response()
         }
@@ -266,6 +277,7 @@ mod session_revocation_db_tests {
                 "test-internal-oauth-client".to_string(),
             )
             .expect("construct placeholder internal-oauth verifier"),
+            delegated: std::sync::Arc::default(),
             schedule_crs_line_index: std::collections::HashMap::new(),
         })
     }

@@ -3,6 +3,13 @@ use crate::app::Router;
 pub mod account;
 pub mod admin;
 pub mod auth;
+pub mod connected_apps;
+#[cfg(test)]
+#[expect(
+    clippy::too_many_lines,
+    reason = "test code: scenario tests read top to bottom"
+)]
+mod delegated_db_tests;
 pub mod departures;
 pub mod freshness;
 pub mod groups;
@@ -10,6 +17,7 @@ pub mod health;
 pub mod history_retention;
 pub mod incidents;
 pub mod island_of_ireland;
+pub mod journey_itinerary;
 pub mod journey_templates;
 pub mod journeys;
 pub mod line_status;
@@ -126,6 +134,7 @@ pub fn public_router() -> Router {
         .merge(auth::router())
         .merge(admin::router())
         .merge(account::router())
+        .merge(connected_apps::router())
         .merge(groups::router())
         .merge(station_stats::router())
         .merge(departures::router())
