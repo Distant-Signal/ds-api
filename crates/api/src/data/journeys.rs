@@ -317,6 +317,22 @@ async fn owned_leg_order_at(
     Ok(AddLegOutcome::Added(target_order))
 }
 
+/// Locks journey `journey_id` (`FOR UPDATE`) if `user_id` owns it; a
+/// missing or someone else's journey locks nothing (the caller's own
+/// ownership check then reports it).
+async fn lock_owned_journey(
+    tx: &mut sqlx::PgConnection,
+    journey_id: i64,
+    user_id: &str,
+) -> anyhow::Result<()> {
+    sqlx::query("SELECT id FROM journeys WHERE id = $1 AND user_id = $2 FOR UPDATE")
+        .bind(journey_id)
+        .bind(user_id)
+        .execute(&mut *tx)
+        .await?;
+    Ok(())
+}
+
 /// How many legs one journey may have. Same value as
 /// `journey_templates::MAX_LEGS_PER_TEMPLATE`, deliberately: a template
 /// materializes 1:1 into a journey's legs, so the two caps answer the same
@@ -435,6 +451,7 @@ pub async fn create_journey_with_pin_leg(
         false,
     )
     .await?;
+    crate::data::journey_revisions::record_plan_change(&mut tx, journey_id, Utc::now()).await?;
     tx.commit().await?;
     Ok((journey_id, leg_id, tracking_id))
 }
@@ -551,6 +568,7 @@ async fn insert_known_train_journey(
         false,
     )
     .await?;
+    crate::data::journey_revisions::record_plan_change(&mut *tx, journey_id, Utc::now()).await?;
     Ok((journey_id, leg_id, tracking_id))
 }
 
@@ -807,6 +825,7 @@ pub async fn add_known_train_leg_to_journey_at(
         false,
     )
     .await?;
+    crate::data::journey_revisions::record_plan_change(&mut tx, journey_id, Utc::now()).await?;
     tx.commit().await?;
     Ok(AddLegOutcome::Added((leg_id, tracking_id)))
 }
@@ -1050,6 +1069,7 @@ pub async fn create_journey_with_window_leg(
         true,
     )
     .await?;
+    crate::data::journey_revisions::record_plan_change(&mut tx, journey_id, Utc::now()).await?;
     tx.commit().await?;
     Ok((journey_id, leg_id))
 }
@@ -1136,6 +1156,7 @@ pub async fn add_window_leg_to_journey_at(
         true,
     )
     .await?;
+    crate::data::journey_revisions::record_plan_change(&mut tx, journey_id, Utc::now()).await?;
     tx.commit().await?;
     Ok(AddLegOutcome::Added(leg_id))
 }
@@ -1537,6 +1558,7 @@ pub async fn create_journey_with_untracked_leg(
     let mut tx = pool.begin().await?;
     let journey_id = insert_journey(&mut *tx, user_id, custom_name).await?;
     let leg_id = insert_untracked_leg(&mut *tx, journey_id, 1, leg).await?;
+    crate::data::journey_revisions::record_plan_change(&mut tx, journey_id, Utc::now()).await?;
     tx.commit().await?;
     Ok((journey_id, leg_id))
 }
@@ -1571,6 +1593,7 @@ pub async fn add_untracked_leg_to_journey_at(
             AddLegOutcome::NoSuchLeg => return Ok(AddLegOutcome::NoSuchLeg),
         };
     let leg_id = insert_untracked_leg(&mut *tx, journey_id, next_leg_order, leg).await?;
+    crate::data::journey_revisions::record_plan_change(&mut tx, journey_id, Utc::now()).await?;
     tx.commit().await?;
     Ok(AddLegOutcome::Added(leg_id))
 }
@@ -1598,6 +1621,9 @@ pub async fn update_untracked_leg(
     leg: &UntrackedLeg,
 ) -> anyhow::Result<UpdateUntrackedOutcome> {
     let mut tx = pool.begin().await?;
+    // The journey row first, as every other leg write takes it, so the
+    // revision written below never waits on it while holding the leg.
+    lock_owned_journey(&mut tx, journey_id, user_id).await?;
     let kind: Option<(String,)> = sqlx::query_as(
         "SELECT jl.kind FROM journey_legs jl JOIN journeys j ON j.id = jl.journey_id \
          WHERE jl.id = $1 AND jl.journey_id = $2 AND j.user_id = $3 FOR UPDATE OF jl",
@@ -1632,6 +1658,7 @@ pub async fn update_untracked_leg(
     .bind(&leg.destination_stop_id)
     .execute(&mut *tx)
     .await?;
+    crate::data::journey_revisions::record_plan_change(&mut tx, journey_id, Utc::now()).await?;
     tx.commit().await?;
     Ok(UpdateUntrackedOutcome::Updated)
 }
@@ -1692,6 +1719,7 @@ pub async fn set_leg_train_subscription(
     )
     .await?;
     if updated {
+        crate::data::journey_revisions::record_plan_change(&mut tx, journey_id, Utc::now()).await?;
         tx.commit().await?;
     } else {
         tx.rollback().await?;
@@ -1735,6 +1763,9 @@ async fn set_leg_train_subscription_locked(
     // returns `Ok(false)`, which the route maps to `404` -- same "no such
     // leg, or not this caller's" posture as every other failure mode
     // here, never leaking whether the subscription id itself exists.
+    // The journey row is locked first, as `delete_leg` locks it, so the
+    // revision this change writes never waits on it while holding the leg.
+    lock_owned_journey(&mut *tx, journey_id, user_id).await?;
     let owned: Option<(Option<i64>,)> = sqlx::query_as(
         "SELECT jl.train_subscription_id FROM journey_legs jl \
          JOIN journeys j ON j.id = jl.journey_id \
@@ -1771,7 +1802,14 @@ async fn set_leg_train_subscription_locked(
     if let Some(old_id) = old_train_subscription_id
         && old_id != train_subscription_id
     {
-        release_leg_subscription(&mut *tx, user_id, old_id, Some(train_subscription_id)).await?;
+        release_leg_subscription(
+            &mut *tx,
+            user_id,
+            old_id,
+            Some(train_subscription_id),
+            false,
+        )
+        .await?;
     }
 
     Ok(true)
@@ -1804,11 +1842,18 @@ async fn set_leg_train_subscription_locked(
 /// (and is seen here as referenced) or waits and then creates a fresh row.
 /// A pin with no train yet (`trains_id` NULL) is never handed back by that
 /// lookup, so it needs no lock.
-async fn release_leg_subscription(
+///
+/// `keep_tickets` (mid-journey changes spec 2026-10-22 §4.4): a replacement
+/// must never cascade a ticket away, so with no `move_to` its tickets are
+/// kept as standalone tickets (`tracked_train_id` NULL) instead; their ids
+/// are in the replaced plan's revision. Remove leg and Delete journey pass
+/// `false`, keeping their behaviour.
+pub(crate) async fn release_leg_subscription(
     conn: &mut sqlx::PgConnection,
     user_id: &str,
     old_id: i64,
     move_to: Option<i64>,
+    keep_tickets: bool,
 ) -> anyhow::Result<()> {
     let trains_id: Option<(Option<i64>,)> =
         sqlx::query_as("SELECT trains_id FROM train_subscriptions WHERE id = $1 AND user_id = $2")
@@ -1851,6 +1896,15 @@ async fn release_leg_subscription(
         )
         .bind(old_id)
         .bind(new_id)
+        .execute(&mut *conn)
+        .await?;
+    } else if keep_tickets {
+        sqlx::query(
+            "UPDATE tracked_train_tickets SET tracked_train_id = NULL \
+             WHERE tracked_train_id = $1 AND user_id = $2",
+        )
+        .bind(old_id)
+        .bind(user_id)
         .execute(&mut *conn)
         .await?;
     }
@@ -1967,6 +2021,7 @@ pub async fn create_subscription_and_bind_leg_with_search(
             return Ok(None);
         }
     }
+    crate::data::journey_revisions::record_plan_change(&mut tx, journey_id, Utc::now()).await?;
     tx.commit().await?;
     Ok(Some(tracking_id))
 }
@@ -2083,7 +2138,10 @@ pub async fn delete_leg(
             .await?;
     }
     if let Some(train_subscription_id) = train_subscription_id {
-        release_leg_subscription(&mut tx, user_id, train_subscription_id, None).await?;
+        release_leg_subscription(&mut tx, user_id, train_subscription_id, None, false).await?;
+    }
+    if !journey_also_deleted {
+        crate::data::journey_revisions::record_plan_change(&mut tx, journey_id, Utc::now()).await?;
     }
 
     tx.commit().await?;
@@ -2251,7 +2309,7 @@ pub(crate) async fn delete_journey_row_releasing_trains(
         .execute(&mut *conn)
         .await?;
     for subscription in subscriptions {
-        release_leg_subscription(&mut *conn, user_id, subscription, None).await?;
+        release_leg_subscription(&mut *conn, user_id, subscription, None, false).await?;
     }
     Ok(result.rows_affected() > 0)
 }
@@ -2402,6 +2460,10 @@ pub struct JourneyListItem {
     pub final_working_delay_minutes: Option<i32>,
     #[serde(skip_serializing)]
     pub final_status: Option<String>,
+    /// The journey's open break (mid-journey changes spec 2026-10-22 §7),
+    /// `None` when it works. Additive, 2026-10-23.
+    #[sqlx(skip)]
+    pub open_break_id: Option<i64>,
 }
 
 /// One journey's final arrival, for [`apply_public_delays`]: the last
@@ -2751,6 +2813,17 @@ pub async fn list_journeys_for_user(
         }
     }
     crate::data::tracking_phase::attach(pool, &mut rows, now).await;
+    let ids: Vec<i64> = rows.iter().map(|row| row.id).collect();
+    let open: Vec<(i64, i64)> = sqlx::query_as(
+        "SELECT journey_id, id FROM journey_breaks WHERE journey_id = ANY($1) AND status = 'open'",
+    )
+    .bind(&ids)
+    .fetch_all(pool)
+    .await?;
+    let open: std::collections::HashMap<i64, i64> = open.into_iter().collect();
+    for row in &mut rows {
+        row.open_break_id = open.get(&row.id).copied();
+    }
     Ok(rows)
 }
 
@@ -2912,52 +2985,68 @@ pub async fn create_journey_from_itinerary(
     let mut created = Vec::with_capacity(legs.len());
     for (index, leg) in legs.iter().enumerate() {
         let leg_order = i32::try_from(index + 1)?;
-        let (trains_id, service_date, origin_override, destination_override) = match leg {
-            ItineraryLeg::Untracked(untracked) => {
-                let leg_id =
-                    insert_untracked_leg(&mut *tx, journey_id, leg_order, untracked).await?;
-                created.push((leg_id, None));
-                continue;
-            }
-            ItineraryLeg::Train {
-                trains_id,
-                service_date,
-                origin_crs,
-                destination_crs,
-            } => (*trains_id, *service_date, origin_crs, destination_crs),
-        };
-        let tracking_id = crate::data::train_tracking::create_subscription_for_train(
-            &mut *tx, trains_id, user_id,
-        )
-        .await?;
-        let pins: Option<(Option<String>, Option<String>)> = sqlx::query_as(
-            "SELECT pin_origin_crs, pin_destination_crs FROM train_subscriptions WHERE id = $1",
-        )
-        .bind(tracking_id)
-        .fetch_optional(&mut *tx)
-        .await?;
-        let (pin_origin_crs, pin_destination_crs) = pins.unwrap_or((None, None));
-        let origin_crs = origin_override.clone().or(pin_origin_crs);
-        let destination_crs = destination_override.clone().or(pin_destination_crs);
-        let leg_id = insert_leg(
-            &mut *tx,
-            journey_id,
-            leg_order,
-            origin_crs.as_deref(),
-            destination_crs.as_deref(),
-            service_date,
-            Some(tracking_id),
-            "manual",
-            None,
-            None,
-            None,
-            None,
-            false,
-        )
-        .await?;
-        created.push((leg_id, Some(tracking_id)));
+        created.push(insert_itinerary_leg(&mut *tx, journey_id, user_id, leg_order, leg).await?);
     }
+    crate::data::journey_revisions::record_plan_change(&mut *tx, journey_id, Utc::now()).await?;
     Ok((journey_id, created))
+}
+
+/// Inserts one itinerary leg at `leg_order` of journey `journey_id` on the
+/// caller's transaction: a train leg tracks its train (finding or creating
+/// `user_id`'s subscription, as [`create_journey_with_known_train_leg`]
+/// does) and keeps its own stations, else the subscription's pins; an
+/// untracked leg is inserted as [`add_untracked_leg_to_journey`] does.
+/// Returns `(leg_id, tracking_id)`, `tracking_id` `None` for an untracked
+/// leg. Shared by [`create_journey_from_itinerary`] and a replacement
+/// (`journey_replace`).
+pub(crate) async fn insert_itinerary_leg(
+    tx: &mut sqlx::PgConnection,
+    journey_id: i64,
+    user_id: &str,
+    leg_order: i32,
+    leg: &ItineraryLeg,
+) -> anyhow::Result<(i64, Option<i64>)> {
+    let (trains_id, service_date, origin_override, destination_override) = match leg {
+        ItineraryLeg::Untracked(untracked) => {
+            let leg_id = insert_untracked_leg(&mut *tx, journey_id, leg_order, untracked).await?;
+            return Ok((leg_id, None));
+        }
+        ItineraryLeg::Train {
+            trains_id,
+            service_date,
+            origin_crs,
+            destination_crs,
+        } => (*trains_id, *service_date, origin_crs, destination_crs),
+    };
+    let tracking_id =
+        crate::data::train_tracking::create_subscription_for_train(&mut *tx, trains_id, user_id)
+            .await?;
+    let pins: Option<(Option<String>, Option<String>)> = sqlx::query_as(
+        "SELECT pin_origin_crs, pin_destination_crs FROM train_subscriptions WHERE id = $1",
+    )
+    .bind(tracking_id)
+    .fetch_optional(&mut *tx)
+    .await?;
+    let (pin_origin_crs, pin_destination_crs) = pins.unwrap_or((None, None));
+    let origin_crs = origin_override.clone().or(pin_origin_crs);
+    let destination_crs = destination_override.clone().or(pin_destination_crs);
+    let leg_id = insert_leg(
+        &mut *tx,
+        journey_id,
+        leg_order,
+        origin_crs.as_deref(),
+        destination_crs.as_deref(),
+        service_date,
+        Some(tracking_id),
+        "manual",
+        None,
+        None,
+        None,
+        None,
+        false,
+    )
+    .await?;
+    Ok((leg_id, Some(tracking_id)))
 }
 
 /// Journeys `user_id` saved through `created_via` in the last 24 hours, for

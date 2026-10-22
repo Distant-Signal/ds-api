@@ -1,4 +1,5 @@
 pub mod account;
+pub mod alternative_ranking;
 pub mod config;
 pub mod corpus;
 pub mod corpus_comparison;
@@ -16,7 +17,12 @@ pub mod groups;
 pub mod incident_removal;
 pub mod island_of_ireland;
 pub mod journey;
+pub mod journey_alternatives;
+pub mod journey_breaks;
+pub mod journey_feasibility;
 pub mod journey_leg_proposal;
+pub mod journey_replace;
+pub mod journey_revisions;
 pub mod journey_templates;
 pub mod journeys;
 pub mod leg_validation;
