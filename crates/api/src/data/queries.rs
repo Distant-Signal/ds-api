@@ -4110,9 +4110,7 @@ mod incident_search_query_tests {
         let pool = test_pool().await;
         delete_fixtures(&pool).await;
 
-        let lines_dir = common::manifest_dir!().join("../../lines");
-        let lines =
-            common::LineDefinition::from_dir(&lines_dir).expect("lines/ directory should parse");
+        let lines = ds_lines::embedded().expect("the embedded catalogue loads");
         let matcher = common::matcher::LineMatcher::new(&lines);
 
         let incident = IncidentMessage {
@@ -4291,9 +4289,7 @@ mod incident_search_query_tests {
         .await
         .expect("seed a pre-column row");
 
-        let lines_dir = common::manifest_dir!().join("../../lines");
-        let lines =
-            common::LineDefinition::from_dir(&lines_dir).expect("lines/ directory should parse");
+        let lines = ds_lines::embedded().expect("the embedded catalogue loads");
         let matcher = common::matcher::LineMatcher::new(&lines);
 
         let report = ds_store::incidents::line_backfill::run_backfill(&pool, &matcher)

@@ -1,8 +1,8 @@
 //! Operator filters' vocabulary for `/Trips/plan` (planner operator
 //! filtering spec 2026-10-31, §4.2 and §6.4): named groups of operators
-//! (`group:GTR`), from `reference-data/operator-groups.csv`; display names
+//! (`group:GTR`), from `crates/api/reference-data/operator-groups.csv`; display names
 //! for the timetable codes `tocs` does not name, from
-//! `reference-data/operator-names.csv`; and the parsing of a request's
+//! `crates/api/reference-data/operator-names.csv`; and the parsing of a request's
 //! `operator` / `avoidOperator` list into operator ids.
 
 use std::collections::BTreeMap;
@@ -10,10 +10,10 @@ use std::sync::LazyLock;
 
 use schedule_query::{DsOperator, OperatorId, OperatorMask};
 
-/// `reference-data/operator-groups.csv`, compiled in.
-const OPERATOR_GROUPS_CSV: &str = include_str!("../../../../reference-data/operator-groups.csv");
-/// `reference-data/operator-names.csv`, compiled in.
-const OPERATOR_NAMES_CSV: &str = include_str!("../../../../reference-data/operator-names.csv");
+/// `crates/api/reference-data/operator-groups.csv`, compiled in.
+const OPERATOR_GROUPS_CSV: &str = include_str!("../../reference-data/operator-groups.csv");
+/// `crates/api/reference-data/operator-names.csv`, compiled in.
+const OPERATOR_NAMES_CSV: &str = include_str!("../../reference-data/operator-names.csv");
 
 /// The prefix naming a group in a request (any case on the wire).
 pub const GROUP_PREFIX: &str = "group:";

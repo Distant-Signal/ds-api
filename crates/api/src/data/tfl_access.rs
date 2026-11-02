@@ -38,8 +38,8 @@
 //! - A ride is [`RIDE_ENTRY_WALK_MINUTES`] (walking in) plus the wait for
 //!   the train plus its minutes on the train plus [`RIDE_EXIT_MINUTES`]
 //!   (from the platform to the National Rail station), as a curated link's
-//!   minutes include the walks at both ends (`reference-data/
-//!   supplementary-fixed-links.csv`). The planner still adds the station's
+//!   minutes include the walks at both ends
+//!   (`crates/common/reference-data/supplementary-fixed-links.csv`). The planner still adds the station's
 //!   minimum change time before the train, as it does after any link.
 //! - The wait (DS-234, [`Headways`]) is what a traveller turning up at a
 //!   random moment of the plan's window waits on average for a train that

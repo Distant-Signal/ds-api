@@ -195,7 +195,6 @@ COPY --from=builder /usr/local/bin/maintenance /usr/local/bin/maintenance
 #   kubectl run ... --image=<this image> --command -- \
 #     /usr/local/bin/ds-migrate backfill-line-train-summaries
 COPY --from=builder /usr/local/bin/ds-migrate /usr/local/bin/ds-migrate
-COPY --chown=api:api lines/ /app/lines/
 
 # Numeric USER, not the `api` name useradd created above: Kubernetes'
 # runAsNonRoot admission check (this chart's podSecurityContext sets

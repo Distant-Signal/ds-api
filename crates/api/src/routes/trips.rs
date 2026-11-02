@@ -257,7 +257,7 @@ const STATION_GROUPS_CACHE_CONTROL: &str = "public, max-age=3600";
 /// `GET /Trips/station-groups` (2026-10-07): every named station group
 /// `/Trips/plan` accepts as `group:NAME` in `via`, `waypoints` and the
 /// avoid lists, with its members, for a picker. Unauthenticated, no
-/// database read: `reference-data/station-groups.csv`, compiled in.
+/// database read: `crates/api/reference-data/station-groups.csv`, compiled in.
 async fn get_station_groups() -> (
     [(axum::http::header::HeaderName, &'static str); 1],
     Json<serde_json::Value>,

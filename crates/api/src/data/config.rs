@@ -1,8 +1,8 @@
 use anyhow::Result;
 use clap::ValueHint;
 pub use common::Defaults;
-pub use common::config::LineCatalogue;
-use common::config::parse_lines;
+pub use ds_lines::LineCatalogue;
+use ds_lines::parse_lines;
 use serde::de::DeserializeOwned;
 
 fn parse_toml_path<T: DeserializeOwned>(path: &'_ str) -> Result<T> {
@@ -262,11 +262,11 @@ pub struct ServiceArguments {
 
     #[arg(long, value_parser = parse_toml_path::<Defaults>, value_hint = ValueHint::FilePath, value_name = "FILE")]
     pub defaults_file: Option<Defaults>,
-    /// Directory of line-catalogue TOML files, loaded once at startup.
-    /// Defaults to `/app/lines` (baked into the Docker image — see
-    /// `docker/api.Dockerfile`), overridable via `LINES_DIR` for local
-    /// (non-Docker) runs.
-    #[arg(long = "lines-dir", env = "LINES_DIR", default_value = "/app/lines", value_parser = parse_lines, value_hint = ValueHint::FilePath, value_name = "DIR")]
+    /// The line catalogue, loaded once at startup. Defaults to the one
+    /// built into the binary (`ds_lines::EMBEDDED`); `LINES_DIR` names a
+    /// directory of line-catalogue TOML files instead, for local runs
+    /// against an edited catalogue.
+    #[arg(long = "lines-dir", env = "LINES_DIR", default_value = ds_lines::EMBEDDED, value_parser = parse_lines, value_hint = ValueHint::FilePath, value_name = "DIR")]
     pub lines: LineCatalogue,
 
     /// The VAPID public key `crates/notifier` signs push messages with —

@@ -1883,7 +1883,7 @@ Additive; no existing field changes meaning.
 - **`GET /Trips/plan`** `kind: "transfer"` legs gain an optional `line`:
   the line ridden, as TfL names it (`"Victoria"`, `"Northern"`, `"DLR"`).
   It comes from the curated link's own line where the link is one of
-  `reference-data/supplementary-fixed-links.csv`'s (Vauxhall to Victoria,
+  `crates/common/reference-data/supplementary-fixed-links.csv`'s (Vauxhall to Victoria,
   `TUBE`, `"Victoria"`), else from the TfL stops at the two ends
   (`originStop`, `destinationStop`) when they share exactly one line
   (Vauxhall to Euston: `"Victoria"`; Euston to King's Cross St. Pancras
@@ -1988,7 +1988,7 @@ change: a `transfer` leg (`mode` `TUBE`, `WALK`, and so on) may now appear
 where trains were offered before, e.g. Vauxhall to Euston is one 22-minute
 `TUBE` leg (27 minutes evenings and Sundays). A small curated set adds
 links the feed lacks, so far Vauxhall to Victoria (`TUBE`, 11 minutes;
-`reference-data/supplementary-fixed-links.csv`). Transfer legs still carry
+`crates/common/reference-data/supplementary-fixed-links.csv`). Transfer legs still carry
 no line name.
 
 ## 2026-10-20: `journeyIds` on tracked trains

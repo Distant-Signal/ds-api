@@ -292,7 +292,7 @@ pub async fn fetch_interchange_data(pool: &PgPool) -> Result<InterchangeData> {
     Ok(data)
 }
 
-/// The curated links (`reference-data/supplementary-fixed-links.csv`) as
+/// The curated links (`crates/common/reference-data/supplementary-fixed-links.csv`) as
 /// fixed-link rows, `(from_crs, link)`, for
 /// [`schedule_query::index_fixed_links_both_ways`]. A link to or from a CRS
 /// the planner has no TIPLOC for is harmless: it is never reached.
