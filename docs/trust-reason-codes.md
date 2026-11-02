@@ -87,7 +87,7 @@ departure boards `poller-ldbws` samples (about 560 stations):
 
 ## Reason text
 
-Codes map to text through `reference-data/delay-attribution-reasons.tsv`,
+Codes map to text through `crates/ds-store/reference-data/delay-attribution-reasons.tsv`,
 converted from Network Rail's "Historic Delay Attribution Glossary"
 (https://www.networkrail.co.uk/wp-content/uploads/2021/08/Historic-Delay-Attribution-Glossary.xlsx,
 August 2021, 365 codes). The attribution is on `/attribution`. The file

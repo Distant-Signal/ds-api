@@ -7,7 +7,7 @@
 //! interchange times at the stations at either end of the link". The
 //! planner charges the minimum change time at the far end only, before the
 //! next train (`trip_planner::csa`, `raptor`), as it does after any link;
-//! the curated links (`reference-data/supplementary-fixed-links.csv`) and
+//! the curated links (`crates/common/reference-data/supplementary-fixed-links.csv`) and
 //! the `TfL` access rides (`tfl_access`) count the walks at both ends in
 //! the link's own minutes. Most of the timetable's London Tube links do
 //! too: Vauxhall to Euston is 22 minutes at the peak, the Victoria line

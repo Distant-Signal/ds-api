@@ -13,6 +13,8 @@ chrono = { version = "0.4.44", features = ["serde"] }
 chrono-tz = "0.10"
 clap = { version = "4.6.1", features = ["derive", "env"] }
 common = { path = "../common" }
+# The line catalogue, embedded (`--lines-dir` defaults to it).
+ds-lines = { path = "../ds-lines" }
 ds-runtime = { path = "../ds-runtime" }
 # The `db` sink (ingest architecture plan 2a.2): the publish protocol and
 # products, the pool and the schema gate.

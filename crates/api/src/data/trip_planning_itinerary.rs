@@ -188,7 +188,7 @@ pub enum PlannedLeg {
         minutes: i32,
         /// The line ridden (`Victoria`), where it is known (additive,
         /// 2026-10-21): the curated link's own line
-        /// (`reference-data/supplementary-fixed-links.csv`), else the one
+        /// (`crates/common/reference-data/supplementary-fixed-links.csv`), else the one
         /// line `originStop` and `destinationStop` share. Absent otherwise.
         /// Filled in by `tfl_stops::attach_transfer_lines`. Two transfers
         /// that are one ride on one line, carrying on the same way through

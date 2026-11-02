@@ -1,7 +1,7 @@
 use std::path::PathBuf;
 
 use clap::Parser;
-use common::config::{LineCatalogue, parse_lines};
+use ds_lines::{LineCatalogue, parse_lines};
 use ds_runtime::secret::Secret;
 
 /// The pool size by default (spec §6.6: publishes are
@@ -103,7 +103,7 @@ pub(crate) struct Config {
     /// field of the same name. Used to build the per-line TIPLOC set this
     /// service's own `schedules_touching` query needs (Task 7) -- a
     /// responsibility this crate did not have before Task 7.
-    #[arg(long = "lines-dir", env = "LINES_DIR", default_value = "/app/lines", value_parser = parse_lines)]
+    #[arg(long = "lines-dir", env = "LINES_DIR", default_value = ds_lines::EMBEDDED, value_parser = parse_lines)]
     pub lines: LineCatalogue,
 
     /// Port for this service's Prometheus `/metrics` endpoint. MUST differ
@@ -185,14 +185,10 @@ mod tests {
 
     use super::Config;
 
-    /// The repo's own line catalogue and (unless `args` names one) a
-    /// database URL, plus `args`.
+    /// The embedded line catalogue (the default) and (unless `args` names
+    /// one) a database URL, plus `args`.
     fn argv(args: &[&str]) -> Vec<String> {
-        let lines = common::manifest_dir!().join("../../lines");
-        let mut full: Vec<String> = ["schedule-reference", "--lines-dir", lines.to_str().unwrap()]
-            .iter()
-            .map(ToString::to_string)
-            .collect();
+        let mut full: Vec<String> = vec!["schedule-reference".to_owned()];
         if !args.contains(&"--database-url") {
             full.extend([
                 "--database-url".to_owned(),

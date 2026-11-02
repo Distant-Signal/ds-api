@@ -195,7 +195,6 @@ COPY --from=builder /usr/local/bin/maintenance /usr/local/bin/maintenance
 #   kubectl run ... --image=<this image> --command -- \
 #     /usr/local/bin/ds-migrate backfill-line-train-summaries
 COPY --from=builder /usr/local/bin/ds-migrate /usr/local/bin/ds-migrate
-COPY --chown=api:api lines/ /app/lines/
 # The TypeScript types generated from this api's request and response types
 # (crates/api/src/api_types.rs). The frontend takes its copy from here once
 # the api has its own repository (repo-split spec §5.3); this image's tag is

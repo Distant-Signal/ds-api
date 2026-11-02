@@ -182,7 +182,7 @@ pub(crate) fn curated_parents(csv: &str) -> BTreeMap<String, String> {
 }
 
 /// The checked-in curated parents
-/// (`reference-data/tiploc-parent-stations.csv`, compiled into `common`).
+/// (`crates/common/reference-data/tiploc-parent-stations.csv`, compiled into `common`).
 pub(crate) fn checked_in_curated_parents() -> BTreeMap<String, String> {
     curated_parents(common::tiploc_parents::CURATED_PARENTS_CSV)
 }
@@ -296,7 +296,7 @@ fn distance_metres(a: (i32, i32), b: (i32, i32)) -> i32 {
 /// 2. nearest -- the station whose MSN grid reference is closest, if within
 ///    [`NEAREST_PARENT_MAX_METRES`] (ties go to the alphabetically first
 ///    CRS);
-/// 3. curated -- `reference-data/tiploc-parent-stations.csv`.
+/// 3. curated -- `crates/common/reference-data/tiploc-parent-stations.csv`.
 ///
 /// Returns the CRS, the rule and the grid distance when both references
 /// are known.

@@ -12,7 +12,7 @@
 //! - **Fixed links** ([`attribute_fixed_links`]): `TUBE` links are London
 //!   Underground, and so is a `TRANSFER` between a pair of stations that
 //!   also has a `TUBE` link (spec §3.2: those are Tube-speed transfer
-//!   allowances); `METRO` links follow `reference-data/fixed-link-operators.csv`.
+//!   allowances); `METRO` links follow `crates/api/reference-data/fixed-link-operators.csv`.
 //!   Anything else stays [`OperatorId::UNKNOWN`] and passes every filter.
 //! - **Stand-in walks** ([`add_tube_stand_in_walks`]): between two stations
 //!   linked by the Tube, an estimated walk of at most
@@ -126,9 +126,9 @@ pub fn add_tube_stand_in_walks(
     added
 }
 
-/// `reference-data/fixed-link-operators.csv`, compiled in.
+/// `crates/api/reference-data/fixed-link-operators.csv`, compiled in.
 const FIXED_LINK_OPERATORS_CSV: &str =
-    include_str!("../../../../reference-data/fixed-link-operators.csv");
+    include_str!("../../reference-data/fixed-link-operators.csv");
 
 /// [`FIXED_LINK_OPERATORS_CSV`] parsed: station CRS -> operator.
 static METRO_STATIONS: LazyLock<HashMap<String, OperatorId>> =
@@ -310,7 +310,7 @@ pub fn running_operators(
 /// no `schedule_services` operator: should be 0, else that table lags the
 /// calling points) and `api_trip_plan_graph_unattributed_links{mode}`
 /// (non-walk fixed links no operator is known for: a new `METRO` link
-/// belongs in `reference-data/fixed-link-operators.csv`).
+/// belongs in `crates/api/reference-data/fixed-link-operators.csv`).
 #[expect(clippy::cast_precision_loss, reason = "gauges of a few thousand")]
 #[expect(
     clippy::implicit_hasher,
