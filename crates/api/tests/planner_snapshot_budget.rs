@@ -49,8 +49,8 @@ fn mb(bytes: usize) -> f64 {
 }
 
 fn settled_rss() -> usize {
-    common::heap::release_freed_memory();
-    usize::try_from(common::heap::resident_set_bytes().unwrap()).unwrap()
+    ds_runtime::heap::release_freed_memory();
+    usize::try_from(ds_runtime::heap::resident_set_bytes().unwrap()).unwrap()
 }
 
 const STOPS: u64 = 3_800;
@@ -175,7 +175,7 @@ fn snapshot_budget() {
         .and_then(|value| value.parse().ok())
         .unwrap_or(68)
         .min(DaySet::DAYS);
-    common::heap::pin_mmap_threshold();
+    ds_runtime::heap::pin_mmap_threshold();
     let before = settled_rss();
     let snapshot = timetable(days);
     let held = settled_rss().saturating_sub(before);

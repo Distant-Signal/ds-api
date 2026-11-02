@@ -450,7 +450,7 @@ where
 ///
 /// **Serialised per `(user_id, trains_id)` (DB2-21).** The statement runs
 /// in its own (nested) transaction after
-/// `common::pg::lock_user_train_subscription`, so a concurrent call for the
+/// `ds_runtime::pg::lock_user_train_subscription`, so a concurrent call for the
 /// same pair waits and then sees the first call's row, instead of both
 /// inserting. The lock is a separate statement on purpose: under READ
 /// COMMITTED a statement's snapshot is taken when it starts, so a lock
@@ -467,7 +467,7 @@ where
     A: sqlx::Acquire<'c, Database = sqlx::Postgres>,
 {
     let mut tx = conn.begin().await?;
-    common::pg::lock_user_train_subscription(&mut tx, user_id, trains_id).await?;
+    ds_runtime::pg::lock_user_train_subscription(&mut tx, user_id, trains_id).await?;
     // One statement, not a SELECT-then-INSERT round trip: the `inserted`
     // CTE's `NOT EXISTS (SELECT 1 FROM existing)` guard means the INSERT
     // never fires when a subscription is already there, and the final

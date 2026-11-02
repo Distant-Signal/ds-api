@@ -1963,7 +1963,7 @@ fn record_missing_routes(stops: &[StopRecord], routes: &LineRoutes, end: usize) 
             continue;
         };
         metrics::counter!(
-            common::metrics::metric_name(ROUTES_MISSING_METRIC),
+            ds_runtime::metrics::metric_name(ROUTES_MISSING_METRIC),
             "line" => line.id.clone(),
             "reason" => reason.metric_label()
         )

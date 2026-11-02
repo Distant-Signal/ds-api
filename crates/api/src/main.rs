@@ -136,7 +136,7 @@ fn main() -> std::process::ExitCode {
     if let Some(code) = data::ticket_subprocess::maybe_run_child() {
         std::process::exit(code);
     }
-    common::logging::exit_code(server_main())
+    ds_runtime::logging::exit_code(server_main())
 }
 
 #[tokio::main]
@@ -150,7 +150,7 @@ async fn server_main() -> anyhow::Result<()> {
     // API-1: tracing FIRST, so nothing logged during `AppState::init` (the
     // INF-5 Postgres wait included), the migrations or a sweep's first tick
     // is dropped.
-    common::logging::init("api");
+    ds_runtime::logging::init("api");
 
     let app = AppState::init().await?;
     // CORPUS_FALLBACK_ENABLED (default off): see `data::corpus_crosswalk`.

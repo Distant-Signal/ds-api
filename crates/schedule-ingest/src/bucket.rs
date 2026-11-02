@@ -311,7 +311,7 @@ impl BucketSource {
     pub(crate) async fn poll_once(&mut self) -> Duration {
         let started = Instant::now();
         let result = self.poll_inner().await;
-        metrics::histogram!(common::metrics::metric_name(POLL_DURATION_METRIC), "source" => SOURCE)
+        metrics::histogram!(ds_runtime::metrics::metric_name(POLL_DURATION_METRIC), "source" => SOURCE)
             .record(started.elapsed().as_secs_f64());
         match result {
             Ok(()) => {
@@ -442,7 +442,7 @@ impl BucketSource {
             return;
         }
         metrics::counter!(
-            common::metrics::metric_name(UNEXPECTED_METRIC),
+            ds_runtime::metrics::metric_name(UNEXPECTED_METRIC),
             "source" => SOURCE,
             "reason" => reason
         )
@@ -490,7 +490,7 @@ impl BucketSource {
             Ok((_, received)) | Err((_, _, received)) => *received,
         };
         self.budget.push_back(((self.clock)(), received));
-        metrics::counter!(common::metrics::metric_name(DOWNLOADED_BYTES_METRIC), "source" => SOURCE)
+        metrics::counter!(ds_runtime::metrics::metric_name(DOWNLOADED_BYTES_METRIC), "source" => SOURCE)
             .increment(received);
         let sha256 = match result {
             Ok((sha256, _)) => sha256,
@@ -680,7 +680,7 @@ impl BucketSource {
             return;
         }
         self.revoked = revoked;
-        metrics::gauge!(common::metrics::metric_name(ACCESS_REVOKED_METRIC), "source" => SOURCE)
+        metrics::gauge!(ds_runtime::metrics::metric_name(ACCESS_REVOKED_METRIC), "source" => SOURCE)
             .set(if revoked { 1.0 } else { 0.0 });
         if revoked {
             tracing::error!(
@@ -698,7 +698,7 @@ impl BucketSource {
             return;
         }
         self.capped = capped;
-        metrics::gauge!(common::metrics::metric_name(DOWNLOAD_CAPPED_METRIC), "source" => SOURCE)
+        metrics::gauge!(ds_runtime::metrics::metric_name(DOWNLOAD_CAPPED_METRIC), "source" => SOURCE)
             .set(if capped { 1.0 } else { 0.0 });
         if capped {
             tracing::error!(
@@ -726,7 +726,7 @@ fn backoff(poll: Duration, max: Duration, failures: u32) -> Duration {
 
 fn count_error(kind: &'static str) {
     metrics::counter!(
-        common::metrics::metric_name(ERRORS_METRIC),
+        ds_runtime::metrics::metric_name(ERRORS_METRIC),
         "source" => SOURCE,
         "kind" => kind
     )
@@ -738,26 +738,26 @@ fn count_error(kind: &'static str) {
     reason = "a Unix timestamp stays far below 2^52"
 )]
 fn set_last_new_object(at: DateTime<Utc>) {
-    metrics::gauge!(common::metrics::metric_name(LAST_NEW_OBJECT_METRIC), "source" => SOURCE)
+    metrics::gauge!(ds_runtime::metrics::metric_name(LAST_NEW_OBJECT_METRIC), "source" => SOURCE)
         .set(at.timestamp() as f64);
 }
 
 /// Every bucket metric at 0, so the alerts' `increase()` sees the first
 /// event.
 pub(crate) fn register_metrics() {
-    let gauge = |name| metrics::gauge!(common::metrics::metric_name(name), "source" => SOURCE);
+    let gauge = |name| metrics::gauge!(ds_runtime::metrics::metric_name(name), "source" => SOURCE);
     gauge(ACCESS_REVOKED_METRIC).set(0.0);
     gauge(DOWNLOAD_CAPPED_METRIC).set(0.0);
     gauge(LAST_NEW_OBJECT_METRIC).set(0.0);
     for kind in ERROR_KINDS {
-        metrics::counter!(common::metrics::metric_name(ERRORS_METRIC), "source" => SOURCE, "kind" => kind)
+        metrics::counter!(ds_runtime::metrics::metric_name(ERRORS_METRIC), "source" => SOURCE, "kind" => kind)
             .increment(0);
     }
     for reason in UNEXPECTED_REASONS {
-        metrics::counter!(common::metrics::metric_name(UNEXPECTED_METRIC), "source" => SOURCE, "reason" => reason)
+        metrics::counter!(ds_runtime::metrics::metric_name(UNEXPECTED_METRIC), "source" => SOURCE, "reason" => reason)
             .increment(0);
     }
-    metrics::counter!(common::metrics::metric_name(DOWNLOADED_BYTES_METRIC), "source" => SOURCE)
+    metrics::counter!(ds_runtime::metrics::metric_name(DOWNLOADED_BYTES_METRIC), "source" => SOURCE)
         .increment(0);
 }
 
@@ -855,7 +855,7 @@ fn remove_partials(root: &Path) {
 pub(crate) mod tests {
     use std::sync::Mutex;
 
-    use common::secret::Secret;
+    use ds_runtime::secret::Secret;
     use wiremock::matchers::{method, path, query_param};
     use wiremock::{Mock, MockServer, Request, Respond, ResponseTemplate};
 

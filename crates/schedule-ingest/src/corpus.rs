@@ -222,20 +222,21 @@ impl CorpusState {
 /// rejection, failure or drift.
 pub(crate) fn register_metrics() {
     for format in [CorpusFormat::Json, CorpusFormat::Xml] {
-        metrics::counter!(common::metrics::metric_name(REJECTED_METRIC), "format" => format.as_str())
+        metrics::counter!(ds_runtime::metrics::metric_name(REJECTED_METRIC), "format" => format.as_str())
             .increment(0);
     }
     for stage in FAILURE_STAGES {
-        metrics::counter!(common::metrics::metric_name(FAILURES_METRIC), "stage" => stage)
+        metrics::counter!(ds_runtime::metrics::metric_name(FAILURES_METRIC), "stage" => stage)
             .increment(0);
     }
-    metrics::gauge!(common::metrics::metric_name(DRIFT_FILES_METRIC)).set(0.0);
+    metrics::gauge!(ds_runtime::metrics::metric_name(DRIFT_FILES_METRIC)).set(0.0);
 }
 
 /// Counts one failed CORPUS cycle at `stage` (one of [`FAILURE_STAGES`]).
 fn count_failure(stage: &'static str) {
     debug_assert!(FAILURE_STAGES.contains(&stage), "unknown stage {stage}");
-    metrics::counter!(common::metrics::metric_name(FAILURES_METRIC), "stage" => stage).increment(1);
+    metrics::counter!(ds_runtime::metrics::metric_name(FAILURES_METRIC), "stage" => stage)
+        .increment(1);
 }
 
 /// Gunzips `compressed`, refusing more than `max_bytes` of output.
@@ -423,7 +424,7 @@ fn report_drift(snapshot: &DirSnapshot, state: &mut CorpusState) {
         .filter(|name| is_nlc_drift_name(name))
         .collect();
     drift.sort();
-    metrics::gauge!(common::metrics::metric_name(DRIFT_FILES_METRIC)).set(drift.len() as f64);
+    metrics::gauge!(ds_runtime::metrics::metric_name(DRIFT_FILES_METRIC)).set(drift.len() as f64);
     if !drift.is_empty() {
         count_failure("drift");
     }
@@ -634,7 +635,7 @@ fn reject(
         DateTime::<Utc>::from(file.mtime),
         crate::sources::Settled::Quarantined,
     );
-    metrics::counter!(common::metrics::metric_name(REJECTED_METRIC), "format" => file.format.as_str())
+    metrics::counter!(ds_runtime::metrics::metric_name(REJECTED_METRIC), "format" => file.format.as_str())
         .increment(1);
     state.handled = Some((file.name.clone(), file.mtime, file.len, Dest::Rejected));
     archive(
@@ -665,7 +666,7 @@ fn note_xml(file: &Candidate, parsed: &Parsed, dirs: &Dirs) {
         return;
     };
     if let Some(midnight) = date.and_hms_opt(0, 0, 0) {
-        metrics::gauge!(common::metrics::metric_name(XML_FILE_DATE_METRIC))
+        metrics::gauge!(ds_runtime::metrics::metric_name(XML_FILE_DATE_METRIC))
             .set(midnight.and_utc().timestamp() as f64);
     }
     if let Some((archived, _)) =
@@ -934,11 +935,11 @@ pub(crate) async fn run_corpus_cycle(
         delivered_at,
         crate::sources::Settled::Accepted,
     );
-    metrics::gauge!(common::metrics::metric_name(LAST_LOAD_METRIC))
+    metrics::gauge!(ds_runtime::metrics::metric_name(LAST_LOAD_METRIC))
         .set(delivered_at.timestamp() as f64);
-    metrics::gauge!(common::metrics::metric_name(FORMAT_LAST_LOAD_METRIC), "format" => winner.format.as_str())
+    metrics::gauge!(ds_runtime::metrics::metric_name(FORMAT_LAST_LOAD_METRIC), "format" => winner.format.as_str())
         .set(delivered_at.timestamp() as f64);
-    metrics::gauge!(common::metrics::metric_name(ROWS_METRIC)).set(locations.len() as f64);
+    metrics::gauge!(ds_runtime::metrics::metric_name(ROWS_METRIC)).set(locations.len() as f64);
     state.handled = Some((winner.name.clone(), winner.mtime, winner.len, Dest::Loaded));
 
     if args.corpus_compare_formats {

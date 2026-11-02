@@ -1,7 +1,7 @@
 use std::path::PathBuf;
 
 use clap::Parser;
-use common::secret::Secret;
+use ds_runtime::secret::Secret;
 
 /// Default for [`Config::cif_file_pattern`]: exactly the name DTD delivers
 /// the full CIF timetable under. Locked to that name by the repo owner
@@ -269,7 +269,7 @@ pub(crate) struct Config {
     pub stability_cycles: u32,
 
     /// Postgres, as the `schedule_ingest` role. The pool reads the shared
-    /// `DATABASE_*` settings (`common::pg`); its default size is 1.
+    /// `DATABASE_*` settings (`ds_runtime::pg`); its default size is 1.
     #[arg(long, env, hide_env_values = true)]
     pub database_url: Secret,
 
@@ -280,11 +280,11 @@ pub(crate) struct Config {
     pub metrics_port: u16,
 
     #[command(flatten)]
-    pub metrics: common::service_args::MetricsArgs,
+    pub metrics: ds_runtime::service_args::MetricsArgs,
 
     /// `/livez` listener and stall window (SVC-08/INF-9).
     #[command(flatten)]
-    pub health: common::service_args::HealthArgs,
+    pub health: ds_runtime::service_args::HealthArgs,
 
     /// Which delivery sources run: the SFTP watch directory and the GCS
     /// bucket (`sources.rs`, `bucket.rs`).

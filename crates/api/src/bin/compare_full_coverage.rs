@@ -104,15 +104,15 @@ struct Args {
 
 #[tokio::main]
 async fn main() -> std::process::ExitCode {
-    common::logging::exit_code(run().await)
+    ds_runtime::logging::exit_code(run().await)
 }
 
 async fn run() -> anyhow::Result<()> {
     dotenvy::dotenv().ok();
-    common::logging::init_with_filter(
+    ds_runtime::logging::init_with_filter(
         "compare-full-coverage",
-        common::logging::EnvFilter::try_from_default_env()
-            .unwrap_or_else(|_| common::logging::EnvFilter::new("info")),
+        ds_runtime::logging::EnvFilter::try_from_default_env()
+            .unwrap_or_else(|_| ds_runtime::logging::EnvFilter::new("info")),
     );
 
     let args = Args::parse();

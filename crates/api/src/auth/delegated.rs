@@ -604,7 +604,7 @@ fn reject(
 ) -> Response {
     let client = client.unwrap_or("unknown").to_string();
     metrics::counter!(
-        common::metrics::metric_name("api_delegated_rejected_total"),
+        ds_runtime::metrics::metric_name("api_delegated_rejected_total"),
         "client" => client.clone(),
         "reason" => reason
     )
@@ -719,7 +719,7 @@ pub async fn gate(
     let response = next.run(request).await;
     let status = response.status();
     metrics::counter!(
-        common::metrics::metric_name("api_delegated_requests_total"),
+        ds_runtime::metrics::metric_name("api_delegated_requests_total"),
         "client" => client_name.to_string(),
         "route" => matched.clone(),
         "status" => status.as_u16().to_string()
