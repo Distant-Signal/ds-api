@@ -4,7 +4,7 @@
 //! An entry is one or more alternatives separated by `|`; each alternative
 //! is a station CRS, a bus stop's or ferry terminal's `tiploc:` code, or a
 //! named group `group:NAME` from the checked-in
-//! `reference-data/station-groups.csv` (e.g. `group:LON`, the eighteen
+//! `crates/api/reference-data/station-groups.csv` (e.g. `group:LON`, the eighteen
 //! London Terminals). `via=KGX|EUS|group:LON` is one via satisfied by
 //! passing any of them. Avoid lists take groups too (`avoid=group:LON`
 //! avoids every member: an avoid list already means "none of these"), but
@@ -14,8 +14,8 @@
 use std::collections::BTreeMap;
 use std::sync::LazyLock;
 
-/// `reference-data/station-groups.csv`, compiled in.
-const STATION_GROUPS_CSV: &str = include_str!("../../../../reference-data/station-groups.csv");
+/// `crates/api/reference-data/station-groups.csv`, compiled in.
+const STATION_GROUPS_CSV: &str = include_str!("../../reference-data/station-groups.csv");
 
 /// The prefix naming a group in a request (any case on the wire).
 pub const GROUP_PREFIX: &str = "group:";

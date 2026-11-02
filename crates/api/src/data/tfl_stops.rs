@@ -525,7 +525,7 @@ pub async fn attach_transfer_stops(pool: &PgPool, segments: &mut [SegmentResult]
     }
 }
 
-/// The curated links' lines (`reference-data/supplementary-fixed-links.csv`)
+/// The curated links' lines (`crates/common/reference-data/supplementary-fixed-links.csv`)
 /// by (mode, the two CRS codes in order): a link runs both ways.
 type CuratedLines = HashMap<(String, String, String), Vec<String>>;
 

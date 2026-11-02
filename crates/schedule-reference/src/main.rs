@@ -1497,7 +1497,7 @@ fn log_new_unresolved_booked_tiplocs(
             "CIF schedule calling point has a booked time but no tiploc_crs row at all (not \
              even an X-prefixed Network Rail pseudo-CRS) -- looks like it could be a real, \
              unmapped station rather than a legitimate non-station junction/timing point; \
-             logged once per process, see reference-data/stanox-crs.md and this delivery's own \
+             logged once per process, see crates/trust-consumer/reference-data/stanox-crs.md and this delivery's own \
              TI/A records for this TIPLOC to investigate"
         );
     }
@@ -1864,7 +1864,7 @@ fn line_population_dates(today: chrono::NaiveDate) -> [chrono::NaiveDate; 2] {
 /// is unioned in alongside `stanox_crs_records` rather than this map being
 /// built from `stanox_crs_records` alone. `stanox_crs` permanently
 /// EXCLUDES 5 STANOX values (`89428`, `52215`, `89530`, `86935`, `87981`
-/// -- see reference-data/stanox-crs.md) that each cover two TIPLOCs with
+/// -- see crates/trust-consumer/reference-data/stanox-crs.md) that each cover two TIPLOCs with
 /// two genuinely different, non-`X`-prefixed real CRS: an ambiguity that is
 /// unresolvable at the STANOX level, so `stanox_crs` drops both rows rather
 /// than guess. That silently meant `crs_to_tiploc_map` had ZERO entries for
@@ -3190,7 +3190,7 @@ mod poll_once_tests {
     /// The real regression test for the 2026-09-24 tiploc-crs-crosswalk gap
     /// this fix closes: before it, `crs_to_tiploc_map` inverted
     /// `stanox_crs_records` alone, which -- per
-    /// reference-data/stanox-crs.md's own documented exclusion policy --
+    /// crates/trust-consumer/reference-data/stanox-crs.md's own documented exclusion policy --
     /// permanently has ZERO rows for `AFK`/`ASI` (STANOX `89428`),
     /// `EBD`/`EBF` (STANOX `89530`), `SDI`/`SFA` (STANOX `52215`) and
     /// `POO`/`PFT` (STANOX `86935`): each of these STANOX covers two

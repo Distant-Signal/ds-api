@@ -11,7 +11,7 @@
 //! See
 //! docs/superpowers/specs/2026-09-01-schedule-ingest-stanox-crs-table-design.md
 //! Decision 2 for the schema and disambiguation policy this module
-//! implements, and `reference-data/stanox-crs.md` for the original,
+//! implements, and `crates/trust-consumer/reference-data/stanox-crs.md` for the original,
 //! hand-curated version of the same policy this reimplements as real code.
 
 use std::collections::HashMap;
@@ -290,7 +290,7 @@ pub(crate) struct ParsedRow {
 /// Resolves the final STANOX->CRS table: completes a blank `TI` CRS from
 /// `msn_crs_by_tiploc` (the WATRLMN case), groups by STANOX, and for any
 /// STANOX with more than one distinct CRS applies the exact policy
-/// `reference-data/stanox-crs.md:104-113` documents by hand for the
+/// `crates/trust-consumer/reference-data/stanox-crs.md:104-113` documents by hand for the
 /// checked-in CSV -- prefer the sole non-`X`-prefixed candidate; otherwise
 /// (2+ non-X, or 2+ X-prefixed, with no principled tiebreaker) exclude the
 /// STANOX entirely. See this design's Decision 2.
@@ -403,7 +403,7 @@ pub(crate) struct TiplocCrsRow {
 /// Unlike `resolve`, this function does NOT filter out X-prefixed
 /// pseudo-CRS candidates in favor of a sole non-X-prefixed one, so a TIPLOC
 /// whose only resolvable CRS is X-prefixed (e.g. real STANOX 87201's
-/// `VICTRCR`/`XVR`, documented in reference-data/stanox-crs.md:100-113) now
+/// `VICTRCR`/`XVR`, documented in crates/trust-consumer/reference-data/stanox-crs.md:100-113) now
 /// gets its own `tiploc_crs` row where it previously had none via
 /// `stanox_crs` -- not a new user-facing bug, since `journey.rs`'s
 /// `an_x_prefixed_pseudo_crs_is_blanked_rather_than_displayed_as_a_real_station`
@@ -790,7 +790,7 @@ mod resolve_tiploc_crs_tests {
      {
         // Core regression test for this plan's whole point. Vauxhall's two
         // real TIPLOCs (STANOX 87214, both CRS VXH -- see
-        // reference-data/stanox-crs.csv line "87214,VXH") each carry their
+        // crates/trust-consumer/reference-data/stanox-crs.csv line "87214,VXH") each carry their
         // own CRS directly on their own TI record.
         let ti_records = vec![
             ti("VAUXHLM", "VAUXHALL", "87214", "VXH"),
@@ -839,7 +839,7 @@ mod resolve_tiploc_crs_tests {
     fn clapham_junction_both_real_tiplocs_resolve_to_the_same_real_crs() {
         // Same shape as the Vauxhall case above, for Clapham Junction's two
         // real TIPLOCs (STANOX 87219, both CRS CLJ -- see
-        // reference-data/stanox-crs.csv line "87219,CLJ").
+        // crates/trust-consumer/reference-data/stanox-crs.csv line "87219,CLJ").
         let ti_records = vec![
             ti("CLPHMJM", "CLAPHAM JUNCTION", "87219", "CLJ"),
             ti("CLPHMJW", "CLAPHAM JUNCTION", "87219", "CLJ"),
