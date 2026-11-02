@@ -271,76 +271,40 @@ mod tests {
     }
 }
 
+/// The env names this `Config` declares. The chart side (every one set on
+/// the `reference` container as the `schedule_reference` role, nothing
+/// stale) is `scripts/check-config-defaults-chart.py`, against
+/// `schedule-reference --print-config-defaults`.
 #[cfg(test)]
-mod chart_env_wiring_tests {
+mod env_contract_tests {
     use clap::CommandFactory;
 
     use super::Config;
 
-    /// The `reference` container's own slice of the schedulefeed Deployment
-    /// template -- scoped rather than matching the whole file, so a var set
-    /// only on the sibling `ingest` container cannot satisfy this check by
-    /// accident. `reference` is the last container in the template,
-    /// so "from its `- name:` line to the first env `define` after it" (the
-    /// sftp and ingest env defines sit at the end of the file) is the whole
-    /// block, and a var set only in the ingest define can't satisfy it.
-    fn reference_container_block() -> String {
-        let chart = common::manifest_dir!()
-            .join("../../charts/distant-signal/templates/schedulefeed-deployment.yaml");
-        let rendered = std::fs::read_to_string(&chart)
-            .unwrap_or_else(|err| panic!("read {}: {err}", chart.display()));
-        let marker = "- name: reference";
-        let start = rendered.find(marker).expect(
-            "the schedulefeed Deployment must still declare a container named `reference`; \
-             if it was renamed, update this test's marker",
-        );
-        let end = rendered[start..]
-            .find("\n{{- define ")
-            .map_or(rendered.len(), |offset| start + offset);
-        rendered[start..end].to_string()
-    }
-
-    /// The `reference` container gets the role's `DATABASE_URL` and its
-    /// settings, and no longer `INGEST_SINK` (release D), the api URLs or
-    /// the internal OAuth settings (release B).
+    /// No api URL is left to wire (release B), and `INGEST_SINK` stays
+    /// removed (release D).
     #[test]
-    fn the_charts_reference_container_sets_this_configs_env() {
-        let block = reference_container_block();
-        assert!(
-            block.contains("- name: SCHEDULE_FORWARD_PUBLISH_DAYS"),
-            "the reference container must set SCHEDULE_FORWARD_PUBLISH_DAYS \
-             (scheduleFeed.reference.forwardPublishDays)"
-        );
-        assert!(
-            block.contains(
-                r#"include "distant-signal.databaseEnvFor" (dict "root" . "service" "schedule_reference")"#
-            ),
-            "the reference container must get DATABASE_URL for the schedule_reference role"
-        );
-        let mut declared: Vec<String> = Config::command()
+    fn only_the_database_and_health_urls_are_declared() {
+        let declared: Vec<String> = Config::command()
             .get_arguments()
             .filter_map(|arg| arg.get_env().and_then(|env| env.to_str()))
-            .filter(|env| env.ends_with("_URL"))
             .map(str::to_string)
             .collect();
-        declared.sort();
+        assert!(
+            declared
+                .iter()
+                .any(|env| env == "SCHEDULE_FORWARD_PUBLISH_DAYS")
+        );
+        assert!(!declared.iter().any(|env| env == "INGEST_SINK"));
+        let mut urls: Vec<&String> = declared
+            .iter()
+            .filter(|env| env.ends_with("_URL"))
+            .collect();
+        urls.sort();
         assert_eq!(
-            declared,
+            urls,
             ["DATABASE_URL", "HEALTH_BIND_URL"],
             "no api URL is left to wire"
         );
-        for gone in [
-            "INGEST_SINK",
-            "API_INGEST_URL",
-            "SCHEDULE_REFERENCE_PUBLISHES_URL",
-            "SCHEDULE_CALLING_POINTS_FULL_URL",
-            "INTERNAL_OAUTH_TOKEN_URL",
-            "INTERNAL_OAUTH_PASSWORD",
-        ] {
-            assert!(
-                !block.contains(&format!("- name: {gone}\n")),
-                "{gone} is no longer rendered"
-            );
-        }
     }
 }

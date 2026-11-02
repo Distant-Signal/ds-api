@@ -136,7 +136,91 @@ fn main() -> std::process::ExitCode {
     if let Some(code) = data::ticket_subprocess::maybe_run_child() {
         std::process::exit(code);
     }
+    ds_runtime::service_args::exit_if_print_config_defaults(config_defaults);
     ds_runtime::logging::exit_code(server_main())
+}
+
+/// What `--print-config-defaults` prints (`ds_runtime::service_args`): the
+/// clap settings `AppState::init` and `server_main` parse, and the
+/// variables read outside clap (`default: null` where the default is not a
+/// single exported value).
+fn config_defaults() -> ds_runtime::service_args::ConfigDefaults {
+    use clap::CommandFactory as _;
+    let live = data::trip_plan_live::LiveConfig::default();
+    let sweep = api::journey_break_sweep::SweepConfig::default();
+    ds_runtime::service_args::ConfigDefaults::for_config::<data::config::ServiceArguments>("api")
+        .args(&api::edge::EdgeSettings::command())
+        .args(&api::rate_limit::RateLimitSettings::command())
+        .args(&api::auth::delegated::DelegatedSettings::command())
+        .args(&data::tfl_arrivals::TflArrivalsSettings::command())
+        .postgres_pool(api::app::DB_POOL_SIZE)
+        .db_role(ds_store::schema::DbRole::Api.key())
+        .env(data::config::STORED_GROUPS_EXTRA_ENV, None)
+        .env(
+            data::corpus_crosswalk::FALLBACK_ENV,
+            Some(
+                &ds_store::corpus::parse_fallback_flag(None)
+                    .unwrap_or_default()
+                    .to_string(),
+            ),
+        )
+        .env(data::planner_snapshot::ENABLED_ENV, None)
+        .env(MIGRATE_ON_STARTUP_ENV, None)
+        .env(ds_store::migrate::MIGRATION_LOCK_TIMEOUT_ENV, None)
+        .env(ds_store::migrate::MIGRATION_STATEMENT_TIMEOUT_ENV, None)
+        .env(api::readiness::CHECK_DATABASE_ENV, None)
+        .env(data::transit_planning::SWITCH_ENV, None)
+        .env(data::transit_planning::CHANGE_MINUTES_ENV, None)
+        .env(data::trip_planning::ROAD_WATER_CHANGE_MINUTES_ENV, None)
+        .env("SCHEDULE_PROVISIONAL_AFTER_DAYS", None)
+        .env("TRIP_PLAN_MAX_WAYPOINTS", None)
+        .env("TRIP_PLAN_MAX_OPTIONS_SEARCH_SIZE", None)
+        .env("TRIP_PLAN_GRAPH_CACHE_DATES", None)
+        .env("TRIP_PLAN_GRAPH_CACHE_MAX_AGE_SECS", None)
+        .env("TRIP_PLAN_GRAPH_PREWARM_INTERVAL_SECS", None)
+        .env("TRIP_PLAN_LIVE_ENABLED", Some(&live.enabled.to_string()))
+        .env(
+            "TRIP_PLAN_LIVE_MAX_REPLANS",
+            Some(&live.max_replans.to_string()),
+        )
+        .env(
+            "TRIP_PLAN_LIVE_MAX_REPLANS_OPTIONS",
+            Some(&live.max_replans_options.to_string()),
+        )
+        .env(
+            "TRIP_PLAN_LIVE_TRUST_MAX_AGE_MINUTES",
+            Some(&live.trust_max_age_minutes.to_string()),
+        )
+        .env(
+            "TRIP_PLAN_LIVE_HORIZON_MINUTES",
+            Some(&live.horizon_minutes.to_string()),
+        )
+        .env(
+            "TRIP_PLAN_LIVE_LOOKBACK_MINUTES",
+            Some(&live.lookback_minutes.to_string()),
+        )
+        .env(
+            "TRIP_PLAN_LIVE_MAX_TRAINS",
+            Some(&live.max_trains.to_string()),
+        )
+        .env(
+            "TRIP_PLAN_LIVE_IN_SEARCH",
+            Some(&live.in_search.to_string()),
+        )
+        .env(
+            "TRIP_PLAN_LIVE_SNAPSHOT_TTL_SECONDS",
+            Some(&live.snapshot_ttl_seconds.to_string()),
+        )
+        .env("JOURNEY_BREAKS_ENABLED", Some(&sweep.enabled.to_string()))
+        .env(
+            "JOURNEY_BREAKS_INTERVAL_SECS",
+            Some(&sweep.interval_secs.to_string()),
+        )
+        .env(
+            "JOURNEY_BREAKS_MAX_JOURNEYS_PER_TICK",
+            Some(&sweep.max_journeys_per_tick.to_string()),
+        )
+        .env("JOURNEY_BREAKS_SUGGESTIONS_MAX_AGE_SECS", None)
 }
 
 #[tokio::main]

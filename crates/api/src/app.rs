@@ -53,6 +53,9 @@ const DEAD_CLIENT_DETECTION_SETTINGS: [(&str, &str); 4] =
 /// `pg_stat_activity.application_name` of every `api` pool connection.
 pub const API_APPLICATION_NAME: &str = "distant-signal-api";
 
+/// The api pool's size when `DATABASE_MAX_CONNECTIONS` is unset.
+pub const DB_POOL_SIZE: u32 = 50;
+
 pub fn with_dead_client_detection(options: PgConnectOptions) -> PgConnectOptions {
     options.options(DEAD_CLIENT_DETECTION_SETTINGS)
 }
@@ -166,7 +169,8 @@ impl AppState {
         // schedule publish chunks) raise the timeout with `SET LOCAL`.
         // `ds_store::pool` builds the same pool and samples it into
         // `distant_signal_db_pool_*` (plan task 1A.11).
-        let pool_settings = ds_store::pool::PoolSettings::from_env(API_APPLICATION_NAME, 50)?;
+        let pool_settings =
+            ds_store::pool::PoolSettings::from_env(API_APPLICATION_NAME, DB_POOL_SIZE)?;
         let db = pool_settings
             .connect_with_until_ready(connect_options, None)
             .await;

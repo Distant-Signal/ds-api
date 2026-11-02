@@ -51,21 +51,3 @@ pub use ds_store::corpus::{FALLBACK_ENV, fallback_enabled, init_fallback_from_en
 
 // Moved to `ds_store::corpus::crosswalk` (ingest architecture plan 1A.6).
 pub use ds_store::corpus::crosswalk::load_corpus_locations;
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    /// The chart sets the flag on the api container, off by default.
-    #[test]
-    fn the_chart_wires_the_flag_off_by_default() {
-        let chart = common::manifest_dir!().join("../../charts/distant-signal");
-        let template =
-            std::fs::read_to_string(chart.join("templates/api-deployment.yaml")).unwrap();
-        assert!(template.contains(&format!(
-            "- name: {FALLBACK_ENV}\n              value: {{{{ .Values.api.corpusFallback.enabled | toString | quote }}}}"
-        )));
-        let values = std::fs::read_to_string(chart.join("values.yaml")).unwrap();
-        assert!(values.contains("  corpusFallback:\n    enabled: false\n"));
-    }
-}

@@ -500,140 +500,52 @@ mod stored_group_allowlist_tests {
     }
 }
 
-/// The chart and this `ServiceArguments` must agree on every
-/// `INTERNAL_OAUTH_GROUP_*` env var. Every group field carries a *suggested
-/// default*, so a var the chart forgets to set does not fail fast: clap is
-/// satisfied and the api silently uses the crate's own group name instead
-/// of the operator's (this happened to `INTERNAL_OAUTH_GROUP_TRUST_BACKLOG`
-/// in 2026-09). Since release B (ingest phase 5) removed the `/private`
-/// routes and their per-producer groups, `INTERNAL_OAUTH_GROUP_MCP` is the
-/// only one, and the api container must set exactly it.
+/// The env names the chart is checked against (scripts/check-config-defaults-chart.py
+/// compares the api container with `api --print-config-defaults`). Every
+/// group field carries a *suggested default*, so a var the chart forgets
+/// to set does not fail fast: clap is satisfied and the api silently uses
+/// the crate's own group name instead of the operator's (this happened to
+/// `INTERNAL_OAUTH_GROUP_TRUST_BACKLOG` in 2026-09). These tests pin the
+/// names on this side; the script fails on a declared var the chart never
+/// sets and on a chart var nothing declares.
 #[cfg(test)]
-mod chart_env_wiring_tests {
+mod env_contract_tests {
     use clap::CommandFactory;
 
     use super::ServiceArguments;
 
-    /// Prefix shared by every machine-credential group field above.
-    const GROUP_ENV_PREFIX: &str = "INTERNAL_OAUTH_GROUP_";
-
-    /// The `api` container's own slice of the api Deployment template. Scoped
-    /// from its `- name: api` line to EOF rather than matching the whole file,
-    /// matching `crates/schedule-reference/src/config.rs`'s equivalent helper
-    /// -- so a var that only ever appears in one of this template's leading
-    /// `fail`-guard comment blocks cannot satisfy the check by accident.
-    /// `api` is the only container in this template, so "to EOF" is the whole
-    /// block.
-    fn api_container_block() -> String {
-        let chart = common::manifest_dir!()
-            .join("../../charts/distant-signal/templates/api-deployment.yaml");
-        let rendered = std::fs::read_to_string(&chart)
-            .unwrap_or_else(|err| panic!("read {}: {err}", chart.display()));
-        let marker = "- name: api\n";
-        let start = rendered.find(marker).expect(
-            "the api Deployment must still declare a container named `api`; if it was renamed, \
-             update this test's marker",
-        );
-        rendered[start..].to_string()
-    }
-
-    #[test]
-    fn every_internal_oauth_group_this_config_declares_is_set_on_the_charts_api_container() {
-        let block = api_container_block();
-        let command = ServiceArguments::command();
-
-        let declared: Vec<String> = command
+    fn declared() -> Vec<String> {
+        ServiceArguments::command()
             .get_arguments()
             .filter_map(|arg| arg.get_env().and_then(|env| env.to_str()))
-            .filter(|env| env.starts_with(GROUP_ENV_PREFIX))
             .map(str::to_string)
-            .collect();
-        assert_eq!(
-            declared,
-            ["INTERNAL_OAUTH_GROUP_MCP"],
-            "release B (ingest phase 5) left only the MCP's {GROUP_ENV_PREFIX}* env var"
-        );
-
-        let missing: Vec<&String> = declared
-            .iter()
-            .filter(|env| !block.contains(&format!("- name: {env}")))
-            .collect();
-
-        assert!(
-            missing.is_empty(),
-            "these {GROUP_ENV_PREFIX}* env vars are declared by crates/api/src/data/config.rs but \
-             never set on the `api` container in \
-             charts/distant-signal/templates/api-deployment.yaml, so under Helm api silently \
-             uses this crate's own suggested group name instead of the operator's real \
-             Authentik group: {missing:?}"
-        );
+            .collect()
     }
 
-    /// The chart must not set a group var this struct no longer declares
-    /// either: a stale `INTERNAL_OAUTH_GROUP_*` in the template is a value an
-    /// operator can configure that silently does nothing, and it is the same
-    /// drift in the opposite direction.
+    /// Release B (ingest phase 5) removed the `/private` routes and their
+    /// per-producer groups: `INTERNAL_OAUTH_GROUP_MCP` is the only one.
     #[test]
-    fn the_chart_sets_no_internal_oauth_group_this_config_does_not_declare() {
-        let block = api_container_block();
-        let command = ServiceArguments::command();
-
-        let declared: Vec<String> = command
-            .get_arguments()
-            .filter_map(|arg| arg.get_env().and_then(|env| env.to_str()))
-            .filter(|env| env.starts_with(GROUP_ENV_PREFIX))
-            .map(str::to_string)
+    fn the_mcp_group_is_the_only_internal_oauth_group() {
+        let groups: Vec<String> = declared()
+            .into_iter()
+            .filter(|env| env.starts_with("INTERNAL_OAUTH_GROUP_"))
             .collect();
-
-        let stale: Vec<&str> = block
-            .lines()
-            .filter_map(|line| line.trim().strip_prefix("- name: "))
-            .filter(|env| env.starts_with(GROUP_ENV_PREFIX))
-            .filter(|env| !declared.iter().any(|d| d == env))
-            .collect();
-
-        assert!(
-            stale.is_empty(),
-            "charts/distant-signal/templates/api-deployment.yaml sets these \
-             {GROUP_ENV_PREFIX}* env vars on the api container, but \
-             crates/api/src/data/config.rs no longer declares them, so clap ignores them and any \
-             operator who configures one gets no effect at all: {stale:?}"
-        );
+        assert_eq!(groups, ["INTERNAL_OAUTH_GROUP_MCP"]);
     }
 
     /// The embedded chatbot's `CHATBOT_ACCESS`/`CHATBOT_ACCESS_GROUP` gate
-    /// was removed on 2026-10-14: every logged-in user gets `/chat`. Neither
-    /// var may come back on either side.
+    /// was removed on 2026-10-14: every logged-in user gets `/chat`.
     #[test]
     fn the_removed_chatbot_access_vars_stay_removed() {
-        let block = api_container_block();
-        let declared: Vec<String> = ServiceArguments::command()
-            .get_arguments()
-            .filter_map(|arg| arg.get_env().and_then(|env| env.to_str()))
-            .map(str::to_string)
-            .collect();
+        let declared = declared();
         for env in ["CHATBOT_ACCESS", "CHATBOT_ACCESS_GROUP"] {
             assert!(
                 !declared.iter().any(|d| d == env),
                 "config.rs declares the removed {env} again"
             );
-            assert!(
-                !block.contains(&format!("- name: {env}\n")),
-                "the api container still sets the removed {env}"
-            );
         }
     }
 
-    /// Narrower cousin of the two tests above, for the four sweep-cadence
-    /// tunables wired into `api-deployment.yaml` in the same 2026-09-25
-    /// Signal Box Audit Low pass that added this test:
-    /// `reconciliation_sweep_interval_secs`, `schedule_enrichment_grace_minutes`,
-    /// `backlog_match_sweep_interval_secs` and `session_cleanup_interval_secs`.
-    /// Each had a working default and so was a silent "can't tune without a
-    /// redeploy" gap rather than the group-var tests' silent-403 hazard --
-    /// still the same underlying bug class, still worth a guard.
-    /// `schedule_match_interval_secs` is deliberately excluded: its own doc
-    /// comment in this file explains why it stays unwired on purpose.
     /// Plan 1B.7: `API_BACKGROUND_LOOPS` defaults to true (today's
     /// behaviour) and takes an explicit value, so the chart's
     /// `API_BACKGROUND_LOOPS=false` turns the loops off.
@@ -650,59 +562,17 @@ mod chart_env_wiring_tests {
         );
         assert_eq!(arg.get_default_values(), ["true"]);
         assert!(matches!(arg.get_action(), clap::ArgAction::Set));
-        let block = api_container_block();
-        assert!(
-            block.contains("- name: API_BACKGROUND_LOOPS"),
-            "the chart renders API_BACKGROUND_LOOPS (when api.backgroundLoops is false)"
-        );
     }
 
     /// Release B (ingest phase 5): `INCIDENTS_ROW_HEARTBEAT` served only
-    /// `POST /private/incidents`, so the api neither declares it nor gets it
-    /// from the chart (poller-incidents still reads it).
+    /// `POST /private/incidents`, so the api no longer declares it
+    /// (poller-incidents still reads it).
     #[test]
     fn incidents_row_heartbeat_is_gone_from_the_api() {
         assert!(
-            !ServiceArguments::command()
-                .get_arguments()
-                .filter_map(|arg| arg.get_env().and_then(|env| env.to_str()))
+            !declared()
+                .iter()
                 .any(|env| env == "INCIDENTS_ROW_HEARTBEAT")
         );
-        assert!(!api_container_block().contains("- name: INCIDENTS_ROW_HEARTBEAT"));
-    }
-
-    #[test]
-    fn every_sweep_interval_tunable_this_config_declares_is_set_on_the_charts_api_container() {
-        const SWEEP_ENV_VARS: &[&str] = &[
-            "RECONCILIATION_SWEEP_INTERVAL_SECS",
-            "SCHEDULE_ENRICHMENT_GRACE_MINUTES",
-            "BACKLOG_MATCH_SWEEP_INTERVAL_SECS",
-            "SESSION_CLEANUP_INTERVAL_SECS",
-            "PAST_TRAVEL_RETENTION_DAYS",
-            "STALE_PUSH_SUBSCRIPTION_DAYS",
-            "INACTIVE_ACCOUNT_RETENTION_DAYS",
-        ];
-        let block = api_container_block();
-        let command = ServiceArguments::command();
-
-        let declared_env_names: Vec<String> = command
-            .get_arguments()
-            .filter_map(|arg| arg.get_env().and_then(|env| env.to_str()))
-            .map(str::to_string)
-            .collect();
-        for env in SWEEP_ENV_VARS {
-            assert!(
-                declared_env_names.iter().any(|d| d == env),
-                "sanity check: crates/api/src/data/config.rs must still declare {env} as an \
-                 env-backed ServiceArguments field; this test's own env var list is stale if not"
-            );
-            assert!(
-                block.contains(&format!("- name: {env}")),
-                "{env} is declared by crates/api/src/data/config.rs but never set on the `api` \
-                 container in charts/distant-signal/templates/api-deployment.yaml, so under Helm \
-                 an operator can never tune it without a rebuild -- it silently stays at this \
-                 crate's own default forever"
-            );
-        }
     }
 }

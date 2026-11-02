@@ -108,8 +108,16 @@ fn scan_interval(poll_interval_secs: u64) -> tokio::time::Interval {
     interval
 }
 
+/// What `--print-config-defaults` prints (`ds_runtime::service_args`).
+fn config_defaults() -> ds_runtime::service_args::ConfigDefaults {
+    ds_runtime::service_args::ConfigDefaults::for_config::<Config>("schedule-ingest")
+        .postgres_pool(sink::DEFAULT_MAX_CONNECTIONS)
+        .db_role(ds_store::schema::DbRole::ScheduleIngest.key())
+}
+
 #[tokio::main]
 async fn main() -> std::process::ExitCode {
+    ds_runtime::service_args::exit_if_print_config_defaults(config_defaults);
     ds_runtime::logging::exit_code(run().await)
 }
 
