@@ -84,14 +84,15 @@ struct Args {
     /// Explicit end date (`YYYY-MM-DD`), defaulting to today.
     #[arg(long)]
     to: Option<chrono::NaiveDate>,
-    /// Directory of `lines/*.toml` files, used only to read this line's
+    /// The line catalogue (`ds_lines::EMBEDDED`, the one built in, or a
+    /// directory of `lines/*.toml` files), used only to read this line's
     /// own (possibly overridden) `reduced_service_pct` severity threshold
     /// -- the operationally meaningful cutoff `classify_cancellation` uses
     /// (see that function's own doc comment). Falls back to
     /// `common::Defaults`'s plain default (0.25) if the line or directory
     /// can't be found, rather than failing the whole comparison over a
     /// missing catalogue mount.
-    #[arg(long, env = "LINES_DIR", default_value = "lines")]
+    #[arg(long, env = "LINES_DIR", default_value = ds_lines::EMBEDDED)]
     lines_dir: String,
     /// Absolute rate-difference threshold (percentage points, as a
     /// fraction) above which a gap is flagged even when neither side
@@ -159,7 +160,7 @@ async fn run() -> anyhow::Result<()> {
 /// own doc comment for why this matters to the comparison.
 fn severity_threshold_for(line_id: &str, lines_dir: &str) -> f64 {
     let defaults = common::Defaults::default();
-    match common::config::parse_lines(lines_dir) {
+    match ds_lines::parse_lines(lines_dir) {
         Ok(lines) => {
             if let Some(line) = lines.iter().find(|l| l.id == line_id) {
                 common::thresholds_for(&defaults, &line.severity_overrides).reduced_service_pct
@@ -428,7 +429,7 @@ mod windows_report {
             .expect("midnight")
             .and_utc();
         let defaults = common::Defaults::default();
-        let per_line: HashMap<String, common::Defaults> = match common::config::parse_lines(
+        let per_line: HashMap<String, common::Defaults> = match ds_lines::parse_lines(
             &args.lines_dir,
         ) {
             Ok(lines) => lines

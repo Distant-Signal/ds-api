@@ -761,9 +761,7 @@ mod db_tests {
         .await
         .unwrap();
         let mut lit = app(pool.clone(), &["tfl"]);
-        std::sync::Arc::get_mut(&mut lit).unwrap().config.lines =
-            common::config::parse_lines(concat!(env!("CARGO_MANIFEST_DIR"), "/../../lines"))
-                .unwrap();
+        std::sync::Arc::get_mut(&mut lit).unwrap().config.lines = ds_lines::embedded().unwrap();
 
         let (status, _, body) = get(&lit, "/transit/tfl").await;
         assert_eq!(status, StatusCode::OK);
