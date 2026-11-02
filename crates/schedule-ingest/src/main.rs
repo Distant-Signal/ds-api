@@ -110,7 +110,7 @@ fn scan_interval(poll_interval_secs: u64) -> tokio::time::Interval {
 
 #[tokio::main]
 async fn main() -> std::process::ExitCode {
-    common::logging::exit_code(run().await)
+    ds_runtime::logging::exit_code(run().await)
 }
 
 #[expect(
@@ -120,12 +120,12 @@ async fn main() -> std::process::ExitCode {
 async fn run() -> anyhow::Result<()> {
     dotenvy::dotenv().ok();
 
-    common::logging::init("schedule-ingest");
+    ds_runtime::logging::init("schedule-ingest");
 
     let config = Config::parse();
     config.sources.validate()?;
     if config.metrics.metrics_enabled {
-        common::metrics::install(config.metrics_port)?;
+        ds_runtime::metrics::install(config.metrics_port)?;
     }
     let progress = health_http::spawn_liveness(&config.health);
 
@@ -164,8 +164,8 @@ async fn run() -> anyhow::Result<()> {
     // the schedule_ingest role (the api's routes went in release B).
     let sink = sink::DbSink::connect(&config.database_url, &progress).await?;
     // Registered at 0 so the alert's increase() sees the first rejection.
-    metrics::counter!(common::metrics::metric_name(ZIP_REJECTED_METRIC)).increment(0);
-    metrics::counter!(common::metrics::metric_name(INGEST_REJECTED_METRIC)).increment(0);
+    metrics::counter!(ds_runtime::metrics::metric_name(ZIP_REJECTED_METRIC)).increment(0);
+    metrics::counter!(ds_runtime::metrics::metric_name(INGEST_REJECTED_METRIC)).increment(0);
 
     // PL-6: directories extracted before the completion marker existed are
     // adopted (or left for re-extraction), and scratch directories from an
@@ -244,7 +244,7 @@ async fn run() -> anyhow::Result<()> {
         .await;
         progress.beat();
 
-        metrics::histogram!(common::metrics::metric_name(
+        metrics::histogram!(ds_runtime::metrics::metric_name(
             "schedule_feed_scan_duration_seconds"
         ))
         .record(cycle_start.elapsed().as_secs_f64());
@@ -517,7 +517,7 @@ async fn run_scan_cycle(
                 );
                 record_ingested(&config.storage_dir, &pending);
                 *last_ingested_mtime = Some(SystemTime::from(pending.delivered_at));
-                metrics::gauge!(common::metrics::metric_name(
+                metrics::gauge!(ds_runtime::metrics::metric_name(
                     "schedule_feed_last_ingest_delivered_at_seconds"
                 ))
                 .set(pending.delivered_at.timestamp() as f64);
@@ -605,7 +605,7 @@ async fn run_scan_cycle(
                     "zip delivery was already extracted and posted before this process started; not waiting or posting again"
                 );
                 *last_ingested_mtime = Some(zip_mtime);
-                metrics::gauge!(common::metrics::metric_name(
+                metrics::gauge!(ds_runtime::metrics::metric_name(
                     "schedule_feed_last_ingest_delivered_at_seconds"
                 ))
                 .set(DateTime::<Utc>::from(zip_mtime).timestamp() as f64);
@@ -783,7 +783,7 @@ async fn run_scan_cycle(
                 delivered_at,
                 sources::Settled::Quarantined,
             );
-            metrics::counter!(common::metrics::metric_name(
+            metrics::counter!(ds_runtime::metrics::metric_name(
                 "schedule_feed_zip_rejected_total"
             ))
             .increment(1);
@@ -832,7 +832,7 @@ async fn run_scan_cycle(
             );
             record_ingested(&config.storage_dir, &request);
             *last_ingested_mtime = Some(zip_mtime);
-            metrics::gauge!(common::metrics::metric_name(
+            metrics::gauge!(ds_runtime::metrics::metric_name(
                 "schedule_feed_last_ingest_delivered_at_seconds"
             ))
             .set(delivered_at.timestamp() as f64);
@@ -914,7 +914,8 @@ fn queue_or_quarantine_failed_post(
                 request.delivered_at,
                 sources::Settled::Quarantined,
             );
-            metrics::counter!(common::metrics::metric_name(INGEST_REJECTED_METRIC)).increment(1);
+            metrics::counter!(ds_runtime::metrics::metric_name(INGEST_REJECTED_METRIC))
+                .increment(1);
             *rejected_mtime = Some(SystemTime::from(request.delivered_at));
             *pending_post = None;
         }
@@ -1560,12 +1561,12 @@ mod tests {
             },
             stability_cycles: 2,
             // Unused: the tests pass their own sink.
-            database_url: common::secret::Secret::new("postgres://unused@127.0.0.1:1/none"),
+            database_url: ds_runtime::secret::Secret::new("postgres://unused@127.0.0.1:1/none"),
             metrics_port: 0,
-            metrics: common::service_args::MetricsArgs {
+            metrics: ds_runtime::service_args::MetricsArgs {
                 metrics_enabled: false,
             },
-            health: common::service_args::HealthArgs {
+            health: ds_runtime::service_args::HealthArgs {
                 health_bind_url: "127.0.0.1:0".to_string(),
                 progress_stall_secs: 1800,
             },

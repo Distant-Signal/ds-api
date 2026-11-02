@@ -495,7 +495,7 @@ async fn parse_operator_filter(
         }
     }
     metrics::counter!(
-        common::metrics::metric_name("api_trip_plan_operator_filter_total"),
+        ds_runtime::metrics::metric_name("api_trip_plan_operator_filter_total"),
         "mode" => match filter.mode {
             FilterMode::Only => "only",
             FilterMode::Avoid => "avoid",
@@ -599,11 +599,11 @@ async fn live_snapshot(
         })
         .await?,
     );
-    metrics::histogram!(common::metrics::metric_name(
+    metrics::histogram!(ds_runtime::metrics::metric_name(
         "api_trip_plan_live_snapshot_build_seconds"
     ))
     .record(started.elapsed().as_secs_f64());
-    metrics::gauge!(common::metrics::metric_name(
+    metrics::gauge!(ds_runtime::metrics::metric_name(
         "api_trip_plan_live_snapshot_trains"
     ))
     .set(f64::from(
@@ -1085,7 +1085,7 @@ async fn plan_trip_request(
             Err(_) => "unavailable",
         };
         metrics::counter!(
-            common::metrics::metric_name("api_trip_plan_live_requests_total"),
+            ds_runtime::metrics::metric_name("api_trip_plan_live_requests_total"),
             "outcome" => label
         )
         .increment(1);
@@ -1104,7 +1104,7 @@ async fn plan_trip_request(
     });
     if live_summary.is_none() {
         metrics::counter!(
-            common::metrics::metric_name("api_trip_plan_live_requests_total"),
+            ds_runtime::metrics::metric_name("api_trip_plan_live_requests_total"),
             "outcome" => "not_requested"
         )
         .increment(1);
@@ -1387,7 +1387,7 @@ pub fn register_graph_metrics() {
     for reason in trip_planning::BuildReason::ALL {
         for trigger in BuildTrigger::ALL {
             metrics::counter!(
-                common::metrics::metric_name(GRAPH_BUILDS_METRIC),
+                ds_runtime::metrics::metric_name(GRAPH_BUILDS_METRIC),
                 "reason" => reason.label(),
                 "trigger" => trigger.label()
             )
@@ -1396,7 +1396,7 @@ pub fn register_graph_metrics() {
     }
     for phase in GRAPH_BUILD_PHASES {
         let _ = metrics::histogram!(
-            common::metrics::metric_name(GRAPH_BUILD_SECONDS_METRIC),
+            ds_runtime::metrics::metric_name(GRAPH_BUILD_SECONDS_METRIC),
             "phase" => phase
         );
     }
@@ -1404,7 +1404,7 @@ pub fn register_graph_metrics() {
 
 fn record_build_phase(phase: &'static str, elapsed: std::time::Duration) {
     metrics::histogram!(
-        common::metrics::metric_name(GRAPH_BUILD_SECONDS_METRIC),
+        ds_runtime::metrics::metric_name(GRAPH_BUILD_SECONDS_METRIC),
         "phase" => phase
     )
     .record(elapsed.as_secs_f64());
@@ -1437,7 +1437,7 @@ async fn load_graph_in(
         return Ok(None);
     };
     metrics::counter!(
-        common::metrics::metric_name("api_trip_plan_graph_cache_total"),
+        ds_runtime::metrics::metric_name("api_trip_plan_graph_cache_total"),
         "result" => match outcome {
             trip_planning::CacheOutcome::Hit => "hit",
             trip_planning::CacheOutcome::Built(_) => "miss",
@@ -1446,7 +1446,7 @@ async fn load_graph_in(
     .increment(1);
     if let trip_planning::CacheOutcome::Built(reason) = outcome {
         metrics::counter!(
-            common::metrics::metric_name(GRAPH_BUILDS_METRIC),
+            ds_runtime::metrics::metric_name(GRAPH_BUILDS_METRIC),
             "reason" => reason.label(),
             "trigger" => trigger.label()
         )
@@ -2369,15 +2369,15 @@ async fn plan_live(
     {
         trip_planning_itinerary::set_waypoint_ready_mins(&mut segments, request.interchange(graph));
     }
-    metrics::counter!(common::metrics::metric_name(
+    metrics::counter!(ds_runtime::metrics::metric_name(
         "api_trip_plan_live_replans_total"
     ))
     .increment(u64::from(replans));
-    metrics::counter!(common::metrics::metric_name(
+    metrics::counter!(ds_runtime::metrics::metric_name(
         "api_trip_plan_live_trains_read_total"
     ))
     .increment(read.len() as u64);
-    metrics::counter!(common::metrics::metric_name(
+    metrics::counter!(ds_runtime::metrics::metric_name(
         "api_trip_plan_live_adjusted_connections_total"
     ))
     .increment(withdrawn as u64);

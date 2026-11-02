@@ -133,7 +133,7 @@ impl FeatureEvent {
     pub fn record(self) {
         let (feature, outcome) = self.labels();
         metrics::counter!(
-            common::metrics::metric_name(FEATURE_EVENTS_METRIC),
+            ds_runtime::metrics::metric_name(FEATURE_EVENTS_METRIC),
             "feature" => feature,
             "outcome" => outcome
         )
@@ -188,7 +188,7 @@ impl DropReason {
 
     pub fn record(self) {
         metrics::counter!(
-            common::metrics::metric_name(USAGE_EVENTS_DROPPED_METRIC),
+            ds_runtime::metrics::metric_name(USAGE_EVENTS_DROPPED_METRIC),
             "reason" => self.label()
         )
         .increment(1);
@@ -519,14 +519,14 @@ fn is_digest(value: &str) -> bool {
 /// Mirrors one counted event into Prometheus.
 pub fn record_usage(event: &ValidEvent, signed_in: bool) {
     metrics::counter!(
-        common::metrics::metric_name(USAGE_EVENTS_METRIC),
+        ds_runtime::metrics::metric_name(USAGE_EVENTS_METRIC),
         "event" => event.event,
         "signed_in" => if signed_in { "true" } else { "false" }
     )
     .increment(1);
     if event.event == "page_view" {
         metrics::counter!(
-            common::metrics::metric_name(USAGE_PAGE_VIEWS_METRIC),
+            ds_runtime::metrics::metric_name(USAGE_PAGE_VIEWS_METRIC),
             "route" => event.route
         )
         .increment(1);
@@ -539,7 +539,7 @@ pub fn register() {
     for event in FeatureEvent::ALL {
         let (feature, outcome) = event.labels();
         metrics::counter!(
-            common::metrics::metric_name(FEATURE_EVENTS_METRIC),
+            ds_runtime::metrics::metric_name(FEATURE_EVENTS_METRIC),
             "feature" => feature,
             "outcome" => outcome
         )
@@ -548,7 +548,7 @@ pub fn register() {
     for spec in EVENTS {
         for signed_in in ["true", "false"] {
             metrics::counter!(
-                common::metrics::metric_name(USAGE_EVENTS_METRIC),
+                ds_runtime::metrics::metric_name(USAGE_EVENTS_METRIC),
                 "event" => spec.name,
                 "signed_in" => signed_in
             )
@@ -557,14 +557,14 @@ pub fn register() {
     }
     for route in ROUTE_TEMPLATES {
         metrics::counter!(
-            common::metrics::metric_name(USAGE_PAGE_VIEWS_METRIC),
+            ds_runtime::metrics::metric_name(USAGE_PAGE_VIEWS_METRIC),
             "route" => *route
         )
         .increment(0);
     }
     for reason in DropReason::ALL {
         metrics::counter!(
-            common::metrics::metric_name(USAGE_EVENTS_DROPPED_METRIC),
+            ds_runtime::metrics::metric_name(USAGE_EVENTS_DROPPED_METRIC),
             "reason" => reason.label()
         )
         .increment(0);

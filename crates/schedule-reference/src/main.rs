@@ -94,21 +94,21 @@ fn poll_interval(poll_interval_secs: u64) -> tokio::time::Interval {
 
 #[tokio::main]
 async fn main() -> std::process::ExitCode {
-    common::logging::exit_code(run().await)
+    ds_runtime::logging::exit_code(run().await)
 }
 
 async fn run() -> anyhow::Result<()> {
     dotenvy::dotenv().ok();
-    common::logging::init("schedule-reference");
+    ds_runtime::logging::init("schedule-reference");
     // Before the first publish: each publish's freed peak goes back to the
-    // kernel (`common::heap`, [`ReleaseAfterPublish`]).
-    common::heap::pin_mmap_threshold();
+    // kernel (`ds_runtime::heap`, [`ReleaseAfterPublish`]).
+    ds_runtime::heap::pin_mmap_threshold();
 
     let config = Config::parse();
     config.validate()?;
     let once = common::poller_loop::RunOnce::from_env()?;
     if config.metrics.metrics_enabled {
-        common::metrics::install(config.metrics_port)?;
+        ds_runtime::metrics::install(config.metrics_port)?;
     }
     let progress = health_http::spawn_liveness(&config.health);
     tracing::info!("schedule-reference starting");
@@ -207,7 +207,7 @@ async fn run_with(
         let result = poll_once(sink, config, &mut state).await.map(drop);
         sink.unlock_run().await;
         progress.beat();
-        metrics::histogram!(common::metrics::metric_name(
+        metrics::histogram!(ds_runtime::metrics::metric_name(
             "schedule_reference_cycle_duration_seconds"
         ))
         .record(cycle_start.elapsed().as_secs_f64());
@@ -271,7 +271,7 @@ async fn run_once_locked(sink: &impl PublishSink, config: &Config) -> anyhow::Re
         Err(err) => {
             return Err(match sink::classify(&err) {
                 common::ingest::FailureClass::Rejected => {
-                    err.context(common::logging::ExitStatus::REJECTED)
+                    err.context(ds_runtime::logging::ExitStatus::REJECTED)
                 }
                 common::ingest::FailureClass::Transient => err,
             });
@@ -298,7 +298,7 @@ async fn run_once_locked(sink: &impl PublishSink, config: &Config) -> anyhow::Re
                  ({failed:?}); later runs skip it until a newer delivery lands",
                 failed.len()
             )
-            .context(common::logging::ExitStatus::REJECTED))
+            .context(ds_runtime::logging::ExitStatus::REJECTED))
         }
     }
 }
@@ -651,7 +651,7 @@ mod telemetry {
 
     pub(crate) fn record(product: &str, outcome: &'static str) {
         metrics::counter!(
-            common::metrics::metric_name(PUBLISHES_METRIC),
+            ds_runtime::metrics::metric_name(PUBLISHES_METRIC),
             "product" => product_kind(product),
             "outcome" => outcome
         )
@@ -664,7 +664,7 @@ mod telemetry {
         for product in PRODUCT_KINDS {
             for outcome in OUTCOMES {
                 metrics::counter!(
-                    common::metrics::metric_name(PUBLISHES_METRIC),
+                    ds_runtime::metrics::metric_name(PUBLISHES_METRIC),
                     "product" => product,
                     "outcome" => outcome
                 )
@@ -686,7 +686,8 @@ mod telemetry {
         reason = "metric gauges take f64, and a process's RSS stays far below 2^52 bytes"
     )]
     pub(crate) fn set_post_publish_rss(bytes: u64) {
-        metrics::gauge!(common::metrics::metric_name(POST_PUBLISH_RSS_METRIC)).set(bytes as f64);
+        metrics::gauge!(ds_runtime::metrics::metric_name(POST_PUBLISH_RSS_METRIC))
+            .set(bytes as f64);
     }
 
     #[expect(
@@ -695,8 +696,10 @@ mod telemetry {
     )]
     pub(crate) fn set_last_published_delivery(dir_name: &str) {
         if let Some(at) = delivery_timestamp(dir_name) {
-            metrics::gauge!(common::metrics::metric_name(LAST_PUBLISHED_DELIVERY_METRIC))
-                .set(at as f64);
+            metrics::gauge!(ds_runtime::metrics::metric_name(
+                LAST_PUBLISHED_DELIVERY_METRIC
+            ))
+            .set(at as f64);
         } else {
             tracing::warn!(
                 delivery = dir_name,
@@ -1111,7 +1114,7 @@ async fn record_signal(
 /// sat at ~1.3GiB RSS until its next restart, against ~8MiB before the first
 /// publish: the `ScheduleIndex`, the per-date row chunks and the crosswalks
 /// were all freed when the cycle ended, but glibc kept the pages (see
-/// `common::heap`). The cycle runs on the main thread (`main`'s `block_on`),
+/// `ds_runtime::heap`). The cycle runs on the main thread (`main`'s `block_on`),
 /// so nearly all of it is the main arena, which glibc only shrinks from the
 /// top on its own. `malloc_trim(0)` here, with the mmap threshold pinned at
 /// startup, returns it. Measured with `publish_memory_harness` on a
@@ -1127,12 +1130,12 @@ struct ReleaseAfterPublish;
 
 impl Drop for ReleaseAfterPublish {
     fn drop(&mut self) {
-        common::heap::release_freed_memory();
-        let rss = common::heap::resident_set_bytes();
+        ds_runtime::heap::release_freed_memory();
+        let rss = ds_runtime::heap::resident_set_bytes();
         tracing::info!(
             rss_mib = rss.map(|bytes| bytes / (1024 * 1024)),
             peak_rss_mib =
-                common::heap::peak_resident_set_bytes().map(|bytes| bytes / (1024 * 1024)),
+                ds_runtime::heap::peak_resident_set_bytes().map(|bytes| bytes / (1024 * 1024)),
             "publish cycle finished; returned its freed heap to the kernel"
         );
         if let Some(rss) = rss {
@@ -1320,10 +1323,10 @@ async fn publish_fixed_links(
 /// it; without this gauge "never managed to seed" (api or the `IdP` down for
 /// hours) looked exactly like "idle between deliveries".
 async fn seed_and_report(sink: &impl PublishSink, config: &Config) -> Option<String> {
-    metrics::gauge!(common::metrics::metric_name(SEEDED_METRIC)).set(0.0);
+    metrics::gauge!(ds_runtime::metrics::metric_name(SEEDED_METRIC)).set(0.0);
     telemetry::register();
     let seeded = seed_last_processed_delivery(sink, config).await;
-    metrics::gauge!(common::metrics::metric_name(SEEDED_METRIC)).set(1.0);
+    metrics::gauge!(ds_runtime::metrics::metric_name(SEEDED_METRIC)).set(1.0);
     if let Some(delivery) = &seeded {
         telemetry::set_last_published_delivery(delivery);
     }
@@ -1427,14 +1430,14 @@ fn forward_publish_dates(today: chrono::NaiveDate, forward_days: i64) -> Vec<chr
 
 /// This process's own "log this TIPLOC at least once" dedup set for
 /// [`log_new_unresolved_booked_tiplocs`] -- see
-/// `common::log_once::LogOnceSet`'s own doc comment for why a plain,
+/// `ds_runtime::log_once::LogOnceSet`'s own doc comment for why a plain,
 /// in-memory, process-lifetime set (not a DB table) is the right posture
 /// here: `schedule-reference` restarts rarely and a real CIF full-timetable
 /// delivery lands roughly once a day, so this publish step runs at most a
 /// handful of times between restarts -- nowhere near often enough for even
 /// "one extra log line per already-known gap after a restart" to matter.
-static UNRESOLVED_TIPLOC_LOG: std::sync::LazyLock<common::log_once::LogOnceSet> =
-    std::sync::LazyLock::new(common::log_once::LogOnceSet::new);
+static UNRESOLVED_TIPLOC_LOG: std::sync::LazyLock<ds_runtime::log_once::LogOnceSet> =
+    std::sync::LazyLock::new(ds_runtime::log_once::LogOnceSet::new);
 
 /// The parse-time half of this codebase's "a CIF calling point that looks
 /// like it should be a real station never silently vanishes from
@@ -4471,15 +4474,15 @@ LTWVRMPTN 2211 22113     TF";
     /// keeping these tests about the whole-network products.
     pub(super) fn test_config() -> Config {
         Config {
-            database_url: common::secret::Secret::new("postgres://unused@127.0.0.1:1/none"),
+            database_url: ds_runtime::secret::Secret::new("postgres://unused@127.0.0.1:1/none"),
             storage_dir: std::path::PathBuf::from("/tmp/schedule-reference-test-does-not-exist"),
             poll_interval_secs: 1800,
             lines: common::config::LineCatalogue(vec![]),
             metrics_port: 0,
-            metrics: common::service_args::MetricsArgs {
+            metrics: ds_runtime::service_args::MetricsArgs {
                 metrics_enabled: false,
             },
-            health: common::service_args::HealthArgs {
+            health: ds_runtime::service_args::HealthArgs {
                 health_bind_url: "127.0.0.1:0".to_string(),
                 progress_stall_secs: 1800,
             },
@@ -4494,8 +4497,8 @@ LTWVRMPTN 2211 22113     TF";
 
     /// Millisecond-scale backoff so retry tests do not wait out the
     /// production schedule.
-    pub(super) const FAST_BACKOFF: common::backoff::Backoff =
-        common::backoff::Backoff::new(Duration::from_millis(1), Duration::from_millis(5));
+    pub(super) const FAST_BACKOFF: ds_runtime::backoff::Backoff =
+        ds_runtime::backoff::Backoff::new(Duration::from_millis(1), Duration::from_millis(5));
 
     #[test]
     fn telemetry_product_kinds_are_bounded() {
@@ -5546,7 +5549,7 @@ mod final_chunk_retry_tests {
     fn retry() -> config::PublishRetry {
         config::PublishRetry {
             attempts: ATTEMPTS,
-            backoff: common::backoff::Backoff::new(
+            backoff: ds_runtime::backoff::Backoff::new(
                 Duration::from_millis(1),
                 Duration::from_millis(1),
             ),
@@ -6158,7 +6161,7 @@ mod db_sink_tests {
     fn retry() -> config::PublishRetry {
         config::PublishRetry {
             attempts: 3,
-            backoff: common::backoff::Backoff::new(
+            backoff: ds_runtime::backoff::Backoff::new(
                 Duration::from_millis(1),
                 Duration::from_millis(1),
             ),
@@ -6531,7 +6534,7 @@ mod publish_memory_harness {
         eprintln!(
             "thread {:?}; before: rss {} MiB ({})",
             std::thread::current().name(),
-            mib(common::heap::resident_set_bytes()),
+            mib(ds_runtime::heap::resident_set_bytes()),
             rss_split()
         );
         let started = std::time::Instant::now();
@@ -6546,8 +6549,8 @@ mod publish_memory_harness {
         eprintln!(
             "after {:?}: peak {} MiB, rss {} MiB ({})",
             started.elapsed(),
-            mib(common::heap::peak_resident_set_bytes()),
-            mib(common::heap::resident_set_bytes()),
+            mib(ds_runtime::heap::peak_resident_set_bytes()),
+            mib(ds_runtime::heap::resident_set_bytes()),
             rss_split()
         );
     }
@@ -6657,7 +6660,7 @@ mod once_mode_tests {
     fn status(result: &anyhow::Result<()>) -> u8 {
         result
             .as_ref()
-            .map_or_else(common::logging::exit_status_of, |()| 0)
+            .map_or_else(ds_runtime::logging::exit_status_of, |()| 0)
     }
 
     #[tokio::test]

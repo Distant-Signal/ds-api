@@ -718,7 +718,7 @@ impl RateLimiter {
                     keys = state.tat.len(),
                     "rate limiter key table full; clearing it"
                 );
-                metrics::counter!(common::metrics::metric_name(
+                metrics::counter!(ds_runtime::metrics::metric_name(
                     "api_rate_limit_table_resets_total"
                 ))
                 .increment(1);
@@ -762,7 +762,7 @@ impl RateLimiter {
                     "wrong_group"
                 };
                 metrics::counter!(
-                    common::metrics::metric_name("api_rate_limit_service_auth_rejected_total"),
+                    ds_runtime::metrics::metric_name("api_rate_limit_service_auth_rejected_total"),
                     "class" => class.label(),
                     "reason" => reason
                 )
@@ -811,7 +811,7 @@ impl RateLimiter {
 
     fn note_peer_fallback(&self, class: LimitClass) {
         metrics::counter!(
-            common::metrics::metric_name("api_rate_limit_peer_fallback_total"),
+            ds_runtime::metrics::metric_name("api_rate_limit_peer_fallback_total"),
             "class" => class.label()
         )
         .increment(1);
@@ -868,7 +868,7 @@ pub async fn enforce(
         for key in [user, client] {
             if let Err(retry_after) = limiter.check_at(class, key, now) {
                 metrics::counter!(
-                    common::metrics::metric_name("api_rate_limited_total"),
+                    ds_runtime::metrics::metric_name("api_rate_limited_total"),
                     "class" => class.label(),
                     "caller" => key.caller().label()
                 )
@@ -905,7 +905,7 @@ pub async fn enforce(
         Err(retry_after) => {
             let caller = client.caller();
             metrics::counter!(
-                common::metrics::metric_name("api_rate_limited_total"),
+                ds_runtime::metrics::metric_name("api_rate_limited_total"),
                 "class" => class.label(),
                 "caller" => caller.label()
             )

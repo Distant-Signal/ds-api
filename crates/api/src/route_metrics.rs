@@ -101,7 +101,7 @@ pub fn register() {
     }
     for result in TRIP_PLAN_GRAPH_CACHE_RESULTS {
         metrics::counter!(
-            common::metrics::metric_name(TRIP_PLAN_GRAPH_CACHE_METRIC),
+            ds_runtime::metrics::metric_name(TRIP_PLAN_GRAPH_CACHE_METRIC),
             "result" => *result
         )
         .increment(0);
@@ -113,7 +113,7 @@ pub fn register() {
 const HTTP_REQUESTS_DURATION_SECONDS: &str = "distant_signal_http_requests_duration_seconds";
 
 /// The api's recorder, as `axum_prometheus`'s `with_default_metrics` builds
-/// it (its request-duration buckets) plus `common::metrics::SHARED_BUCKETS`
+/// it (its request-duration buckets) plus `ds_runtime::metrics::SHARED_BUCKETS`
 /// (the pool's acquire time), so those render as histograms here too.
 /// Every other histogram stays a summary, as before.
 fn recorder_builder() -> anyhow::Result<PrometheusBuilder> {
@@ -121,7 +121,7 @@ fn recorder_builder() -> anyhow::Result<PrometheusBuilder> {
         Matcher::Full(HTTP_REQUESTS_DURATION_SECONDS.to_owned()),
         axum_prometheus::utils::SECONDS_DURATION_BUCKETS,
     )?;
-    for (name, buckets) in common::metrics::SHARED_BUCKETS {
+    for (name, buckets) in ds_runtime::metrics::SHARED_BUCKETS {
         builder = builder.set_buckets_for_metric(Matcher::Full((*name).to_owned()), buckets)?;
     }
     Ok(builder)
@@ -175,7 +175,7 @@ mod tests {
         let handle = recorder.handle();
         metrics::with_local_recorder(&recorder, || {
             metrics::histogram!(HTTP_REQUESTS_DURATION_SECONDS).record(0.003);
-            metrics::histogram!(common::metrics::DB_POOL_ACQUIRE_SECONDS).record(0.0005);
+            metrics::histogram!(ds_runtime::metrics::DB_POOL_ACQUIRE_SECONDS).record(0.0005);
         });
         let rendered = handle.render();
         for series in [

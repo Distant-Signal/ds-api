@@ -147,7 +147,7 @@ pub fn build_connections_with_passes(
 /// codes are being minted from something unbounded.
 #[expect(clippy::cast_precision_loss, reason = "a gauge of thousands")]
 pub fn record_interned_codes() {
-    let name = common::metrics::metric_name("api_trip_plan_interned_codes");
+    let name = ds_runtime::metrics::metric_name("api_trip_plan_interned_codes");
     metrics::gauge!(name.clone(), "kind" => "stop").set(schedule_query::StopCode::count() as f64);
     metrics::gauge!(name, "kind" => "trip").set(schedule_query::TripCode::count() as f64);
 }

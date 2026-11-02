@@ -598,7 +598,7 @@ pub async fn run_sweep(
                     reason = "a grant count is far below 2^52"
                 )]
                 metrics::gauge!(
-                    common::metrics::metric_name("api_delegated_grants_active"),
+                    ds_runtime::metrics::metric_name("api_delegated_grants_active"),
                     "client" => client
                 )
                 .set(count as f64);

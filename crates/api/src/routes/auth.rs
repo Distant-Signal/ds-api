@@ -22,7 +22,7 @@ pub(crate) const USERS_CREATED_METRIC: &str = "api_users_created_total";
 /// Registers [`USERS_CREATED_METRIC`] at 0 at startup, so an alert's
 /// `increase()` sees the first sign-up after a restart.
 pub fn register_user_metrics() {
-    metrics::counter!(common::metrics::metric_name(USERS_CREATED_METRIC)).increment(0);
+    metrics::counter!(ds_runtime::metrics::metric_name(USERS_CREATED_METRIC)).increment(0);
 }
 
 pub fn router() -> Router {
@@ -325,7 +325,7 @@ async fn callback(
     if user.created {
         // Sign-up is open (Authentik's Discord source self-enrols anyone),
         // so this is the signal a signup-spike alert watches.
-        metrics::counter!(common::metrics::metric_name(USERS_CREATED_METRIC)).increment(1);
+        metrics::counter!(ds_runtime::metrics::metric_name(USERS_CREATED_METRIC)).increment(1);
     }
 
     let session_token = auth::generate_session_token();

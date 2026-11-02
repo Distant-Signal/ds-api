@@ -662,27 +662,28 @@ pub const CALLS_METRIC: &str = "api_trip_plan_snapshot_calls";
 pub const OUTCOMES_METRIC: &str = "api_trip_plan_snapshot_total";
 
 fn record_seconds(phase: &'static str, elapsed: Duration) {
-    metrics::histogram!(common::metrics::metric_name(SECONDS_METRIC), "phase" => phase)
+    metrics::histogram!(ds_runtime::metrics::metric_name(SECONDS_METRIC), "phase" => phase)
         .record(elapsed.as_secs_f64());
 }
 
 #[expect(clippy::cast_precision_loss, reason = "gauges of millions")]
 fn record_size(snapshot: &TimetableSnapshot, bytes: usize) {
-    metrics::gauge!(common::metrics::metric_name(BYTES_METRIC)).set(bytes as f64);
-    metrics::gauge!(common::metrics::metric_name(CALLS_METRIC)).set(snapshot.calls.len() as f64);
+    metrics::gauge!(ds_runtime::metrics::metric_name(BYTES_METRIC)).set(bytes as f64);
+    metrics::gauge!(ds_runtime::metrics::metric_name(CALLS_METRIC))
+        .set(snapshot.calls.len() as f64);
 }
 
 /// Counts one [`ensure`] outcome (`failed` for an error).
 pub fn count_outcome(outcome: Result<Outcome, ()>) {
     let label = outcome.map_or("failed", Outcome::label);
-    metrics::counter!(common::metrics::metric_name(OUTCOMES_METRIC), "outcome" => label)
+    metrics::counter!(ds_runtime::metrics::metric_name(OUTCOMES_METRIC), "outcome" => label)
         .increment(1);
 }
 
 /// Registers the outcome series at 0.
 pub fn register_metrics() {
     for outcome in ["current", "loaded", "built", "busy", "failed"] {
-        metrics::counter!(common::metrics::metric_name(OUTCOMES_METRIC), "outcome" => outcome)
+        metrics::counter!(ds_runtime::metrics::metric_name(OUTCOMES_METRIC), "outcome" => outcome)
             .increment(0);
     }
 }

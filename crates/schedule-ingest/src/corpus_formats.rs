@@ -212,7 +212,7 @@ pub(crate) fn compare(json: &[CorpusLocation], xml: &[CorpusLocation]) -> Format
 )]
 pub(crate) fn report(comparison: &FormatComparison, json_file: &str, xml_file: &str) {
     for (measure, value) in comparison.measures() {
-        metrics::gauge!(common::metrics::metric_name(DIFF_METRIC), "measure" => measure)
+        metrics::gauge!(ds_runtime::metrics::metric_name(DIFF_METRIC), "measure" => measure)
             .set(value as f64);
     }
     let c = comparison;

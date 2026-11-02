@@ -15,6 +15,7 @@ chrono = { version = "0.4.44", features = ["serde"] }
 chrono-tz = "0.10"
 clap = { version = "4.6.1", features = ["derive", "env"] }
 common = { path = "../common", features = ["postgres"] }
+ds-runtime = { path = "../ds-runtime", features = ["postgres"] }
 dotenvy = "0.15.7"
 # The shared data access (ingest architecture phase 1A): `data::*` keeps
 # `pub use ds_store::...` shims as functions move there.

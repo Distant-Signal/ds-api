@@ -24,11 +24,11 @@ pub use ds_store::trains::types::{
 use ds_store::trains::types::{RawCallingPoint, RawTimetable, tiploc_key};
 
 /// This process's own "log this TIPLOC at least once" dedup set for
-/// [`log_if_unresolved_booked_stop`] -- see `common::log_once::LogOnceSet`'s
+/// [`log_if_unresolved_booked_stop`] -- see `ds_runtime::log_once::LogOnceSet`'s
 /// own doc comment for why a plain, in-memory, process-lifetime set (not a
 /// DB table) is the right posture here.
-static UNRESOLVED_STATION_TIPLOC_LOG: std::sync::LazyLock<common::log_once::LogOnceSet> =
-    std::sync::LazyLock::new(common::log_once::LogOnceSet::new);
+static UNRESOLVED_STATION_TIPLOC_LOG: std::sync::LazyLock<ds_runtime::log_once::LogOnceSet> =
+    std::sync::LazyLock::new(ds_runtime::log_once::LogOnceSet::new);
 
 /// The query-time half of this codebase's "a calling point that looks like
 /// it should be a real station never silently vanishes from production

@@ -372,9 +372,9 @@ impl AuditShipper {
                 Err(_) => malformed += 1,
             }
         }
-        metrics::counter!(common::metrics::metric_name(LINES_METRIC)).increment(shipped);
+        metrics::counter!(ds_runtime::metrics::metric_name(LINES_METRIC)).increment(shipped);
         if malformed > 0 {
-            metrics::counter!(common::metrics::metric_name(ERRORS_METRIC), "kind" => "parse")
+            metrics::counter!(ds_runtime::metrics::metric_name(ERRORS_METRIC), "kind" => "parse")
                 .increment(malformed);
             tracing::warn!(file = %shown(&object.name), malformed, "audit-log file has lines that are not JSON log entries; skipped them");
         }
@@ -440,14 +440,15 @@ impl AuditShipper {
 }
 
 fn count_error(kind: &'static str) {
-    metrics::counter!(common::metrics::metric_name(ERRORS_METRIC), "kind" => kind).increment(1);
+    metrics::counter!(ds_runtime::metrics::metric_name(ERRORS_METRIC), "kind" => kind).increment(1);
 }
 
 /// Every shipper metric at 0.
 pub(crate) fn register_metrics() {
-    metrics::counter!(common::metrics::metric_name(LINES_METRIC)).increment(0);
+    metrics::counter!(ds_runtime::metrics::metric_name(LINES_METRIC)).increment(0);
     for kind in ERROR_KINDS {
-        metrics::counter!(common::metrics::metric_name(ERRORS_METRIC), "kind" => kind).increment(0);
+        metrics::counter!(ds_runtime::metrics::metric_name(ERRORS_METRIC), "kind" => kind)
+            .increment(0);
     }
 }
 
@@ -488,7 +489,7 @@ mod tests {
     use std::sync::{Arc, Mutex};
     use std::time::SystemTime;
 
-    use common::secret::Secret;
+    use ds_runtime::secret::Secret;
     use wiremock::{Mock, MockServer, Request, Respond, ResponseTemplate};
 
     use super::*;
