@@ -8339,11 +8339,11 @@ mod schedule_destination_departures_query_tests {
         // trailing STP indicator `P`), exactly like `WCML_MULTI_STATION_SCHEDULES`'s
         // own `BSNC17798...P` line it was quoted from. This one byte-count
         // detail was lost when this block was first written (2026-09-24,
-        // commit 0221de164e21a4455073546474cad19651082e42): it shipped as a
+        // commit 92dc5c2c859263df2b990d75d2404bcba7d192d5): it shipped as a
         // 40-byte line (only 11 padding spaces), which still parsed under
         // the THEN-current `parse_basic_schedule`, which read the STP
         // indicator from "the line's last significant character" rather
-        // than its fixed column. The next day's commit 7d1790d2 (2026-09-25,
+        // than its fixed column. The next day's commit 7f5fd2e2 (2026-09-25,
         // "close 5 Low-severity sched-area findings") correctly fixed that
         // -- a truncated real BS line could otherwise decode a
         // bogus-but-plausible STP value -- by requiring the STP indicator

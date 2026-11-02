@@ -215,7 +215,7 @@ struct TrainSearchParams {
     /// runs against; defaults to today (London-local, computed from the
     /// same single `Utc::now()` read this handler already uses for
     /// everything else -- see this file's own module doc comment on
-    /// timezone handling and git history `baa4e75`/`8250a9a`). Must be
+    /// timezone handling and git history `a628841`/`6f48e62`). Must be
     /// within `SEARCH_WINDOW_BACKWARD_DAYS` days ago and
     /// `SEARCH_WINDOW_FORWARD_DAYS` days from today, inclusive, or within
     /// the published timetable's `service_date` range (see
@@ -1129,7 +1129,7 @@ async fn get_trains_search(
     // `today` and `now` are deliberately read from ONE
     // `Utc::now().with_timezone(...)` call rather than two independent
     // `Utc::now()` calls -- see this same reasoning's original writeup in
-    // this route's git history (baa4e75) for why two independent reads can
+    // this route's git history (a628841) for why two independent reads can
     // disagree about which calendar day it is around the UTC/London
     // midnight boundary during British Summer Time. `date` (if supplied)
     // is validated against THIS SAME `today`, never a second, independently

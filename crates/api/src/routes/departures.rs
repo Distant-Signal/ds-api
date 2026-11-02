@@ -198,7 +198,7 @@ async fn get_station_schedule_departures(
     Query(params): Query<ScheduleDeparturesParams>,
 ) -> Result<Json<Vec<Value>>, (StatusCode, String)> {
     // `today` is London-local, not UTC -- see `routes::trains`'s
-    // `london_now`/`today` split (baa4e75) for the original incident this
+    // `london_now`/`today` split (a628841) for the original incident this
     // mirrors: during the 00:00-01:00 BST window, `Utc::now().date_naive()`
     // is still yesterday in London, so a UTC "today" served yesterday's
     // CIF-derived schedule (or 404'd) for the first hour of every service
@@ -834,7 +834,7 @@ mod db_tests {
     async fn schedule_departures_uses_london_local_today_not_bare_utc() {
         // Regression for the 19-pass review's Medium finding: this route
         // used to key its lookup off `chrono::Utc::now().date_naive()`,
-        // exactly the bug `routes::trains`'s `london_now` split (baa4e75)
+        // exactly the bug `routes::trains`'s `london_now` split (a628841)
         // already fixed for `/trains/search` -- during the roughly-hour-
         // long window where UTC's calendar day still lags London's (every
         // night of British Summer Time, 23:00-00:00 UTC = 00:00-01:00
