@@ -297,7 +297,7 @@ pub fn scheme_for(operator: Option<&str>, atoc_code: Option<&str>) -> Option<Ope
 
 /// Whether a ticket is a single or a return, as far as its free-text
 /// `ticket_type` clearly says.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, ts_rs::TS)]
 #[serde(rename_all = "camelCase")]
 pub enum TicketKind {
     Single,
@@ -339,10 +339,11 @@ pub fn ticket_kind(ticket_type: Option<&str>) -> TicketKind {
 /// that delay is a projection, and the estimate says so: `provisional` is
 /// `true` and `disclaimer` is [`PROVISIONAL_DISCLAIMER`]. It becomes final
 /// (`provisional: false`, [`DISCLAIMER`]) once the train has arrived.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, ts_rs::TS)]
 #[serde(rename_all = "camelCase")]
 pub struct DelayRepayEstimate {
     /// `DR15`, `DR30` or `HX` (Heathrow Express's own scheme).
+    #[ts(as = "crate::ts_values::DelayRepayScheme")]
     pub scheme: &'static str,
     /// The band the delay fell into: 15, 30, 60 or 120 (`HX`: 30 or 60,
     /// meaning "more than").
@@ -354,6 +355,7 @@ pub struct DelayRepayEstimate {
     /// return) below 120 minutes and for a single at 120+; `return` (the
     /// whole return fare) at 120+ for a return or an unknown ticket (see
     /// `ticket_kind`); `ticket` (the ticket price) for Heathrow Express.
+    #[ts(as = "crate::ts_values::FareBasis")]
     pub fare_basis: &'static str,
     /// What the ticket's type says it is; the 120-minute band's wording
     /// depends on it.
@@ -439,7 +441,7 @@ pub fn estimate_delay_repay(
 
 /// Whether the train got the passenger to the ticket's destination, from
 /// TRUST and Darwin (`data::delay_repay_outcome`).
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, ts_rs::TS)]
 #[serde(rename_all = "camelCase")]
 pub enum Outcome {
     /// TRUST reported its arrival there: the delay is final.
@@ -536,7 +538,7 @@ pub struct AssessInputs<'a> {
 /// The Delay Repay fields both `GET .../delay-repay` and
 /// `GET /Train/tickets/mine` serve (flattened into each), so the two can
 /// never disagree.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, ts_rs::TS)]
 #[serde(rename_all = "camelCase")]
 pub struct DelayRepayFields {
     /// The delay against the PUBLIC arrival at `measured_at_crs` (design

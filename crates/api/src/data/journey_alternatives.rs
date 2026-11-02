@@ -40,12 +40,13 @@ pub const MAX_SUGGESTIONS: usize = 9;
 
 /// One leg of an alternative: a train to track, or a Tube ride, bus or
 /// walk saved as an untracked leg (as `POST /Journeys/itinerary` takes it).
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, ts_rs::TS)]
 #[serde(
     tag = "kind",
     rename_all = "camelCase",
     rename_all_fields = "camelCase"
 )]
+#[ts(rename = "ReplanSuggestionLeg")]
 pub enum SuggestionLeg {
     Train {
         train_uid: String,
@@ -68,9 +69,11 @@ pub enum SuggestionLeg {
         /// running late (additive, DS-141): it could leave earlier. Absent
         /// otherwise, and from a set saved before.
         #[serde(default, skip_serializing_if = "Option::is_none")]
+        #[ts(optional)]
         relies_on_late_departure: Option<trip_plan_live::LateDepartureReliance<DateTime<Utc>>>,
     },
     Untracked {
+        #[ts(as = "crate::ts_values::TransitMode")]
         transit_mode: String,
         origin_name: Option<String>,
         destination_name: Option<String>,
@@ -83,8 +86,9 @@ pub enum SuggestionLeg {
 }
 
 /// One ranked alternative.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, ts_rs::TS)]
 #[serde(rename_all = "camelCase")]
+#[ts(rename = "ReplanSuggestion")]
 pub struct Suggestion {
     /// Stable within its set (`s1`, `s2`, ...): what an accept names.
     pub id: String,
@@ -110,10 +114,12 @@ pub struct Suggestion {
     /// The best route on only the journey's preferred operators
     /// (additive, 2026-10-31): their codes. Absent otherwise.
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
     pub operator_only: Option<Vec<String>>,
     /// The journey's operator filter left no suggestion, so this one uses
     /// other operators (additive, 2026-10-31). Absent when `false`.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    #[ts(optional = nullable)]
     pub outside_operator_filter: bool,
 }
 
@@ -190,7 +196,7 @@ impl Suggestion {
 
 /// The train whose leg no longer works, as the sheet and the push name it
 /// ("the 10:16 to Charing Cross").
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, ts_rs::TS)]
 #[serde(rename_all = "camelCase")]
 pub struct TriggerTrain {
     pub leg_id: i64,
@@ -204,7 +210,7 @@ pub struct TriggerTrain {
 }
 
 /// The alternatives for one break point, as served and stored.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, ts_rs::TS)]
 #[serde(rename_all = "camelCase")]
 pub struct SuggestionSet {
     pub generated_at: DateTime<Utc>,

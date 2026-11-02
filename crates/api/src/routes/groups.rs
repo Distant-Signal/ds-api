@@ -219,9 +219,9 @@ struct CreateGroupRequest {
     name: String,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, ts_rs::TS)]
 #[serde(rename_all = "camelCase")]
-struct GroupIdentityResponse {
+pub(crate) struct GroupIdentityResponse {
     id: String,
     name: String,
 }
@@ -257,9 +257,9 @@ async fn list_groups(
     Ok(Json(list))
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, ts_rs::TS)]
 #[serde(rename_all = "camelCase")]
-struct GroupDetailResponse {
+pub(crate) struct GroupDetailResponse {
     id: String,
     name: String,
     owner_id: String,
@@ -419,9 +419,9 @@ async fn remove_member(
 /// direction -- `promote` and `demote` are exact inverses and their
 /// responses were byte-identical in shape, so a second copy would only be
 /// a thing to keep in sync.
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, ts_rs::TS)]
 #[serde(rename_all = "camelCase")]
-struct RoleChangeResponse {
+pub(crate) struct RoleChangeResponse {
     user_id: String,
     role: GroupRole,
 }
@@ -591,9 +591,9 @@ async fn get_join_preview(
     result
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, ts_rs::TS)]
 #[serde(rename_all = "camelCase")]
-struct JoinResponse {
+pub(crate) struct JoinResponse {
     group_id: String,
 }
 

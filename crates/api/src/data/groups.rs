@@ -13,7 +13,7 @@ use crate::data::users;
 /// doc's §2.1 for why there are three tiers, not two: the creator is a
 /// PERMANENT `owner`, distinct from a promotable `admin`, so an `admin`
 /// can never remove/demote/act on the `owner` row itself.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, ts_rs::TS)]
 #[serde(rename_all = "lowercase")]
 pub enum GroupRole {
     Owner,
@@ -122,7 +122,7 @@ pub async fn create_group(pool: &PgPool, name: &str, user_id: &str) -> Result<St
     Ok(id)
 }
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, ts_rs::TS)]
 #[serde(rename_all = "camelCase")]
 pub struct GroupSummary {
     pub id: String,
@@ -315,7 +315,7 @@ struct GroupMemberRow {
 /// which the frontend renders as its own generic "A member" placeholder.
 /// Same rule, same helper (`users::MemberDisplay`), as
 /// `GroupTrain.added_by_name` one struct away.
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, ts_rs::TS)]
 #[serde(rename_all = "camelCase")]
 pub struct GroupMember {
     pub user_id: String,
@@ -665,7 +665,7 @@ pub(crate) async fn remove_member_in_tx(
     Ok(RemoveMemberOutcome::Removed { new_owner })
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, ts_rs::TS)]
 #[serde(rename_all = "camelCase")]
 pub struct InviteLink {
     /// `Some` only when this value came straight from
@@ -756,7 +756,7 @@ pub async fn get_active_invite_link(pool: &PgPool, group_id: &str) -> Result<Opt
     }))
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, ts_rs::TS)]
 #[serde(rename_all = "camelCase")]
 pub struct JoinPreview {
     pub group_id: String,
@@ -1165,7 +1165,7 @@ struct GroupTrainRow {
 /// hard constraint: no future edit to this struct or to `list_group_trains`'s
 /// query may join `tracked_train_tickets` or select
 /// `train_subscriptions.notifications_enabled`/`tracked_at`.
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, ts_rs::TS)]
 #[serde(rename_all = "camelCase")]
 pub struct GroupTrain {
     pub train_subscription_id: i64,
@@ -1175,8 +1175,10 @@ pub struct GroupTrain {
     pub pin_destination_name: Option<String>,
     pub pin_scheduled_departure: Option<DateTime<Utc>>,
     pub service_date: chrono::NaiveDate,
+    #[ts(as = "crate::ts_values::ResolutionStatus")]
     pub resolution_status: String,
     pub train_uid: Option<String>,
+    #[ts(as = "Option<crate::ts_values::JourneyStatus>")]
     pub status: Option<String>,
     /// The delay at the sharer's own stop (their pin destination), against
     /// the public timetable; see `TrackedTrainState::delay_minutes`.
@@ -1186,8 +1188,10 @@ pub struct GroupTrain {
     /// See `TrackedTrainState::delay_provisional`.
     pub delay_provisional: bool,
     #[serde(skip_serializing)]
+    #[ts(skip)]
     pub trains_id: Option<i64>,
     #[serde(skip_serializing)]
+    #[ts(skip)]
     pub working_delay_minutes: Option<i32>,
     pub custom_name: Option<String>,
     pub added_by: String,
@@ -1205,6 +1209,7 @@ pub struct GroupTrain {
     /// Whether the shared `trains` row carries timetable data, internal:
     /// an input to `tracking_phase`.
     #[serde(skip_serializing)]
+    #[ts(skip)]
     pub timetable_on_row: bool,
     /// See `TrackedTrainState::tracking_phase`. Derived from the
     /// subscription's resolution and live status and public timetable data
@@ -1319,7 +1324,7 @@ struct GroupJourneyRow {
 /// no `notificationsEnabled`/exact `addedAt` -- a shared journey's group
 /// row must never widen past what `group_trains` already decided was safe
 /// to show a fellow member for the underlying tracked-train resource.
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, ts_rs::TS)]
 #[serde(rename_all = "camelCase")]
 pub struct GroupJourney {
     pub journey_id: i64,
@@ -1340,8 +1345,10 @@ pub struct GroupJourney {
     pub last_destination_crs: Option<String>,
     pub last_destination_name: Option<String>,
     pub service_date: chrono::NaiveDate,
+    #[ts(as = "Option<crate::ts_values::ResolutionStatus>")]
     pub resolution_status: Option<String>,
     pub train_uid: Option<String>,
+    #[ts(as = "Option<crate::ts_values::JourneyStatus>")]
     pub status: Option<String>,
     /// The delay at the sharer's own stop (their pin destination), against
     /// the public timetable; see `TrackedTrainState::delay_minutes`.
@@ -1351,8 +1358,10 @@ pub struct GroupJourney {
     /// See `TrackedTrainState::delay_provisional`.
     pub delay_provisional: bool,
     #[serde(skip_serializing)]
+    #[ts(skip)]
     pub trains_id: Option<i64>,
     #[serde(skip_serializing)]
+    #[ts(skip)]
     pub working_delay_minutes: Option<i32>,
     pub added_by: String,
     pub added_by_name: Option<String>,
@@ -1362,10 +1371,11 @@ pub struct GroupJourney {
     /// `schedule_services`; absent (not `train`) when that leg has no
     /// matched train. Additive (2026-10-20).
     #[serde(flatten)]
-    pub service: Option<crate::data::schedule_services::ServiceModeFields>,
+    pub service: crate::data::schedule_services::OptionalServiceModeFields,
     /// Whether the leg's `trains` row carries timetable data, internal: an
     /// input to `tracking_phase`.
     #[serde(skip_serializing)]
+    #[ts(skip)]
     pub timetable_on_row: bool,
     /// The summarised leg's `trackingPhase` (see
     /// `TrackedTrainState::tracking_phase`); `None` for an open or
@@ -1377,9 +1387,11 @@ pub struct GroupJourney {
     /// summarises the journey's first train leg, else its first leg, so
     /// `untracked` means the journey has no train legs. Additive
     /// (2026-10-20).
+    #[ts(as = "crate::ts_values::JourneyLegKind")]
     pub kind: String,
     /// The untracked leg's mode (`tube`, `walk`, ...); `None` on a train
     /// leg.
+    #[ts(as = "Option<crate::ts_values::TransitMode>")]
     pub transit_mode: Option<String>,
     /// The untracked leg's planned times; `None` on a train leg.
     pub planned_departure: Option<DateTime<Utc>>,
@@ -1437,7 +1449,7 @@ impl From<GroupJourneyRow> for GroupJourney {
             added_by: row.added_by,
             added_by_name: added_by.label,
             added_by_tag: added_by.tag,
-            service: None,
+            service: crate::data::schedule_services::OptionalServiceModeFields(None),
             timetable_on_row: row.timetable_on_row,
             tracking_phase: None,
             first_report_expected_at: None,
@@ -1572,9 +1584,10 @@ macro_rules! impl_journey_states {
             fn set_service_mode(&mut self, mode: crate::data::schedule_services::ServiceMode) {
                 // `attach` sets a train on every row it has no key for; an
                 // open or untracked leg has no train to describe.
-                self.service = self
-                    .has_train()
-                    .then_some(crate::data::schedule_services::ServiceModeFields(mode));
+                self.service = crate::data::schedule_services::OptionalServiceModeFields(
+                    self.has_train()
+                        .then_some(crate::data::schedule_services::ServiceModeFields(mode)),
+                );
             }
         }
     };
@@ -1797,7 +1810,7 @@ struct SharedTrainRow {
 /// `GroupTrain` -- it reaches a member without them opening the group at
 /// all -- so no future edit may widen it past what the group detail page
 /// already shows the same member.
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, ts_rs::TS)]
 #[serde(rename_all = "camelCase")]
 pub struct SharedTrain {
     pub group_id: String,
@@ -1809,8 +1822,10 @@ pub struct SharedTrain {
     pub pin_destination_name: Option<String>,
     pub pin_scheduled_departure: Option<DateTime<Utc>>,
     pub service_date: chrono::NaiveDate,
+    #[ts(as = "crate::ts_values::ResolutionStatus")]
     pub resolution_status: String,
     pub train_uid: Option<String>,
+    #[ts(as = "Option<crate::ts_values::JourneyStatus>")]
     pub status: Option<String>,
     /// The delay at the sharer's own stop (their pin destination), against
     /// the public timetable; see `TrackedTrainState::delay_minutes`.
@@ -1820,8 +1835,10 @@ pub struct SharedTrain {
     /// See `TrackedTrainState::delay_provisional`.
     pub delay_provisional: bool,
     #[serde(skip_serializing)]
+    #[ts(skip)]
     pub trains_id: Option<i64>,
     #[serde(skip_serializing)]
+    #[ts(skip)]
     pub working_delay_minutes: Option<i32>,
     pub custom_name: Option<String>,
     pub added_by: String,
@@ -1836,6 +1853,7 @@ pub struct SharedTrain {
     /// Whether the shared `trains` row carries timetable data, internal:
     /// an input to `tracking_phase`.
     #[serde(skip_serializing)]
+    #[ts(skip)]
     pub timetable_on_row: bool,
     /// See `TrackedTrainState::tracking_phase`. Derived from the
     /// subscription's resolution and live status and public timetable data
@@ -2026,7 +2044,7 @@ struct SharedJourneyRow {
 /// exactly. Not consumed by any frontend page in this phase -- see this
 /// feature's plan, Judgment Call 4 -- but built now for parity with
 /// `group_trains`'s own route/function set, per spec §6.
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, ts_rs::TS)]
 #[serde(rename_all = "camelCase")]
 pub struct SharedJourney {
     pub group_id: String,
@@ -2049,8 +2067,10 @@ pub struct SharedJourney {
     pub last_destination_crs: Option<String>,
     pub last_destination_name: Option<String>,
     pub service_date: chrono::NaiveDate,
+    #[ts(as = "Option<crate::ts_values::ResolutionStatus>")]
     pub resolution_status: Option<String>,
     pub train_uid: Option<String>,
+    #[ts(as = "Option<crate::ts_values::JourneyStatus>")]
     pub status: Option<String>,
     /// The delay at the sharer's own stop (their pin destination), against
     /// the public timetable; see `TrackedTrainState::delay_minutes`.
@@ -2060,8 +2080,10 @@ pub struct SharedJourney {
     /// See `TrackedTrainState::delay_provisional`.
     pub delay_provisional: bool,
     #[serde(skip_serializing)]
+    #[ts(skip)]
     pub trains_id: Option<i64>,
     #[serde(skip_serializing)]
+    #[ts(skip)]
     pub working_delay_minutes: Option<i32>,
     pub added_by: String,
     pub added_by_name: Option<String>,
@@ -2070,10 +2092,11 @@ pub struct SharedJourney {
     /// `schedule_services`; absent (not `train`) when that leg has no
     /// matched train. Additive (2026-10-20).
     #[serde(flatten)]
-    pub service: Option<crate::data::schedule_services::ServiceModeFields>,
+    pub service: crate::data::schedule_services::OptionalServiceModeFields,
     /// Whether the leg's `trains` row carries timetable data, internal: an
     /// input to `tracking_phase`.
     #[serde(skip_serializing)]
+    #[ts(skip)]
     pub timetable_on_row: bool,
     /// The summarised leg's `trackingPhase` (see
     /// `TrackedTrainState::tracking_phase`); `None` for an open or
@@ -2085,9 +2108,11 @@ pub struct SharedJourney {
     /// summarises the journey's first train leg, else its first leg, so
     /// `untracked` means the journey has no train legs. Additive
     /// (2026-10-20).
+    #[ts(as = "crate::ts_values::JourneyLegKind")]
     pub kind: String,
     /// The untracked leg's mode (`tube`, `walk`, ...); `None` on a train
     /// leg.
+    #[ts(as = "Option<crate::ts_values::TransitMode>")]
     pub transit_mode: Option<String>,
     /// The untracked leg's planned times; `None` on a train leg.
     pub planned_departure: Option<DateTime<Utc>>,
@@ -2147,7 +2172,7 @@ impl From<SharedJourneyRow> for SharedJourney {
             added_by: row.added_by,
             added_by_name: added_by.label,
             added_by_tag: added_by.tag,
-            service: None,
+            service: crate::data::schedule_services::OptionalServiceModeFields(None),
             timetable_on_row: row.timetable_on_row,
             tracking_phase: None,
             first_report_expected_at: None,
@@ -2468,7 +2493,7 @@ struct GroupCustomLineRow {
 /// this feature already widened, rather than duplicating a second,
 /// parallel status-rendering path into the groups module that would then
 /// have to be kept in sync with the first.
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, ts_rs::TS)]
 #[serde(rename_all = "camelCase")]
 pub struct GroupCustomLine {
     pub line_id: String,
@@ -2546,7 +2571,7 @@ struct SharedCustomLineRow {
 /// [`GroupCustomLine`] plus the two fields that only make sense once rows
 /// from several groups land in one list (`group_id`/`group_name`, the
 /// "from <group>" tag the home page renders).
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, ts_rs::TS)]
 #[serde(rename_all = "camelCase")]
 pub struct SharedCustomLine {
     pub group_id: String,
@@ -2638,7 +2663,7 @@ pub async fn list_shared_custom_lines_for_user(
 
 /// A group a custom line is shared into, as the line's OWNER sees it on
 /// their own edit page ("Shared with: Family, Commute Buddies").
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, ts_rs::TS)]
 #[serde(rename_all = "camelCase")]
 pub struct LineGroupRef {
     pub id: String,
@@ -6380,7 +6405,7 @@ mod group_train_wire_shape_tests {
             added_by: "user-1".to_string(),
             added_by_name: Some("Alex".to_string()),
             added_by_tag: None,
-            service: None,
+            service: crate::data::schedule_services::OptionalServiceModeFields(None),
             timetable_on_row: false,
             tracking_phase: None,
             first_report_expected_at: None,
@@ -6442,8 +6467,10 @@ mod group_train_wire_shape_tests {
         );
         assert_eq!(untracked["untrackedStatus"], "planned");
         let bus = GroupJourney {
-            service: Some(crate::data::schedule_services::ServiceModeFields(
-                crate::data::schedule_services::ServiceMode::Bus,
+            service: crate::data::schedule_services::OptionalServiceModeFields(Some(
+                crate::data::schedule_services::ServiceModeFields(
+                    crate::data::schedule_services::ServiceMode::Bus,
+                ),
             )),
             ..group_journey()
         };
@@ -6524,7 +6551,7 @@ mod group_train_wire_shape_tests {
             untracked_status: None,
             resolution_status: Some("resolved".to_string()),
             train_uid: Some("P00001".to_string()),
-            service: Some(train.service),
+            service: crate::data::schedule_services::OptionalServiceModeFields(Some(train.service)),
             timetable_on_row: true,
             tracking_phase: phase,
             first_report_expected_at: expected,

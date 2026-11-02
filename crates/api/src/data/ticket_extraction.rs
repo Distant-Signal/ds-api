@@ -20,7 +20,7 @@ use serde::{Deserialize, Serialize};
 ///
 /// `Deserialize` exists only for `data::ticket_subprocess`, whose parent
 /// process reads this back from the parse child's JSON reply.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, ts_rs::TS)]
 #[serde(rename_all = "camelCase")]
 pub struct PartialTicket {
     pub operator: Option<String>,
@@ -56,8 +56,10 @@ pub struct PartialTicket {
     /// codebase ever treats this field as an exact scheduled-departure
     /// match target the way `TrackPinRequest::scheduled_departure` is.
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
     pub current_departure_date: Option<DateTime<Utc>>,
     #[serde(deserialize_with = "deserialize_known_source")]
+    #[ts(as = "crate::ts_values::TicketSource")]
     pub source: SourceTag,
 }
 

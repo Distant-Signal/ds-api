@@ -82,6 +82,13 @@ export type AccessLegEnd = "origin" | "destination" | "both";
  */
 export type AccessResponse = { origin: StopAccess | null, destination: StopAccess | null, };
 
+export type AttachTicketResponse = { ticketId: number, trackedTrainId: number, };
+
+/**
+ * `journey_templates.auto_commit_rule` (its CHECK constraint).
+ */
+export type AutoCommitRule = "earliest" | "nearest_to_now";
+
 /**
  * `journey_breaks.cause` (its CHECK constraint).
  */
@@ -91,6 +98,27 @@ export type BreakCause = "cancelled" | "part_cancelled" | "connection_missed" | 
  * `journey_breaks.fault` (its CHECK constraint).
  */
 export type BreakFault = "operator" | "user" | "unknown";
+
+/**
+ * `journey_breaks.opened_via` (its CHECK constraint).
+ */
+export type BreakOpenedVia = "push" | "in_app";
+
+/**
+ * A break with its suggestions, as the break routes answer.
+ */
+export type BreakResponse = { id: number, journeyId: number, cause: BreakCause, fault: BreakFault, severity: number, status: BreakStatus, triggerLegId: number | null, detectedAt: string, openedVia: BreakOpenedVia | null, 
+/**
+ * Why the fault is what it is, when the data overrode the traveller
+ * (§14 Q5): "Your earlier train was late, so this counts as a missed
+ * connection."
+ */
+faultNote: string | null, suggestions: SuggestionSet | null, stale: boolean, };
+
+/**
+ * `journey_breaks.status` (its CHECK constraint).
+ */
+export type BreakStatus = "open" | "accepted" | "dismissed" | "recovered" | "expired";
 
 export type Cancellation = { kind: CancellationKind, 
 /**
@@ -178,16 +206,217 @@ export type Confidence = "low" | "medium" | "high";
  */
 export type ConnectionState = "ok" | "atRisk" | "missed" | "unknown";
 
+export type CreateJourneyTemplateResponse = { templateId: number, };
+
 /**
  * Which baseline a delay was measured against. See the module doc.
  */
 export type DelayBasis = "public" | "publicSchedule" | "working";
 
 /**
+ * A rough eligibility estimate for a Delay Repay claim -- never a
+ * guarantee, never proof of travel, never a claim itself. `disclaimer` is
+ * intentionally NOT optional: every estimate carries its own caveat text
+ * baked in, so a caller serializing this type cannot accidentally display
+ * a bare percentage with no caveat attached.
+ *
+ * The delay it is computed from is the train's delay against the PUBLIC
+ * arrival at the ticket's destination (design doc §9 decision 3), which
+ * is what operators pay Delay Repay on. Before the train has arrived there
+ * that delay is a projection, and the estimate says so: `provisional` is
+ * `true` and `disclaimer` is [`PROVISIONAL_DISCLAIMER`]. It becomes final
+ * (`provisional: false`, [`DISCLAIMER`]) once the train has arrived.
+ */
+export type DelayRepayEstimate = { 
+/**
+ * `DR15`, `DR30` or `HX` (Heathrow Express's own scheme).
+ */
+scheme: DelayRepayScheme, 
+/**
+ * The band the delay fell into: 15, 30, 60 or 120 (`HX`: 30 or 60,
+ * meaning "more than").
+ */
+bandMinutes: number, 
+/**
+ * Rough percentage of `fare_basis`. `None` exactly when `borderline`:
+ * the band could go either way, so no figure is shown.
+ */
+percentage: number | null, 
+/**
+ * Which fare `percentage` is of: `single` (the single fare, or half a
+ * return) below 120 minutes and for a single at 120+; `return` (the
+ * whole return fare) at 120+ for a return or an unknown ticket (see
+ * `ticket_kind`); `ticket` (the ticket price) for Heathrow Express.
+ */
+fareBasis: FareBasis, 
+/**
+ * What the ticket's type says it is; the 120-minute band's wording
+ * depends on it.
+ */
+ticketKind: TicketKind, 
+/**
+ * Caledonian Sleeper only: the percentage of the room supplement
+ * (50 at 30-59 minutes, 100 at 60+). `None` otherwise, and when
+ * `borderline`.
+ */
+roomSupplementPercentage: number | null, 
+/**
+ * `true` while provisional and the projection is less than
+ * [`BORDERLINE_MINUTES`] above `threshold_minutes`.
+ */
+borderline: boolean, 
+/**
+ * The band threshold a `borderline` projection is just above; `None`
+ * when not borderline.
+ */
+thresholdMinutes: number | null, 
+/**
+ * `true` while the train has not reached the ticket's destination yet.
+ */
+provisional: boolean, disclaimer: string, };
+
+export type DelayRepayEstimateResponse = { 
+/**
+ * Why there is no delay at all, when that is known up front: a bus or
+ * ferry is never reported live, so its delay cannot be measured.
+ * `None` for a train.
+ */
+unmeasurableReason: string | null, 
+/**
+ * The delay against the PUBLIC arrival at `measured_at_crs` (design
+ * doc §9 decision 3): measured once the train has arrived (or, at a
+ * departure-only station, departed), projected before then
+ * (`provisional`). `None` when `outcome` is `notReached`.
+ */
+delayMinutes: number | null, 
+/**
+ * `true` while `delay_minutes` (and `estimate`) are a projection.
+ */
+provisional: boolean, 
+/**
+ * See `common::public_delay::DelayBasis`; `None` exactly when
+ * `delay_minutes` is.
+ */
+delayBasis: DelayBasis | null, 
+/**
+ * Where the delay was measured: the ticket's destination, else the
+ * pin destination, else the terminus. Set when `delay_minutes` is, and
+ * when `outcome` is `notReached` (the destination not reached).
+ */
+measuredAtCrs: string | null, 
+/**
+ * `measured_at_crs`'s station name, when known.
+ */
+measuredAtName: string | null, 
+/**
+ * See [`Outcome`]; `None` while not known yet.
+ */
+outcome: Outcome | null, 
+/**
+ * `true` for an operator running its own compensation scheme: no
+ * percentage, just the claim link.
+ */
+ownScheme: boolean, 
+/**
+ * The scheme's operator, when it is one in [`OPERATORS`] (else `None`:
+ * the ticket's own `operator` text is the best name).
+ */
+schemeOperator: string | null, estimate: DelayRepayEstimate | null, 
+/**
+ * Always populated, independent of `estimate`: no caller is ever left
+ * with nowhere real to go.
+ */
+claimUrl: string, 
+/**
+ * Always populated, independent of `estimate`.
+ */
+disclaimer: string, 
+/**
+ * [`RULES_CHECKED_ON`].
+ */
+rulesCheckedOn: string, serviceMode: ServiceMode, liveTracking: boolean, };
+
+/**
+ * The Delay Repay fields both `GET .../delay-repay` and
+ * `GET /Train/tickets/mine` serve (flattened into each), so the two can
+ * never disagree.
+ */
+export type DelayRepayFields = { 
+/**
+ * The delay against the PUBLIC arrival at `measured_at_crs` (design
+ * doc §9 decision 3): measured once the train has arrived (or, at a
+ * departure-only station, departed), projected before then
+ * (`provisional`). `None` when `outcome` is `notReached`.
+ */
+delayMinutes: number | null, 
+/**
+ * `true` while `delay_minutes` (and `estimate`) are a projection.
+ */
+provisional: boolean, 
+/**
+ * See `common::public_delay::DelayBasis`; `None` exactly when
+ * `delay_minutes` is.
+ */
+delayBasis: DelayBasis | null, 
+/**
+ * Where the delay was measured: the ticket's destination, else the
+ * pin destination, else the terminus. Set when `delay_minutes` is, and
+ * when `outcome` is `notReached` (the destination not reached).
+ */
+measuredAtCrs: string | null, 
+/**
+ * `measured_at_crs`'s station name, when known.
+ */
+measuredAtName: string | null, 
+/**
+ * See [`Outcome`]; `None` while not known yet.
+ */
+outcome: Outcome | null, 
+/**
+ * `true` for an operator running its own compensation scheme: no
+ * percentage, just the claim link.
+ */
+ownScheme: boolean, 
+/**
+ * The scheme's operator, when it is one in [`OPERATORS`] (else `None`:
+ * the ticket's own `operator` text is the best name).
+ */
+schemeOperator: string | null, estimate: DelayRepayEstimate | null, 
+/**
+ * Always populated, independent of `estimate`: no caller is ever left
+ * with nowhere real to go.
+ */
+claimUrl: string, 
+/**
+ * Always populated, independent of `estimate`.
+ */
+disclaimer: string, 
+/**
+ * [`RULES_CHECKED_ON`].
+ */
+rulesCheckedOn: string, };
+
+/**
+ * A Delay Repay estimate's `scheme`: `delay_repay_rules::Scheme::as_str`
+ * of every scheme with bands (an own scheme has no estimate).
+ */
+export type DelayRepayScheme = "DR15" | "DR30" | "HX";
+
+/**
  * Where an estimate came from: `train_current_state.eta_source` (its
  * CHECK constraint) and `ds_store::trains::predicted_start::BASIS`.
  */
 export type EtaSource = "trust-propagated" | "darwin-estimated" | "previous-working";
+
+/**
+ * A Delay Repay estimate's `fareBasis`: `delay_repay_rules::estimate_delay_repay`.
+ */
+export type FareBasis = "single" | "return" | "ticket";
+
+/**
+ * How well one alternative fits the ticket (§17.3, step 3).
+ */
+export type Fit = "covered" | "coveredIfCancelled" | "check" | "likelyNewTicket";
 
 /**
  * How a follow reached the journey.
@@ -212,6 +441,208 @@ ownerName: string | null, ownerTag: string | null,
  * The group the journey was followed through; `None` for a link.
  */
 groupId: string | null, groupName: string | null, followedAt: string, };
+
+/**
+ * A custom line granted into a group, as `GET /groups/{id}/lines/custom`
+ * returns it.
+ *
+ * Deliberately carries only the line's identity and its attribution --
+ * no stations, operators, headcode filters or status. Not because those
+ * are secret from a granted member (they explicitly are not, design
+ * §3.5: full detail or nothing), but because the group page reads them
+ * through the ordinary `/lines/{id}` and `GET /Line/{ids}/Status` routes
+ * this feature already widened, rather than duplicating a second,
+ * parallel status-rendering path into the groups module that would then
+ * have to be kept in sync with the first.
+ */
+export type GroupCustomLine = { lineId: string, lineName: string, grantedBy: string, grantedByName: string | null, 
+/**
+ * Same contract, same derivation, as `GroupTrain.added_by_tag`: set
+ * only when there is no showable name, so a group whose `IdP` can name
+ * nobody still tells its members' shares apart.
+ */
+grantedByTag: string | null, };
+
+export type GroupDetailResponse = { id: string, name: string, ownerId: string, ownerName: string | null, 
+/**
+ * Present only when `owner_name` is absent -- the distinguishing
+ * suffix for the generic placeholder; see
+ * `groups::GroupMember.display_tag`.
+ */
+ownerTag: string | null, memberCount: number, role: GroupRole, inviteLink: InviteLink | null, };
+
+export type GroupIdentityResponse = { id: string, name: string, };
+
+/**
+ * A shared journey's display shape for `GET /groups/{id}/journeys` --
+ * `GroupTrain`'s direct analogue, one level up. Carries the FIRST leg's
+ * identity/live-status fields (Judgment Call 2 in this feature's plan) so
+ * the group page can render something useful without duplicating a
+ * worst-status-across-legs rollup that belongs to the journey's own
+ * detail page instead. `legCount` lets the row at least signal "there's
+ * more" for a multi-leg journey once Phase 2 ships.
+ *
+ * Same hard privacy constraint `GroupTrain` documents: no ticket field,
+ * no `notificationsEnabled`/exact `addedAt` -- a shared journey's group
+ * row must never widen past what `group_trains` already decided was safe
+ * to show a fellow member for the underlying tracked-train resource.
+ */
+export type GroupJourney = { journeyId: number, customName: string | null, legCount: number, pinOriginCrs: string | null, pinDestinationCrs: string | null, pinOriginName: string | null, pinDestinationName: string | null, pinScheduledDeparture: string | null, 
+/**
+ * The journey's own ends, for naming it: the first leg's planned
+ * origin and the LAST leg's planned destination (`journey_legs`, not
+ * the first leg's train pin above, which is empty until that leg is
+ * matched and names only that leg). Names via `stations`, `None` when
+ * unresolved. Additive (2026-10-20).
+ */
+firstOriginCrs: string | null, firstOriginName: string | null, lastDestinationCrs: string | null, lastDestinationName: string | null, serviceDate: string, resolutionStatus: ResolutionStatus | null, trainUid: string | null, status: JourneyStatus | null, 
+/**
+ * The delay at the sharer's own stop (their pin destination), against
+ * the public timetable; see `TrackedTrainState::delay_minutes`.
+ */
+delayMinutes: number | null, 
+/**
+ * See `TrackedTrainState::delay_basis`.
+ */
+delayBasis: DelayBasis | null, 
+/**
+ * See `TrackedTrainState::delay_provisional`.
+ */
+delayProvisional: boolean, addedBy: string, addedByName: string | null, 
+/**
+ * Same contract as `GroupTrain.added_by_tag`.
+ */
+addedByTag: string | null, 
+/**
+ * The summarised leg's `trackingPhase` (see
+ * `TrackedTrainState::tracking_phase`); `None` for an open or
+ * untracked leg. Additive (2026-10-20).
+ */
+trackingPhase: TrackingPhase | null, 
+/**
+ * See `TrackedTrainState::first_report_expected_at`.
+ */
+firstReportExpectedAt: string | null, 
+/**
+ * The summarised leg's kind: `train` or `untracked`. The row
+ * summarises the journey's first train leg, else its first leg, so
+ * `untracked` means the journey has no train legs. Additive
+ * (2026-10-20).
+ */
+kind: JourneyLegKind, 
+/**
+ * The untracked leg's mode (`tube`, `walk`, ...); `None` on a train
+ * leg.
+ */
+transitMode: TransitMode | null, 
+/**
+ * The untracked leg's planned times; `None` on a train leg.
+ */
+plannedDeparture: string | null, plannedArrival: string | null, 
+/**
+ * The untracked leg's clock-only state; `None` on a train leg.
+ */
+untrackedStatus: UntrackedStatus | null, 
+/**
+ * Whether the CALLER follows this journey (DS-146,
+ * `journey_follows`); set by the route, `false` here.
+ */
+following: boolean, serviceMode?: ServiceMode, liveTracking?: boolean, };
+
+/**
+ * Deliberately no `email` field, and `display_name` is deliberately never
+ * an email either: `GET /groups/{id}/members` returns this to every
+ * current member, and a joined-via-link member has no other relationship
+ * with the rest of the group -- shipping their verified email to everyone
+ * (as a field of its own, OR quietly as the `displayName` fallback for a
+ * member whose `IdP` sent no name) leaks more than the feature needs. The
+ * fallback is their `username` instead. `None` means "neither on file",
+ * which the frontend renders as its own generic "A member" placeholder.
+ * Same rule, same helper (`users::MemberDisplay`), as
+ * `GroupTrain.added_by_name` one struct away.
+ */
+export type GroupMember = { userId: string, displayName: string | null, 
+/**
+ * Set when -- and only when -- `display_name` is `None`: six hex
+ * characters the frontend appends to its own placeholder, so a group
+ * whose `IdP` gives this app no showable name for anybody (Entra ID,
+ * where `preferred_username` is the email-shaped UPN) renders "A
+ * member (#a1b2c3)" per member instead of the same "A member" on
+ * every single row. Derived from `user_id`, which this struct already
+ * carries in the clear, and never from an email -- see
+ * `users::MemberDisplay`.
+ */
+displayTag: string | null, role: GroupRole, joinedAt: string, };
+
+/**
+ * The three-tier role stored in `group_members.role` -- see the design
+ * doc's §2.1 for why there are three tiers, not two: the creator is a
+ * PERMANENT `owner`, distinct from a promotable `admin`, so an `admin`
+ * can never remove/demote/act on the `owner` row itself.
+ */
+export type GroupRole = "owner" | "admin" | "member";
+
+export type GroupSummary = { id: string, name: string, role: GroupRole, memberCount: number, };
+
+/**
+ * A shared train's display shape for `GET /groups/{id}/trains`. Carries
+ * exactly the fields `frontend/lib/trackingName.ts`'s
+ * `trackedTrainDisplayName` needs to compute the tracker's default name
+ * the same way the tracker themselves would see it (spec §4: "never
+ * stored, always computed"), plus live status and attribution.
+ *
+ * Deliberately carries NO ticket field, and NO `notificationsEnabled`/
+ * exact `trackedAt` field -- spec §4's "Never shown" list. This is a
+ * hard constraint: no future edit to this struct or to `list_group_trains`'s
+ * query may join `tracked_train_tickets` or select
+ * `train_subscriptions.notifications_enabled`/`tracked_at`.
+ */
+export type GroupTrain = { trainSubscriptionId: number, pinOriginCrs: string | null, pinDestinationCrs: string | null, pinOriginName: string | null, pinDestinationName: string | null, pinScheduledDeparture: string | null, serviceDate: string, resolutionStatus: ResolutionStatus, trainUid: string | null, status: JourneyStatus | null, 
+/**
+ * The delay at the sharer's own stop (their pin destination), against
+ * the public timetable; see `TrackedTrainState::delay_minutes`.
+ */
+delayMinutes: number | null, 
+/**
+ * See `TrackedTrainState::delay_basis`.
+ */
+delayBasis: DelayBasis | null, 
+/**
+ * See `TrackedTrainState::delay_provisional`.
+ */
+delayProvisional: boolean, customName: string | null, addedBy: string, addedByName: string | null, 
+/**
+ * Set only when `added_by_name` is `None`, and appended by the
+ * frontend to its "a member" placeholder so two sharers whose `IdP`
+ * gives this app no showable name are still told apart. Same
+ * contract, same derivation, as `GroupMember.display_tag`.
+ */
+addedByTag: string | null, 
+/**
+ * See `TrackedTrainState::tracking_phase`. Derived from the
+ * subscription's resolution and live status and public timetable data
+ * only, so it widens nothing past the "Never shown" list. Additive
+ * (2026-10-20).
+ */
+trackingPhase: TrackingPhase | null, 
+/**
+ * See `TrackedTrainState::first_report_expected_at`.
+ */
+firstReportExpectedAt: string | null, serviceMode: ServiceMode, liveTracking: boolean, };
+
+export type InviteLink = { 
+/**
+ * `Some` only when this value came straight from
+ * [`rotate_invite_link`] -- tokens are stored hashed (2026-09-26 review,
+ * L14; `unlisted_links::hash_link_token`, the same SHA-256 scheme
+ * `sessions.id` uses), so [`get_active_invite_link`] can report that a
+ * link is active and when it expires, but can never recover its token.
+ */
+token: string | null, expiresAt: string, };
+
+export type JoinPreview = { groupId: string, groupName: string, memberCount: number, };
+
+export type JoinResponse = { groupId: string, };
 
 export type JourneyDetailResponse = { id: number, customName: string | null, createdAt: string, legs: Array<JourneyLegDetailResponse>, 
 /**
@@ -365,6 +796,27 @@ timetable?: LegTimetable, };
  * `journey_legs.kind` (its CHECK constraint).
  */
 export type JourneyLegKind = "train" | "untracked";
+
+/**
+ * A proposed window-mode journey leg -- the read side's flattened
+ * `depart_after`/`depart_before` shape, matching
+ * `routes::journeys::JourneyLegDetailResponse`'s own established
+ * read-side convention (see `common::TimeWindow`'s doc comment for why
+ * that convention exists) rather than introducing a nested-object shape
+ * only this one response would use. No `arrive_after`/`arrive_before`:
+ * a ticket's `current_departure_date` only ever tells us when the
+ * traveller meant to LEAVE, never when they'd arrive, so there is nothing
+ * non-guessed to propose for an arrival window (see this module's own
+ * "never guessed at" posture, shared with `ticket_extraction`).
+ */
+export type JourneyLegProposal = { originCrs: string | null, destinationCrs: string | null, 
+/**
+ * `None` whenever the ticket has no `current_departure_date` at all --
+ * there is no honest calendar day to propose without it. The caller's
+ * own `/track` form already defaults an empty `serviceDate` to today,
+ * same as every other visit to that page.
+ */
+serviceDate: string | null, departAfter: string | null, departBefore: string | null, };
 
 /**
  * One row of `GET /Journeys/mine` -- deliberately lighter than the full
@@ -731,6 +1183,28 @@ cancelled: boolean,
  */
 board: StopBoard | null, scheduledArrival: string | null, scheduledDeparture: string | null, publicArrival: string | null, publicDeparture: string | null, workingArrival: string | null, workingDeparture: string | null, workingPass: string | null, canBoard: boolean, canAlight: boolean, requestStop: boolean, passingPoint: boolean, };
 
+/**
+ * `GET /JourneyTemplates/{id}`'s response. `daysOfWeek`/`active`/
+ * `startsOn`/`endsOn`/`defaultMatchMode`/`autoCommitRule` are all real,
+ * round-tripped fields (so a future Phase C edit UI has somewhere to
+ * read/write) -- this plan's own frontend (Task 8) renders NONE of them
+ * as editable controls; see that task's own scope note.
+ */
+export type JourneyTemplateDetailResponse = { id: number, customName: string | null, createdAt: string, updatedAt: string, daysOfWeek: number | null, active: boolean, startsOn: string | null, endsOn: string | null, defaultMatchMode: TemplateMatchMode, autoCommitRule: AutoCommitRule | null, legs: Array<JourneyTemplateLegDetailResponse>, };
+
+export type JourneyTemplateLegDetailResponse = { id: number, originCrs: string | null, originName: string | null, destinationCrs: string | null, destinationName: string | null, departAfter: string | null, departBefore: string | null, arriveAfter: string | null, arriveBefore: string | null, };
+
+/**
+ * One row of `GET /JourneyTemplates/mine` -- deliberately lighter than the
+ * full detail response, mirroring `journeys::JourneyListItem`'s own
+ * "list is lighter than detail" split. Summarizes a multi-leg template as
+ * "first leg's origin -> last leg's destination," the same rollup
+ * `app/journeys/[id]/page.tsx`'s `defaultJourneyTitle` computes client-side
+ * for a journey with no `customName` -- computed server-side here instead
+ * since a list row has no per-leg detail to compute it from client-side.
+ */
+export type JourneyTemplateListItem = { id: number, customName: string | null, createdAt: string, legCount: number, firstOriginCrs: string | null, firstOriginName: string | null, lastDestinationCrs: string | null, lastDestinationName: string | null, active: boolean, daysOfWeek: number | null, };
+
 export type JsonValue = number | string | boolean | Array<JsonValue> | { [key in string]: JsonValue } | null;
 
 /**
@@ -899,6 +1373,12 @@ notices: Array<TransitLegNotice>,
 liveArrivals?: LiveArrivalsFilter, };
 
 /**
+ * A group a custom line is shared into, as the line's OWNER sees it on
+ * their own edit page ("Shared with: Family, Commute Buddies").
+ */
+export type LineGroupRef = { id: string, name: string, };
+
+/**
  * A ride's line, as a plan's transit leg shows it.
  */
 export type LineView = { 
@@ -957,6 +1437,8 @@ export type MatchMode = "unmatched" | "manual" | "auto";
  * How the leg's ride stands in today's timetable.
  */
 export type MatchState = "matched" | "retimed" | "notInTimetable" | "noService" | "noTimetable";
+
+export type MaterializeTemplateResponse = { journeyId: number, legIds: Array<number>, };
 
 /**
  * Why a segment has no itineraries -- served as the segment's
@@ -1028,6 +1510,66 @@ viaCrs: string | null, } | { "kind": "operatorOnly",
  * The preferred operators' codes.
  */
 operators: Array<string>, };
+
+/**
+ * Whether the train got the passenger to the ticket's destination, from
+ * TRUST and Darwin (`data::delay_repay_outcome`).
+ */
+export type Outcome = "arrived" | "departedOnly" | "notReached";
+
+/**
+ * What a `.pkpass`/PDF parse could recover -- the same fillable fields as
+ * `common::TicketEntryRequest`, minus a user-chosen `source` (this is
+ * fixed per parse path) plus a fixed `source` describing which one
+ * produced it. `None` means "not found in this file, leave for the user
+ * to fill in" -- never guessed at. This is exactly what a human sees on a
+ * review-before-save form pre-filled from an upload; nothing here is ever
+ * written to `tracked_train_tickets` directly -- see this module's own
+ * doc comment.
+ *
+ * `Deserialize` exists only for `data::ticket_subprocess`, whose parent
+ * process reads this back from the parse child's JSON reply.
+ */
+export type PartialTicket = { operator: string | null, ticketType: string | null, 
+/**
+ * Best-effort station identifier -- almost never a real CRS code in
+ * practice (neither `.pkpass` nor PDF extraction publishes one; both
+ * give station NAMES, e.g. "Kings Cross"). Deliberately NOT
+ * normalized here: `train_tracking::validate_ticket_entry`'s existing
+ * CRS-format check is what actually forces a human to correct this
+ * into a real code before it can be saved -- see this plan's Global
+ * Constraints.
+ */
+originCrs: string | null, destinationCrs: string | null, 
+/**
+ * The ticket's own claimed departure INSTANT, when the source format
+ * carries one -- currently only ever populated from a `.pkpass`'s
+ * `semantics.currentDepartureDate` (Apple's standardised key for
+ * exactly this, an ISO 8601 date-time string), and only `Some` when
+ * that key parses as a real `DateTime`. `None` for every PDF-sourced
+ * ticket (no PDF date/time extraction exists in this module -- neither
+ * tier's ticket-type/route regexes attempt one, and adding one would
+ * be a new, separate false-positive surface against unstructured
+ * text); also `None` for a `.pkpass` whose `semantics` dictionary is
+ * absent, or present but missing this one key, or a `primaryFields`
+ * heuristic match (that positional fallback is names only, per
+ * `primary_fields_origin_destination`'s own doc comment -- it has
+ * nothing dateable to read either).
+ *
+ * This is deliberately a best-effort HINT for a journey-leg search
+ * window (`data::journey_leg_proposal::propose_window_leg`), never a
+ * hard pin: a ticket's booked departure can genuinely differ from the
+ * train the traveller actually catches (an earlier/later service on
+ * the same ticket, a rebooked journey, ...), so nothing in this
+ * codebase ever treats this field as an exact scheduled-departure
+ * match target the way `TrackPinRequest::scheduled_departure` is.
+ */
+currentDepartureDate?: string, source: TicketSource, };
+
+/**
+ * One of the badged picks (§17.6), in display order.
+ */
+export type Pick = "recommended" | "fastest" | "fewestChanges" | "sameOperator" | "noTube" | "rejoin";
 
 export type PlannedItinerary = { legs: Array<PlannedLeg>, 
 /**
@@ -1425,10 +1967,151 @@ cancellation: Cancellation | null, serviceMode: ServiceMode, liveTracking: boole
  */
 export type ReasonSource = "darwin" | "ldbws" | "trust";
 
+export type RenameResponse = { 
+/**
+ * The normalized value actually stored -- `None` if the name was
+ * cleared, `Some(trimmed)` otherwise. Never echoes back an
+ * un-normalized value the caller sent.
+ */
+customName: string | null, };
+
+/**
+ * What a replacement answers (`POST .../replan/accept`, `.../replace`,
+ * `.../revert`), and what an `Idempotency-Key` replays.
+ */
+export type ReplaceResponse = { journeyId: number, 
+/**
+ * The revision now current (1 when revision 1 was refreshed).
+ */
+revisionNo: number, newLegIds: Array<number>, 
+/**
+ * The revision an Undo goes back to; `None` when the change refreshed
+ * the booked plan (nothing to undo to).
+ */
+undoRevisionNo: number | null, };
+
+/**
+ * One ranked alternative.
+ */
+export type ReplanSuggestion = { 
+/**
+ * Stable within its set (`s1`, `s2`, ...): what an accept names.
+ */
+id: string, departure: string, arrival: string, changeCount: number, 
+/**
+ * Minutes after the booked arrival at the same destination; `None`
+ * when the booked arrival is unknown or the destination differs.
+ */
+delayMinutes: number | null, 
+/**
+ * The last current leg this alternative replaces.
+ */
+throughLegId: number, 
+/**
+ * The later booked leg it gets you to in time for, kept (§5.5).
+ */
+rejoinsLegId: number | null, legs: Array<ReplanSuggestionLeg>, cost: number, fit: Fit | null, fitLabel: string | null, fitReason: string | null, picks: Array<Pick>, pickLabels: Array<string>, 
+/**
+ * One of the (at most three) cards; the rest are "More options".
+ */
+card: boolean, 
+/**
+ * The best route on only the journey's preferred operators
+ * (additive, 2026-10-31): their codes. Absent otherwise.
+ */
+operatorOnly?: Array<string>, 
+/**
+ * The journey's operator filter left no suggestion, so this one uses
+ * other operators (additive, 2026-10-31). Absent when `false`.
+ */
+outsideOperatorFilter?: boolean, };
+
+/**
+ * One leg of an alternative: a train to track, or a Tube ride, bus or
+ * walk saved as an untracked leg (as `POST /Journeys/itinerary` takes it).
+ */
+export type ReplanSuggestionLeg = { "kind": "train", trainUid: string, serviceDate: string, originCrs: string | null, originName: string | null, destinationCrs: string | null, destinationName: string | null, 
+/**
+ * Live (else timetabled) times at the leg's two calls.
+ */
+departure: string, arrival: string, 
+/**
+ * Timetabled (public) times, for "+N min".
+ */
+scheduledDeparture: string, scheduledArrival: string, operator: string | null, operatorName: string | null, platform: string | null, cancelled: boolean, 
+/**
+ * Set when the change onto this train works only because it is
+ * running late (additive, DS-141): it could leave earlier. Absent
+ * otherwise, and from a set saved before.
+ */
+reliesOnLateDeparture?: LateDepartureReliance<string>, } | { "kind": "untracked", transitMode: TransitMode, originName: string | null, destinationName: string | null, lineName: string | null, originStopId: string | null, destinationStopId: string | null, plannedDeparture: string, plannedArrival: string, };
+
 /**
  * `train_subscriptions.resolution_status` (its CHECK constraint).
  */
 export type ResolutionStatus = "pending" | "schedule_matched" | "resolved" | "unresolved";
+
+/**
+ * `journey_revisions.actor` (its CHECK constraint).
+ */
+export type RevisionActor = "owner" | "system";
+
+/**
+ * `journey_revisions.cause` (its CHECK constraint): a break's causes
+ * ([`BreakCause`]) and `user_choice`.
+ */
+export type RevisionCause = "cancelled" | "part_cancelled" | "connection_missed" | "user_missed" | "user_choice" | "skipped_stop";
+
+/**
+ * `journey_revisions.fault` (its CHECK constraint): a break's faults
+ * ([`BreakFault`]) and `none`.
+ */
+export type RevisionFault = "operator" | "user" | "none" | "unknown";
+
+/**
+ * One revision leg as served by `GET /Journeys/{id}/revisions`.
+ */
+export type RevisionLeg = { position: number, sourceLegId: number | null, kind: JourneyLegKind, trainUid: string | null, serviceDate: string, atocCode: string | null, originCrs: string | null, originName: string | null, destinationCrs: string | null, destinationName: string | null, bookedDeparture: string | null, bookedArrival: string | null, transitMode: TransitMode | null, originPlace: string | null, destinationPlace: string | null, lineName: string | null, plannedDeparture: string | null, plannedArrival: string | null, ticketIds: Array<number>, fate: RevisionLegFate, 
+/**
+ * An untracked leg's stops and network ride (DS-237, additive), so
+ * going back to this plan keeps them; `null` otherwise and on a
+ * revision written before them.
+ */
+originStopId: string | null, destinationStopId: string | null, transitNetwork: string | null, transitLineId: string | null, headsign: string | null, };
+
+/**
+ * `journey_revision_legs.fate` (its CHECK constraint).
+ */
+export type RevisionLegFate = "planned" | "travelled" | "missed" | "cancelled" | "part_cancelled" | "not_used";
+
+/**
+ * `journey_revisions.reason` (its CHECK constraint).
+ */
+export type RevisionReason = "booked" | "replace" | "auto_shift" | "revert";
+
+/**
+ * One plan as `GET /Journeys/{id}/revisions` serves it.
+ */
+export type RevisionResponse = { 
+/**
+ * Whether the plan can be gone back to ([`revert_allowed`]); never
+ * the current one.
+ */
+canRevert: boolean, revisionNo: number, createdAt: string, reason: RevisionReason, cause: RevisionCause | null, fault: RevisionFault | null, breakId: number | null, actor: RevisionActor, isCompensationBaseline: boolean, legs: Array<RevisionLeg>, };
+
+/**
+ * `GET /Journeys/{id}/revisions`'s body: every plan, newest first.
+ */
+export type RevisionsResponse = { revisions: Array<RevisionResponse>, };
+
+/**
+ * The body both role-changing routes return: the member whose role
+ * changed, and the role they now hold. One struct rather than one per
+ * direction -- `promote` and `demote` are exact inverses and their
+ * responses were byte-identical in shape, so a second copy would only be
+ * a thing to keep in sync.
+ */
+export type RoleChangeResponse = { userId: string, role: GroupRole, };
 
 /**
  * A time on the plan's clock: `time` (`HH:MM:SS`) and how many days after
@@ -1458,6 +2141,128 @@ export type ShareLinkResponse = {
  * its URL again -- the owner regenerates to get a fresh copyable one.
  */
 token: string | null, expiresAt: string | null, };
+
+/**
+ * One custom line granted into one group the CALLER is a member of --
+ * [`GroupCustomLine`] plus the two fields that only make sense once rows
+ * from several groups land in one list (`group_id`/`group_name`, the
+ * "from <group>" tag the home page renders).
+ */
+export type SharedCustomLine = { groupId: string, groupName: string, lineId: string, lineName: string, grantedBy: string, grantedByName: string | null, 
+/**
+ * Same contract as `GroupCustomLine.granted_by_tag`.
+ */
+grantedByTag: string | null, };
+
+/**
+ * One journey shared into one group the CALLER is a member of --
+ * [`GroupJourney`] plus the two fields that only make sense once rows
+ * from several groups land in one list, mirroring [`SharedTrain`]
+ * exactly. Not consumed by any frontend page in this phase -- see this
+ * feature's plan, Judgment Call 4 -- but built now for parity with
+ * `group_trains`'s own route/function set, per spec §6.
+ */
+export type SharedJourney = { groupId: string, groupName: string, journeyId: number, customName: string | null, legCount: number, pinOriginCrs: string | null, pinDestinationCrs: string | null, pinOriginName: string | null, pinDestinationName: string | null, pinScheduledDeparture: string | null, 
+/**
+ * The journey's own ends, for naming it: the first leg's planned
+ * origin and the LAST leg's planned destination (`journey_legs`, not
+ * the first leg's train pin above, which is empty until that leg is
+ * matched and names only that leg). Names via `stations`, `None` when
+ * unresolved. Additive (2026-10-20).
+ */
+firstOriginCrs: string | null, firstOriginName: string | null, lastDestinationCrs: string | null, lastDestinationName: string | null, serviceDate: string, resolutionStatus: ResolutionStatus | null, trainUid: string | null, status: JourneyStatus | null, 
+/**
+ * The delay at the sharer's own stop (their pin destination), against
+ * the public timetable; see `TrackedTrainState::delay_minutes`.
+ */
+delayMinutes: number | null, 
+/**
+ * See `TrackedTrainState::delay_basis`.
+ */
+delayBasis: DelayBasis | null, 
+/**
+ * See `TrackedTrainState::delay_provisional`.
+ */
+delayProvisional: boolean, addedBy: string, addedByName: string | null, addedByTag: string | null, 
+/**
+ * The summarised leg's `trackingPhase` (see
+ * `TrackedTrainState::tracking_phase`); `None` for an open or
+ * untracked leg. Additive (2026-10-20).
+ */
+trackingPhase: TrackingPhase | null, 
+/**
+ * See `TrackedTrainState::first_report_expected_at`.
+ */
+firstReportExpectedAt: string | null, 
+/**
+ * The summarised leg's kind: `train` or `untracked`. The row
+ * summarises the journey's first train leg, else its first leg, so
+ * `untracked` means the journey has no train legs. Additive
+ * (2026-10-20).
+ */
+kind: JourneyLegKind, 
+/**
+ * The untracked leg's mode (`tube`, `walk`, ...); `None` on a train
+ * leg.
+ */
+transitMode: TransitMode | null, 
+/**
+ * The untracked leg's planned times; `None` on a train leg.
+ */
+plannedDeparture: string | null, plannedArrival: string | null, 
+/**
+ * The untracked leg's clock-only state; `None` on a train leg.
+ */
+untrackedStatus: UntrackedStatus | null, 
+/**
+ * Whether the CALLER follows this journey (DS-146,
+ * `journey_follows`); set by the route, `false` here.
+ */
+following: boolean, serviceMode?: ServiceMode, liveTracking?: boolean, };
+
+/**
+ * One train shared into one group the CALLER is a member of -- `GroupTrain`
+ * (the per-group `GET /groups/{id}/trains` shape) plus the two fields that
+ * only make sense once rows from several groups land in one list:
+ * `group_id`/`group_name`, the "from <group>" attribution
+ * `/track/mine` tags each row with.
+ *
+ * Inherits `GroupTrain`'s hard privacy constraint verbatim (spec §4's
+ * "Never shown" list): no ticket field, no `notificationsEnabled`, no
+ * exact `trackedAt`. This shape is strictly MORE exposed than
+ * `GroupTrain` -- it reaches a member without them opening the group at
+ * all -- so no future edit may widen it past what the group detail page
+ * already shows the same member.
+ */
+export type SharedTrain = { groupId: string, groupName: string, trainSubscriptionId: number, pinOriginCrs: string | null, pinDestinationCrs: string | null, pinOriginName: string | null, pinDestinationName: string | null, pinScheduledDeparture: string | null, serviceDate: string, resolutionStatus: ResolutionStatus, trainUid: string | null, status: JourneyStatus | null, 
+/**
+ * The delay at the sharer's own stop (their pin destination), against
+ * the public timetable; see `TrackedTrainState::delay_minutes`.
+ */
+delayMinutes: number | null, 
+/**
+ * See `TrackedTrainState::delay_basis`.
+ */
+delayBasis: DelayBasis | null, 
+/**
+ * See `TrackedTrainState::delay_provisional`.
+ */
+delayProvisional: boolean, customName: string | null, addedBy: string, addedByName: string | null, 
+/**
+ * Same contract as `GroupTrain.added_by_tag`.
+ */
+addedByTag: string | null, 
+/**
+ * See `TrackedTrainState::tracking_phase`. Derived from the
+ * subscription's resolution and live status and public timetable data
+ * only, so it widens nothing past the "Never shown" list. Additive
+ * (2026-10-20).
+ */
+trackingPhase: TrackingPhase | null, 
+/**
+ * See `TrackedTrainState::first_report_expected_at`.
+ */
+firstReportExpectedAt: string | null, serviceMode: ServiceMode, liveTracking: boolean, };
 
 /**
  * One group a journey reached the caller through (`GET /Journeys/mine`'s
@@ -1583,6 +2388,50 @@ observedAt: string, };
 export type StopStatus = "Unknown" | "Scheduled" | "Called" | "Skipped";
 
 /**
+ * The alternatives for one break point, as served and stored.
+ */
+export type SuggestionSet = { generatedAt: string, 
+/**
+ * The break's fingerprint when planned (§5.4); empty with no break.
+ */
+fingerprint: string, 
+/**
+ * The first leg replaced.
+ */
+fromLegId: number, originCrs: string, originName: string | null, destinationCrs: string, destinationName: string | null, departAfter: string, 
+/**
+ * The booked arrival at the destination (the compensation baseline's).
+ */
+bookedArrival: string | null, 
+/**
+ * The sheet's one-line ticket hint (§17.5).
+ */
+hint: string | null, 
+/**
+ * The leg's train, when it is a train leg.
+ */
+trigger: TriggerTrain | null, 
+/**
+ * Cards first, then the rest by cost.
+ */
+suggestions: Array<ReplanSuggestion>, 
+/**
+ * Set by the route on read: stored suggestions that need a re-plan.
+ */
+stale: boolean, };
+
+/**
+ * The body of `409 suggestion_stale`: the coded error, with the break's
+ * fresh suggestions.
+ */
+export type SuggestionStaleResponse = { error: "suggestion_stale", message: string, break: BreakResponse, };
+
+/**
+ * `journey_templates.default_match_mode` (its CHECK constraint).
+ */
+export type TemplateMatchMode = "manual" | "auto";
+
+/**
  * One line serving a stop.
  */
 export type TflStopLine = { 
@@ -1611,6 +2460,105 @@ name: string,
  * `tube`, `dlr`, `tram`.
  */
 modes: Array<string>, lines: Array<TflStopLine>, };
+
+export type TicketCreatedResponse = { ticketId: number, };
+
+/**
+ * Whether a ticket is a single or a return, as far as its free-text
+ * `ticket_type` clearly says.
+ */
+export type TicketKind = "single" | "return" | "unknown";
+
+/**
+ * A user's own tickets, across every tracked train they have -- the
+ * cross-train counterpart to `TrackedTrainTicket` (which is scoped to one
+ * tracked train). Carries the ticket's own six fields (unchanged from
+ * `TrackedTrainTicket`) plus enough of the owning tracked train's context
+ * (route, date, live delay) to make a row useful without clicking
+ * through, plus a Delay Repay estimate computed inline -- see
+ * `build_ticket_list_item` for why that's a pure computation, not a
+ * second query per row. The last four fields are deliberately named and
+ * shaped to match `DelayRepayEstimateResponse` exactly, field-for-field,
+ * so the frontend can pass a `TicketListItem` straight into the
+ * already-reviewed `<DelayRepayEstimate>` component with no adapter.
+ *
+ * `tracked_train_id` and every train-context field
+ * (`serviceDate`/`pinOriginCrs`/.../`status`) are `Option` -- all `None`
+ * together for a standalone ticket with no tracked train attached yet
+ * (see `create_ticket`'s doc comment). `estimate`/`delayMinutes` are
+ * already `None` in that case too, by construction: `build_ticket_list_item`
+ * only ever computes a real estimate from a `(operator, delay_minutes)`
+ * pair, and a standalone row has no `delay_minutes` to pair with. This is
+ * the same "graceful `None`, never a crash" behavior
+ * `get_delay_repay_estimate`'s route already guarantees for an attached
+ * ticket whose train hasn't resolved/reported a delay yet -- a standalone
+ * ticket is just the same case with `None` for one more reason. `claimUrl`
+ * and `disclaimer` are still always populated, per that same route's
+ * invariant.
+ */
+export type TicketListItem = { id: number, trackedTrainId: number | null, operator: string | null, ticketType: string | null, originCrs: string | null, destinationCrs: string | null, 
+/**
+ * See `TicketListRow::origin_name`'s doc comment.
+ */
+originName: string | null, destinationName: string | null, source: TicketSource, createdAt: string, serviceDate: string | null, pinOriginCrs: string | null, pinDestinationCrs: string | null, pinScheduledDeparture: string | null, resolutionStatus: ResolutionStatus | null, trainUid: string | null, status: JourneyStatus | null, customName: string | null, 
+/**
+ * The delay against the PUBLIC arrival at `measured_at_crs` (design
+ * doc §9 decision 3): measured once the train has arrived (or, at a
+ * departure-only station, departed), projected before then
+ * (`provisional`). `None` when `outcome` is `notReached`.
+ */
+delayMinutes: number | null, 
+/**
+ * `true` while `delay_minutes` (and `estimate`) are a projection.
+ */
+provisional: boolean, 
+/**
+ * See `common::public_delay::DelayBasis`; `None` exactly when
+ * `delay_minutes` is.
+ */
+delayBasis: DelayBasis | null, 
+/**
+ * Where the delay was measured: the ticket's destination, else the
+ * pin destination, else the terminus. Set when `delay_minutes` is, and
+ * when `outcome` is `notReached` (the destination not reached).
+ */
+measuredAtCrs: string | null, 
+/**
+ * `measured_at_crs`'s station name, when known.
+ */
+measuredAtName: string | null, 
+/**
+ * See [`Outcome`]; `None` while not known yet.
+ */
+outcome: Outcome | null, 
+/**
+ * `true` for an operator running its own compensation scheme: no
+ * percentage, just the claim link.
+ */
+ownScheme: boolean, 
+/**
+ * The scheme's operator, when it is one in [`OPERATORS`] (else `None`:
+ * the ticket's own `operator` text is the best name).
+ */
+schemeOperator: string | null, estimate: DelayRepayEstimate | null, 
+/**
+ * Always populated, independent of `estimate`: no caller is ever left
+ * with nowhere real to go.
+ */
+claimUrl: string, 
+/**
+ * Always populated, independent of `estimate`.
+ */
+disclaimer: string, 
+/**
+ * [`RULES_CHECKED_ON`].
+ */
+rulesCheckedOn: string, };
+
+/**
+ * `tracked_train_tickets.source` (its CHECK constraint).
+ */
+export type TicketSource = "manual" | "pkpass-semantics" | "pkpass-heuristic" | "pdf-heuristic";
 
 /**
  * One timetabled call of the ride, from boarding to alighting.
@@ -1981,6 +2929,37 @@ trackingPhase: TrackingPhase | null,
 firstReportExpectedAt: string | null, serviceMode: ServiceMode, liveTracking: boolean, };
 
 /**
+ * The public read-model for a ticket, returned directly as JSON by
+ * `GET /Train/{trackingId}/tickets` (Task 3). Never leaks `user_id` --
+ * same posture as `TrackedTrainState`. `tracked_train_id` is `Option<i64>`
+ * -- `None` for a standalone ticket that hasn't been attached to a tracked
+ * train yet (see `create_ticket`'s doc comment); every row this struct's
+ * own `list_tickets_for_tracked_train` returns is guaranteed non-null by
+ * that query's own `WHERE tracked_train_id = $1` filter (a NULL column
+ * value can never equal a bound `i64`), but `get_ticket_owned` (used by
+ * the Delay Repay route and the attach route) has no such filter and can
+ * legitimately return `None` here.
+ */
+export type TrackedTrainTicket = { id: number, trackedTrainId: number | null, operator: string | null, ticketType: string | null, originCrs: string | null, destinationCrs: string | null, 
+/**
+ * See `TrackedTrainState::pin_origin_name`'s doc comment -- same
+ * `LEFT JOIN stations` mechanism, joined here on the TICKET's own
+ * `origin_crs`/`destination_crs`, not the pin route (which
+ * `TrackedTrainListItem` already covers).
+ */
+originName: string | null, destinationName: string | null, 
+/**
+ * See `ticket_extraction::PartialTicket::current_departure_date`'s own
+ * doc comment -- this is that same best-effort HINT, persisted
+ * verbatim by `create_ticket`. `GET /Train/tickets/{ticketId}/journey-leg-proposal`
+ * (`data::journey_leg_proposal::propose_window_leg`) is the one reader
+ * that does anything with it; every other existing reader of this
+ * struct (`TicketPanel.tsx`'s rendering, the Delay Repay route) simply
+ * ignores it, same as any other field it doesn't need.
+ */
+currentDepartureDate: string | null, source: TicketSource, createdAt: string, customName: string | null, };
+
+/**
  * The traveller-facing phase of a tracked train (spec §4.3), evaluated in
  * declaration order.
  */
@@ -2094,6 +3073,24 @@ export type TransitWalkStop = { id: string, name: string,
  * left out when none are known (another network's stop).
  */
 modes?: Array<string>, };
+
+/**
+ * The train whose leg no longer works, as the sheet and the push name it
+ * ("the 10:16 to Charing Cross").
+ */
+export type TriggerTrain = { legId: number, 
+/**
+ * Its timetabled departure from the leg's boarding station.
+ */
+departure: string | null, originName: string | null, 
+/**
+ * The leg's own alighting station.
+ */
+destinationName: string | null, 
+/**
+ * The train's own destination (what a train is named by).
+ */
+trainDestinationName: string | null, };
 
 /**
  * One whole journey across every segment.

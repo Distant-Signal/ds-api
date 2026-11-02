@@ -50,7 +50,7 @@ pub struct Replacement<'a> {
 
 /// What a replacement answers (`POST .../replan/accept`, `.../replace`,
 /// `.../revert`), and what an `Idempotency-Key` replays.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, ts_rs::TS)]
 #[serde(rename_all = "camelCase")]
 pub struct ReplaceResponse {
     pub journey_id: i64,

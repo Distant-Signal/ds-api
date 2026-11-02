@@ -1042,17 +1042,21 @@ fn leg_travelled() -> RouteError {
 }
 
 /// A break with its suggestions, as the break routes answer.
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, ts_rs::TS)]
 #[serde(rename_all = "camelCase")]
-struct BreakResponse {
+pub(crate) struct BreakResponse {
     id: i64,
     journey_id: i64,
+    #[ts(as = "crate::ts_values::BreakCause")]
     cause: String,
+    #[ts(as = "crate::ts_values::BreakFault")]
     fault: String,
     severity: i16,
+    #[ts(as = "crate::ts_values::BreakStatus")]
     status: String,
     trigger_leg_id: Option<i64>,
     detected_at: DateTime<Utc>,
+    #[ts(as = "Option<crate::ts_values::BreakOpenedVia>")]
     opened_via: Option<String>,
     /// Why the fault is what it is, when the data overrode the traveller
     /// (§14 Q5): "Your earlier train was late, so this counts as a missed
@@ -1384,13 +1388,30 @@ fn stale_response(row: BreakRow, now: DateTime<Utc>) -> Response {
     .increment(1);
     (
         StatusCode::CONFLICT,
-        Json(serde_json::json!({
-            "error": "suggestion_stale",
-            "message": "That train no longer works. Here are the latest options.",
-            "break": BreakResponse::from_row(row, now),
-        })),
+        Json(SuggestionStaleResponse::new(row, now)),
     )
         .into_response()
+}
+
+/// The body of `409 suggestion_stale`: the coded error, with the break's
+/// fresh suggestions.
+#[derive(Debug, Serialize, ts_rs::TS)]
+pub(crate) struct SuggestionStaleResponse {
+    #[ts(type = "\"suggestion_stale\"")]
+    error: &'static str,
+    message: &'static str,
+    #[serde(rename = "break")]
+    break_: BreakResponse,
+}
+
+impl SuggestionStaleResponse {
+    fn new(row: BreakRow, now: DateTime<Utc>) -> Self {
+        Self {
+            error: "suggestion_stale",
+            message: "That train no longer works. Here are the latest options.",
+            break_: BreakResponse::from_row(row, now),
+        }
+    }
 }
 
 /// `POST /Journeys/{id}/replan/accept` `{breakId, suggestionId, fingerprint}`
@@ -1674,6 +1695,23 @@ async fn post_replace(
     )
 }
 
+/// `GET /Journeys/{id}/revisions`'s body: every plan, newest first.
+#[derive(Debug, Serialize, ts_rs::TS)]
+pub(crate) struct RevisionsResponse {
+    revisions: Vec<RevisionResponse>,
+}
+
+/// One plan as `GET /Journeys/{id}/revisions` serves it.
+#[derive(Debug, Serialize, ts_rs::TS)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct RevisionResponse {
+    #[serde(flatten)]
+    revision: journey_revisions::Revision,
+    /// Whether the plan can be gone back to ([`revert_allowed`]); never
+    /// the current one.
+    can_revert: bool,
+}
+
 /// `GET /Journeys/{id}/revisions`: every plan, newest first, each with its
 /// legs and their fates (§7, §8.2 "Earlier plans").
 async fn get_revisions(
@@ -1690,18 +1728,15 @@ async fn get_revisions(
             let now = now_utc();
             let latest_at = revisions.first().map(|r| r.created_at);
             let latest_no = revisions.first().map(|r| r.revision_no);
-            let body: Vec<serde_json::Value> = revisions
-                .iter()
-                .map(|revision| {
-                    let mut value = serde_json::to_value(revision).unwrap_or_default();
-                    value["canRevert"] = serde_json::Value::Bool(
-                        Some(revision.revision_no) != latest_no
-                            && revert_allowed(revision, latest_no, latest_at, now),
-                    );
-                    value
+            let revisions = revisions
+                .into_iter()
+                .map(|revision| RevisionResponse {
+                    can_revert: Some(revision.revision_no) != latest_no
+                        && revert_allowed(&revision, latest_no, latest_at, now),
+                    revision,
                 })
                 .collect();
-            Ok(Json(serde_json::json!({ "revisions": body })).into_response())
+            Ok(Json(RevisionsResponse { revisions }).into_response())
         }
         .await,
     )
@@ -2017,6 +2052,114 @@ mod wire_tests {
             serde_json::json!({
                 "journeyId": 4, "revisionNo": 3, "newLegIds": [9], "undoRevisionNo": 2
             })
+        );
+    }
+
+    fn at(text: &str) -> DateTime<Utc> {
+        text.parse().unwrap()
+    }
+
+    fn revision() -> journey_revisions::Revision {
+        journey_revisions::Revision {
+            id: 11,
+            revision_no: 2,
+            created_at: at("2026-09-17T09:10:00Z"),
+            reason: "replace".to_string(),
+            cause: Some("user_missed".to_string()),
+            fault: Some("user".to_string()),
+            break_id: Some(5),
+            actor: "owner".to_string(),
+            is_compensation_baseline: false,
+            legs: vec![journey_revisions::RevisionLeg {
+                position: 0,
+                source_leg_id: Some(7),
+                kind: "untracked".to_string(),
+                train_uid: None,
+                service_date: NaiveDate::from_ymd_opt(2026, 9, 17).unwrap(),
+                atoc_code: None,
+                origin_crs: None,
+                origin_name: None,
+                destination_crs: None,
+                destination_name: None,
+                booked_departure: None,
+                booked_arrival: None,
+                transit_mode: Some("tube".to_string()),
+                origin_place: Some("Euston".to_string()),
+                destination_place: Some("Victoria".to_string()),
+                line_name: Some("Victoria".to_string()),
+                planned_departure: Some(at("2026-09-17T09:00:00Z")),
+                planned_arrival: Some(at("2026-09-17T09:15:00Z")),
+                ticket_ids: vec![3],
+                fate: "missed".to_string(),
+                origin_stop_id: Some("940GZZLUEUS".to_string()),
+                destination_stop_id: None,
+                transit_network: Some("tfl".to_string()),
+                transit_line_id: Some("victoria".to_string()),
+                headsign: None,
+                revision_id: 11,
+            }],
+        }
+    }
+
+    /// `GET .../revisions` was built with `json!` (each revision as
+    /// serialized, plus `canRevert`); the typed body serves the same JSON.
+    #[test]
+    fn the_revisions_body_is_each_revision_and_whether_it_can_be_reverted() {
+        let mut before = serde_json::to_value(revision()).unwrap();
+        before["canRevert"] = serde_json::Value::Bool(true);
+        let before = serde_json::json!({ "revisions": [before] });
+        let after = serde_json::to_value(RevisionsResponse {
+            revisions: vec![RevisionResponse {
+                revision: revision(),
+                can_revert: true,
+            }],
+        })
+        .unwrap();
+        assert_eq!(after, before);
+        assert_eq!(after["revisions"][0]["canRevert"], true);
+        assert_eq!(after["revisions"][0]["legs"][0]["fate"], "missed");
+        assert!(after["revisions"][0].get("id").is_none());
+        assert!(after["revisions"][0]["legs"][0].get("revisionId").is_none());
+    }
+
+    /// `409 suggestion_stale` was built with `json!`; the typed body
+    /// serves the same JSON.
+    #[test]
+    fn a_stale_suggestion_answers_the_coded_error_and_the_fresh_break() {
+        let now = at("2026-09-17T09:00:00Z");
+        let row = BreakRow {
+            id: 5,
+            journey_id: 4,
+            user_id: "user-1".to_string(),
+            detected_at: at("2026-09-17T08:55:00Z"),
+            cause: "user_missed".to_string(),
+            fault: "operator".to_string(),
+            severity: 2,
+            trigger_leg_id: Some(7),
+            trigger_trains_id: Some(70),
+            break_position: 0,
+            fingerprint: "f".to_string(),
+            status: "open".to_string(),
+            suggestions: None,
+            suggestions_at: None,
+            confirmations: 1,
+            notified_at: None,
+            notified_severity: None,
+            opened_at: None,
+            opened_via: Some("push".to_string()),
+            resolved_at: None,
+            accepted_revision_id: None,
+        };
+        let before = serde_json::json!({
+            "error": "suggestion_stale",
+            "message": "That train no longer works. Here are the latest options.",
+            "break": BreakResponse::from_row(row.clone(), now),
+        });
+        let after = serde_json::to_value(SuggestionStaleResponse::new(row, now)).unwrap();
+        assert_eq!(after, before);
+        assert_eq!(
+            after["break"]["faultNote"],
+            "Your earlier train was late, so this counts as a missed connection."
         );
     }
 
