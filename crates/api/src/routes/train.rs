@@ -1807,7 +1807,7 @@ impl PublicEnrichment {
 /// this cache only bounds how often THIS route re-attempts it inline.
 ///
 /// Process-local, not persisted or shared across replicas or restarts --
-/// deliberately, same tradeoff `common::log_once::LogOnceSet` documents
+/// deliberately, same tradeoff `ds_runtime::log_once::LogOnceSet` documents
 /// for its own process-lifetime cache: this exists purely to cap the cost
 /// of one process serving repeat reads for the same row, not to coordinate
 /// retries cluster-wide. A cold process or an unlucky round-robin still

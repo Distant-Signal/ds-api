@@ -314,7 +314,7 @@ const SHARED_PRUNE_EVERY: Duration = Duration::from_secs(3_600);
 
 fn count_cache(layer: &'static str, result: &'static str) {
     metrics::counter!(
-        common::metrics::metric_name("api_tfl_arrivals_cache_total"),
+        ds_runtime::metrics::metric_name("api_tfl_arrivals_cache_total"),
         "layer" => layer,
         "result" => result
     )
@@ -771,7 +771,7 @@ async fn fetch_counted(
         Err(err) => err.label(),
     };
     metrics::counter!(
-        common::metrics::metric_name("api_tfl_arrivals_fetch_total"),
+        ds_runtime::metrics::metric_name("api_tfl_arrivals_fetch_total"),
         "outcome" => label
     )
     .increment(1);

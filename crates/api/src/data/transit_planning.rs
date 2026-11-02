@@ -1439,7 +1439,7 @@ pub async fn read_days(
 /// [`read_days`] or the timetable snapshot's equivalent.
 pub fn count_skip(network: &str, reason: SkipReason) {
     metrics::counter!(
-        common::metrics::metric_name("api_trip_plan_transit_networks_skipped_total"),
+        ds_runtime::metrics::metric_name("api_trip_plan_transit_networks_skipped_total"),
         "network" => network.to_owned(),
         "reason" => reason.metric_label()
     )
@@ -1451,7 +1451,7 @@ pub fn count_skip(network: &str, reason: SkipReason) {
 pub fn record_connections(graph: &TransitGraph) {
     for network in &graph.networks {
         metrics::gauge!(
-            common::metrics::metric_name("api_trip_plan_transit_connections"),
+            ds_runtime::metrics::metric_name("api_trip_plan_transit_connections"),
             "network" => network.network.clone()
         )
         .set(network.connections as f64);

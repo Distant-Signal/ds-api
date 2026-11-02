@@ -352,7 +352,7 @@ impl Subscriber {
             return;
         }
         self.healthy = healthy;
-        metrics::gauge!(common::metrics::metric_name(HEALTHY_METRIC), "source" => SOURCE)
+        metrics::gauge!(ds_runtime::metrics::metric_name(HEALTHY_METRIC), "source" => SOURCE)
             .set(if healthy { 1.0 } else { 0.0 });
         match err {
             None => tracing::info!(
@@ -380,7 +380,7 @@ fn shown(name: &str) -> String {
 
 fn count_messages(outcome: &'static str, n: usize) {
     metrics::counter!(
-        common::metrics::metric_name(MESSAGES_METRIC),
+        ds_runtime::metrics::metric_name(MESSAGES_METRIC),
         "source" => SOURCE,
         "outcome" => outcome
     )
@@ -389,7 +389,7 @@ fn count_messages(outcome: &'static str, n: usize) {
 
 fn count_error(kind: &'static str) {
     metrics::counter!(
-        common::metrics::metric_name(ERRORS_METRIC),
+        ds_runtime::metrics::metric_name(ERRORS_METRIC),
         "source" => SOURCE,
         "kind" => kind
     )
@@ -398,12 +398,12 @@ fn count_error(kind: &'static str) {
 
 /// Every Pub/Sub metric at 0.
 pub(crate) fn register_metrics() {
-    metrics::gauge!(common::metrics::metric_name(HEALTHY_METRIC), "source" => SOURCE).set(0.0);
+    metrics::gauge!(ds_runtime::metrics::metric_name(HEALTHY_METRIC), "source" => SOURCE).set(0.0);
     for outcome in OUTCOMES {
         count_messages(outcome, 0);
     }
     for kind in ERROR_KINDS {
-        metrics::counter!(common::metrics::metric_name(ERRORS_METRIC), "source" => SOURCE, "kind" => kind)
+        metrics::counter!(ds_runtime::metrics::metric_name(ERRORS_METRIC), "source" => SOURCE, "kind" => kind)
             .increment(0);
     }
 }
@@ -436,7 +436,7 @@ pub(crate) fn is_subscription_name(name: &str) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use common::secret::Secret;
+    use ds_runtime::secret::Secret;
     use wiremock::matchers::{method, path};
     use wiremock::{Mock, ResponseTemplate};
 

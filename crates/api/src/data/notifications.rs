@@ -14,11 +14,11 @@
 //! public IP that day can rebind to an internal/private address by the
 //! time `crates/notifier` actually sends to it -- registration-time
 //! validation alone doesn't catch that. The actual resolve-and-check logic
-//! moved to `common::outbound_endpoint_guard::validate_outbound_url` (this
+//! moved to `ds_runtime::outbound_endpoint_guard::validate_outbound_url` (this
 //! function is now a thin, same-signature wrapper over it) specifically so
 //! `crates/notifier` -- which has no dependency on this crate -- can run
 //! the identical check again immediately before its own send, closing that
-//! window. See `common::outbound_endpoint_guard`'s own module doc and
+//! window. See `ds_runtime::outbound_endpoint_guard`'s own module doc and
 //! `crates/notifier/src/send.rs`'s send-time call for the other half.
 
 use anyhow::Result;
@@ -29,12 +29,12 @@ use sqlx::PgPool;
 /// land somewhere inside the cluster's own network instead of at a real
 /// push service -- an SSRF vector, since that POST is issued server-side
 /// on every notification, using whatever URL this function let through.
-/// Thin wrapper over `common::outbound_endpoint_guard::validate_outbound_url`
+/// Thin wrapper over `ds_runtime::outbound_endpoint_guard::validate_outbound_url`
 /// -- see that function's own doc comment for the full scheme/DNS-rebinding
 /// rationale, shared verbatim with `crates/notifier`'s own send-time
 /// re-check (this module's doc comment above).
 pub async fn validate_push_endpoint(endpoint: &str) -> Result<(), String> {
-    common::outbound_endpoint_guard::validate_outbound_url(endpoint).await
+    ds_runtime::outbound_endpoint_guard::validate_outbound_url(endpoint).await
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -522,7 +522,7 @@ mod db_tests {
 mod validate_push_endpoint_tests {
     use std::net::IpAddr;
 
-    use common::outbound_endpoint_guard::is_disallowed_ip;
+    use ds_runtime::outbound_endpoint_guard::is_disallowed_ip;
 
     use super::*;
 

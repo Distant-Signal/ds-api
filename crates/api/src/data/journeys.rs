@@ -739,7 +739,7 @@ pub async fn track_known_train_on_its_own(
     service_date: NaiveDate,
 ) -> anyhow::Result<TrainTrackedOnItsOwn> {
     let mut tx = pool.begin().await?;
-    common::pg::lock_user_train_subscription(&mut tx, user_id, trains_id).await?;
+    ds_runtime::pg::lock_user_train_subscription(&mut tx, user_id, trains_id).await?;
     let existing: Option<(i64, i64)> = sqlx::query_as(
         "SELECT ts.id, MIN(jl.journey_id) \
          FROM train_subscriptions ts \
@@ -832,7 +832,7 @@ pub async fn stop_tracking_train(
         delete_journey_row_releasing_trains(&mut tx, journey_id, user_id).await?;
     }
     if let Some(trains_id) = trains_id {
-        common::pg::lock_user_train_subscription(&mut tx, user_id, trains_id).await?;
+        ds_runtime::pg::lock_user_train_subscription(&mut tx, user_id, trains_id).await?;
     }
     sqlx::query(
         "DELETE FROM train_subscriptions ts WHERE ts.id = $1 AND ts.user_id = $2 \
@@ -2240,7 +2240,7 @@ async fn set_leg_train_subscription_locked(
 /// right: that was the old train's.
 ///
 /// Takes the `(user_id, trains_id)` lock `create_subscription_for_train`
-/// takes (`common::pg::lock_user_train_subscription`, also taken by the
+/// takes (`ds_runtime::pg::lock_user_train_subscription`, also taken by the
 /// notifier's copy) before deciding, so a concurrent "Track this train" or
 /// leg bind that is about to hand back this same row either finishes first
 /// (and is seen here as referenced) or waits and then creates a fresh row.
@@ -2269,7 +2269,7 @@ pub(crate) async fn release_leg_subscription(
         return Ok(());
     };
     if let Some(trains_id) = trains_id {
-        common::pg::lock_user_train_subscription(&mut *conn, user_id, trains_id).await?;
+        ds_runtime::pg::lock_user_train_subscription(&mut *conn, user_id, trains_id).await?;
     }
     let keep: Option<(bool,)> = sqlx::query_as(
         "SELECT EXISTS (SELECT 1 FROM journey_legs jl WHERE jl.train_subscription_id = ts.id) \

@@ -21,7 +21,7 @@
 //! 5. `data::journey_breaks::expire_finished`: open journey breaks whose
 //!    journey is over, whether or not the break sweep is on.
 //!
-//! It connects with the shared retry (`common::startup`), giving up after
+//! It connects with the shared retry (`ds_runtime::startup`), giving up after
 //! `MAINTENANCE_CONNECT_DEADLINE_SECS` (default 120): a fresh pod on a
 //! saturated node, or one whose `NetworkPolicy` is not programmed yet, would
 //! otherwise fail on its first 5 s acquire.
@@ -32,7 +32,7 @@
 //! `API_BACKGROUND_LOOPS`, until the `CronJob` is on.
 
 use clap::Parser;
-use common::secret::Secret;
+use ds_runtime::secret::Secret;
 
 use api::data::retention::{RetentionOutcome, RetentionPolicy};
 
@@ -89,22 +89,23 @@ struct PassReport {
 
 #[tokio::main]
 async fn main() -> std::process::ExitCode {
-    common::logging::exit_code(run().await)
+    ds_runtime::logging::exit_code(run().await)
 }
 
 async fn run() -> anyhow::Result<()> {
     let args = Args::parse();
-    common::logging::init_with_filter(
+    ds_runtime::logging::init_with_filter(
         "api-maintenance",
-        common::logging::EnvFilter::try_from_default_env()
-            .unwrap_or_else(|_| common::logging::EnvFilter::new("info")),
+        ds_runtime::logging::EnvFilter::try_from_default_env()
+            .unwrap_or_else(|_| ds_runtime::logging::EnvFilter::new("info")),
     );
-    let settings = common::pg::PoolSettings::from_env(APPLICATION_NAME, DEFAULT_MAX_CONNECTIONS)?;
+    let settings =
+        ds_runtime::pg::PoolSettings::from_env(APPLICATION_NAME, DEFAULT_MAX_CONNECTIONS)?;
     // Retried, within MAINTENANCE_CONNECT_DEADLINE_SECS: one 5 s acquire
     // (DATABASE_ACQUIRE_TIMEOUT_SECS) is not enough on a saturated node.
-    let pool = common::startup::retry_until_ready_within(
+    let pool = ds_runtime::startup::retry_until_ready_within(
         "postgres",
-        common::startup::CONNECT_BACKOFF,
+        ds_runtime::startup::CONNECT_BACKOFF,
         std::time::Duration::from_secs(args.maintenance_connect_deadline_secs),
         || settings.connect(args.database_url.expose()),
     )

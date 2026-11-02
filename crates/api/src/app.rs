@@ -45,10 +45,10 @@ pub struct AppState {
 }
 
 /// Dead-client detection (`client_connection_check_interval` and TCP
-/// keepalives), now shared with every pool through `common::pg`; kept here
+/// keepalives), now shared with every pool through `ds_runtime::pg`; kept here
 /// for the migration connection, which is not built by `PoolSettings`.
 const DEAD_CLIENT_DETECTION_SETTINGS: [(&str, &str); 4] =
-    common::pg::DEAD_CLIENT_DETECTION_SETTINGS;
+    ds_runtime::pg::DEAD_CLIENT_DETECTION_SETTINGS;
 
 /// `pg_stat_activity.application_name` of every `api` pool connection.
 pub const API_APPLICATION_NAME: &str = "distant-signal-api";
@@ -162,7 +162,7 @@ impl AppState {
         //
         // application_name, statement_timeout (60s), idle-in-transaction
         // timeout (30s) and a 5s acquire_timeout, all overridable by env --
-        // see `common::pg`. Statements that legitimately run longer (the
+        // see `ds_runtime::pg`. Statements that legitimately run longer (the
         // schedule publish chunks) raise the timeout with `SET LOCAL`.
         // `ds_store::pool` builds the same pool and samples it into
         // `distant_signal_db_pool_*` (plan task 1A.11).
@@ -384,7 +384,7 @@ mod dead_client_detection_tests {
         }
     }
 
-    /// The pool `AppState::init` builds: the `common::pg` settings stack on
+    /// The pool `AppState::init` builds: the `ds_runtime::pg` settings stack on
     /// top of the dead-client detection options rather than replacing them.
     #[tokio::test]
     #[ignore = "requires a live database; run with `DATABASE_URL=... cargo test -p api \

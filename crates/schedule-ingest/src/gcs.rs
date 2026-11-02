@@ -32,7 +32,7 @@ use chrono::{DateTime, Utc};
 use common::gcp_external_account::{
     ExternalAccountConfig, ExternalAccountTokenSource, TokenSourceSettings,
 };
-use common::secret::Secret;
+use ds_runtime::secret::Secret;
 use serde::Deserialize;
 
 /// The public GCS endpoint (`BUCKET_BASE_URL` empty).
