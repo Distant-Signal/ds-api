@@ -805,17 +805,17 @@ fn default_results() -> String {
 async fn get_trip_plan(
     State(app): State<App>,
     Query(params): Query<TripPlanParams>,
-) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
+) -> Result<Json<TripPlanResponse>, (StatusCode, String)> {
     let result = plan_trip_request(app, params).await;
     // Usage analytics, phase 1 (DS-190): the outcome only, never the
     // stations asked about.
     crate::usage_events::FeatureEvent::record_result(
         &result,
         |Json(body)| {
-            if body["journeys"].as_array().is_some_and(|j| !j.is_empty()) {
-                crate::usage_events::FeatureEvent::TripPlanResults
-            } else {
+            if body.journeys.is_empty() {
                 crate::usage_events::FeatureEvent::TripPlanNoRoute
+            } else {
+                crate::usage_events::FeatureEvent::TripPlanResults
             }
         },
         crate::usage_events::FeatureEvent::TripPlanRejected,
@@ -832,7 +832,7 @@ async fn get_trip_plan(
 async fn plan_trip_request(
     app: App,
     params: TripPlanParams,
-) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
+) -> Result<Json<TripPlanResponse>, (StatusCode, String)> {
     if params.results != "fastest" && params.results != "options" {
         return Err((
             StatusCode::BAD_REQUEST,
@@ -1090,16 +1090,20 @@ async fn plan_trip_request(
         )
         .increment(1);
         match outcome {
-            Ok(summary) => serde_json::json!({
-                "applied": true,
-                "reason": null,
-                "replans": summary.replans,
-                "trainsRead": summary.trains_read,
-                "adjustedTrains": summary.adjusted_trains,
-                "inSearch": summary.in_search,
-                "snapshotTrains": summary.snapshot_trains,
-            }),
-            Err(reason) => serde_json::json!({ "applied": false, "reason": reason }),
+            Ok(summary) => TripPlanLive {
+                applied: true,
+                reason: None,
+                replans: Some(summary.replans),
+                trains_read: Some(summary.trains_read),
+                adjusted_trains: Some(summary.adjusted_trains),
+                in_search: Some(summary.in_search),
+                snapshot_trains: Some(summary.snapshot_trains),
+            },
+            Err(reason) => TripPlanLive {
+                applied: false,
+                reason: Some(reason),
+                ..TripPlanLive::default()
+            },
         }
     });
     if live_summary.is_none() {
@@ -1121,141 +1125,233 @@ async fn plan_trip_request(
     } else {
         Vec::new()
     };
-    let mut body = serde_json::json!({
-        "results": params.results,
-        "maxChanges": max_changes,
-        // Additive (2026-09-29): the arrive-by deadline (`null` for a
-        // depart-after request) and the avoid lists as applied.
-        "arriveBy": match request.time {
+    // Before `segments` moves into the body.
+    let journeys =
+        trip_planning_itinerary::journey_summaries(&segments, request.interchange(&graph))
+            .into_iter()
+            .enumerate()
+            .map(|(j, journey)| TripPlanJourney {
+                change_count: journey.change_count,
+                access_change_count: journey.access_change_count,
+                departure: segment_clock(journey.departure_min),
+                arrival: segment_clock(journey.arrival_min),
+                total_duration_minutes: journey.arrival_min - journey.departure_min,
+                exceeds_recommended_changes: journey.exceeds_recommended_changes,
+                live_feasible: journey.live_feasible,
+                labels: (params.results == "options").then_some(journey.labels),
+                via_satisfied_by: (!request.vias.is_empty()).then_some(journey.via_satisfied_by),
+                waypoint_satisfied_by: waypoint_stops.get(j).cloned(),
+            })
+            .collect();
+    let body = TripPlanResponse {
+        max_changes,
+        arrive_by: match request.time {
             trip_planning_itinerary::TimeBound::ArriveBy(minutes) => Some(segment_clock(minutes)),
             trip_planning_itinerary::TimeBound::DepartAfter(_) => None,
         },
-        // Additive (2026-10-19): the effective depart-after start (00:00
-        // when none was given), `null` for an arrive-by request. Both
-        // echoes carry `dayOffset` (see `?dayOffset=`).
-        "departAfter": match request.time {
-            trip_planning_itinerary::TimeBound::DepartAfter(minutes) => Some(segment_clock(minutes)),
+        depart_after: match request.time {
+            trip_planning_itinerary::TimeBound::DepartAfter(minutes) => {
+                Some(segment_clock(minutes))
+            }
             trip_planning_itinerary::TimeBound::ArriveBy(_) => None,
         },
-        // Additive (2026-10-20): the service dates whose trains were
-        // searched -- `[date]`, or `[date, date + 1]` with
-        // `acrossMidnight`. Every time in this body is on `date`'s clock;
-        // each train leg also names its own `serviceDate`.
-        "serviceDates": service_dates,
-        "avoid": request.avoid.avoid,
-        "avoidStop": request.avoid.avoid_stop,
-        "avoidChange": request.avoid.avoid_change,
-        // Additive (2026-10-06): the pass-through vias as applied.
-        "via": request.vias,
-        // Additive (2026-10-07): each station group the request named
-        // (`group:NAME` in `via`, `waypoints` or an avoid list) -> its
-        // member CRS codes,
-        // as expanded. `{}` when none.
-        "stationGroups": station_groups,
-        // Additive (2026-10-31): the operator filter as applied, each list
-        // expanded to its operators (`[]` when unused), the groups it named
-        // (`{}` when none), and the chosen operators that run nothing on
-        // `date`.
-        "operator": OperatorFilter::codes_if(operator_filter.as_ref(), FilterMode::Only),
-        "avoidOperator": OperatorFilter::codes_if(operator_filter.as_ref(), FilterMode::Avoid),
-        "preferOperator": OperatorFilter::codes_if(operator_filter.as_ref(), FilterMode::Prefer),
-        "operatorGroups": operator_filter.as_ref().map(|f| f.list.groups.clone()).unwrap_or_default(),
-        "operatorsNotRunning": operator_filter
+        avoid: request.avoid.avoid.clone(),
+        avoid_stop: request.avoid.avoid_stop.clone(),
+        avoid_change: request.avoid.avoid_change.clone(),
+        via: request.vias.clone(),
+        station_groups,
+        operator: OperatorFilter::codes_if(operator_filter.as_ref(), FilterMode::Only),
+        avoid_operator: OperatorFilter::codes_if(operator_filter.as_ref(), FilterMode::Avoid),
+        prefer_operator: OperatorFilter::codes_if(operator_filter.as_ref(), FilterMode::Prefer),
+        operator_groups: operator_filter
+            .as_ref()
+            .map(|f| f.list.groups.clone())
+            .unwrap_or_default(),
+        operators_not_running: operator_filter
             .as_ref()
             .map(|f| f.not_running(&[&graph]))
             .unwrap_or_default(),
-        "segments": segments.iter().map(|segment| serde_json::json!({
-            "originCrs": segment.origin_crs,
-            "destinationCrs": segment.destination_crs,
-            "itineraries": segment.itineraries,
-            "cappedByMaxChanges": segment.capped_by_max_changes,
-            // Additive (2026-09-28): when this segment was searched from --
-            // `departAfter` for the first, the previous segment's arrival
-            // plus the waypoint's change time for later ones; `null` when
-            // the previous segment found nothing to chain from, and for an
-            // arrive-by request.
-            "departAfter": segment.depart_after_min.map(segment_clock),
-            // Additive (2026-09-29), arrive-by only: the latest arrival this
-            // segment was searched for; `null` otherwise.
-            "arriveBy": segment.arrive_by_min.map(segment_clock),
-            // Additive (2026-09-29): why `itineraries` is empty; `null` when
-            // it is not.
-            "noResultReason": segment.no_result_reason,
-        })).collect::<Vec<_>>(),
-        // Additive (2026-09-29): the whole journeys, aligned with every
-        // segment's `itineraries` -- journey `j` is `itineraries[j]` of each
-        // segment -- with their end-to-end change count.
-        "journeys": trip_planning_itinerary::journey_summaries(&segments, request.interchange(&graph))
-            .iter()
-            .enumerate()
-            .map(|(j, journey)| {
-                let mut value = serde_json::json!({
-                    "changeCount": journey.change_count,
-                    // Additive (2026-10-30): changes within `TfL` access
-                    // legs, not in `changeCount`.
-                    "accessChangeCount": journey.access_change_count,
-                    "departure": segment_clock(journey.departure_min),
-                    "arrival": segment_clock(journey.arrival_min),
-                    "totalDurationMinutes": journey.arrival_min - journey.departure_min,
-                });
-                if let Some(exceeds) = journey.exceeds_recommended_changes {
-                    value["exceedsRecommendedChanges"] = exceeds.into();
-                }
-                if let Some(feasible) = journey.live_feasible {
-                    value["liveFeasible"] = feasible.into();
-                }
-                // Additive (2026-10-30, DS-196), `results=options` only:
-                // what this option is (`fastest` or `leavesLatest`, `fewestChanges`,
-                // `alternative` with its `viaCrs`).
-                if params.results == "options" {
-                    value["labels"] = serde_json::json!(journey.labels);
-                }
-                // Additive (2026-10-06), with `via` only: for each via in
-                // order, the leg that passed it.
-                if !request.vias.is_empty() {
-                    value["viaSatisfiedBy"] = serde_json::json!(journey.via_satisfied_by);
-                }
-                // Additive (2026-10-07), only when a waypoint is an OR
-                // choice: for each waypoint in order, where the journey
-                // stopped for it.
-                if let Some(stops) = waypoint_stops.get(j) {
-                    value["waypointSatisfiedBy"] = serde_json::json!(stops);
-                }
-                value
+        segments: segments
+            .into_iter()
+            .map(|segment| TripPlanSegment {
+                origin_crs: segment.origin_crs,
+                destination_crs: segment.destination_crs,
+                itineraries: segment.itineraries,
+                capped_by_max_changes: segment.capped_by_max_changes,
+                depart_after: segment.depart_after_min.map(segment_clock),
+                arrive_by: segment.arrive_by_min.map(segment_clock),
+                no_result_reason: segment.no_result_reason,
             })
-            .collect::<Vec<_>>(),
-    });
-    if let Some(summary) = live_summary {
-        body["live"] = summary;
-    }
-    // Additive (2026-10-31), with `preferOperator` only: what the extra
-    // search did (`added`, `labelled`, `tooSlow` or `none`).
-    if let Some(prefer) = &prefer {
-        body["preferOperatorResult"] = prefer.outcome().into();
-    }
-    // Additive (2026-10-23, DS-135), only when an end is a `TfL` stop: each
-    // stop end with its access candidates (`null` for a station end).
-    if let Some(access) = &access {
-        body["access"] = access.to_json();
-    }
-    // Additive (2026-10-24, DS-164), only when planned with transit
-    // networks: each network whose timetable does not cover the date
-    // (`noTimetable`), so the plan was made without it. Never "no trams".
-    if transit {
-        body["transitNotices"] = transit_planning::notices_json(&transit_skipped);
-    }
-    // Additive (2026-10-08): whether `date`'s timetable is still
-    // provisional. Once per response, not per journey or leg. With
-    // `acrossMidnight`, the later of the two dates: it is the one that can
-    // be provisional when the earlier is not.
-    if let Some(object) = body.as_object_mut() {
-        crate::routes::provisional::TimetableCertainty::for_date(
+            .collect(),
+        journeys,
+        live: live_summary,
+        prefer_operator_result: prefer.as_ref().map(|prefer| prefer.outcome()),
+        access: access.as_deref().map(tfl_access::AccessEnds::response),
+        transit_notices: transit.then(|| transit_planning::notices(&transit_skipped)),
+        // With `acrossMidnight`, the later of the two dates: it is the one
+        // that can be provisional when the earlier is not.
+        certainty: crate::routes::provisional::TimetableCertainty::for_date(
             service_dates.last().copied().unwrap_or(date),
             crate::routes::london_today(),
-        )
-        .insert_into(object);
-    }
+        ),
+        service_dates,
+        results: params.results,
+    };
     Ok(Json(body))
+}
+
+/// `GET /Trips/plan`'s body. Fields marked additive were added after the
+/// first release, on the date given; an optional one is absent, not
+/// `null`, when its condition does not hold.
+#[derive(Debug, serde::Serialize, ts_rs::TS)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct TripPlanResponse {
+    /// `fastest` or `options`, as asked.
+    #[ts(as = "crate::ts_values::TripPlanResults")]
+    results: String,
+    max_changes: u32,
+    /// Additive (2026-09-29): the arrive-by deadline, `null` for a
+    /// depart-after request.
+    arrive_by: Option<SegmentClock>,
+    /// Additive (2026-10-19): the effective depart-after start (00:00 when
+    /// none was given), `null` for an arrive-by request.
+    depart_after: Option<SegmentClock>,
+    /// Additive (2026-10-20): the service dates whose trains were searched:
+    /// `[date]`, or `[date, date + 1]` with `acrossMidnight`. Every time in
+    /// this body is on `date`'s clock; each train leg also names its own
+    /// `serviceDate`.
+    service_dates: Vec<NaiveDate>,
+    /// Additive (2026-09-29): the avoid lists as applied.
+    avoid: Vec<String>,
+    avoid_stop: Vec<String>,
+    avoid_change: Vec<String>,
+    /// Additive (2026-10-06): the pass-through vias as applied.
+    via: Vec<String>,
+    /// Additive (2026-10-07): each station group the request named
+    /// (`group:NAME` in `via`, `waypoints` or an avoid list) to its member
+    /// CRS codes, as expanded. `{}` when none.
+    station_groups: std::collections::BTreeMap<String, Vec<String>>,
+    /// Additive (2026-10-31): the operator filter as applied, each list
+    /// expanded to its operators (`[]` when unused), the groups it named
+    /// (`{}` when none), and the chosen operators that run nothing on
+    /// `date`.
+    operator: Vec<String>,
+    avoid_operator: Vec<String>,
+    prefer_operator: Vec<String>,
+    operator_groups: std::collections::BTreeMap<String, Vec<String>>,
+    operators_not_running: Vec<String>,
+    segments: Vec<TripPlanSegment>,
+    /// Additive (2026-09-29): the whole journeys, aligned with every
+    /// segment's `itineraries` (journey `j` is `itineraries[j]` of each
+    /// segment), with their end-to-end change count.
+    journeys: Vec<TripPlanJourney>,
+    /// With `live` asked for (the default): whether the live overlay
+    /// applied, and what it did.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    live: Option<TripPlanLive>,
+    /// Additive (2026-10-31), with `preferOperator` only: what the extra
+    /// search did (`added`, `labelled`, `tooSlow` or `none`).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[ts(optional, as = "Option<crate::ts_values::PreferOperatorResult>")]
+    prefer_operator_result: Option<&'static str>,
+    /// Additive (2026-10-23, DS-135), only when an end is a `TfL` stop:
+    /// each stop end with its access candidates (`null` for a station end).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    access: Option<tfl_access::AccessResponse>,
+    /// Additive (2026-10-24, DS-164), only when planned with transit
+    /// networks: each network whose timetable does not cover the date, so
+    /// the plan was made without it.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    transit_notices: Option<Vec<transit_planning::TransitPlanNotice>>,
+    /// Additive (2026-10-08): whether the timetable is still provisional.
+    /// Once per response, not per journey or leg.
+    #[serde(flatten)]
+    certainty: crate::routes::provisional::TimetableCertainty,
+}
+
+/// One segment of a plan: origin to the first waypoint, waypoint to
+/// waypoint, or the last waypoint to the destination.
+#[derive(Debug, serde::Serialize, ts_rs::TS)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct TripPlanSegment {
+    origin_crs: String,
+    destination_crs: String,
+    itineraries: Vec<trip_planning_itinerary::PlannedItinerary>,
+    capped_by_max_changes: bool,
+    /// Additive (2026-09-28): when this segment was searched from:
+    /// `departAfter` for the first, the previous segment's arrival plus the
+    /// waypoint's change time for later ones; `null` when the previous
+    /// segment found nothing to chain from, and for an arrive-by request.
+    depart_after: Option<SegmentClock>,
+    /// Additive (2026-09-29), arrive-by only: the latest arrival this
+    /// segment was searched for; `null` otherwise.
+    arrive_by: Option<SegmentClock>,
+    /// Additive (2026-09-29): why `itineraries` is empty; `null` when it is
+    /// not.
+    no_result_reason: Option<trip_planning_itinerary::NoResultReason>,
+}
+
+/// One whole journey across every segment.
+#[derive(Debug, serde::Serialize, ts_rs::TS)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct TripPlanJourney {
+    change_count: u32,
+    /// Additive (2026-10-30): changes within `TfL` access legs, not in
+    /// `changeCount`.
+    access_change_count: u32,
+    departure: SegmentClock,
+    arrival: SegmentClock,
+    total_duration_minutes: u32,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    exceeds_recommended_changes: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    live_feasible: Option<bool>,
+    /// Additive (2026-10-30, DS-196), `results=options` only: what this
+    /// option is (`fastest` or `leavesLatest`, `fewestChanges`,
+    /// `alternative` with its `viaCrs`).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    labels: Option<Vec<trip_planning_itinerary::OptionLabel>>,
+    /// Additive (2026-10-06), with `via` only: for each via in order, the
+    /// leg that passed it.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    via_satisfied_by: Option<Vec<trip_planning_itinerary::ViaSatisfied>>,
+    /// Additive (2026-10-07), only when a waypoint is an OR choice: for
+    /// each waypoint in order, where the journey stopped for it.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    waypoint_satisfied_by: Option<Vec<trip_planning_itinerary::WaypointSatisfied>>,
+}
+
+/// The live overlay's outcome: `applied` with what it did, or why not
+/// (`reason`: `disabled`, `outsideLiveWindow`, ...). The counts are present
+/// only when it applied.
+#[derive(Debug, Default, serde::Serialize, ts_rs::TS)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct TripPlanLive {
+    applied: bool,
+    reason: Option<&'static str>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    replans: Option<u32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    trains_read: Option<usize>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    adjusted_trains: Option<usize>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    in_search: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    snapshot_trains: Option<usize>,
 }
 
 /// The access candidates of a `TfL` stop origin or destination (DS-135),
@@ -2992,10 +3088,22 @@ fn parse_max_changes(raw: Option<&str>) -> Result<Option<u32>, (StatusCode, Stri
     clippy::expect_used,
     reason = "a constant or range-checked time is always valid"
 )]
-fn segment_clock(minutes: u32) -> serde_json::Value {
+fn segment_clock(minutes: u32) -> SegmentClock {
     let time = NaiveTime::from_num_seconds_from_midnight_opt((minutes % 1440) * 60, 0)
         .expect("minutes modulo 1440 is a valid clock time");
-    serde_json::json!({ "time": time, "dayOffset": minutes / 1440 })
+    SegmentClock {
+        time,
+        day_offset: minutes / 1440,
+    }
+}
+
+/// A time on the plan's clock: `time` (`HH:MM:SS`) and how many days after
+/// `date` it falls (`dayOffset`).
+#[derive(Debug, serde::Serialize, ts_rs::TS)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct SegmentClock {
+    time: NaiveTime,
+    day_offset: u32,
 }
 
 /// Validates `?live=`: absent or empty means `true`; otherwise `true` or

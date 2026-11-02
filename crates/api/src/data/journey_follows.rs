@@ -45,7 +45,7 @@ pub const VALID_FOLLOW: &str = "((f.group_id IS NOT NULL AND EXISTS ( \
            AND (ful.expires_at IS NULL OR ful.expires_at > now()))))";
 
 /// How a follow reached the journey.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, ts_rs::TS)]
 #[serde(rename_all = "camelCase")]
 pub enum FollowVia {
     Group,
@@ -58,7 +58,7 @@ pub enum FollowVia {
 /// every other member label, `users::MemberDisplay`) and the group's name;
 /// a share link shows nothing about its owner, so a link follow carries
 /// neither.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, ts_rs::TS)]
 #[serde(rename_all = "camelCase")]
 pub struct FollowedFrom {
     pub via: FollowVia,

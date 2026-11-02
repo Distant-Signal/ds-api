@@ -63,7 +63,7 @@ pub struct StationTube {
 
 /// The walks a Tube transfer leg's `minutes` include, at each end
 /// (additive, 2026-11-02).
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, ts_rs::TS)]
 #[serde(rename_all = "camelCase")]
 pub struct StationWalks {
     /// From the National Rail station to the Tube station.

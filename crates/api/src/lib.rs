@@ -30,6 +30,8 @@
 //! `migrate` is `ds_store::migrate` re-exported: the migrator and the
 //! migrations directory moved to `ds-store` in plan task 1B.1.
 
+#[cfg(test)]
+mod api_types;
 pub mod app;
 pub mod auth;
 pub mod data;
@@ -44,5 +46,6 @@ pub mod routes;
 pub mod shutdown;
 #[cfg(test)]
 pub(crate) mod test_support;
+pub mod ts_values;
 pub mod unavailable;
 pub mod usage_events;

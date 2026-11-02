@@ -997,7 +997,7 @@ pub async fn fetch_snapshot_states(
 // ---------------------------------------------------------------------------
 
 /// A train leg's live status, served as the leg's `live`.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, ts_rs::TS)]
 #[serde(rename_all = "camelCase")]
 pub struct LegLive {
     /// `Cancelled`, `Departed`, `Late`, `Delayed`, `OnTime` or `Scheduled`
@@ -1023,6 +1023,7 @@ pub struct LegLive {
     /// Set when that change works only because this train is running late
     /// (additive, DS-141; absent otherwise): see [`LateDepartureReliance`].
     #[serde(skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
     pub relies_on_late_departure: Option<LateDepartureReliance<NaiveTime>>,
 }
 
@@ -1224,7 +1225,7 @@ pub fn interchange_feasible(departure_min: i64, ready_min: i64, change_minutes: 
 /// The live overlay keeps a late train late (no recovery is modelled), so
 /// such a change is offered, but the train could make up time and leave
 /// nearer its booked time, before the traveller can reach it.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, serde::Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, serde::Deserialize, ts_rs::TS)]
 #[serde(rename_all = "camelCase")]
 pub struct LateDepartureReliance<T> {
     /// The onward train's timetabled (public, else working) departure.

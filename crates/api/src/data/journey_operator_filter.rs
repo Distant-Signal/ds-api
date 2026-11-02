@@ -25,10 +25,11 @@ pub struct OperatorFilterRequest {
 }
 
 /// A stored filter, as `GET /Journeys/{id}` serves it.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, ts_rs::TS)]
 #[serde(rename_all = "camelCase")]
 pub struct JourneyOperatorFilter {
     /// `only`, `avoid` or `prefer`.
+    #[ts(as = "crate::ts_values::OperatorMode")]
     pub mode: String,
     /// The operators as applied, groups expanded.
     pub codes: Vec<String>,
