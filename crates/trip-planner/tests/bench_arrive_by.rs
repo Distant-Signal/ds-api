@@ -3,8 +3,8 @@
 //! production scale (~28k trains, ~400k connections, 2,000 stations;
 //! production is ~25k schedules and ~290k connections). Ignored by default,
 //! and a no-op unless `DS_RUN_ARRIVE_BY_BENCH` is set (CI runs every
-//! `--ignored` test, in debug; scripts/check-bench-gates.py checks the
-//! gate). Run it in release mode:
+//! `--ignored` test, in debug; `check-bench-gates.py`, from Distant-Signal/ci,
+//! checks the gate). Run it in release mode:
 //!
 //! ```text
 //! DS_RUN_ARRIVE_BY_BENCH=1 cargo test --release -p trip-planner --test bench_arrive_by -- --ignored --nocapture
