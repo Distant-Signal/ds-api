@@ -26,7 +26,8 @@ database that has already applied `20260906140000`.
    # From a checkout, as the schema owner (DATABASE_URL is the fallback)
    MIGRATION_DATABASE_URL=postgres://owner@... cargo run -p ds-migrate -- backfill-trains
 
-   # From the api container image (ds-migrate ships alongside `api`)
+   # From the ds-migrate image (the chart's `migrate.image`), as a one-off
+   # pod with the schema owner's MIGRATION_DATABASE_URL
    /usr/local/bin/ds-migrate backfill-trains
    ```
 
