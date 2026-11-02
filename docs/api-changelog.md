@@ -3,6 +3,17 @@
 Changes to the Distant Signal (DS) HTTP API that a client such as DS-MCP
 needs to know about. Newest first. Field names are as served (camelCase).
 
+## 2026-11-02: `GET /public/version`
+
+New, unauthenticated: the images this deployment runs and the source each
+was built from, for AGPL-3.0 §13 (Distant Signal is now
+AGPL-3.0-or-later). The body is `{images: [{service, image, source,
+revision}]}`: `service` is the workload (`api`, `frontend`, ...), `image`
+the reference its pods pull (`<repository>@<digest>` when pinned),
+`source` the repository URL and `revision` the commit, or `null` when the
+chart wasn't packaged by CI. `images` is empty outside the chart. The site
+serves it at `/api/version`. DS-MCP: no change needed.
+
 ## 2026-11-02: sliding browser sessions
 
 Browser sessions (the `distant_signal_session` cookie) no longer end a

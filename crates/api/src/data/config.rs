@@ -68,6 +68,15 @@ pub struct ServiceArguments {
     )]
     pub transit_networks: Vec<String>,
 
+    /// The file listing the images this deployment runs and the source
+    /// each was built from, which `/public/version` serves (AGPL-3.0 §13):
+    /// a JSON array of `{service, image, source, revision}`
+    /// (`API_SOURCE_IMAGES_FILE`). The chart mounts it from a config map and
+    /// the route reads it per request, so a new revision needs no restart.
+    /// Unset, or a missing file: the route lists no images.
+    #[arg(long, env = "API_SOURCE_IMAGES_FILE", value_hint = ValueHint::FilePath)]
+    pub source_images_file: Option<std::path::PathBuf>,
+
     /// Authentik/SSO end-user group (read from the `groups` OIDC claim,
     /// already decoded into `AuthenticatedUser.groups` on every login) whose
     /// members may call the admin

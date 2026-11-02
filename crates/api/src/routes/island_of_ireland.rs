@@ -246,6 +246,7 @@ mod db_tests {
             internal_oauth_client_id: "test-internal-oauth-client".to_string(),
             internal_oauth_group_mcp: "srv-ds-mcp".to_string(),
             transit_networks: Vec::new(),
+            source_images_file: None,
             admin_group: String::new(),
             sso_issuer_url: "https://example.invalid".to_string(),
             sso_client_id: "test-client".to_string(),
