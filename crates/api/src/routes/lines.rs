@@ -278,7 +278,7 @@ async fn get_line_schedule(
     OptionalAuthenticatedUser(user): OptionalAuthenticatedUser,
 ) -> Result<axum::response::Response, (StatusCode, String)> {
     // London-local "today", not UTC -- see `routes::trains`'s `london_now`
-    // split (baa4e75) for the original incident: during the 00:00-01:00 BST
+    // split (a628841) for the original incident: during the 00:00-01:00 BST
     // window a UTC "today" is still yesterday in London, so this route
     // would 404 or serve yesterday's CIF-derived line schedule for the
     // first hour of every service day. `schedule_line_population` is keyed
@@ -3365,7 +3365,7 @@ mod db_tests {
     async fn schedule_uses_london_local_today_not_bare_utc() {
         // Regression for the 19-pass review's Medium finding: this route
         // used to key its lookup off `chrono::Utc::now().date_naive()`,
-        // exactly the bug `routes::trains`'s `london_now` split (baa4e75)
+        // exactly the bug `routes::trains`'s `london_now` split (a628841)
         // already fixed for `/trains/search` -- during the roughly-hour-
         // long window where UTC's calendar day still lags London's (every
         // night of British Summer Time, 23:00-00:00 UTC = 00:00-01:00
