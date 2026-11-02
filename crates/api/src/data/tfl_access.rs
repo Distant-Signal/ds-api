@@ -252,7 +252,7 @@ pub struct StopRecord {
 }
 
 /// How a candidate was found.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, ts_rs::TS)]
 #[serde(rename_all = "camelCase")]
 pub enum AccessBasis {
     /// The stop's own hub station.
@@ -266,7 +266,7 @@ pub enum AccessBasis {
 }
 
 /// One National Rail station a stop can be left for (or reached from).
-#[derive(Debug, Clone, PartialEq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, ts_rs::TS)]
 #[serde(rename_all = "camelCase")]
 pub struct AccessCandidate {
     pub crs: String,
@@ -277,32 +277,39 @@ pub struct AccessCandidate {
     pub basis: AccessBasis,
     /// The line ridden (`Metropolitan`), for a ride.
     #[serde(skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
     pub line: Option<String>,
     /// The stop at the station's end of a ride (`Harrow-on-the-Hill`).
     #[serde(skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
     pub station_stop: Option<TflStopSummary>,
     /// Along the line for a ride, in a straight line for a walk.
     pub distance_metres: u32,
     /// Stops ridden to the far end, for a ride measured along the line's
     /// routes (absent for a spanning-tree estimate or a walk).
     #[serde(skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
     pub stop_count: Option<u32>,
     /// Where a ride changes trains between two branches of its line
     /// (`Harrow-on-the-Hill`); its `minutes` include the change.
     #[serde(skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
     pub change_at: Option<TflStopSummary>,
     /// Where the ride is boarded, when that is not the plan's own stop but
     /// another stop area of its station ([`with_siblings`]: Paddington
     /// (H&C Line) for Paddington); `minutes` include the walk to it.
     #[serde(skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
     pub board_stop: Option<TflStopSummary>,
     /// Where the ride is left, when that is not the plan's own stop but
     /// another stop area of its station; `minutes` include the walk from it.
     #[serde(skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
     pub alight_stop: Option<TflStopSummary>,
     /// Who runs the ride ([`line_operator`]); unknown for a walk. Not
     /// served: the `line` says it.
     #[serde(skip)]
+    #[ts(skip)]
     pub operator: schedule_query::OperatorId,
 }
 
@@ -326,7 +333,7 @@ impl AccessCandidate {
 }
 
 /// One end of a plan that is a `TfL` stop, and its candidates.
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, ts_rs::TS)]
 #[serde(rename_all = "camelCase")]
 pub struct StopAccess {
     pub stop: TflStopSummary,
@@ -334,7 +341,7 @@ pub struct StopAccess {
 }
 
 /// Which end of the journey an access leg is at.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, ts_rs::TS)]
 #[serde(rename_all = "camelCase")]
 pub enum AccessLegEnd {
     Origin,
@@ -346,7 +353,7 @@ pub enum AccessLegEnd {
 /// On a `/Trips/plan` transfer leg that is an access or egress leg: which
 /// end, how it was found, and how far it goes. Its `minutes` are an
 /// estimate.
-#[derive(Debug, Clone, PartialEq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, ts_rs::TS)]
 #[serde(rename_all = "camelCase")]
 pub struct AccessLeg {
     pub end: AccessLegEnd,
@@ -354,12 +361,15 @@ pub struct AccessLeg {
     pub distance_metres: u32,
     /// See [`AccessCandidate::change_at`].
     #[serde(skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
     pub change_at: Option<TflStopSummary>,
     /// See [`AccessCandidate::board_stop`].
     #[serde(skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
     pub board_stop: Option<TflStopSummary>,
     /// See [`AccessCandidate::alight_stop`].
     #[serde(skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
     pub alight_stop: Option<TflStopSummary>,
 }
 
@@ -1668,6 +1678,14 @@ pub struct AccessEnds {
     pub direct: Option<AccessCandidate>,
 }
 
+/// `GET /Trips/plan`'s top-level `access`: each stop end with its
+/// candidates, `null` for a station end.
+#[derive(Debug, Clone, Serialize, ts_rs::TS)]
+pub struct AccessResponse {
+    pub origin: Option<StopAccess>,
+    pub destination: Option<StopAccess>,
+}
+
 /// Why a stop cannot be an end.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum AccessError {
@@ -2152,13 +2170,12 @@ impl AccessEnds {
         )
     }
 
-    /// The response's top-level `access`: each stop end with its
-    /// candidates, `null` for a station end.
-    pub fn to_json(&self) -> serde_json::Value {
-        serde_json::json!({
-            "origin": self.origin,
-            "destination": self.destination,
-        })
+    /// The response's top-level `access`.
+    pub fn response(&self) -> AccessResponse {
+        AccessResponse {
+            origin: self.origin.clone(),
+            destination: self.destination.clone(),
+        }
     }
 
     /// Dresses the access legs of `segments` (run after

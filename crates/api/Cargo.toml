@@ -14,11 +14,11 @@ base64 = "0.22"
 chrono = { version = "0.4.44", features = ["serde"] }
 chrono-tz = "0.10"
 clap = { version = "4.6.1", features = ["derive", "env"] }
-common = { path = "../common", features = ["postgres"] }
+common = { path = "../common", features = ["postgres", "ts"] }
 dotenvy = "0.15.7"
 # The shared data access (ingest architecture phase 1A): `data::*` keeps
 # `pub use ds_store::...` shims as functions move there.
-ds-store = { path = "../ds-store" }
+ds-store = { path = "../ds-store", features = ["ts"] }
 # Explicit, not merely transitive-via-`pdf-extract`/`lopdf`/`zip`: used
 # directly by `ticket_extraction::reject_pdf_compression_bombs` to run our
 # OWN bounded zlib decompression pass over a candidate PDF, ahead of
@@ -67,6 +67,12 @@ serde-inline-default = "1.0.1"
 serde_json = { version = "1.0.149", features = ["raw_value"] }
 sha2 = "0.10"
 sqlx = { version = "0.8.6", features = ["chrono", "macros", "migrate", "postgres", "runtime-tokio", "tls-native-tls", "json"] }
+# Generated TypeScript for the frontend (`api_types`, repo-split spec §5.3):
+# `#[derive(TS)]` on the response and request types, written to
+# `api-types/api.ts` by the `api_types` test. No `format` feature (dprint):
+# the file is checked byte for byte, so its layout must not depend on a
+# formatter's version.
+ts-rs = { version = "=12.0.1", default-features = false, features = ["serde-compat", "chrono-impl", "serde-json-impl"] }
 tokio = { version = "1.52.3", features = ["rt-multi-thread", "macros", "sync", "fs", "net", "tracing", "time", "process", "io-util", "signal"] }
 toml = { version = "1.1.2", features = ["serde"] }
 tower = "0.5.3"

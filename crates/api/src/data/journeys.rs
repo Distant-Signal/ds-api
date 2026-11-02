@@ -101,26 +101,35 @@ pub struct JourneyLegRow {
 /// that search's `origin`, renamed here because a leg's `origin` is where
 /// the traveller boards. The wire shape and the
 /// `journey_legs.search_filters` column's JSON are both this struct.
-#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, ts_rs::TS)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct LegSearchFilters {
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
     pub operator: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
     pub starts_at: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
     pub terminates_at: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
     pub previously_calls_at: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
     pub previously_stops_at: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
     pub calls_at: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
     pub via: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
     pub avoid: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
     pub avoid_stop: Option<String>,
 }
 
@@ -1709,7 +1718,7 @@ pub const TRANSIT_STOP_MODES: [&str; 2] = ["tram", "bus"];
 pub const TFL_STOP_MODES: [&str; 4] = ["tube", "dlr", "tram", "metro"];
 
 /// An untracked leg's state, from the clock alone (spec §2.2).
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, ts_rs::TS)]
 #[serde(rename_all = "camelCase")]
 pub enum UntrackedStatus {
     /// Before its planned departure.
@@ -2730,7 +2739,7 @@ pub(crate) async fn delete_journey_row_releasing_trains(
     clippy::struct_excessive_bools,
     reason = "a wire row: each flag is an independent API field, not a state machine"
 )]
-#[derive(Debug, Clone, sqlx::FromRow, Serialize)]
+#[derive(Debug, Clone, sqlx::FromRow, Serialize, ts_rs::TS)]
 #[serde(rename_all = "camelCase")]
 pub struct JourneyListItem {
     pub id: i64,
@@ -2741,6 +2750,7 @@ pub struct JourneyListItem {
     /// (§5.5a), so its list needs this. Absent on a followed journey's row:
     /// how its owner saved it is not the follower's business.
     #[serde(skip_serializing_if = "String::is_empty")]
+    #[ts(optional = nullable)]
     pub created_via: String,
     pub leg_id: i64,
     pub origin_crs: Option<String>,
@@ -2777,9 +2787,12 @@ pub struct JourneyListItem {
     pub first_service_date: NaiveDate,
     /// How many legs the journey has.
     pub leg_count: i64,
+    #[ts(as = "crate::ts_values::MatchMode")]
     pub match_mode: String,
     pub train_subscription_id: Option<i64>,
+    #[ts(as = "Option<crate::ts_values::ResolutionStatus>")]
     pub resolution_status: Option<String>,
+    #[ts(as = "Option<crate::ts_values::JourneyStatus>")]
     pub status: Option<String>,
     /// The delay at the passenger's own stop, against the PUBLIC timetable
     /// (`data::stop_delay`, design doc §9 decision 2): the current leg's destination. `None` until
@@ -2798,17 +2811,22 @@ pub struct JourneyListItem {
     /// (`train_current_state.delay_minutes`), internal: the input to the
     /// per-stop estimates and to the forecast above. Never serialized.
     #[serde(skip_serializing)]
+    #[ts(skip)]
     pub working_delay_minutes: Option<i32>,
     /// The leg's shared `trains` row and its UID, internal: what the delay
     /// is read for.
     #[serde(skip_serializing)]
+    #[ts(skip)]
     pub trains_id: Option<i64>,
     #[serde(skip_serializing)]
+    #[ts(skip)]
     pub train_uid: Option<String>,
     /// The current leg's kind: `train` or `untracked` (spec 2026-10-20
     /// §2.4). For an untracked leg `originName`/`destinationName` carry its
     /// place names, and the five fields below are set.
+    #[ts(as = "crate::ts_values::JourneyLegKind")]
     pub kind: String,
+    #[ts(as = "Option<crate::ts_values::TransitMode>")]
     pub transit_mode: Option<String>,
     pub line_name: Option<String>,
     pub planned_departure: Option<DateTime<Utc>>,
@@ -2819,6 +2837,7 @@ pub struct JourneyListItem {
     /// Whether the leg's `trains` row carries timetable data, internal: an
     /// input to `tracking_phase`.
     #[serde(skip_serializing)]
+    #[ts(skip)]
     pub timetable_on_row: bool,
     /// The current train leg's `trackingPhase` (see
     /// `train_tracking::TrackedTrainState::tracking_phase`); `None` for an
@@ -2860,16 +2879,22 @@ pub struct JourneyListItem {
     /// The last train leg's train, date, destination, running delay and
     /// status, internal: what `final_arrival_delay_minutes` is read for.
     #[serde(skip_serializing)]
+    #[ts(skip)]
     pub final_trains_id: Option<i64>,
     #[serde(skip_serializing)]
+    #[ts(skip)]
     pub final_train_uid: Option<String>,
     #[serde(skip_serializing)]
+    #[ts(skip)]
     pub final_service_date: Option<NaiveDate>,
     #[serde(skip_serializing)]
+    #[ts(skip)]
     pub final_destination_crs: Option<String>,
     #[serde(skip_serializing)]
+    #[ts(skip)]
     pub final_working_delay_minutes: Option<i32>,
     #[serde(skip_serializing)]
+    #[ts(skip)]
     pub final_status: Option<String>,
     /// The journey's open break (mid-journey changes spec 2026-10-22 §7),
     /// `None` when it works. Additive, 2026-10-23.
@@ -2886,6 +2911,7 @@ pub struct JourneyListItem {
     /// read-only. Absent on the caller's own journeys.
     #[sqlx(skip)]
     #[serde(skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
     pub followed_from: Option<crate::data::journey_follows::FollowedFrom>,
     /// Set on a journey another member shared into one or more of the
     /// caller's groups (DS-178, `include=shared` only): one entry per such
@@ -2894,6 +2920,7 @@ pub struct JourneyListItem {
     /// one of their groups carries both.
     #[sqlx(skip)]
     #[serde(skip_serializing_if = "Vec::is_empty")]
+    #[ts(optional = nullable)]
     pub shared_via: Vec<crate::data::groups::SharedVia>,
 }
 

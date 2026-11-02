@@ -1145,8 +1145,8 @@ async fn get_by_uid_and_date(
 /// fields keep their names and place.
 ///
 /// [`PublicTrainState`]: crate::data::trains::PublicTrainState
-#[derive(Debug, Serialize)]
-struct PublicTrainResponse {
+#[derive(Debug, Serialize, ts_rs::TS)]
+pub(crate) struct PublicTrainResponse {
     #[serde(flatten)]
     state: crate::data::trains::PublicTrainState,
     #[serde(flatten)]
@@ -1161,9 +1161,9 @@ struct PublicTrainResponse {
 /// same pair `TrackedTrainState` carries. Kept beside the response rather
 /// than on `PublicTrainState`, which is built in many places that have no
 /// use for it.
-#[derive(Debug, Default, Serialize)]
+#[derive(Debug, Default, Serialize, ts_rs::TS)]
 #[serde(rename_all = "camelCase")]
-struct PublicPhaseFields {
+pub(crate) struct PublicPhaseFields {
     tracking_phase: Option<crate::data::tracking_phase::TrackingPhase>,
     first_report_expected_at: Option<chrono::DateTime<Utc>>,
 }

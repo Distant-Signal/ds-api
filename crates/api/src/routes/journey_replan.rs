@@ -754,11 +754,13 @@ pub(crate) async fn plan_suggestions(
 // ---------------------------------------------------------------------------
 
 /// The open break as `GET /Journeys/{id}` serves it.
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, ts_rs::TS)]
 #[serde(rename_all = "camelCase")]
 pub(crate) struct OpenBreakSummary {
     pub id: i64,
+    #[ts(as = "crate::ts_values::BreakCause")]
     pub cause: String,
+    #[ts(as = "crate::ts_values::BreakFault")]
     pub fault: String,
     pub severity: i16,
     pub trigger_leg_id: Option<i64>,
@@ -801,7 +803,7 @@ impl OpenBreakSummary {
 }
 
 /// What `GET /Journeys/{id}` gains (flattened into its response).
-#[derive(Debug, Clone, Default, Serialize)]
+#[derive(Debug, Clone, Default, Serialize, ts_rs::TS)]
 #[serde(rename_all = "camelCase")]
 pub(crate) struct DetailExtras {
     /// The open break, `null` when the journey works.
@@ -810,13 +812,16 @@ pub(crate) struct DetailExtras {
     pub revision_count: i64,
     /// Suggestion pushes muted for this journey (owner only).
     #[serde(skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
     pub suggestions_muted: Option<bool>,
     /// The `/plan` operator filter the journey keeps (owner only; additive,
     /// 2026-10-31). Absent when it has none.
     #[serde(skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
     pub operator_filter: Option<crate::data::journey_operator_filter::JourneyOperatorFilter>,
     /// Per current leg, the legs of the plan before it that it replaced.
     #[serde(skip)]
+    #[ts(skip)]
     pub replaces: HashMap<i64, Vec<i64>>,
 }
 

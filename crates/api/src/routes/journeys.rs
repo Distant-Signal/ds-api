@@ -1382,9 +1382,9 @@ async fn get_my_journeys(
     }
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, ts_rs::TS)]
 #[serde(rename_all = "camelCase")]
-struct JourneyDetailResponse {
+pub(crate) struct JourneyDetailResponse {
     id: i64,
     custom_name: Option<String>,
     created_at: DateTime<Utc>,
@@ -1394,6 +1394,7 @@ struct JourneyDetailResponse {
     /// share-link route and from a group member's view, which have no use
     /// for how the owner saved it.
     #[serde(skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
     created_via: Option<String>,
     /// Whether the CALLER owns this journey, as opposed to reading it via a
     /// group it's been shared into (`journey_readable_by`). The frontend
@@ -1417,6 +1418,7 @@ struct JourneyDetailResponse {
     /// Set when the caller follows this journey (DS-146): who shared it and
     /// how. Session callers only; absent otherwise.
     #[serde(skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
     followed_from: Option<journey_follows::FollowedFrom>,
     /// Whether the caller could follow this journey through a group it is
     /// shared into (DS-146), i.e. `POST /Journeys/{id}/follow` with no body
@@ -1424,6 +1426,7 @@ struct JourneyDetailResponse {
     /// absent (false) otherwise. A share-link visitor follows with the
     /// link's token instead.
     #[serde(skip_serializing_if = "std::ops::Not::not")]
+    #[ts(optional = nullable)]
     can_follow: bool,
 }
 
@@ -1431,9 +1434,9 @@ struct JourneyDetailResponse {
 /// wire -- deliberately its own type rather than reusing `UnlistedLink`
 /// directly, so this route's response shape doesn't change if that
 /// module's internal shape ever does.
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, ts_rs::TS)]
 #[serde(rename_all = "camelCase")]
-struct ShareLinkResponse {
+pub(crate) struct ShareLinkResponse {
     /// `Some` ONLY in the response to the `POST .../share-link` that just
     /// minted it. Tokens are stored hashed (2026-09-26 review, L14,
     /// `unlisted_links::hash_link_token`), so `GET /Journeys/{id}` can say
@@ -1443,9 +1446,9 @@ struct ShareLinkResponse {
     expires_at: Option<DateTime<Utc>>,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, ts_rs::TS)]
 #[serde(rename_all = "camelCase")]
-struct JourneyLegDetailResponse {
+pub(crate) struct JourneyLegDetailResponse {
     id: i64,
     origin_crs: Option<String>,
     /// `None` whenever `origin_crs` is `None`, or there is no `stations`
@@ -1461,6 +1464,7 @@ struct JourneyLegDetailResponse {
     depart_before: Option<NaiveTime>,
     arrive_after: Option<NaiveTime>,
     arrive_before: Option<NaiveTime>,
+    #[ts(as = "crate::ts_values::MatchMode")]
     match_mode: String,
     /// Whether this leg was ever created via a window search -- `true` for
     /// a `window`-mode leg (even one with all four `depart_*`/`arrive_*`
@@ -1488,7 +1492,9 @@ struct JourneyLegDetailResponse {
     /// leg never has one. For an untracked leg, `originName`/
     /// `destinationName` are its place names and the fields below are set;
     /// for a train leg they are `null`.
+    #[ts(as = "crate::ts_values::JourneyLegKind")]
     kind: String,
+    #[ts(as = "Option<crate::ts_values::TransitMode>")]
     transit_mode: Option<String>,
     line_name: Option<String>,
     planned_departure: Option<DateTime<Utc>>,
@@ -1511,6 +1517,7 @@ struct JourneyLegDetailResponse {
     /// altogether when it couldn't be worked out (the frontend then falls
     /// back to its own gap check). Additive, 2026-10-22.
     #[serde(skip_serializing_if = "Option::is_none")]
+    #[ts(optional = nullable)]
     #[expect(
         clippy::option_option,
         reason = "absent (not worked out) and null (the first leg) differ on the wire"
@@ -1530,12 +1537,13 @@ struct JourneyLegDetailResponse {
     /// (`data::timetabled_legs::LegTimetable`): scheduled times only,
     /// never live. Absent on other legs, and when it couldn't be read.
     #[serde(skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
     timetable: Option<crate::data::timetabled_legs::LegTimetable>,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, ts_rs::TS)]
 #[serde(rename_all = "camelCase")]
-struct LegSkipResponse {
+pub(crate) struct LegSkipResponse {
     origin_skipped: bool,
     destination_skipped: bool,
 }

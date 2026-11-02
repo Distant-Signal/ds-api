@@ -1461,7 +1461,7 @@ pub fn record_connections(graph: &TransitGraph) {
 // --- Legs ------------------------------------------------------------------
 
 /// A transit leg's `serviceMode`.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, ts_rs::TS)]
 #[serde(rename_all = "camelCase")]
 pub enum TransitServiceMode {
     Tram,
@@ -1485,7 +1485,7 @@ impl TransitServiceMode {
 }
 
 /// A transit leg's `line`: `null` for a replacement bus.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, ts_rs::TS)]
 pub struct TransitLegLine {
     /// The public id, `metrolink:blue`.
     pub id: String,
@@ -1494,7 +1494,7 @@ pub struct TransitLegLine {
 }
 
 /// A transit leg's `originStop` or `destinationStop`.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, ts_rs::TS)]
 pub struct TransitLegStop {
     /// The station, in the network's public spelling.
     pub id: String,
@@ -1504,7 +1504,7 @@ pub struct TransitLegStop {
 }
 
 /// A notice on a transit leg (spec §7.3): a current disruption on its line.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, ts_rs::TS)]
 #[serde(rename_all = "camelCase")]
 pub struct TransitLegNotice {
     /// `disruption`.
@@ -1522,6 +1522,7 @@ pub struct TransitLegNotice {
     /// absent for a status from `TfL`, whose line page has the detail
     /// (additive, DS-237).
     #[serde(skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
     pub situation_id: Option<String>,
 }
 
@@ -1533,7 +1534,7 @@ pub struct TransitLegNotice {
 /// Carried on a `PlannedLeg::Train` (`transit`), so every consumer that
 /// walks legs treats it as a ride (it counts as a change, Q5), and
 /// serialized in its place by `PlannedLeg`'s `Serialize`.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, ts_rs::TS)]
 #[serde(tag = "kind", rename = "transit", rename_all = "camelCase")]
 pub struct TransitLeg {
     pub network: String,
@@ -1555,6 +1556,7 @@ pub struct TransitLeg {
     /// from the boarding platform in the hour around this one; absent with
     /// fewer than three ([`headway_minutes`]).
     #[serde(skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
     pub headway_minutes: Option<u32>,
     pub notices: Vec<TransitLegNotice>,
 }
@@ -1562,7 +1564,7 @@ pub struct TransitLeg {
 /// On a rail-link walk (`kind: "transfer"`, `mode: "WALK"`): the tram stop
 /// at one end and the estimated walk alone (Q2). The transfer's own
 /// `minutes` also hold the tram-side change buffer.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, ts_rs::TS)]
 #[serde(rename_all = "camelCase")]
 pub struct TransitWalk {
     pub network: String,
@@ -1574,7 +1576,7 @@ pub struct TransitWalk {
     pub estimated: bool,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, ts_rs::TS)]
 pub struct TransitWalkStop {
     pub id: String,
     pub name: String,
@@ -1582,6 +1584,7 @@ pub struct TransitWalkStop {
     /// client can say which kind of station the walk reaches (DS-239);
     /// left out when none are known (another network's stop).
     #[serde(skip_serializing_if = "Vec::is_empty")]
+    #[ts(optional = nullable)]
     pub modes: Vec<String>,
 }
 
@@ -1757,25 +1760,30 @@ fn hub_walk_stops(
     Some((stop(from)?, stop(to)?))
 }
 
-/// `transitNotices` (spec §7.3): each network left out of the plan, as
-/// `{network, reason: "noTimetable", message}`.
-pub fn notices_json<'a>(
+/// One of `GET /Trips/plan`'s `transitNotices` (spec §7.3): a network left
+/// out of the plan.
+#[derive(Debug, Clone, Serialize, ts_rs::TS)]
+pub struct TransitPlanNotice {
+    pub network: String,
+    /// Always `noTimetable` so far.
+    pub reason: &'static str,
+    pub message: &'static str,
+}
+
+/// `transitNotices` (spec §7.3): each network left out of the plan, once.
+pub fn notices<'a>(
     skipped: impl IntoIterator<Item = &'a (String, SkipReason)>,
-) -> serde_json::Value {
+) -> Vec<TransitPlanNotice> {
     let mut seen: HashSet<&str> = HashSet::new();
-    serde_json::Value::Array(
-        skipped
-            .into_iter()
-            .filter(|(network, _)| seen.insert(network.as_str()))
-            .map(|(network, _)| {
-                serde_json::json!({
-                    "network": network,
-                    "reason": "noTimetable",
-                    "message": "Tram times aren't available for this date.",
-                })
-            })
-            .collect(),
-    )
+    skipped
+        .into_iter()
+        .filter(|(network, _)| seen.insert(network.as_str()))
+        .map(|(network, _)| TransitPlanNotice {
+            network: network.clone(),
+            reason: "noTimetable",
+            message: "Tram times aren't available for this date.",
+        })
+        .collect()
 }
 
 /// A disruption notice per current non-good status of `line_id` (a local
@@ -2475,12 +2483,12 @@ mod tests {
 
     #[test]
     fn notices_name_each_left_out_network_once() {
-        let notices = notices_json(&[
+        let notices = notices(&[
             ("metrolink".to_owned(), SkipReason::OutsideHorizon),
             ("metrolink".to_owned(), SkipReason::NoServiceDay),
         ]);
         assert_eq!(
-            notices,
+            serde_json::to_value(notices).unwrap(),
             serde_json::json!([{
                 "network": "metrolink",
                 "reason": "noTimetable",

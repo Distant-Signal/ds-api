@@ -23,7 +23,7 @@ use crate::data::reference::escape_ilike_pattern;
 use crate::data::trip_planning_itinerary::{PlannedLeg, SegmentResult};
 
 /// One stop as the api serves it.
-#[derive(Debug, Clone, PartialEq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, ts_rs::TS)]
 #[serde(rename_all = "camelCase")]
 pub struct TflStopSummary {
     /// The `NaPTAN` id (`940GZZLUEUS`): what a leg stores.

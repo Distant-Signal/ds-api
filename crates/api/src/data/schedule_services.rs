@@ -25,7 +25,7 @@ use sqlx::PgPool;
 /// What kind of vehicle a schedule is. The stored spelling is
 /// [`Self::as_db_str`] (`replacement_bus`), the wire spelling camelCase
 /// (`replacementBus`).
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default, Serialize, Deserialize, ts_rs::TS)]
 #[serde(rename_all = "camelCase")]
 pub enum ServiceMode {
     #[default]
@@ -93,6 +93,50 @@ impl From<schedule_query::ServiceMode> for ServiceMode {
 /// `#[serde(flatten)]` it into a response struct.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub struct ServiceModeFields(pub ServiceMode);
+
+/// [`ServiceModeFields`]'s wire shape, for its generated TypeScript only
+/// (`api_types`): the `Serialize` impl below writes these two entries.
+#[derive(ts_rs::TS)]
+#[ts(rename = "ServiceModeFields", rename_all = "camelCase")]
+pub struct ServiceModeFieldsWire {
+    pub service_mode: ServiceMode,
+    pub live_tracking: bool,
+}
+
+/// `ts_rs::TS` by way of [`ServiceModeFieldsWire`], written out because `#[ts(as)]` cannot
+/// be flattened, and this type is `#[serde(flatten)]`ed into response types.
+impl ts_rs::TS for ServiceModeFields {
+    type WithoutGenerics = <ServiceModeFieldsWire as ts_rs::TS>::WithoutGenerics;
+    type OptionInnerType = Self;
+
+    fn docs() -> Option<String> {
+        <ServiceModeFieldsWire as ts_rs::TS>::docs()
+    }
+    fn ident(cfg: &ts_rs::Config) -> String {
+        <ServiceModeFieldsWire as ts_rs::TS>::ident(cfg)
+    }
+    fn name(cfg: &ts_rs::Config) -> String {
+        <ServiceModeFieldsWire as ts_rs::TS>::name(cfg)
+    }
+    fn inline(cfg: &ts_rs::Config) -> String {
+        <ServiceModeFieldsWire as ts_rs::TS>::inline(cfg)
+    }
+    fn inline_flattened(cfg: &ts_rs::Config) -> String {
+        <ServiceModeFieldsWire as ts_rs::TS>::inline_flattened(cfg)
+    }
+    fn decl(cfg: &ts_rs::Config) -> String {
+        <ServiceModeFieldsWire as ts_rs::TS>::decl(cfg)
+    }
+    fn decl_concrete(cfg: &ts_rs::Config) -> String {
+        <ServiceModeFieldsWire as ts_rs::TS>::decl_concrete(cfg)
+    }
+    fn visit_dependencies(v: &mut impl ts_rs::TypeVisitor) {
+        <ServiceModeFieldsWire as ts_rs::TS>::visit_dependencies(v);
+    }
+    fn output_path() -> Option<std::path::PathBuf> {
+        <ServiceModeFieldsWire as ts_rs::TS>::output_path()
+    }
+}
 
 impl Serialize for ServiceModeFields {
     fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {

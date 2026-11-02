@@ -801,7 +801,7 @@ pub use ds_store::tracking::{
 /// eventually got reconnected to it. Deleted outright rather than fixed,
 /// since dead code carrying a latent cross-user leak serves no purpose
 /// sitting around waiting to be reconnected.
-#[derive(Debug, Clone, sqlx::FromRow, Serialize)]
+#[derive(Debug, Clone, sqlx::FromRow, Serialize, ts_rs::TS)]
 #[serde(rename_all = "camelCase")]
 pub struct TrackedTrainState {
     pub id: i64,
@@ -843,6 +843,7 @@ pub struct TrackedTrainState {
     /// value on `TrackedTrainListItem` for `GET /Train/mine`, so nothing new
     /// is exposed by reading it here.
     #[serde(skip_serializing)]
+    #[ts(skip)]
     pub pin_scheduled_departure: Option<DateTime<Utc>>,
     /// `None` whenever the `LEFT JOIN` below found no `stations` row for
     /// `pin_origin_crs` (an unrecognised code, or reference data that
@@ -851,6 +852,7 @@ pub struct TrackedTrainState {
     /// code rather than assume this is always present.
     pub pin_origin_name: Option<String>,
     pub pin_destination_name: Option<String>,
+    #[ts(as = "crate::ts_values::ResolutionStatus")]
     pub resolution_status: String,
     pub train_uid: Option<String>,
     pub train_id: Option<String>,
@@ -874,6 +876,7 @@ pub struct TrackedTrainState {
     /// below (the frontend already gets this signal per-stop, on each
     /// `JourneyStop`'s own `skipSource`).
     #[serde(skip_serializing)]
+    #[ts(skip)]
     pub schedule_skipped_stations: Vec<String>,
     /// The shared row's own captured origin-platform snapshot
     /// (`trains.platform`/`planned_platform`) -- same internal-plumbing
@@ -881,9 +884,12 @@ pub struct TrackedTrainState {
     /// `journey::build_journey_stops` and never sent to the frontend
     /// directly (the origin `JourneyStop` carries it instead).
     #[serde(skip_serializing)]
+    #[ts(skip)]
     pub schedule_platform: Option<String>,
     #[serde(skip_serializing)]
+    #[ts(skip)]
     pub schedule_planned_platform: Option<String>,
+    #[ts(as = "Option<crate::ts_values::JourneyStatus>")]
     pub status: Option<String>,
     pub last_reported_location: Option<String>,
     pub last_event_type: Option<String>,
@@ -904,9 +910,11 @@ pub struct TrackedTrainState {
     /// (`train_current_state.delay_minutes`), internal: the input to the
     /// per-stop estimates and to the forecast above. Never serialized.
     #[serde(skip_serializing)]
+    #[ts(skip)]
     pub working_delay_minutes: Option<i32>,
     pub next_calling_point: Option<String>,
     pub eta_next: Option<DateTime<Utc>>,
+    #[ts(as = "Option<crate::ts_values::EtaSource>")]
     pub eta_source: Option<String>,
     pub custom_name: Option<String>,
     /// How many groups (`crate::data::groups`) this subscription is
@@ -937,10 +945,12 @@ pub struct TrackedTrainState {
     /// Additive (2026-10-22).
     #[sqlx(skip)]
     #[serde(skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
     pub journey_ids: Option<Vec<i64>>,
     /// See `journey_ids`.
     #[sqlx(skip)]
     #[serde(skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
     pub single_leg_journey_ids: Option<Vec<i64>>,
     /// Whether this subscription's delay, cancellation and skipped-stop
     /// pushes are on (`train_subscriptions.notifications_enabled`, set by
@@ -948,6 +958,7 @@ pub struct TrackedTrainState {
     /// absent from the JSON otherwise. Additive (2026-10-23).
     #[sqlx(skip)]
     #[serde(skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
     pub notifications_enabled: Option<bool>,
     /// The shared `trains` row's own surrogate key, needed to read
     /// `train_movement_events` for this train's live overlay -- internal
@@ -957,6 +968,7 @@ pub struct TrackedTrainState {
     /// field on the wire would repeat exactly the confusion
     /// `PublicTrainState::trains_id`'s own doc comment describes).
     #[serde(skip_serializing)]
+    #[ts(skip)]
     pub trains_id: Option<i64>,
     /// The merged scheduled-timetable + live-overlay stop list -- `None`
     /// until `train_uid` is known, or if neither backing source has
@@ -1161,7 +1173,7 @@ const TRACKED_TRAIN_STATE_SELECT: &str = concat!(
 /// design spec). Lives API-crate-side only, same as `TrackedTrainState`/
 /// `TrackedTrainTicket` -- never sent between Rust services, only
 /// serialized to JSON for the frontend.
-#[derive(Debug, Clone, sqlx::FromRow, Serialize)]
+#[derive(Debug, Clone, sqlx::FromRow, Serialize, ts_rs::TS)]
 #[serde(rename_all = "camelCase")]
 pub struct TrackedTrainListItem {
     pub id: i64,
@@ -1183,8 +1195,10 @@ pub struct TrackedTrainListItem {
     /// `20260906130000_nullable_pin_columns.sql` and are written (or not)
     /// together by `create_subscription_for_train`.
     pub pin_scheduled_departure: Option<DateTime<Utc>>,
+    #[ts(as = "crate::ts_values::ResolutionStatus")]
     pub resolution_status: String,
     pub train_uid: Option<String>,
+    #[ts(as = "Option<crate::ts_values::JourneyStatus>")]
     pub status: Option<String>,
     /// The delay at the passenger's own stop, against the PUBLIC timetable
     /// (`data::stop_delay`, design doc §9 decision 2): see `TrackedTrainState::delay_minutes`. `None` until
@@ -1203,9 +1217,11 @@ pub struct TrackedTrainListItem {
     /// (`train_current_state.delay_minutes`), internal: the input to the
     /// per-stop estimates and to the forecast above. Never serialized.
     #[serde(skip_serializing)]
+    #[ts(skip)]
     pub working_delay_minutes: Option<i32>,
     /// The shared `trains` row, internal: what the delay is read for.
     #[serde(skip_serializing)]
+    #[ts(skip)]
     pub trains_id: Option<i64>,
     pub tracked_at: DateTime<Utc>,
     pub custom_name: Option<String>,
@@ -1225,6 +1241,7 @@ pub struct TrackedTrainListItem {
     /// points or a schedule origin), internal: one of the inputs to
     /// `tracking_phase`.
     #[serde(skip_serializing)]
+    #[ts(skip)]
     pub timetable_on_row: bool,
     /// See `TrackedTrainState::tracking_phase`.
     #[sqlx(skip)]
