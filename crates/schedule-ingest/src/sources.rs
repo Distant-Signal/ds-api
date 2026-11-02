@@ -253,7 +253,7 @@ impl MultiSource {
     /// Registers the disagreement counter at 0.
     pub(crate) fn register_metrics() {
         for kind in DISAGREEMENT_KINDS {
-            metrics::counter!(common::metrics::metric_name(DISAGREEMENT_METRIC), "kind" => kind)
+            metrics::counter!(ds_runtime::metrics::metric_name(DISAGREEMENT_METRIC), "kind" => kind)
                 .increment(0);
         }
     }
@@ -294,7 +294,7 @@ impl MultiSource {
                 .insert((arrival.source, arrival.sha256.clone()));
             if first {
                 metrics::counter!(
-                    common::metrics::metric_name(DISAGREEMENT_METRIC),
+                    ds_runtime::metrics::metric_name(DISAGREEMENT_METRIC),
                     "kind" => arrival.kind.metric_label()
                 )
                 .increment(1);

@@ -20,7 +20,7 @@
 //! DS_RUN_BUDGET_BENCH=1 cargo test --release -p api --test transit_planning_budget -- --ignored --nocapture --test-threads=1
 //! ```
 //!
-//! Memory is this process's resident set (`common::heap`), read after
+//! Memory is this process's resident set (`ds_runtime::heap`), read after
 //! freed pages are returned to the kernel, with each graph held: the
 //! figure the api's pod pays. The phase M4 measurement on a copy of
 //! production (`scripts/measure-transit-trip-planning.py`) checks it there.
@@ -468,8 +468,8 @@ fn build_with(days: &[NetworkDay]) -> Graph {
 
 /// The resident set once freed memory is back with the kernel.
 fn settled_rss() -> usize {
-    common::heap::release_freed_memory();
-    usize::try_from(common::heap::resident_set_bytes().unwrap()).unwrap()
+    ds_runtime::heap::release_freed_memory();
+    usize::try_from(ds_runtime::heap::resident_set_bytes().unwrap()).unwrap()
 }
 
 /// What holding one more built graph adds to the resident set.
@@ -492,7 +492,7 @@ fn memory_budget() {
     if !bench_requested() {
         return;
     }
-    common::heap::pin_mmap_threshold();
+    ds_runtime::heap::pin_mmap_threshold();
     // Both held at once, as the cache holds its dates.
     let (rail, rail_graph) = held(false);
     let rail_connections = rail_graph.connections.len();
@@ -554,7 +554,7 @@ fn memory_budget_with_tfl() {
     if !bench_requested() {
         return;
     }
-    common::heap::pin_mmap_threshold();
+    ds_runtime::heap::pin_mmap_threshold();
     let (metrolink, metrolink_graph) = held(true);
     let (both, graph) = held_with(&[metrolink_day(), tfl_day()]);
     let transit = graph.transit.as_ref().unwrap();
@@ -804,7 +804,7 @@ fn operator_table_memory() {
         128,
         "the operator id must fit FixedLink's padding"
     );
-    common::heap::pin_mmap_threshold();
+    ds_runtime::heap::pin_mmap_threshold();
     let before = settled_rss();
     let codes = ["VT", "GR", "GW", "SW", "SN", "SE", "NT", "SR", "XC", "LM"];
     let table = api::data::planner_operators::OperatorTable::new(

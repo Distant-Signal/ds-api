@@ -23,7 +23,7 @@
 
 use anyhow::{Context, anyhow};
 use chrono::{DateTime, Utc};
-use common::secret::Secret;
+use ds_runtime::secret::Secret;
 use ds_store::corpus::{
     CorpusLocation, DeliveredFileProvenance, corpus_delivery_problem, corpus_provenance_problem,
     delivery_source_problem, replace_corpus_locations_with_provenance,

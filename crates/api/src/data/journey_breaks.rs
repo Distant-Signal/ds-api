@@ -235,7 +235,7 @@ pub async fn upsert_open(
     tx.commit().await?;
     if outcome == Upserted::New {
         metrics::counter!(
-            common::metrics::metric_name("api_journey_breaks_detected_total"),
+            ds_runtime::metrics::metric_name("api_journey_breaks_detected_total"),
             "cause" => detected.cause.as_str(),
             "fault" => detected.fault
         )
@@ -303,7 +303,7 @@ pub async fn resolve(
     let resolved = result.rows_affected() == 1;
     if resolved {
         metrics::counter!(
-            common::metrics::metric_name("api_journey_breaks_resolved_total"),
+            ds_runtime::metrics::metric_name("api_journey_breaks_resolved_total"),
             "status" => status.to_string()
         )
         .increment(1);
@@ -433,7 +433,7 @@ pub async fn expire_finished(pool: &PgPool) -> anyhow::Result<u64> {
     .await?;
     if result.rows_affected() > 0 {
         metrics::counter!(
-            common::metrics::metric_name("api_journey_breaks_resolved_total"),
+            ds_runtime::metrics::metric_name("api_journey_breaks_resolved_total"),
             "status" => "expired"
         )
         .increment(result.rows_affected());

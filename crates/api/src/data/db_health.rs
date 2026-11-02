@@ -33,8 +33,8 @@ pub const DB_PROBE_FAILURES_METRIC: &str = "api_db_probe_failures_total";
 fn health() -> ds_store::pool::DbHealth {
     ds_store::pool::DbHealth::new(
         "api",
-        metrics::gauge!(common::metrics::metric_name(DB_UP_METRIC)),
-        metrics::counter!(common::metrics::metric_name(DB_PROBE_FAILURES_METRIC)),
+        metrics::gauge!(ds_runtime::metrics::metric_name(DB_UP_METRIC)),
+        metrics::counter!(ds_runtime::metrics::metric_name(DB_PROBE_FAILURES_METRIC)),
     )
 }
 

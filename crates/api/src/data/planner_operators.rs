@@ -321,7 +321,7 @@ pub fn record_attribution(
     unknown_connections: usize,
     unattributed_links: &HashMap<String, usize>,
 ) {
-    metrics::gauge!(common::metrics::metric_name(
+    metrics::gauge!(ds_runtime::metrics::metric_name(
         "api_trip_plan_graph_unknown_operator_connections"
     ))
     .set(unknown_connections as f64);
@@ -334,7 +334,7 @@ pub fn record_attribution(
     }
     for (mode, count) in unattributed_links {
         metrics::gauge!(
-            common::metrics::metric_name("api_trip_plan_graph_unattributed_links"),
+            ds_runtime::metrics::metric_name("api_trip_plan_graph_unattributed_links"),
             "mode" => mode.clone()
         )
         .set(*count as f64);

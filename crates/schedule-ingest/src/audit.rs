@@ -198,7 +198,7 @@ pub(crate) mod tests {
 
     use super::*;
 
-    /// Captures the JSON lines `common::logging` writes, for asserting the
+    /// Captures the JSON lines `ds_runtime::logging` writes, for asserting the
     /// audit line's exact shape.
     #[derive(Clone, Default)]
     pub(crate) struct Capture(Arc<Mutex<Vec<u8>>>);
@@ -276,7 +276,7 @@ pub(crate) mod tests {
     pub(crate) fn capture_default() -> (tracing::subscriber::DefaultGuard, Capture) {
         pin_callsite_interest();
         let out = Capture::default();
-        let subscriber = common::logging::json_subscriber(
+        let subscriber = ds_runtime::logging::json_subscriber(
             "schedule-ingest",
             tracing_subscriber::EnvFilter::new("info"),
             out.clone(),

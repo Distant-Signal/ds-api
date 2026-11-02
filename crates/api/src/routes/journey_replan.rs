@@ -737,12 +737,12 @@ pub(crate) async fn plan_suggestions(
         &operator_names,
     );
     metrics::histogram!(
-        common::metrics::metric_name("api_journey_break_suggestions_seconds"),
+        ds_runtime::metrics::metric_name("api_journey_break_suggestions_seconds"),
         "trigger" => trigger_label
     )
     .record(started.elapsed().as_secs_f64());
     metrics::counter!(
-        common::metrics::metric_name("api_journey_break_suggestions_total"),
+        ds_runtime::metrics::metric_name("api_journey_break_suggestions_total"),
         "result" => if set.suggestions.is_empty() { "none" } else { "found" }
     )
     .increment(1);
@@ -1165,7 +1165,7 @@ async fn get_current_break(
                 .map_err(internal("stamp break"))?
             {
                 metrics::counter!(
-                    common::metrics::metric_name("api_journey_break_opened_total"),
+                    ds_runtime::metrics::metric_name("api_journey_break_opened_total"),
                     "via" => via
                 )
                 .increment(1);
@@ -1373,7 +1373,7 @@ async fn suggestion_trains(
 
 /// `409 suggestion_stale` with the fresh suggestions in the body.
 fn stale_response(row: BreakRow, now: DateTime<Utc>) -> Response {
-    metrics::counter!(common::metrics::metric_name(
+    metrics::counter!(ds_runtime::metrics::metric_name(
         "api_journey_replan_stale_total"
     ))
     .increment(1);
@@ -1528,7 +1528,7 @@ async fn post_accept(
                     alternative_ranking::Fit::LikelyNewTicket => "likely_new_ticket",
                 });
                 metrics::counter!(
-                    common::metrics::metric_name("api_journey_replan_accepted_total"),
+                    ds_runtime::metrics::metric_name("api_journey_replan_accepted_total"),
                     "via" => row.opened_via.clone().unwrap_or_else(|| "in_app".to_string()),
                     "rank" => match rank { 0 => "1", 1 => "2", 2 => "3", _ => "more" },
                     "pick" => pick,

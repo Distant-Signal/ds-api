@@ -1,6 +1,6 @@
 //! The break sweep (docs/superpowers/specs/2026-10-22-mid-journey-changes-design.md
 //! §5.3, D-4): every `JOURNEY_BREAKS_INTERVAL_SECS`, under its own
-//! advisory lock (`common::advisory_locks::JOURNEY_BREAKS_SWEEP`, so with
+//! advisory lock (`ds_runtime::advisory_locks::JOURNEY_BREAKS_SWEEP`, so with
 //! several api replicas one runs it), the api
 //!
 //! 1. expires open breaks of journeys that are over;
@@ -72,14 +72,14 @@ impl SweepConfig {
 /// The sweep as a `ds_store::loops` loop, under its advisory lock.
 pub fn loop_spec(app: App, config: &SweepConfig) -> ds_store::loops::LoopSpec {
     ds_store::loops::LoopSpec::new(
-        common::advisory_locks::JOURNEY_BREAKS_SWEEP,
+        ds_runtime::advisory_locks::JOURNEY_BREAKS_SWEEP,
         StdDuration::from_secs(config.interval_secs),
         move |_pool| {
             let app = app.clone();
             async move {
                 let started = Instant::now();
                 let result = run_sweep(&app, Utc::now()).await;
-                metrics::histogram!(common::metrics::metric_name(
+                metrics::histogram!(ds_runtime::metrics::metric_name(
                     "api_journey_breaks_sweep_seconds"
                 ))
                 .record(started.elapsed().as_secs_f64());
@@ -212,7 +212,7 @@ async fn sweep_journey(
             Ok(_) => swept.planned += 1,
             Err(err) => {
                 metrics::counter!(
-                    common::metrics::metric_name("api_journey_break_suggestions_total"),
+                    ds_runtime::metrics::metric_name("api_journey_break_suggestions_total"),
                     "result" => "error"
                 )
                 .increment(1);

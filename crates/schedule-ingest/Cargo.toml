@@ -13,6 +13,7 @@ chrono = { version = "0.4.44", features = ["serde"] }
 chrono-tz = "0.10"
 clap = { version = "4.6.1", features = ["derive", "env"] }
 common = { path = "../common" }
+ds-runtime = { path = "../ds-runtime" }
 dotenvy = "0.15.7"
 # The GCS bucket source (`gcs.rs`): RS256 for a service-account key's
 # self-signed JWT. Already in the tree (object_store, rustls), with the same
@@ -66,7 +67,7 @@ tempfile = "3"
 # A fake GCS JSON API (and STS/IAM Credentials) for the bucket source's
 # tests; same spec as `crates/common`.
 wiremock = "0.6"
-# To capture `common::logging`'s JSON lines in the audit-line tests; same
+# To capture `ds_runtime::logging`'s JSON lines in the audit-line tests; same
 # spec as `crates/common`.
 tracing-subscriber = { version = "0.3.23", features = ["env-filter"] }
 

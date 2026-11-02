@@ -242,7 +242,7 @@ pub struct ServiceArguments {
     /// serves its own `/metrics`, via a listener the Ingress never routes
     /// to and that the chart's `NetworkPolicy` scopes to the monitoring
     /// namespace alone (see `networkpolicy.yaml`'s api-metrics rule) --
-    /// this crate just can't reuse `common::metrics::install` verbatim like
+    /// this crate just can't reuse `ds_runtime::metrics::install` verbatim like
     /// they do, since it already drives `axum-prometheus`'s
     /// `PrometheusMetricLayerBuilder` off its own public router rather than
     /// installing `metrics-exporter-prometheus` directly (see that

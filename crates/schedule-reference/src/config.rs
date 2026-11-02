@@ -2,11 +2,11 @@ use std::path::PathBuf;
 
 use clap::Parser;
 use common::config::{LineCatalogue, parse_lines};
-use common::secret::Secret;
+use ds_runtime::secret::Secret;
 
 /// The pool size by default (spec §6.6: publishes are
 /// sequential and the final chunk holds one connection; the role's limit is
-/// 4). `DATABASE_MAX_CONNECTIONS` overrides it (`common::pg`).
+/// 4). `DATABASE_MAX_CONNECTIONS` overrides it (`ds_runtime::pg`).
 pub(crate) const DB_POOL_SIZE: u32 = 3;
 
 /// [`Config::forward_publish_days`] by default: four weeks ahead (raised
@@ -55,7 +55,7 @@ pub(crate) struct Config {
     /// switch, `db` only since release B).
     ///
     /// The `schedule_reference` role's connection. Pool size and timeouts
-    /// come from the shared `DATABASE_*` variables (`common::pg`); the
+    /// come from the shared `DATABASE_*` variables (`ds_runtime::pg`); the
     /// default pool is [`DB_POOL_SIZE`].
     #[arg(long, env = "DATABASE_URL", hide_env_values = true)]
     pub database_url: Secret,
@@ -114,17 +114,17 @@ pub(crate) struct Config {
     pub metrics_port: u16,
 
     #[command(flatten)]
-    pub metrics: common::service_args::MetricsArgs,
+    pub metrics: ds_runtime::service_args::MetricsArgs,
 
     /// `/livez` listener and stall window (SVC-08/INF-9).
     #[command(flatten)]
-    pub health: common::service_args::HealthArgs,
+    pub health: ds_runtime::service_args::HealthArgs,
 
     /// Backoff for the startup read of this service's own completion marker
     /// (`main::seed_last_processed_delivery`), retried until it succeeds.
     /// Not a CLI/env flag: fixed in production, overridden only by tests.
     #[arg(skip = STARTUP_SEED_BACKOFF)]
-    pub startup_backoff: common::backoff::Backoff,
+    pub startup_backoff: ds_runtime::backoff::Backoff,
 
     /// How each product publish is retried within one cycle before it is
     /// recorded as failed (`main::publish_with_retry`). Not a CLI/env flag:
@@ -151,10 +151,11 @@ impl Config {
 /// so a dependency that comes back after the ~1 minute the 2026-09-26 node
 /// reboot's SSO outage lasted is noticed within seconds, while a long outage
 /// costs one GET a minute.
-pub(crate) const STARTUP_SEED_BACKOFF: common::backoff::Backoff = common::backoff::Backoff::new(
-    std::time::Duration::from_secs(1),
-    std::time::Duration::from_secs(60),
-);
+pub(crate) const STARTUP_SEED_BACKOFF: ds_runtime::backoff::Backoff =
+    ds_runtime::backoff::Backoff::new(
+        std::time::Duration::from_secs(1),
+        std::time::Duration::from_secs(60),
+    );
 
 /// Bounded, in-cycle retry of one product publish -- see
 /// `main::publish_with_retry`.
@@ -162,7 +163,7 @@ pub(crate) const STARTUP_SEED_BACKOFF: common::backoff::Backoff = common::backof
 pub(crate) struct PublishRetry {
     /// Total attempts, including the first (so `1` means "no retry").
     pub attempts: u32,
-    pub backoff: common::backoff::Backoff,
+    pub backoff: ds_runtime::backoff::Backoff,
 }
 
 /// Production value of [`Config::publish_retry`]: three attempts, waiting
@@ -172,7 +173,7 @@ pub(crate) struct PublishRetry {
 /// by the next cycle (`main::PublishState`), on its own.
 pub(crate) const PUBLISH_RETRY: PublishRetry = PublishRetry {
     attempts: 3,
-    backoff: common::backoff::Backoff::new(
+    backoff: ds_runtime::backoff::Backoff::new(
         std::time::Duration::from_secs(10),
         std::time::Duration::from_secs(60),
     ),
@@ -212,7 +213,7 @@ mod tests {
         config.validate().unwrap();
         assert_eq!(config.database_url().unwrap(), "postgres://u:p@db/ds");
         let mut config = parse(&[]);
-        config.database_url = common::secret::Secret::new("");
+        config.database_url = ds_runtime::secret::Secret::new("");
         let err = config.validate().unwrap_err();
         assert!(err.to_string().contains("DATABASE_URL"), "{err}");
     }
