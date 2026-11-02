@@ -48,7 +48,7 @@ pub async fn shared_train_enrichment_state(
 /// that helper operates on `TrackedTrainState`'s own pin-shaped input;
 /// wiring it into this new public shape is left as a fast-follow, not
 /// part of this task's own scope (only the ownership-check removal).
-#[derive(Debug, Clone, sqlx::FromRow, Serialize)]
+#[derive(Debug, Clone, sqlx::FromRow, Serialize, ts_rs::TS)]
 #[serde(rename_all = "camelCase")]
 pub struct PublicTrainState {
     /// The SHARED `trains` row's own surrogate key, serialized as
@@ -82,6 +82,7 @@ pub struct PublicTrainState {
     /// (`schedule_destination_departures.headcode`), not from TRUST. `None`
     /// when no row carries one or the rows disagree.
     pub headcode: Option<String>,
+    #[ts(as = "Option<crate::ts_values::JourneyStatus>")]
     pub status: Option<String>,
     pub last_reported_location: Option<String>,
     pub last_event_type: Option<String>,
@@ -102,9 +103,11 @@ pub struct PublicTrainState {
     /// (`train_current_state.delay_minutes`), internal: the input to the
     /// per-stop estimates and to the forecast above. Never serialized.
     #[serde(skip_serializing)]
+    #[ts(skip)]
     pub working_delay_minutes: Option<i32>,
     pub next_calling_point: Option<String>,
     pub eta_next: Option<DateTime<Utc>>,
+    #[ts(as = "Option<crate::ts_values::EtaSource>")]
     pub eta_source: Option<String>,
     /// The shared row's own captured Darwin skip snapshot
     /// (`trains.skipped_stations`) -- internal plumbing for
@@ -117,13 +120,16 @@ pub struct PublicTrainState {
     /// internal-only field on an otherwise-public struct stays off the
     /// wire.
     #[serde(skip_serializing)]
+    #[ts(skip)]
     pub skipped_stations: Vec<String>,
     /// The shared row's own captured origin-platform snapshot
     /// (`trains.platform`/`planned_platform`) -- same internal-plumbing
     /// posture as `skipped_stations` immediately above.
     #[serde(skip_serializing)]
+    #[ts(skip)]
     pub platform: Option<String>,
     #[serde(skip_serializing)]
+    #[ts(skip)]
     pub planned_platform: Option<String>,
     /// See `train_tracking::TrackedTrainState::journey_stops`'s doc
     /// comment -- same contract, populated the same "read row, then

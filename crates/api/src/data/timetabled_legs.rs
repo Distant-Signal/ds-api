@@ -91,7 +91,7 @@ pub struct Ride {
 }
 
 /// How the leg's ride stands in today's timetable.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, ts_rs::TS)]
 #[serde(rename_all = "camelCase")]
 pub enum MatchState {
     /// The timetable has the ride at the planned times.
@@ -167,7 +167,7 @@ pub fn headway_minutes(rides: &[Ride], departure: DateTime<Utc>) -> Option<u32> 
 }
 
 /// A ride's line, as a plan's transit leg shows it.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, ts_rs::TS)]
 #[serde(rename_all = "camelCase")]
 pub struct LineView {
     /// The public id, `tfl:victoria`, `metrolink:blue`.
@@ -179,7 +179,7 @@ pub struct LineView {
 }
 
 /// One timetabled call of the ride, from boarding to alighting.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, ts_rs::TS)]
 #[serde(rename_all = "camelCase")]
 pub struct TimetabledCall {
     /// The station, in the network's public spelling.
@@ -195,7 +195,7 @@ pub struct TimetabledCall {
 
 /// A leg's `timetable` on `GET /Journeys/{id}`: what the network's active
 /// timetable says about it now. Scheduled times only.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, ts_rs::TS)]
 #[serde(rename_all = "camelCase")]
 pub struct LegTimetable {
     pub network: String,
@@ -211,6 +211,7 @@ pub struct LegTimetable {
     /// How often the line runs between the two stations around the
     /// planned time; absent with too few rides to say.
     #[serde(skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
     pub headway_minutes: Option<u32>,
     /// Current disruption on the line (the plan's transit leg notices).
     pub notices: Vec<TransitLegNotice>,
@@ -220,10 +221,12 @@ pub struct LegTimetable {
     /// the alighting stop. Absent elsewhere, and when no pattern of the
     /// line serves the two stops.
     #[serde(skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
     pub live_arrivals: Option<LiveArrivalsFilter>,
     /// Every ride between the two stations in the read window, for the
     /// connection checks.
     #[serde(skip)]
+    #[ts(skip)]
     pub rides: Vec<Ride>,
 }
 
@@ -232,7 +235,7 @@ pub struct LegTimetable {
 /// the trains whose destination is one of `destinations`, the last stations
 /// of the line's timetabled patterns from the boarding stop through the
 /// alighting one. Indicative: a prediction is not the leg's ride.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, ts_rs::TS)]
 #[serde(rename_all = "camelCase")]
 pub struct LiveArrivalsFilter {
     /// The boarding stop, `TfL`'s spelling (`940GZZLUEUS`).

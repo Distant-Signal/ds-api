@@ -68,8 +68,9 @@ pub const fn max_rounds(max_changes: u32) -> u32 {
     clippy::large_enum_variant,
     reason = "nearly every leg is a train; boxing it saves nothing"
 )]
-#[derive(Debug, Clone, serde::Serialize)]
+#[derive(Debug, Clone, serde::Serialize, ts_rs::TS)]
 #[serde(rename_all = "camelCase", tag = "kind", remote = "Self")]
+#[ts(rename = "PlannedRailOrTransferLeg")]
 pub enum PlannedLeg {
     #[serde(rename_all = "camelCase")]
     Train {
@@ -167,6 +168,7 @@ pub enum PlannedLeg {
         /// pre-overlay shape exactly), then `null` (nothing known, or
         /// outside the live window) or a [`crate::data::trip_plan_live::LegLive`].
         #[serde(skip_serializing_if = "Option::is_none")]
+        #[ts(optional = nullable)]
         live: Option<Option<Box<crate::data::trip_plan_live::LegLive>>>,
         /// A ride on a transit network's timetable (a tram, or a
         /// replacement bus from a tram timetable; 2026-10-24, DS-164): the
@@ -193,6 +195,7 @@ pub enum PlannedLeg {
         /// the stop between them (Euston to Victoria, Victoria to Vauxhall),
         /// are served as one leg (2026-10-22, `tfl_stops::merge_transfer_rides`).
         #[serde(skip_serializing_if = "Option::is_none")]
+        #[ts(optional)]
         line: Option<String>,
         /// For a `TUBE` or `METRO` transfer, the `TfL` stop at each end
         /// (`{id, name, modes, lines}`; additive, 2026-10-20, docs/superpowers/
@@ -201,8 +204,10 @@ pub enum PlannedLeg {
         /// place name. Absent when unknown. Filled in by
         /// `tfl_stops::attach_transfer_stops`.
         #[serde(skip_serializing_if = "Option::is_none")]
+        #[ts(optional)]
         origin_stop: Option<Box<crate::data::tfl_stops::TflStopSummary>>,
         #[serde(skip_serializing_if = "Option::is_none")]
+        #[ts(optional)]
         destination_stop: Option<Box<crate::data::tfl_stops::TflStopSummary>>,
         /// Present only on an access or egress leg between a `TfL` stop end
         /// and a National Rail station (additive, 2026-10-23, DS-135): which
@@ -210,6 +215,7 @@ pub enum PlannedLeg {
         /// `minutes` are an estimate. Filled in by
         /// `tfl_access::AccessEnds::finish_legs`.
         #[serde(skip_serializing_if = "Option::is_none")]
+        #[ts(optional)]
         access: Option<Box<crate::data::tfl_access::AccessLeg>>,
         /// Present only on a walk between a National Rail station and a
         /// transit network's tram stop (additive, 2026-10-24, DS-164): the
@@ -217,6 +223,7 @@ pub enum PlannedLeg {
         /// holds the tram-side change time). The tram end's `*Crs` is then
         /// `null`. Filled in by `transit_planning` dressing.
         #[serde(skip_serializing_if = "Option::is_none")]
+        #[ts(optional)]
         transit_walk: Option<Box<crate::data::transit_planning::TransitWalk>>,
         /// Present only on a Tube hop between two National Rail stations
         /// naming both its Tube stations (additive, 2026-11-02): the walks
@@ -224,16 +231,19 @@ pub enum PlannedLeg {
         /// include (`originMinutes`, `destinationMinutes`), so the ride is
         /// the rest. Filled in by `tube_link_walks::attach_station_walks`.
         #[serde(skip_serializing_if = "Option::is_none")]
+        #[ts(optional)]
         station_walks: Option<crate::data::tube_link_walks::StationWalks>,
         /// Who runs the link (additive, 2026-10-31): `LT` for a Tube link
         /// or ride, `ds:DLR` and so on (planner operator filtering spec
         /// §6.5). Absent for a walk or when no operator is known.
         #[serde(skip_serializing_if = "Option::is_none")]
+        #[ts(optional)]
         operator: Option<String>,
         /// `true` for an estimated walk standing in for the Tube, which only
         /// a plan whose operator filter rules the Tube out uses (additive,
         /// 2026-10-31, spec §5.1). Absent otherwise.
         #[serde(skip_serializing_if = "std::ops::Not::not")]
+        #[ts(optional = nullable)]
         estimated_walk: bool,
     },
 }
@@ -253,6 +263,25 @@ impl serde::Serialize for PlannedLeg {
     }
 }
 
+/// [`PlannedLeg`]'s wire shape for its generated TypeScript (`api_types`):
+/// the derived `train` and `transfer` legs, or a `transit` leg, which its
+/// `Serialize` writes in a train leg's place.
+#[derive(ts_rs::TS)]
+#[ts(rename = "PlannedLeg", untagged)]
+pub enum PlannedLegWire {
+    RailOrTransfer(PlannedLeg),
+    Transit(TransitLegWire),
+}
+
+/// A `transit` leg's TypeScript, named `TransitLeg`: `TransitLeg`'s own
+/// derive takes its name from its tag value, `transit`.
+#[derive(ts_rs::TS)]
+#[ts(rename = "TransitLeg")]
+pub struct TransitLegWire {
+    #[ts(flatten)]
+    pub leg: crate::data::transit_planning::TransitLeg,
+}
+
 impl PlannedLeg {
     /// A train, bus, ferry or transit ride (not a transfer): what a change
     /// count counts.
@@ -261,9 +290,10 @@ impl PlannedLeg {
     }
 }
 
-#[derive(Debug, Clone, serde::Serialize)]
+#[derive(Debug, Clone, serde::Serialize, ts_rs::TS)]
 #[serde(rename_all = "camelCase")]
 pub struct PlannedItinerary {
+    #[ts(as = "Vec<PlannedLegWire>")]
     pub legs: Vec<PlannedLeg>,
     /// Changes between National Rail trains (rides less one): what
     /// `maxChanges`, `exceedsRecommendedChanges` and the options' change
@@ -278,24 +308,30 @@ pub struct PlannedItinerary {
     pub total_duration_minutes: u32,
     /// `results=fastest` only -- see this plan's Judgment Call 3.
     #[serde(skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
     pub exceeds_recommended_changes: Option<bool>,
     /// Internal (never serialized): minutes from service-day midnight of the
     /// itinerary's first departure and final arrival, and the `TIPLOC` it
     /// finally arrives at -- what [`plan_via_waypoints`] chains the next
     /// segment from.
     #[serde(skip)]
+    #[ts(skip)]
     pub departure_min: u32,
     #[serde(skip)]
+    #[ts(skip)]
     pub arrival_min: u32,
     #[serde(skip)]
+    #[ts(skip)]
     pub arrival_tiploc: Option<String>,
     /// Internal: the `TIPLOC` the itinerary starts from -- what an arrive-by
     /// chain ([`chain_deadline_min`]) charges the change time at.
     #[serde(skip)]
+    #[ts(skip)]
     pub departure_tiploc: Option<String>,
     /// Live overlay only (absent otherwise): no cancelled leg and no change
     /// that live times make impossible.
     #[serde(skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
     pub live_feasible: Option<bool>,
     /// The first leg is the same train the previous segment's itinerary rode
     /// into the waypoint: the traveller stays aboard and makes no change
@@ -304,26 +340,31 @@ pub struct PlannedItinerary {
     /// Internal: the vias this itinerary's legs satisfied, collected into
     /// the response's `journeys[j].viaSatisfiedBy` (see [`journey_summaries`]).
     #[serde(skip)]
+    #[ts(skip)]
     pub via_satisfied_by: Vec<ViaSatisfied>,
     /// Only on a request planned with transit networks (`transit=true` or a
     /// tram stop end; additive, 2026-10-24, DS-164): whether any leg is
     /// `kind: "transit"`, so its times are scheduled, not live. Absent
     /// otherwise.
     #[serde(skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
     pub scheduled_only: Option<bool>,
     /// Internal: `Some` on an alternative route `results=options` added to
     /// its Pareto set (DS-196), holding the CRS that tells it apart (if
     /// any). Turned into `labels` by [`label_options`].
     #[serde(skip)]
+    #[ts(skip)]
     pub alternative: Option<AlternativeRoute>,
     /// Internal: the route `?preferOperator=` asked for (2026-10-31):
     /// labelled `operatorOnly` by [`label_options`].
     #[serde(skip)]
+    #[ts(skip)]
     pub operator_only: bool,
     /// `results=options` only (additive, 2026-10-30, DS-196): what this
     /// option is -- see [`OptionLabel`]. The same on every segment's part
     /// of one journey. Absent in `fastest` mode.
     #[serde(skip_serializing_if = "Vec::is_empty")]
+    #[ts(optional = nullable)]
     pub labels: Vec<OptionLabel>,
 }
 
@@ -339,7 +380,7 @@ pub struct AlternativeRoute {
 /// `{"kind": "fastest"}`, `{"kind": "leavesLatest"}`,
 /// `{"kind": "fewestChanges"}` or `{"kind": "alternative", "viaCrs": "MYB"}`
 /// (`viaCrs` may be `null`).
-#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, ts_rs::TS)]
 #[serde(tag = "kind", rename_all = "camelCase")]
 pub enum OptionLabel {
     /// Depart-after: arrives first (then fewest changes). Exactly one
@@ -1173,7 +1214,7 @@ fn alternative_crs<J>(
 ///   the route needs). `operator` also when none of the chosen operators
 ///   runs that day. A filter that only fails together with the avoid lists
 ///   is `avoidCombined`, its `values` then holding the operator codes too.
-#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, ts_rs::TS)]
 #[serde(rename_all = "camelCase")]
 pub struct NoResultReason {
     pub constraint: &'static str,
@@ -1183,6 +1224,7 @@ pub struct NoResultReason {
     /// links or connecting rides, not trains, made the difference (`["LT"]`:
     /// crossing London needs the Tube). Absent otherwise.
     #[serde(skip_serializing_if = "Vec::is_empty")]
+    #[ts(optional = nullable)]
     pub link_operators: Vec<String>,
 }
 
@@ -1506,7 +1548,7 @@ pub fn build_restrictions(
 
 /// Which leg passed one via: served per journey as
 /// `journeys[j].viaSatisfiedBy[k]` for the request's `via[k]`.
-#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, ts_rs::TS)]
 #[serde(rename_all = "camelCase")]
 pub struct ViaSatisfied {
     /// The via, as requested (`KGX|EUS` or `group:LON` for an OR choice).
@@ -1523,6 +1565,7 @@ pub struct ViaSatisfied {
     /// `call` (the train called there: the traveller stayed aboard, boarded
     /// or alighted), `pass` (it ran through without calling, or past a
     /// call the live overlay cancelled) or `walk` (a transfer leg into it).
+    #[ts(as = "crate::ts_values::ViaHow")]
     pub how: &'static str,
 }
 
@@ -1731,7 +1774,7 @@ fn resolve_code_tiplocs(interchange: &InterchangeData, code: &str) -> Result<Vec
 /// Where a journey stopped for one requested waypoint (2026-10-07): served
 /// as `journeys[j].waypointSatisfiedBy[k]` for `waypoints[k]` when any
 /// waypoint is an OR choice.
-#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, ts_rs::TS)]
 #[serde(rename_all = "camelCase")]
 pub struct WaypointSatisfied {
     /// The waypoint as requested (`KGX`, `KGX|EUS`, `group:LON`).
@@ -1747,6 +1790,7 @@ pub struct WaypointSatisfied {
     /// aboard when the next segment `continuesPreviousTrain`), `walk` (a
     /// transfer leg into it), `origin` or `destination` (an end of the trip
     /// is a member; see [`waypoints_at_ends`]).
+    #[ts(as = "crate::ts_values::WaypointHow")]
     pub how: &'static str,
 }
 

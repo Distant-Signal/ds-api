@@ -35,7 +35,7 @@ use crate::data::trip_planning::{self, GraphCache};
 pub const AT_RISK_SLACK_MINUTES: i64 = 3;
 
 /// How one change between two consecutive legs stands.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, ts_rs::TS)]
 #[serde(rename_all = "camelCase")]
 pub enum ConnectionState {
     /// Enough time to change, with room to spare (or none was needed).
@@ -53,7 +53,7 @@ pub enum ConnectionState {
 
 /// The change onto a leg from the one before it (`connection` on every
 /// leg of `GET /Journeys/{id}` after the first).
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, ts_rs::TS)]
 #[serde(rename_all = "camelCase")]
 pub struct LegConnection {
     /// Minutes from the previous leg's expected arrival (reported, else
@@ -72,6 +72,7 @@ pub struct LegConnection {
     /// (usually `ok`); this says the train could leave earlier than
     /// expected. See [`trip_plan_live::LateDepartureReliance`].
     #[serde(skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
     pub relies_on_late_departure: Option<trip_plan_live::LateDepartureReliance<DateTime<Utc>>>,
     /// Onto a timetabled leg (DS-237, additive; absent otherwise): the
     /// ride its timetable has first from when the traveller gets there,
@@ -79,11 +80,12 @@ pub struct LegConnection {
     /// the timetable has moved it). The changes after it are judged from
     /// its arrival. Scheduled times, never live.
     #[serde(skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
     pub next_timetabled: Option<TimetabledRide>,
 }
 
 /// A ride of a timetabled leg, by its scheduled times.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, ts_rs::TS)]
 #[serde(rename_all = "camelCase")]
 pub struct TimetabledRide {
     pub departure: DateTime<Utc>,
