@@ -733,3 +733,57 @@ async fn tokens_never_reach_the_logs() {
     );
     cleanup(&pool, "TEST-PTOK-E").await;
 }
+
+/// The banner every page shows (spec §15 decision 3): the newest token
+/// created in the last 7 days, only while the feature is on, and gone
+/// once it is revoked.
+#[tokio::test]
+#[ignore = "requires a live database; run with `DATABASE_URL=... cargo test -p api \
+            personal_tokens_db_tests -- --ignored --test-threads=1`"]
+async fn the_notice_names_a_new_token_for_seven_days() {
+    let pool = connect().await;
+    cleanup(&pool, "TEST-PTOK-F").await;
+    let h = harness(pool.clone(), settings());
+    let raw = seed_user(&pool, "TEST-PTOK-F1").await;
+    let notice = |router: axum::Router, raw: String| async move {
+        let (status, _, body) = send(
+            &router,
+            "GET",
+            "/public/account/connected-apps-notice",
+            &[("cookie", &cookie(&raw))],
+            None,
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        body["tokenNotice"].clone()
+    };
+    assert_eq!(notice(h.main.clone(), raw.clone()).await, Value::Null);
+    let (_, body) = create(&h, &raw, &["lines:read"]).await;
+    let id = body["id"].as_i64().unwrap();
+    let shown = notice(h.main.clone(), raw.clone()).await;
+    assert_eq!(shown["name"], "Kitchen display");
+    assert!(shown.get("token").is_none());
+    // Off: no token notice even with a new token.
+    let off = harness(pool.clone(), PersonalTokenSettings::default());
+    assert_eq!(notice(off.main.clone(), raw.clone()).await, Value::Null);
+    // Older than 7 days, or revoked: none.
+    sqlx::query(
+        "UPDATE personal_api_tokens SET created_at = now() - INTERVAL '8 days' WHERE id = $1",
+    )
+    .bind(id)
+    .execute(&pool)
+    .await
+    .unwrap();
+    assert_eq!(notice(h.main.clone(), raw.clone()).await, Value::Null);
+    let (_, body) = create(&h, &raw, &["lines:read"]).await;
+    crate::data::personal_tokens::revoke(
+        &pool,
+        body["id"].as_i64().unwrap(),
+        None,
+        crate::data::personal_tokens::RevokeReason::User,
+    )
+    .await
+    .unwrap();
+    assert_eq!(notice(h.main.clone(), raw.clone()).await, Value::Null);
+    cleanup(&pool, "TEST-PTOK-F").await;
+}

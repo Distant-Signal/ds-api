@@ -44,8 +44,12 @@ proxy never forwards `Authorization` in the first place.
 
 ## Turning it on
 
-Production waits for the token-creation push notice and banner (spec §15,
-decision 3). Then:
+Production waited for the token-creation notice (spec §15, decision 3),
+which has now shipped: the notifier sends one "New API token created" web
+push per new token to each of the user's devices, whatever their quiet
+hours (`personal_api_tokens.push_notified_at`, in the notifier's
+`grant_notice` cycle), and every page shows a banner for 7 days naming the
+token, with a link to revoke it. Then:
 
 1. DS chart values (Ranma-Config, `clusters/mine-bringer/apps/distant-signal.yaml`):
 

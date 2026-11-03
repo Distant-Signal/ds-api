@@ -109,6 +109,25 @@ pub enum CreateOutcome {
     NoUser,
 }
 
+/// How long the "a token was created" banner shows (as a new grant's).
+pub const NEW_TOKEN_NOTICE_DAYS: i64 = 7;
+
+/// The user's newest unrevoked token created in the last
+/// [`NEW_TOKEN_NOTICE_DAYS`], for the banner every page shows.
+pub async fn recent_token(pool: &PgPool, user_id: &str) -> Result<Option<TokenRow>> {
+    Ok(sqlx::query_as::<_, TokenRow>(
+        "SELECT id, name, hint, scopes, created_at, expires_at, last_used_at \
+         FROM personal_api_tokens \
+         WHERE user_id = $1 AND revoked_at IS NULL AND expires_at > now() \
+           AND created_at > now() - make_interval(days => $2) \
+         ORDER BY created_at DESC, id DESC LIMIT 1",
+    )
+    .bind(user_id)
+    .bind(i32::try_from(NEW_TOKEN_NOTICE_DAYS)?)
+    .fetch_optional(pool)
+    .await?)
+}
+
 /// The columns of a new token row.
 #[derive(Debug)]
 pub struct NewTokenRow<'a> {

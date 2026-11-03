@@ -3,6 +3,16 @@
 Changes to the Distant Signal (DS) HTTP API that a client such as DS-MCP
 needs to know about. Newest first. Field names are as served (camelCase).
 
+## 2026-11-03: `tokenNotice` on the connected-apps notice
+
+Additive. `GET /public/account/connected-apps-notice` gains `tokenNotice`:
+the newest unrevoked personal API token created in the last 7 days
+(`{id, name, hint, scopes, createdAt, expiresAt, lastUsedAt}`, never the
+token), or `null`; always `null` while personal tokens are off. The site
+shows it as a banner on every page, and the notifier sends one "New API
+token created" web push per new token, whatever the quiet hours, as it
+does for a newly connected app. DS-MCP: no change needed.
+
 ## 2026-11-03: read-only personal API tokens (off by default)
 
 New, behind `api.personalTokens.enabled` (off). A user creates a `dsp_`
