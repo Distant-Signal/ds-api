@@ -68,7 +68,7 @@ pub struct JourneyTemplateLegWithNamesRow {
 /// `app/journeys/[id]/page.tsx`'s `defaultJourneyTitle` computes client-side
 /// for a journey with no `customName` -- computed server-side here instead
 /// since a list row has no per-leg detail to compute it from client-side.
-#[derive(Debug, Clone, sqlx::FromRow, Serialize)]
+#[derive(Debug, Clone, sqlx::FromRow, Serialize, ts_rs::TS)]
 #[serde(rename_all = "camelCase")]
 pub struct JourneyTemplateListItem {
     pub id: i64,

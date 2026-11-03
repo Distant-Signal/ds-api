@@ -45,6 +45,43 @@ fn visit_roots(v: &mut Collector) {
     v.visit::<crate::data::journeys::JourneyListItem>();
     // Trips.
     v.visit::<crate::routes::trips::TripPlanResponse>();
+    // Groups.
+    v.visit::<crate::data::groups::GroupSummary>();
+    v.visit::<crate::routes::groups::GroupIdentityResponse>();
+    v.visit::<crate::routes::groups::GroupDetailResponse>();
+    v.visit::<crate::data::groups::GroupMember>();
+    v.visit::<crate::routes::groups::RoleChangeResponse>();
+    v.visit::<crate::data::groups::InviteLink>();
+    v.visit::<crate::data::groups::JoinPreview>();
+    v.visit::<crate::routes::groups::JoinResponse>();
+    v.visit::<crate::data::groups::GroupTrain>();
+    v.visit::<crate::data::groups::SharedTrain>();
+    v.visit::<crate::data::groups::GroupJourney>();
+    v.visit::<crate::data::groups::SharedJourney>();
+    v.visit::<crate::data::groups::GroupCustomLine>();
+    v.visit::<crate::data::groups::SharedCustomLine>();
+    v.visit::<crate::data::groups::LineGroupRef>();
+    // Tickets and Delay Repay.
+    v.visit::<crate::data::train_tracking::TrackedTrainTicket>();
+    v.visit::<crate::data::train_tracking::TicketListItem>();
+    v.visit::<crate::routes::train::TicketCreatedResponse>();
+    v.visit::<crate::routes::train::AttachTicketResponse>();
+    v.visit::<crate::routes::train::RenameResponse>();
+    v.visit::<crate::routes::train::DelayRepayEstimateResponse>();
+    v.visit::<crate::data::delay_repay_rules::DelayRepayFields>();
+    v.visit::<crate::data::ticket_extraction::PartialTicket>();
+    v.visit::<crate::data::journey_leg_proposal::JourneyLegProposal>();
+    // Journey templates.
+    v.visit::<crate::data::journey_templates::JourneyTemplateListItem>();
+    v.visit::<crate::routes::journey_templates::JourneyTemplateDetailResponse>();
+    v.visit::<crate::routes::journey_templates::CreateJourneyTemplateResponse>();
+    v.visit::<crate::routes::journey_templates::MaterializeTemplateResponse>();
+    // Breaks, alternatives and replans.
+    v.visit::<crate::data::journey_alternatives::SuggestionSet>();
+    v.visit::<crate::routes::journey_replan::BreakResponse>();
+    v.visit::<crate::routes::journey_replan::SuggestionStaleResponse>();
+    v.visit::<crate::data::journey_replace::ReplaceResponse>();
+    v.visit::<crate::routes::journey_replan::RevisionsResponse>();
 }
 
 /// Collects one declaration per exportable type, keyed by its TypeScript

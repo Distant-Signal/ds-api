@@ -141,3 +141,123 @@ pub enum WaypointHow {
     Origin,
     Destination,
 }
+
+/// `journey_breaks.status` (its CHECK constraint).
+#[derive(TS)]
+#[ts(rename_all = "snake_case")]
+pub enum BreakStatus {
+    Open,
+    Accepted,
+    Dismissed,
+    Recovered,
+    Expired,
+}
+
+/// `journey_breaks.opened_via` (its CHECK constraint).
+#[derive(TS)]
+#[ts(rename_all = "snake_case")]
+pub enum BreakOpenedVia {
+    Push,
+    InApp,
+}
+
+/// `journey_revisions.reason` (its CHECK constraint).
+#[derive(TS)]
+#[ts(rename_all = "snake_case")]
+pub enum RevisionReason {
+    Booked,
+    Replace,
+    AutoShift,
+    Revert,
+}
+
+/// `journey_revisions.cause` (its CHECK constraint): a break's causes
+/// ([`BreakCause`]) and `user_choice`.
+#[derive(TS)]
+#[ts(rename_all = "snake_case")]
+pub enum RevisionCause {
+    Cancelled,
+    PartCancelled,
+    ConnectionMissed,
+    UserMissed,
+    UserChoice,
+    SkippedStop,
+}
+
+/// `journey_revisions.fault` (its CHECK constraint): a break's faults
+/// ([`BreakFault`]) and `none`.
+#[derive(TS)]
+#[ts(rename_all = "snake_case")]
+pub enum RevisionFault {
+    Operator,
+    User,
+    None,
+    Unknown,
+}
+
+/// `journey_revisions.actor` (its CHECK constraint).
+#[derive(TS)]
+#[ts(rename_all = "snake_case")]
+pub enum RevisionActor {
+    Owner,
+    System,
+}
+
+/// `journey_revision_legs.fate` (its CHECK constraint).
+#[derive(TS)]
+#[ts(rename_all = "snake_case")]
+pub enum RevisionLegFate {
+    Planned,
+    Travelled,
+    Missed,
+    Cancelled,
+    PartCancelled,
+    NotUsed,
+}
+
+/// `tracked_train_tickets.source` (its CHECK constraint).
+#[derive(TS)]
+#[ts(rename_all = "kebab-case")]
+pub enum TicketSource {
+    Manual,
+    PkpassSemantics,
+    PkpassHeuristic,
+    PdfHeuristic,
+}
+
+/// A Delay Repay estimate's `scheme`: `delay_repay_rules::Scheme::as_str`
+/// of every scheme with bands (an own scheme has no estimate).
+#[derive(TS)]
+pub enum DelayRepayScheme {
+    #[ts(rename = "DR15")]
+    Dr15,
+    #[ts(rename = "DR30")]
+    Dr30,
+    #[ts(rename = "HX")]
+    HeathrowExpress,
+}
+
+/// A Delay Repay estimate's `fareBasis`: `delay_repay_rules::estimate_delay_repay`.
+#[derive(TS)]
+#[ts(rename_all = "snake_case")]
+pub enum FareBasis {
+    Single,
+    Return,
+    Ticket,
+}
+
+/// `journey_templates.default_match_mode` (its CHECK constraint).
+#[derive(TS)]
+#[ts(rename_all = "snake_case")]
+pub enum TemplateMatchMode {
+    Manual,
+    Auto,
+}
+
+/// `journey_templates.auto_commit_rule` (its CHECK constraint).
+#[derive(TS)]
+#[ts(rename_all = "snake_case")]
+pub enum AutoCommitRule {
+    Earliest,
+    NearestToNow,
+}

@@ -153,7 +153,7 @@ pub fn entitlement(
 }
 
 /// How well one alternative fits the ticket (§17.3, step 3).
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize, ts_rs::TS)]
 #[serde(rename_all = "camelCase")]
 pub enum Fit {
     Covered,
@@ -211,7 +211,9 @@ pub struct Candidate {
 }
 
 /// One of the badged picks (§17.6), in display order.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize, ts_rs::TS,
+)]
 #[serde(rename_all = "camelCase")]
 pub enum Pick {
     Recommended,

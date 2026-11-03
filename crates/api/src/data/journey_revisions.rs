@@ -455,11 +455,12 @@ pub async fn prepare_replacement(
 }
 
 /// One revision leg as served by `GET /Journeys/{id}/revisions`.
-#[derive(Debug, Clone, Serialize, sqlx::FromRow)]
+#[derive(Debug, Clone, Serialize, sqlx::FromRow, ts_rs::TS)]
 #[serde(rename_all = "camelCase")]
 pub struct RevisionLeg {
     pub position: i32,
     pub source_leg_id: Option<i64>,
+    #[ts(as = "crate::ts_values::JourneyLegKind")]
     pub kind: String,
     pub train_uid: Option<String>,
     pub service_date: NaiveDate,
@@ -470,6 +471,7 @@ pub struct RevisionLeg {
     pub destination_name: Option<String>,
     pub booked_departure: Option<DateTime<Utc>>,
     pub booked_arrival: Option<DateTime<Utc>>,
+    #[ts(as = "Option<crate::ts_values::TransitMode>")]
     pub transit_mode: Option<String>,
     pub origin_place: Option<String>,
     pub destination_place: Option<String>,
@@ -477,6 +479,7 @@ pub struct RevisionLeg {
     pub planned_departure: Option<DateTime<Utc>>,
     pub planned_arrival: Option<DateTime<Utc>>,
     pub ticket_ids: Vec<i64>,
+    #[ts(as = "crate::ts_values::RevisionLegFate")]
     pub fate: String,
     /// An untracked leg's stops and network ride (DS-237, additive), so
     /// going back to this plan keeps them; `null` otherwise and on a
@@ -491,17 +494,21 @@ pub struct RevisionLeg {
 }
 
 /// One revision with its legs.
-#[derive(Debug, Clone, Serialize, sqlx::FromRow)]
+#[derive(Debug, Clone, Serialize, sqlx::FromRow, ts_rs::TS)]
 #[serde(rename_all = "camelCase")]
 pub struct Revision {
     #[serde(skip)]
     pub id: i64,
     pub revision_no: i32,
     pub created_at: DateTime<Utc>,
+    #[ts(as = "crate::ts_values::RevisionReason")]
     pub reason: String,
+    #[ts(as = "Option<crate::ts_values::RevisionCause>")]
     pub cause: Option<String>,
+    #[ts(as = "Option<crate::ts_values::RevisionFault>")]
     pub fault: Option<String>,
     pub break_id: Option<i64>,
+    #[ts(as = "crate::ts_values::RevisionActor")]
     pub actor: String,
     pub is_compensation_baseline: bool,
     #[sqlx(skip)]

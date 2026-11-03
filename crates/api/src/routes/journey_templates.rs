@@ -134,22 +134,22 @@ struct MaterializeTemplateRequest {
     service_date: NaiveDate,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, ts_rs::TS)]
 #[serde(rename_all = "camelCase")]
-struct CreateJourneyTemplateResponse {
+pub(crate) struct CreateJourneyTemplateResponse {
     template_id: i64,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, ts_rs::TS)]
 #[serde(rename_all = "camelCase")]
-struct MaterializeTemplateResponse {
+pub(crate) struct MaterializeTemplateResponse {
     journey_id: i64,
     leg_ids: Vec<i64>,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, ts_rs::TS)]
 #[serde(rename_all = "camelCase")]
-struct JourneyTemplateLegDetailResponse {
+pub(crate) struct JourneyTemplateLegDetailResponse {
     id: i64,
     origin_crs: Option<String>,
     origin_name: Option<String>,
@@ -166,9 +166,9 @@ struct JourneyTemplateLegDetailResponse {
 /// round-tripped fields (so a future Phase C edit UI has somewhere to
 /// read/write) -- this plan's own frontend (Task 8) renders NONE of them
 /// as editable controls; see that task's own scope note.
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, ts_rs::TS)]
 #[serde(rename_all = "camelCase")]
-struct JourneyTemplateDetailResponse {
+pub(crate) struct JourneyTemplateDetailResponse {
     id: i64,
     custom_name: Option<String>,
     created_at: DateTime<Utc>,
@@ -177,7 +177,9 @@ struct JourneyTemplateDetailResponse {
     active: bool,
     starts_on: Option<NaiveDate>,
     ends_on: Option<NaiveDate>,
+    #[ts(as = "crate::ts_values::TemplateMatchMode")]
     default_match_mode: String,
+    #[ts(as = "Option<crate::ts_values::AutoCommitRule>")]
     auto_commit_rule: Option<String>,
     legs: Vec<JourneyTemplateLegDetailResponse>,
 }

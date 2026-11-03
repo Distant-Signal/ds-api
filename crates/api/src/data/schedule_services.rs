@@ -148,6 +148,64 @@ impl Serialize for ServiceModeFields {
     }
 }
 
+/// [`ServiceModeFields`] for a row that may have no schedule: both fields
+/// when `Some`, neither when `None`. `#[serde(flatten)]` it as you would
+/// an `Option<ServiceModeFields>`, which it serializes exactly as.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct OptionalServiceModeFields(pub Option<ServiceModeFields>);
+
+impl Serialize for OptionalServiceModeFields {
+    fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        self.0.serialize(serializer)
+    }
+}
+
+/// [`OptionalServiceModeFields`]'s wire shape, for its generated
+/// TypeScript only (`api_types`): both fields are absent together.
+#[derive(ts_rs::TS)]
+#[ts(rename = "OptionalServiceModeFields", rename_all = "camelCase")]
+pub struct OptionalServiceModeFieldsWire {
+    #[ts(optional)]
+    pub service_mode: Option<ServiceMode>,
+    #[ts(optional)]
+    pub live_tracking: Option<bool>,
+}
+
+/// `ts_rs::TS` by way of [`OptionalServiceModeFieldsWire`], for the same
+/// reason as [`ServiceModeFields`]'s.
+impl ts_rs::TS for OptionalServiceModeFields {
+    type WithoutGenerics = <OptionalServiceModeFieldsWire as ts_rs::TS>::WithoutGenerics;
+    type OptionInnerType = Self;
+
+    fn docs() -> Option<String> {
+        <OptionalServiceModeFieldsWire as ts_rs::TS>::docs()
+    }
+    fn ident(cfg: &ts_rs::Config) -> String {
+        <OptionalServiceModeFieldsWire as ts_rs::TS>::ident(cfg)
+    }
+    fn name(cfg: &ts_rs::Config) -> String {
+        <OptionalServiceModeFieldsWire as ts_rs::TS>::name(cfg)
+    }
+    fn inline(cfg: &ts_rs::Config) -> String {
+        <OptionalServiceModeFieldsWire as ts_rs::TS>::inline(cfg)
+    }
+    fn inline_flattened(cfg: &ts_rs::Config) -> String {
+        <OptionalServiceModeFieldsWire as ts_rs::TS>::inline_flattened(cfg)
+    }
+    fn decl(cfg: &ts_rs::Config) -> String {
+        <OptionalServiceModeFieldsWire as ts_rs::TS>::decl(cfg)
+    }
+    fn decl_concrete(cfg: &ts_rs::Config) -> String {
+        <OptionalServiceModeFieldsWire as ts_rs::TS>::decl_concrete(cfg)
+    }
+    fn visit_dependencies(v: &mut impl ts_rs::TypeVisitor) {
+        <OptionalServiceModeFieldsWire as ts_rs::TS>::visit_dependencies(v);
+    }
+    fn output_path() -> Option<std::path::PathBuf> {
+        <OptionalServiceModeFieldsWire as ts_rs::TS>::output_path()
+    }
+}
+
 /// Adds `serviceMode`/`liveTracking` to a hand-built JSON object (the
 /// `render::*_json` rows). A non-object is left alone.
 pub fn annotate_json(value: &mut serde_json::Value, mode: ServiceMode) {

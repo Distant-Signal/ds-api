@@ -1871,7 +1871,7 @@ pub async fn attach_ticket_to_tracked_train(
 /// value can never equal a bound `i64`), but `get_ticket_owned` (used by
 /// the Delay Repay route and the attach route) has no such filter and can
 /// legitimately return `None` here.
-#[derive(Debug, Clone, sqlx::FromRow, Serialize)]
+#[derive(Debug, Clone, sqlx::FromRow, Serialize, ts_rs::TS)]
 #[serde(rename_all = "camelCase")]
 pub struct TrackedTrainTicket {
     pub id: i64,
@@ -1894,6 +1894,7 @@ pub struct TrackedTrainTicket {
     /// struct (`TicketPanel.tsx`'s rendering, the Delay Repay route) simply
     /// ignores it, same as any other field it doesn't need.
     pub current_departure_date: Option<DateTime<Utc>>,
+    #[ts(as = "crate::ts_values::TicketSource")]
     pub source: String,
     pub created_at: DateTime<Utc>,
     pub custom_name: Option<String>,
@@ -2123,7 +2124,7 @@ impl TicketListRow {
 /// ticket is just the same case with `None` for one more reason. `claimUrl`
 /// and `disclaimer` are still always populated, per that same route's
 /// invariant.
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, ts_rs::TS)]
 #[serde(rename_all = "camelCase")]
 pub struct TicketListItem {
     pub id: i64,
@@ -2135,14 +2136,17 @@ pub struct TicketListItem {
     /// See `TicketListRow::origin_name`'s doc comment.
     pub origin_name: Option<String>,
     pub destination_name: Option<String>,
+    #[ts(as = "crate::ts_values::TicketSource")]
     pub source: String,
     pub created_at: DateTime<Utc>,
     pub service_date: Option<chrono::NaiveDate>,
     pub pin_origin_crs: Option<String>,
     pub pin_destination_crs: Option<String>,
     pub pin_scheduled_departure: Option<DateTime<Utc>>,
+    #[ts(as = "Option<crate::ts_values::ResolutionStatus>")]
     pub resolution_status: Option<String>,
     pub train_uid: Option<String>,
+    #[ts(as = "Option<crate::ts_values::JourneyStatus>")]
     pub status: Option<String>,
     /// The Delay Repay fields, exactly as `GET .../delay-repay` serves
     /// them (`delay_repay_rules::assess`, flattened), so the two never

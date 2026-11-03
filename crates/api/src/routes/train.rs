@@ -149,9 +149,9 @@ struct TrackPinResponse {
     journey_id: i64,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, ts_rs::TS)]
 #[serde(rename_all = "camelCase")]
-struct TicketCreatedResponse {
+pub(crate) struct TicketCreatedResponse {
     ticket_id: i64,
 }
 
@@ -164,18 +164,18 @@ struct RenameRequest {
     custom_name: Option<String>,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, ts_rs::TS)]
 #[serde(rename_all = "camelCase")]
-struct RenameResponse {
+pub(crate) struct RenameResponse {
     /// The normalized value actually stored -- `None` if the name was
     /// cleared, `Some(trimmed)` otherwise. Never echoes back an
     /// un-normalized value the caller sent.
     custom_name: Option<String>,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, ts_rs::TS)]
 #[serde(rename_all = "camelCase")]
-struct DelayRepayEstimateResponse {
+pub(crate) struct DelayRepayEstimateResponse {
     /// The delay, where it was measured, the outcome at the destination,
     /// the scheme and the estimate, the claim link and the disclaimer:
     /// `delay_repay_rules::DelayRepayFields`, shared with
@@ -255,9 +255,9 @@ struct AttachTicketRequest {
     tracking_id: i64,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, ts_rs::TS)]
 #[serde(rename_all = "camelCase")]
-struct AttachTicketResponse {
+pub(crate) struct AttachTicketResponse {
     ticket_id: i64,
     tracked_train_id: i64,
 }

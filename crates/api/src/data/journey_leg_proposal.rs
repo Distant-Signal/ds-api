@@ -26,7 +26,7 @@ use serde::Serialize;
 /// traveller meant to LEAVE, never when they'd arrive, so there is nothing
 /// non-guessed to propose for an arrival window (see this module's own
 /// "never guessed at" posture, shared with `ticket_extraction`).
-#[derive(Debug, Clone, PartialEq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, ts_rs::TS)]
 #[serde(rename_all = "camelCase")]
 pub struct JourneyLegProposal {
     pub origin_crs: Option<String>,
