@@ -1,6 +1,6 @@
 # Read-only personal API tokens on a separate API hostname
 
-Status: proposal. Task DS-286. Written 2026-11-03. This is item 2 of the
+Status: accepted (decisions in §15, 2026-11-03). Task DS-286. Written 2026-11-03. This is item 2 of the
 integrations roadmap.
 
 A Distant Signal (DS) user creates a **personal API token** on the
@@ -31,7 +31,7 @@ relaxed for this one class of credential (§4).
 12. OpenAPI
 13. Threat model
 14. Implementation plan
-15. Questions for the user
+15. Decisions (2026-11-03)
 
 ## 1. Summary
 
@@ -138,7 +138,7 @@ Cloudflare's free Universal SSL certificate covers `cursed.solutions` and
 `api.ds.cursed.solutions` would need Advanced Certificate Manager, a paid
 add-on, or it would fail TLS. The chart takes the public base URL as a value
 (`api.personalTokens.publicBaseUrl`), so the name is Ranma-Config's choice
-(question 1 in §15).
+(decision 1 in §15).
 
 ### 3.2 Why a listener in the api, not a route in the frontend
 
@@ -289,7 +289,7 @@ query parameters of the existing handler it reuses.
 | Path | Scope | Handler | `max-age` |
 |---|---|---|---|
 | `/v1/status` | none | new, `{"ok":true}` | 60 |
-| `/v1/me` | any | new: the token's name, scopes, `expiresAt`, and the user's display name | 0 (`no-store`) |
+| `/v1/me` | any | new: the token's name, scopes, `createdAt` and `expiresAt` | 0 (`no-store`) |
 | `/v1/Journeys/mine` | `journeys:read` | `journeys::get_my_journeys` | 30 |
 | `/v1/Journeys/{journey_id}` | `journeys:read` | `journeys::get_journey` | 30 |
 | `/v1/Line/Mode/{mode}/Status` | `lines:read` | `line_status::get_mode_status` | 60 |
@@ -317,13 +317,13 @@ A `2xx` JSON response on the token listener is wrapped:
 {
   "data": <the handler's body, unchanged>,
   "attribution": {
-    "text": "Powered by NationalRail. Contains Network Rail data, RDG data, RSP timetable data and TfL data.",
     "sources": [
-      {"name": "National Rail (Darwin)", "notice": "powered by NationalRail"},
-      {"name": "Network Rail (TRUST)", "notice": "<the Network Rail Infrastructure Limited licence statement>"},
-      {"name": "RSP timetable", "notice": "Source: RSP"},
-      {"name": "TfL", "notice": "Powered by TfL Open Data"}
-    ]
+      {"name": "National Rail", "notice": "powered by NationalRail (Train Information Services Ltd)", "url": "https://www.nationalrail.co.uk"},
+      {"name": "Network Rail", "notice": "Contains Information of Network Rail Infrastructure Limited licensed under the following licence", "url": "<the NRIL licence page>"},
+      {"name": "RSP", "notice": "Source: RSP"},
+      {"name": "Transport for London", "notice": "Powered by TfL Open Data", "url": "<TfL's transport data terms>"}
+    ],
+    "statement": "Distant Signal is an independent, unofficial service and is not affiliated with or endorsed by ..."
   }
 }
 ```
@@ -335,9 +335,10 @@ A `2xx` JSON response on the token listener is wrapped:
   no third-party data, so they get an empty `sources` list.
 - **The notice text** is the credits DS already carries (the footer and
   `/privacy`; the full list is in the integrations research, "Licensing and
-  privacy flags"), so there is one source of truth: a Rust
-  constant table, `common::attribution`, which a test checks against the
-  frontend's credits component.
+  privacy flags"), so there is one source of truth on each side: a Rust constant table
+  in `crate::personal_tokens`, which a test checks against the frontend's
+  credits components. `statement` is the website's non-affiliation
+  statement.
 - **Errors** (`4xx` and `5xx`) are not wrapped. They use the delegated error
   contract, `{"error": "...", "message": "..."}`.
 - **Size:** the wrapping middleware buffers the body up to 4 MiB. Anything
@@ -352,8 +353,9 @@ room for later top-level fields, such as `meta`.
 
 ### 6.1 Rate buckets
 
-These use the existing GCRA limiter in `crate::rate_limit`, with new
-classes and keys. State is in memory, per pod, like every other bucket.
+These use the GCRA algorithm of `crate::rate_limit`, through a small
+keyed table of its own (`KeyedLimiter`), which charges every bucket that
+applies or none. State is in memory, per pod, like every other bucket.
 
 | Bucket | Key | Default | Value |
 |---|---|---|---|
@@ -368,9 +370,9 @@ classes and keys. State is in memory, per pod, like every other bucket.
 - Failed authentication is charged **after** a failure, and the bucket is
   also checked **before** the lookup. A client over its failure budget gets
   `429` without any database work.
-- Metrics: `distant_signal_api_rate_limited_total{class, caller}`, with
-  callers `personal_token`, `personal_user`, `personal_global` and
-  `personal_auth_failure`.
+- Metrics: `distant_signal_api_rate_limited_total{class="personal_token", caller}`,
+  with callers `personal_token` (any of the token, user, train and
+  pod-wide buckets) and `personal_auth_failure`.
 
 ### 6.2 Client IP on the token listener
 
@@ -447,7 +449,7 @@ It is rendered only when the `GET` route answers `enabled: true`.
   "PAT".
 - The 7-day "connected" banner and push notice that grants have
   (`ConnectedAppNotice`) are reused for token creation in a later PR (§14,
-  PR 6). §15 question 3 asks whether production waits for it.
+  PR 6). Production waits for it (§15 decision 3).
 
 ## 8. Audit, revocation and the kill switch
 
@@ -479,7 +481,7 @@ None of these lines carries the token, its hash, or a request body.
 | 90 days unused | Revoked (`inactive`) on the next request or by the hourly sweep |
 | Expiry | Refused from `expires_at`. The sweep marks it `expired` |
 | Account deletion | Rows cascade |
-| Authentik logout, back-channel logout, "log out other sessions" | **Kept** (§15 question 2) |
+| Authentik logout, back-channel logout, "log out other sessions" | **Kept** (§15 decision 2) |
 
 Tokens survive the user's logouts on purpose. A token exists to keep a
 device working for months. Ending a browser session should not break the
@@ -740,7 +742,7 @@ PR (PR 5), because nothing at runtime depends on it.
 | Cookie confusion on the token host | `Cookie` is stripped. The token host is a different origin and DS never sets cookies for it. No CORS, so another site's JavaScript can't read responses |
 | Rate-limit evasion with a spoofed IP | Token buckets key on the token and the user, not the IP. `CF-Connecting-IP` is trusted only behind the NetworkPolicy, and only for the failure bucket |
 | Load from many polling clients | Per-token, per-user and pod-wide buckets; `private, max-age` and ETag; a 60-second poll hint; the Cloudflare edge rule |
-| A stolen browser session mints a long-lived token | The token is listed on the page and revoke-sessions revokes it. The push notice and banner come in PR 6 (§15 question 3) |
+| A stolen browser session mints a long-lived token | The token is listed on the page and revoke-sessions revokes it. The push notice and banner come in PR 6, and production waits for them (§15 decision 3) |
 | Timing side channels | Lookup by the hash of a high-entropy token, plus a constant-time comparison of the hashes |
 | Tokens in logs | No log line takes the header or the token. The trace span records the matched route, not the raw URI. A test sends a token and asserts that the captured logs don't contain it |
 
@@ -775,23 +777,24 @@ Each PR can be deployed on its own, and each is off until §10.
 7. **Recipes:** docs pages for Home Assistant REST sensors and Apple
    Shortcuts.
 
-## 15. Questions for the user
+## 15. Decisions (2026-11-03)
 
-1. **Hostname.** I recommend `ds-api.cursed.solutions`: Cloudflare's free
-   certificate covers it, and it matches `ds-mcp.cursed.solutions`.
-   `api.ds.cursed.solutions` needs Advanced Certificate Manager. The chart
-   doesn't care which name is used; only Ranma-Config does.
-2. **Should tokens survive logouts?** I recommend yes: keep tokens across
-   Authentik logout, back-channel logout and "log out other sessions", and
-   revoke them only on Revoke, admin revoke-sessions, idle, expiry or
-   account deletion. Delegated grants end on any Authentik logout (D-7),
-   but a personal token exists to keep a device working.
-3. **Should production wait for the creation notice (PR 6)?** I recommend
-   turning it on in production only after PR 6 ships, so a stolen session
-   minting a token gets the same push notice and banner a new grant does.
-   Turning it on before that, for testing with your own account, is fine.
-4. **CORS.** I recommend none in v1. Browser JavaScript on another site then
-   can't use a token directly, which discourages putting tokens in web
-   pages. An unauthenticated-by-cookie API could safely send
-   `Access-Control-Allow-Origin: *` later, if a browser-based integration
-   needs it.
+The user answered the four open questions on 2026-11-03, each as
+recommended.
+
+1. **Hostname: `ds-api.cursed.solutions`.** Cloudflare's free certificate
+   covers it (`api.ds.cursed.solutions` would need Advanced Certificate
+   Manager), and it matches `ds-mcp.cursed.solutions`. §10 uses it.
+2. **Tokens survive the user's logouts.** Authentik logout, back-channel
+   logout and "log out other sessions" keep them. They end on Revoke,
+   Revoke all, admin revoke-sessions, idle, expiry or account deletion.
+   A separate **"Revoke all tokens"** action sits alongside "Log out other
+   sessions" on the account page, so a user who wants everything ended
+   has it in one place (frontend PR, §14 PR 4).
+3. **Production waits for the creation notice.** Ranma-Config turns
+   `api.personalTokens.enabled` on only after PR 6 (the push notice and
+   the 7-day banner on token creation) has shipped. Testing with the
+   owner's own account before then is fine.
+4. **No CORS in v1.** The token listener sends no
+   `Access-Control-Allow-*` headers. A browser integration that needs it
+   is a later, separate decision.
