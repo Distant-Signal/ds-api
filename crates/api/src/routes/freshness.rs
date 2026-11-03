@@ -230,7 +230,7 @@ mod db_tests {
         serde_json::from_slice(&body).unwrap()
     }
 
-    #[sqlx::test(migrations = "../ds-store/migrations")]
+    #[sqlx::test(migrator = "ds_store::migrate::MIGRATOR")]
     #[ignore = "needs DATABASE_URL (a role that can create databases)"]
     async fn corpus_is_null_before_any_delivery(pool: PgPool) {
         let json = get_freshness_json(&pool).await;
@@ -241,7 +241,7 @@ mod db_tests {
         assert!(json["corpus"].is_null(), "no delivery yet: {json}");
     }
 
-    #[sqlx::test(migrations = "../ds-store/migrations")]
+    #[sqlx::test(migrator = "ds_store::migrate::MIGRATOR")]
     #[ignore = "needs DATABASE_URL (a role that can create databases)"]
     async fn corpus_reports_the_newest_delivery(pool: PgPool) {
         let older = Utc.with_ymd_and_hms(2026, 8, 1, 3, 0, 0).unwrap();

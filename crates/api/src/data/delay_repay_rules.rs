@@ -773,7 +773,7 @@ mod tests {
     /// reference-data/toc-codes.csv, named consistently.
     #[test]
     fn every_atoc_code_is_in_the_reference_table() {
-        let csv = include_str!("../../../../reference-data/toc-codes.csv");
+        let csv = ds_lines::reference_data::TOC_CODES_CSV;
         for rule in OPERATORS {
             let line = csv
                 .lines()
