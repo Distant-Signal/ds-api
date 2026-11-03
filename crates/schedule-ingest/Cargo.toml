@@ -7,13 +7,13 @@ publish.workspace = true
 license.workspace = true
 
 [dependencies]
-health-http = { path = "../health-http" }
+health-http = { workspace = true }
 anyhow = "1.0.102"
 chrono = { version = "0.4.44", features = ["serde"] }
 chrono-tz = "0.10"
 clap = { version = "4.6.1", features = ["derive", "env"] }
-common = { path = "../common" }
-ds-runtime = { path = "../ds-runtime" }
+common = { workspace = true, features = ["default"] }
+ds-runtime = { workspace = true, features = ["default"] }
 dotenvy = "0.15.7"
 # The GCS bucket source (`gcs.rs`): RS256 for a service-account key's
 # self-signed JWT. Already in the tree (object_store, rustls), with the same
@@ -26,7 +26,7 @@ base64 = "0.22"
 crc = "3.3"
 # The DB sink (ingest architecture plan 2d.1, `sink.rs`): the feed
 # marker and CORPUS writes, their validation, the pool and the schema gate.
-ds-store = { path = "../ds-store" }
+ds-store = { workspace = true }
 # CORPUS extracts arrive gzipped (`corpus.rs`); same spec as `crates/api`.
 flate2 = "1"
 metrics = "0.24"
