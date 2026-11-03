@@ -114,6 +114,16 @@ openapi_document_is_current`. CI's repo-checks job runs Distant-Signal/ci's
 `openapi-breaking` action (oasdiff) against the base commit and fails on a
 breaking change: v1 only grows. A breaking change needs a `/v2` document.
 
+## Recipes
+
+Step-by-step guides for using a token from things people already run:
+
+- [Home Assistant](recipes/home-assistant.md): line status, the next
+  journey and a train's delay as REST sensors, with the credits on a
+  dashboard.
+- [Apple Shortcuts](recipes/apple-shortcuts.md): "how's my line" and "my
+  next train" with Siri.
+
 ## Revocation and the kill switch
 
 | Trigger | Effect |
