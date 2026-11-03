@@ -11,7 +11,8 @@
 //!   they could connect, and what a client deleted in the last 30 days
 //!   ("Recently deleted by the assistant", §5.5a).
 //! * `GET /account/connected-apps-notice`: the newest grant made in the
-//!   last 7 days, for the banner every page shows (§5.3 control 2).
+//!   last 7 days, for the banner every page shows (§5.3 control 2), and
+//!   `tokenNotice`, the newest personal API token made in the last 7 days.
 //! * `GET /account/connected-apps/{client}/consent`: what the consent page
 //!   shows, plus a single-use confirmation token bound to this session and
 //!   client, valid 10 minutes, stored hashed (§5.3 control 1). Each call
@@ -94,6 +95,10 @@ struct ConnectedAppsResponse {
 #[serde(rename_all = "camelCase")]
 struct NoticeResponse {
     notice: Option<GrantView>,
+    /// The newest personal API token created in the last 7 days, while
+    /// personal tokens are on (docs/specs/personal-api-tokens.md §15
+    /// decision 3). Additive.
+    token_notice: Option<crate::data::personal_tokens::TokenRow>,
 }
 
 #[derive(Debug, Serialize)]
@@ -216,13 +221,23 @@ async fn list_connected_apps(State(app): State<App>, user: AuthenticatedUser) ->
 }
 
 async fn connected_app_notice(State(app): State<App>, user: AuthenticatedUser) -> Response {
-    match data::recent_grant(&app.database, &user.id).await {
-        Ok(grant) => Json(NoticeResponse {
-            notice: grant.map(|grant| grant_view(&app, grant)),
-        })
-        .into_response(),
-        Err(err) => database_error("read the connected-app notice")(err),
-    }
+    let grant = match data::recent_grant(&app.database, &user.id).await {
+        Ok(grant) => grant,
+        Err(err) => return database_error("read the connected-app notice")(err),
+    };
+    let token_notice = if app.personal_tokens.enabled() {
+        match crate::data::personal_tokens::recent_token(&app.database, &user.id).await {
+            Ok(token) => token,
+            Err(err) => return database_error("read the personal-token notice")(err),
+        }
+    } else {
+        None
+    };
+    Json(NoticeResponse {
+        notice: grant.map(|grant| grant_view(&app, grant)),
+        token_notice,
+    })
+    .into_response()
 }
 
 async fn consent(
