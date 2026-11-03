@@ -483,14 +483,28 @@ pub fn retain_allowed_groups(groups: &[String], allowlist: &[String]) -> Vec<Str
 /// `created` comes from `xmax = 0`, true only for a row this statement
 /// `INSERTed` (an `ON CONFLICT DO UPDATE` sets `xmax` to this transaction).
 pub async fn upsert_user(pool: &PgPool, identity: &OidcIdentity) -> Result<User> {
+    let mut conn = pool.acquire().await?;
+    upsert_user_in(&mut conn, identity, None).await
+}
+
+/// [`upsert_user`] on `conn` (the account continuity login runs it in its
+/// transaction, `data::account_continuity`), also storing `discord_id`
+/// when it is `Some`. `None` leaves the stored `users.discord_id` as it
+/// is, so a login without the claim never clears one loaded earlier.
+pub async fn upsert_user_in(
+    conn: &mut sqlx::PgConnection,
+    identity: &OidcIdentity,
+    discord_id: Option<&str>,
+) -> Result<User> {
     let name = non_blank(identity.name.as_deref());
     let username = non_blank(identity.preferred_username.as_deref());
     let row = sqlx::query_as::<_, User>(
-        "INSERT INTO users (id, name, username, groups, created_at, last_login_at) \
-         VALUES ($1, $2, $3, $4, NOW(), NOW()) \
+        "INSERT INTO users (id, name, username, groups, discord_id, created_at, last_login_at) \
+         VALUES ($1, $2, $3, $4, $5, NOW(), NOW()) \
          ON CONFLICT (id) DO UPDATE SET \
             name = EXCLUDED.name, \
             username = EXCLUDED.username, groups = EXCLUDED.groups, \
+            discord_id = COALESCE(EXCLUDED.discord_id, users.discord_id), \
             last_login_at = NOW() \
          RETURNING id, name, username, (xmax = 0) AS created",
     )
@@ -498,7 +512,8 @@ pub async fn upsert_user(pool: &PgPool, identity: &OidcIdentity) -> Result<User>
     .bind(name)
     .bind(username)
     .bind(&identity.groups)
-    .fetch_one(pool)
+    .bind(discord_id)
+    .fetch_one(&mut *conn)
     .await?;
     Ok(row)
 }

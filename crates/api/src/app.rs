@@ -207,6 +207,19 @@ impl AppState {
         )?;
         crate::data::users::SessionLifetime::try_from_config(&config)?;
 
+        // Account continuity (docs/connected-apps.md): off unless a claim
+        // name is set; a name the user could edit refuses to start.
+        let continuity = config
+            .continuity_claim_names()
+            .context("invalid account continuity claim names")?;
+        if continuity.enabled() {
+            tracing::info!(
+                discord_id_claim = continuity.discord_id.as_deref().unwrap_or(""),
+                primary_sub_claim = continuity.primary_sub.as_deref().unwrap_or(""),
+                "account continuity is on: a login with a new sub may take over a matching account"
+            );
+        }
+
         let oidc = OidcClient::new(OidcConfig {
             issuer_url: config.sso_issuer_url.clone(),
             client_id: config.sso_client_id.clone(),

@@ -254,13 +254,166 @@ fn localized<T: std::ops::Deref<Target = String>>(
 /// `#[serde(default)]` on `groups`: a missing claim deserializes to
 /// `None`, never a deserialization error -- the same "never trust silence
 /// as something stronger than it is" posture.
+///
+/// `other` holds every claim nothing above names, so the account
+/// continuity claims (`ContinuityClaimNames`), whose names are
+/// configuration rather than code, can be read off the same verified token.
 #[derive(Debug, Clone, Default, serde::Deserialize, serde::Serialize)]
 pub struct AccessGroupClaims {
     #[serde(default)]
     pub groups: Option<Vec<String>>,
+    #[serde(flatten)]
+    pub other: serde_json::Map<String, serde_json::Value>,
 }
 
 impl AdditionalClaims for AccessGroupClaims {}
+
+/// The ID-token claims that carry a user's identity at a previous
+/// identity provider, for account continuity across the move of public
+/// login to `ds-sso` (docs/connected-apps.md, "Account continuity"). Each
+/// is a claim NAME, set from `SSO_DISCORD_ID_CLAIM` and
+/// `SSO_PRIMARY_SUB_CLAIM`; unset (the default) turns that match off, and
+/// with both unset the login callback behaves exactly as before.
+///
+/// Both claims must be set by the identity provider from data the user
+/// cannot edit: the Discord id from `ds-sso`'s Discord source connection
+/// identifier, the primary sub from its OIDC source for the primary
+/// identity provider. [`ContinuityClaimNames::new`] refuses the standard
+/// profile claims a user can change.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct ContinuityClaimNames {
+    pub discord_id: Option<String>,
+    pub primary_sub: Option<String>,
+}
+
+/// Claims a continuity claim name may never be: the user can edit them
+/// (the profile claims), or they mean something else already.
+const RESERVED_CLAIM_NAMES: &[&str] = &[
+    "sub",
+    "iss",
+    "aud",
+    "azp",
+    "exp",
+    "iat",
+    "nbf",
+    "nonce",
+    "auth_time",
+    "acr",
+    "amr",
+    "at_hash",
+    "c_hash",
+    "sid",
+    "jti",
+    "name",
+    "given_name",
+    "family_name",
+    "middle_name",
+    "nickname",
+    "preferred_username",
+    "profile",
+    "picture",
+    "website",
+    "email",
+    "email_verified",
+    "gender",
+    "birthdate",
+    "zoneinfo",
+    "locale",
+    "phone_number",
+    "phone_number_verified",
+    "address",
+    "updated_at",
+    "groups",
+];
+
+impl ContinuityClaimNames {
+    /// The configured names (blank is unset), refusing a reserved claim
+    /// name and the same name for both.
+    pub fn new(discord_id: &str, primary_sub: &str) -> Result<Self> {
+        let pick = |env: &str, value: &str| -> Result<Option<String>> {
+            let value = value.trim();
+            if value.is_empty() {
+                return Ok(None);
+            }
+            anyhow::ensure!(
+                !RESERVED_CLAIM_NAMES.contains(&value),
+                "{env}={value} names a standard claim; account continuity must match on a \
+                 dedicated claim the identity provider fills from data the user cannot edit"
+            );
+            Ok(Some(value.to_string()))
+        };
+        let names = Self {
+            discord_id: pick("SSO_DISCORD_ID_CLAIM", discord_id)?,
+            primary_sub: pick("SSO_PRIMARY_SUB_CLAIM", primary_sub)?,
+        };
+        anyhow::ensure!(
+            names.discord_id.is_none() || names.discord_id != names.primary_sub,
+            "SSO_DISCORD_ID_CLAIM and SSO_PRIMARY_SUB_CLAIM name the same claim"
+        );
+        Ok(names)
+    }
+
+    /// Whether account continuity is on at all.
+    pub fn enabled(&self) -> bool {
+        self.discord_id.is_some() || self.primary_sub.is_some()
+    }
+}
+
+/// The continuity claims one login's ID token carried (see
+/// [`ContinuityClaimNames`]). `None` when the claim is not configured,
+/// absent, or not a usable value.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct ContinuityClaims {
+    /// A Discord snowflake: ASCII digits only.
+    pub discord_id: Option<String>,
+    /// The user's subject at the primary identity provider.
+    pub primary_sub: Option<String>,
+}
+
+/// The longest claim value accepted: a Discord snowflake is at most 20
+/// digits and an Authentik hashed subject 64 hex characters.
+const MAX_CONTINUITY_CLAIM_LEN: usize = 255;
+
+/// A claim value as a trimmed, non-empty string: a JSON string, or an
+/// integer (a snowflake an identity provider sent as a number).
+fn claim_string(value: &serde_json::Value) -> Option<String> {
+    let text = match value {
+        serde_json::Value::String(text) => text.trim().to_string(),
+        serde_json::Value::Number(number) if number.is_u64() || number.is_i64() => {
+            number.to_string()
+        }
+        _ => return None,
+    };
+    (!text.is_empty() && text.len() <= MAX_CONTINUITY_CLAIM_LEN).then_some(text)
+}
+
+/// Reads the configured continuity claims out of a verified token's other
+/// claims. A Discord id that is not all digits is dropped (and logged), so
+/// a misconfigured mapping can never match on, say, a handle.
+pub fn continuity_claims(
+    other: &serde_json::Map<String, serde_json::Value>,
+    names: &ContinuityClaimNames,
+) -> ContinuityClaims {
+    let read = |name: &Option<String>| {
+        name.as_ref()
+            .and_then(|name| other.get(name))
+            .and_then(claim_string)
+    };
+    let discord_id = read(&names.discord_id).filter(|id| {
+        let snowflake = id.bytes().all(|b| b.is_ascii_digit());
+        if !snowflake {
+            tracing::warn!(
+                "the Discord id claim is not a Discord id (digits only); ignoring it for account \
+                 continuity"
+            );
+        }
+        snowflake
+    });
+    ContinuityClaims {
+        discord_id,
+        primary_sub: read(&names.primary_sub),
+    }
+}
 
 /// Mirrors `openidconnect::core`'s own `CoreIdTokenFields`/
 /// `CoreTokenResponse` type aliases (`core/mod.rs`), but with
@@ -496,7 +649,9 @@ impl OidcClient {
     /// token's signature/issuer/audience/nonce/expiry (`openidconnect`'s
     /// job, not re-implemented here), extracts the claims this app cares
     /// about into `RawClaims` (`raw_claims_from_id_token`), and maps them
-    /// through `identity_from_claims`. Also returns the refresh token, if the
+    /// through `identity_from_claims`. Also returns the account continuity
+    /// claims `continuity` names (`continuity_claims`; all `None` when it
+    /// names none), and the refresh token, if the
     /// provider issued one (not guaranteed) -- though no caller consumes
     /// it today: `routes::auth::callback` deliberately drops it rather
     /// than persisting it, since nothing implements silent renewal yet
@@ -507,7 +662,8 @@ impl OidcClient {
         code: String,
         pkce_verifier: PkceCodeVerifier,
         expected_nonce: &Nonce,
-    ) -> Result<(OidcIdentity, Option<String>)> {
+        continuity: &ContinuityClaimNames,
+    ) -> Result<(OidcIdentity, ContinuityClaims, Option<String>)> {
         let client = self.client().await?;
 
         let token_response = client
@@ -527,9 +683,10 @@ impl OidcClient {
             .context("id token verification failed")?;
 
         let raw = raw_claims_from_id_token(claims);
+        let continuity = continuity_claims(&claims.additional_claims().other, continuity);
         let refresh_token = token_response.refresh_token().map(|t| t.secret().clone());
 
-        Ok((identity_from_claims(raw), refresh_token))
+        Ok((identity_from_claims(raw), continuity, refresh_token))
     }
 }
 
@@ -1057,5 +1214,127 @@ mod tests {
         assert_eq!(raw.preferred_username.as_deref(), Some("p"));
         assert_eq!(raw.nickname.as_deref(), Some("k"));
         assert_eq!(raw.sub, "b4f1c0de-0000-4000-8000-000000000001");
+    }
+
+    // ---------------------------------------------------------------
+    // Account continuity claims.
+    // ---------------------------------------------------------------
+
+    fn names() -> ContinuityClaimNames {
+        ContinuityClaimNames::new("ds_discord_id", "ds_primary_sub").expect("valid names")
+    }
+
+    #[test]
+    fn continuity_is_off_by_default() {
+        let names = ContinuityClaimNames::new("", "  ").expect("blank is unset");
+        assert!(!names.enabled());
+        assert_eq!(names, ContinuityClaimNames::default());
+        let claims = id_token_claims(serde_json::json!({ "ds_discord_id": "123" }));
+        assert_eq!(
+            continuity_claims(&claims.additional_claims().other, &names),
+            ContinuityClaims::default(),
+            "no configured name reads no claim"
+        );
+    }
+
+    #[test]
+    fn either_claim_name_alone_turns_continuity_on() {
+        assert!(ContinuityClaimNames::new("d", "").unwrap().enabled());
+        assert!(ContinuityClaimNames::new("", "p").unwrap().enabled());
+    }
+
+    /// The user can edit their profile claims, so matching on one would
+    /// let anyone take over an account.
+    #[test]
+    fn a_standard_or_editable_claim_name_is_refused() {
+        for name in [
+            "preferred_username",
+            "nickname",
+            "name",
+            "email",
+            "sub",
+            "groups",
+        ] {
+            assert!(ContinuityClaimNames::new(name, "").is_err(), "{name}");
+            assert!(ContinuityClaimNames::new("", name).is_err(), "{name}");
+        }
+        assert!(ContinuityClaimNames::new("same", "same").is_err());
+    }
+
+    /// The claims arrive through the same verified token, next to `groups`
+    /// and the standard claims, which still parse as before.
+    #[test]
+    fn continuity_claims_are_read_off_the_token_under_their_configured_names() {
+        let claims = id_token_claims(serde_json::json!({
+            "preferred_username": "ada",
+            "groups": ["ds-admins"],
+            "ds_discord_id": "80351110224678912",
+            "ds_primary_sub": "  0f3c-primary  ",
+        }));
+        assert_eq!(
+            claims.additional_claims().groups.as_deref(),
+            Some(["ds-admins".to_string()].as_slice())
+        );
+        assert_eq!(
+            raw_claims_from_id_token(&claims)
+                .preferred_username
+                .as_deref(),
+            Some("ada")
+        );
+        assert_eq!(
+            continuity_claims(&claims.additional_claims().other, &names()),
+            ContinuityClaims {
+                discord_id: Some("80351110224678912".to_string()),
+                primary_sub: Some("0f3c-primary".to_string()),
+            }
+        );
+    }
+
+    #[test]
+    fn a_numeric_snowflake_is_read_as_its_digits() {
+        let claims =
+            id_token_claims(serde_json::json!({ "ds_discord_id": 80_351_110_224_678_912u64 }));
+        assert_eq!(
+            continuity_claims(&claims.additional_claims().other, &names()).discord_id,
+            Some("80351110224678912".to_string())
+        );
+    }
+
+    /// A Discord id must be a snowflake, so a mapping that emits a handle
+    /// by mistake never matches; blank, absent, and non-string values are
+    /// no claim at all.
+    #[test]
+    fn unusable_continuity_claims_are_dropped() {
+        for value in [
+            serde_json::json!("ada#1234"),
+            serde_json::json!(""),
+            serde_json::json!("  "),
+            serde_json::json!(null),
+            serde_json::json!(true),
+            serde_json::json!(["1"]),
+            serde_json::json!({ "id": "1" }),
+            serde_json::json!(1.5),
+        ] {
+            let claims = id_token_claims(serde_json::json!({
+                "ds_discord_id": value.clone(),
+                "ds_primary_sub": value.clone(),
+            }));
+            let read = continuity_claims(&claims.additional_claims().other, &names());
+            assert_eq!(read.discord_id, None, "{value}");
+            if !matches!(&value, serde_json::Value::String(text) if !text.trim().is_empty()) {
+                assert_eq!(read.primary_sub, None, "{value}");
+            }
+        }
+        let long = "1".repeat(MAX_CONTINUITY_CLAIM_LEN + 1);
+        let claims = id_token_claims(serde_json::json!({ "ds_discord_id": long }));
+        assert_eq!(
+            continuity_claims(&claims.additional_claims().other, &names()).discord_id,
+            None
+        );
+        let claims = id_token_claims(serde_json::json!({}));
+        assert_eq!(
+            continuity_claims(&claims.additional_claims().other, &names()),
+            ContinuityClaims::default()
+        );
     }
 }

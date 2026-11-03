@@ -3,6 +3,20 @@
 Changes to the Distant Signal (DS) HTTP API that a client such as DS-MCP
 needs to know about. Newest first. Field names are as served (camelCase).
 
+## 2026-11-04: account continuity across a change of login provider (off by default)
+
+No route or response changes. Behind `SSO_DISCORD_ID_CLAIM` and
+`SSO_PRIMARY_SUB_CLAIM` (both unset), the login callback re-keys an
+existing account to a new OIDC `sub` when the ID token's Discord id or
+forwarded primary sub matches it, so `users.id` (the `sub` a delegated
+token, `POST /delegated-grants/revoke {sub}` and back-channel logout carry)
+changes for that user at their first login through the new provider. A
+login whose claims match two accounts is answered `409`. See
+[connected-apps.md](connected-apps.md), "Account continuity". DS-MCP: no
+code change; its grants are keyed by `sub`, so after the switch to
+`ds-sso` each user connects again, and until their first DS login their
+delegated calls get `403 not_granted`.
+
 ## 2026-11-04: the OpenAPI document in the api image
 
 Additive, no HTTP change. The api image

@@ -1,4 +1,5 @@
 pub mod account;
+pub mod account_continuity;
 pub mod alternative_ranking;
 pub mod cancellation;
 pub mod config;

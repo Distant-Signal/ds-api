@@ -176,6 +176,110 @@ after revocation (`api.delegated.revokedGrantRetentionDays`,
 after 24 hours and expired confirmation tokens. See
 [personal-data-retention.md](personal-data-retention.md).
 
+## Account continuity
+
+When DS's interactive login moves to a new identity provider (the
+dedicated `ds-sso` instance for public login: Ranma-Config
+`docs/specs/ds-public-auth-idp.md`), every user arrives with a new `sub`.
+`users.id` is the `sub`, and the delegated, revoke and back-channel logout
+paths use a token's `sub` directly, so the api keeps `users.id` equal to
+the current `sub` and **re-keys an existing account in place** on its
+first login through the new provider. Sessions, personal API tokens,
+delegated grants and everything else the user owns follow, through the
+`ON UPDATE CASCADE` foreign keys (ds-core v0.1.1).
+
+**It is off by default.** Two api settings turn it on, each naming an
+ID-token claim (top-level; the api reads the ID token only, never
+userinfo):
+
+| Env | Claim | Matches |
+|---|---|---|
+| `SSO_DISCORD_ID_CLAIM` | the user's Discord id (snowflake), from `ds-sso`'s Discord source connection identifier | `users.discord_id` |
+| `SSO_PRIMARY_SUB_CLAIM` | the user's `sub` at the primary identity provider, forwarded by `ds-sso`'s OIDC source for it (staff) | `users.id` |
+
+Both must be filled by the identity provider from data the user cannot
+edit, never from a profile attribute. The api refuses to start if either
+names a standard claim (`preferred_username`, `nickname`, `name`, `email`,
+`sub`, `groups`, ...). A Discord id that is not all digits is ignored. The
+chart's values are `api.sso.discordIdClaim` and `api.sso.primarySubClaim`
+(Distant-Signal/ds-deploy), empty by default.
+
+On a login whose `sub` has no account, in one transaction:
+
+1. a row whose `discord_id` is the token's Discord id, or whose `id` is the
+   forwarded primary sub, is re-keyed: `UPDATE users SET id = <new sub>`,
+   plus `group_train_share_moves.added_by` (a copied id with no foreign
+   key);
+2. else a new account is created, as before.
+
+A login whose `sub` has an account is the ordinary upsert. Every login
+stores the Discord id claim in `users.discord_id` when it is present (a
+login without it keeps the stored one).
+
+Conflicts are never resolved automatically; an operator merges the
+accounts by hand:
+
+| `kind` | When | Login |
+|---|---|---|
+| `discord_id_held_by_another_account` | the new `sub` already has an account (it logged in before the Discord ids were loaded) and another account holds the Discord id | goes ahead as the new `sub`'s account, Discord id not stored, nothing re-keyed |
+| `ambiguous_match` | the Discord id and the primary sub match two different accounts | refused (`409`), nothing created |
+| `primary_sub_account_has_another_discord_id` | the primary sub's account holds a different Discord id from the token's | refused (`409`) |
+
+Observability: an audit line (`audit=true`) `event=account_rekeyed` with
+`from_user_id`, `to_user_id` and `matched_by` (`discord_id` or
+`primary_sub`) per re-key, and `event=account_continuity_conflict` (ERROR)
+with `kind`, `user_id` and `login_refused` per conflict; the Discord id is
+never logged. Metrics:
+`distant_signal_api_account_rekeys_total{matched_by}` and
+`distant_signal_api_account_continuity_conflicts_total{kind}`.
+
+### Cut-over
+
+The order is the Ranma-Config spec's runbook:
+
+1. Deploy ds-core v0.1.1's migrations (additive) and its grants (the api
+   needs `SELECT` and `UPDATE` on `group_train_share_moves.added_by`: with
+   per-service roles on, re-run the role setup before an api built against
+   v0.1.1 starts, since its schema gate checks the grant).
+2. Hand Ranma the list of DS accounts (read-only):
+
+   ```sql
+   SELECT id FROM users ORDER BY id;
+   ```
+
+3. Load the export (`{legacy_sub, discord_id}` per account, from the
+   primary's Discord source connections) before step 4: an account that
+   logs in through `ds-sso` before its Discord id is loaded gets a second
+   account. The export holds personal identifiers: keep it out of the
+   repository and delete it after loading. With the export as a two-column
+   CSV (`legacy_sub,discord_id`, empty for none):
+
+   ```sql
+   BEGIN;
+   CREATE TEMP TABLE continuity_export (legacy_sub text PRIMARY KEY, discord_id text) ON COMMIT DROP;
+   \copy continuity_export FROM 'export.csv' WITH (FORMAT csv, HEADER true)
+   -- Review first: a Discord id on two accounts, or not all digits.
+   SELECT discord_id, array_agg(legacy_sub) FROM continuity_export
+   WHERE discord_id <> '' GROUP BY discord_id HAVING count(*) > 1 OR discord_id !~ '^[0-9]+$';
+   UPDATE users u SET discord_id = e.discord_id
+   FROM continuity_export e
+   WHERE u.id = e.legacy_sub AND e.discord_id <> '' AND u.discord_id IS NULL;
+   COMMIT;
+   ```
+
+4. Set `SSO_DISCORD_ID_CLAIM` and `SSO_PRIMARY_SUB_CLAIM` with the switch
+   of `SSO_ISSUER_URL` (and the delegated `issuerUrl`) to `ds-sso`. Each
+   account is re-keyed on its owner's first login. ds-mcp keys its own
+   grants by `sub`, so MCP users connect again; a user who reaches ds-mcp
+   before their first DS login gets `403 not_granted` until they log in to
+   DS once.
+5. Afterwards: review the conflicts (the metric and the audit lines) and
+   any account no claim matched (`SELECT id FROM users WHERE last_login_at
+   < <cut-over>`), and merge by hand.
+
+Rolling back to the primary after a re-key would need the reverse
+mapping: the audit lines record each `from_user_id` and `to_user_id`.
+
 ## Observability
 
 - Audit log lines (`audit=true`): `delegated_request` (every delegated

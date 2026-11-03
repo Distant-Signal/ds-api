@@ -146,6 +146,24 @@ pub struct ServiceArguments {
     #[arg(long, env)]
     pub sso_post_login_redirect_url: String,
 
+    /// Account continuity across a change of identity provider
+    /// (docs/connected-apps.md, "Account continuity"): the ID-token claim
+    /// that carries the user's Discord id (snowflake), taken by the
+    /// provider from its Discord source connection. When set, a login
+    /// whose `sub` has no account yet takes over the account with that
+    /// `users.discord_id` (re-keyed to the new `sub`), and every login
+    /// stores the claim in `users.discord_id`. EMPTY BY DEFAULT: off.
+    #[arg(long, env, default_value = "")]
+    pub sso_discord_id_claim: String,
+
+    /// Account continuity, staff: the ID-token claim that carries the
+    /// user's `sub` at the previous (primary) identity provider, which is
+    /// their existing `users.id`. When set, a login whose `sub` has no
+    /// account yet takes over the account whose id is that claim. EMPTY BY
+    /// DEFAULT: off.
+    #[arg(long, env, default_value = "")]
+    pub sso_primary_sub_claim: String,
+
     /// Session idle timeout in days: a SLIDING expiry. Sign-in stamps
     /// `sessions.expires_at = NOW() + this`, and
     /// `auth::AuthenticatedUser::from_request_parts` (the one place every
@@ -447,6 +465,16 @@ pub const STORED_GROUPS_EXTRA_ENV: &str = "OIDC_STORED_GROUPS_EXTRA";
 pub const DEFAULT_STORED_GROUPS_EXTRA: &str = "";
 
 impl ServiceArguments {
+    /// The account continuity claim names (`SSO_DISCORD_ID_CLAIM`,
+    /// `SSO_PRIMARY_SUB_CLAIM`); see
+    /// [`crate::auth::oidc::ContinuityClaimNames`]. Checked at startup.
+    pub fn continuity_claim_names(&self) -> Result<crate::auth::oidc::ContinuityClaimNames> {
+        crate::auth::oidc::ContinuityClaimNames::new(
+            &self.sso_discord_id_claim,
+            &self.sso_primary_sub_claim,
+        )
+    }
+
     /// The `IdP` groups a login may store on `users.groups`; see
     /// [`STORED_GROUPS_EXTRA_ENV`].
     pub fn stored_group_allowlist(&self) -> Vec<String> {

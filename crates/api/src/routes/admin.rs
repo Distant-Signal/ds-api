@@ -241,6 +241,8 @@ mod session_revocation_db_tests {
             sso_client_secret: "test-secret".to_string(),
             sso_redirect_url: format!("{ORIGIN}/callback"),
             sso_post_login_redirect_url: format!("{ORIGIN}/"),
+            sso_discord_id_claim: String::new(),
+            sso_primary_sub_claim: String::new(),
             session_ttl_days: 14,
             session_max_age_days: 90,
             session_extend_throttle_hours: 24,
