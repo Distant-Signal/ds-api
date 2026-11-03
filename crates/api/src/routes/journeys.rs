@@ -1322,7 +1322,7 @@ fn internal_error(operation: &'static str) -> impl Fn(anyhow::Error) -> (StatusC
 /// no parameters before `include` and ignored any it was sent, which a
 /// client may rely on.
 #[derive(Debug, Default, Deserialize)]
-struct MyJourneysParams {
+pub(crate) struct MyJourneysParams {
     /// A comma-separated list: `followed` also lists the journeys the
     /// caller follows (DS-146), `shared` the journeys other members shared
     /// into the caller's groups (DS-178).
@@ -1359,7 +1359,7 @@ fn parse_my_journeys_include(include: Option<&str>) -> Option<journeys::ListIncl
 /// own journeys, as before. A delegated caller always gets its own
 /// journeys only: following and reading a group-shared journey are
 /// session features (`get_journey`).
-async fn get_my_journeys(
+pub(crate) async fn get_my_journeys(
     State(app): State<App>,
     user: DelegatedOrSessionUser<ReadScope>,
     Query(params): Query<MyJourneysParams>,
@@ -1370,15 +1370,15 @@ async fn get_my_journeys(
             StatusCode::BAD_REQUEST,
             "include must be `followed`, `shared` or `followed,shared`".to_string(),
         ))
-        .render(user.is_delegated(), "bad_request");
+        .render(user.is_bearer(), "bad_request");
     };
-    if user.is_delegated() {
+    if user.is_bearer() {
         include = journeys::ListInclude::OWN;
     }
     match journeys::list_journeys_for_user(&app.database, &user.user_id, include).await {
         Ok(rows) => Json(rows).into_response(),
         Err(err) => RouteError::from(internal_error("list journeys")(err))
-            .render(user.is_delegated(), "bad_request"),
+            .render(user.is_bearer(), "bad_request"),
     }
 }
 
@@ -1573,13 +1573,13 @@ pub(crate) struct LegSkipResponse {
 /// so `journey_readable_by` is not used for them, and a journey shared
 /// with them answers 404 like any other. `shareLink` is always `null` for
 /// them: a live share link is a credential.
-async fn get_journey(
+pub(crate) async fn get_journey(
     State(app): State<App>,
     user: DelegatedOrSessionUser<ReadScope>,
     Path(journey_id): Path<i64>,
 ) -> axum::response::Response {
     use axum::response::IntoResponse;
-    let delegated = user.is_delegated();
+    let delegated = user.is_bearer();
     match get_journey_inner(&app, &user, journey_id).await {
         Ok(response) => Json(response).into_response(),
         Err(err) => RouteError::from(err).render(delegated, "bad_request"),
@@ -1592,7 +1592,7 @@ async fn get_journey_inner(
     journey_id: i64,
 ) -> Result<JourneyDetailResponse, (StatusCode, String)> {
     let not_found = || (StatusCode::NOT_FOUND, "no journey with that id".to_string());
-    if !user.is_delegated() {
+    if !user.is_bearer() {
         let readable = journeys::journey_readable_by(&app.database, journey_id, &user.user_id)
             .await
             .map_err(internal_error("check journey readability"))?;
@@ -1606,12 +1606,12 @@ async fn get_journey_inner(
         .map_err(internal_error("read journey"))?
         .ok_or_else(not_found)?;
     let is_owner = summary.user_id == user.user_id;
-    if user.is_delegated() && !is_owner {
+    if user.is_bearer() && !is_owner {
         return Err(not_found());
     }
 
     let mut response = build_journey_detail_response(app, journey_id, is_owner).await?;
-    if user.is_delegated() {
+    if user.is_bearer() {
         response.share_link = None;
     } else if !is_owner {
         response.followed_from =
@@ -3106,6 +3106,7 @@ mod db_tests {
             .expect("construct placeholder internal-oauth verifier"),
             delegated: std::sync::Arc::default(),
             tfl_arrivals: std::sync::Arc::default(),
+            personal_tokens: std::sync::Arc::default(),
             schedule_crs_line_index: std::collections::HashMap::new(),
         })
     }

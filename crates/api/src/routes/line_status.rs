@@ -217,7 +217,7 @@ fn parse_modes(raw: &str) -> Result<Vec<String>, String> {
     Ok(modes)
 }
 
-async fn get_mode_status(
+pub(crate) async fn get_mode_status(
     State(app): State<App>,
     Path(modes): Path<String>,
     Query(query): Query<DetailQuery>,
@@ -278,7 +278,7 @@ fn parse_line_status_ids(raw: &str) -> Result<Vec<String>, (StatusCode, String)>
         .collect())
 }
 
-async fn get_line_status(
+pub(crate) async fn get_line_status(
     State(app): State<App>,
     Path(ids): Path<String>,
     Query(query): Query<DetailQuery>,
@@ -354,7 +354,7 @@ async fn get_line_status(
 /// completely unchanged, and reuses the exact `ApiNotFoundError` path the
 /// frontend already has for "this call came back not-found" -- no new
 /// wrapper type, no new response shape, on either side.
-async fn get_stop_point_disruption(
+pub(crate) async fn get_stop_point_disruption(
     State(app): State<App>,
     Path(crs): Path<String>,
 ) -> Result<Json<Vec<Value>>, (StatusCode, String)> {
@@ -1910,6 +1910,7 @@ mod db_tests {
             .expect("construct placeholder internal-oauth verifier"),
             delegated: std::sync::Arc::default(),
             tfl_arrivals: std::sync::Arc::default(),
+            personal_tokens: std::sync::Arc::default(),
             schedule_crs_line_index: HashMap::new(),
         })
     }

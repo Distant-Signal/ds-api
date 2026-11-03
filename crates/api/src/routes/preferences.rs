@@ -58,7 +58,7 @@ pub fn router() -> Router {
     clippy::struct_excessive_bools,
     reason = "one switch per kind of push, as the wire has them"
 )]
-struct NotificationPreferences {
+pub(crate) struct NotificationPreferences {
     journey_suggestions: bool,
     line_status: bool,
     train_delay: bool,
@@ -200,7 +200,7 @@ impl From<notification_settings::NotificationSettings> for NotificationPreferenc
 
 /// Also a delegated route (`preferences:read`, DS-153): a connected app the
 /// user granted it may read these settings, never change them.
-async fn get_notification_preferences(
+pub(crate) async fn get_notification_preferences(
     State(app): State<App>,
     user: DelegatedOrSessionUser<PreferencesReadScope>,
 ) -> Result<Json<NotificationPreferences>, (StatusCode, String)> {
@@ -226,7 +226,7 @@ async fn put_notification_preferences(
 
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
-struct PreferencesResponse {
+pub(crate) struct PreferencesResponse {
     pinned_lines: Vec<String>,
     pinned_stations: Vec<String>,
     pinned_operators: Vec<String>,
@@ -235,11 +235,11 @@ struct PreferencesResponse {
     silent_pinned_lines: Vec<String>,
 }
 
-async fn get_preferences(
+pub(crate) async fn get_preferences(
     State(app): State<App>,
-    user: AuthenticatedUser,
+    user: DelegatedOrSessionUser<PreferencesReadScope>,
 ) -> Result<Json<PreferencesResponse>, (StatusCode, String)> {
-    let pinned_line_ids = preferences::list_pinned_line_ids(&app.database, &user.id)
+    let pinned_line_ids = preferences::list_pinned_line_ids(&app.database, &user.user_id)
         .await
         .map_err(internal_error)?;
     // Only the custom lines THIS caller may read count as "known" here.
@@ -260,7 +260,7 @@ async fn get_preferences(
     let readable_custom_ids = if pinned_custom_ids.is_empty() {
         HashSet::new()
     } else {
-        custom_lines::readable_custom_line_ids(&app.database, &pinned_custom_ids, &user.id)
+        custom_lines::readable_custom_line_ids(&app.database, &pinned_custom_ids, &user.user_id)
             .await
             .map_err(internal_error)?
     };
@@ -289,24 +289,27 @@ async fn get_preferences(
         readable_custom_ids,
         tfl.into_iter().map(|l| l.id).chain(transit),
     );
-    let silent_pinned_lines = preferences::list_silent_pinned_line_ids(&app.database, &user.id)
-        .await
-        .map_err(internal_error)?
-        .into_iter()
-        .filter(|id| pinned_lines.contains(id))
-        .collect();
+    let silent_pinned_lines =
+        preferences::list_silent_pinned_line_ids(&app.database, &user.user_id)
+            .await
+            .map_err(internal_error)?
+            .into_iter()
+            .filter(|id| pinned_lines.contains(id))
+            .collect();
 
-    let pinned_station_candidates = preferences::list_pinned_station_crs(&app.database, &user.id)
-        .await
-        .map_err(internal_error)?;
+    let pinned_station_candidates =
+        preferences::list_pinned_station_crs(&app.database, &user.user_id)
+            .await
+            .map_err(internal_error)?;
     let pinned_stations =
         preferences::filter_existing_station_crs(&app.database, &pinned_station_candidates)
             .await
             .map_err(internal_error)?;
 
-    let pinned_operator_codes = preferences::list_pinned_operator_codes(&app.database, &user.id)
-        .await
-        .map_err(internal_error)?;
+    let pinned_operator_codes =
+        preferences::list_pinned_operator_codes(&app.database, &user.user_id)
+            .await
+            .map_err(internal_error)?;
     // Every real ATOC code plus the synthetic "TfL" row is "known" here --
     // unlike `filter_known_pinned_lines`, there is no ownership/visibility
     // distinction to make (an operator code is a public reference concept,

@@ -14,6 +14,9 @@ base64 = "0.22"
 chrono = { version = "0.4.44", features = ["serde"] }
 chrono-tz = "0.10"
 clap = { version = "4.6.1", features = ["derive", "env"] }
+# The checksum on a personal API token (`personal_tokens::token`), so secret
+# scanners and the api can recognise a real one without a lookup.
+crc32fast = "1.5"
 common = { path = "../common", features = ["postgres", "ts"] }
 # The line catalogue, embedded (`--lines-dir` defaults to it).
 ds-lines = { path = "../ds-lines" }
@@ -69,6 +72,9 @@ serde-inline-default = "1.0.1"
 # `data::queries::upsert_schedule_line_population`'s doc comment.
 serde_json = { version = "1.0.149", features = ["raw_value"] }
 sha2 = "0.10"
+# Constant-time comparison of personal API token hashes
+# (`personal_tokens::token`). Already in the tree through the TLS stack.
+subtle = "2.6"
 sqlx = { version = "0.8.6", features = ["chrono", "macros", "migrate", "postgres", "runtime-tokio", "tls-native-tls", "json"] }
 # Generated TypeScript for the frontend (`api_types`, repo-split spec §5.3):
 # `#[derive(TS)]` on the response and request types, written to
@@ -92,6 +98,8 @@ ds-store = { path = "../ds-store", features = ["test-support"] }
 wiremock = "0.6"
 # The Atom feed tests parse the documents (`routes::feeds`).
 quick-xml = "0.41.0"
+# Captures log output in a test, to check no personal token is ever logged.
+tracing-subscriber = "0.3.23"
 metrics-exporter-prometheus = { version = "0.18", default-features = false }
 
 [lints]

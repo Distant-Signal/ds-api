@@ -42,6 +42,9 @@ pub struct AppState {
     /// Live arrivals at `TfL` stops, fetched on demand behind a short
     /// per-stop cache (`crate::data::tfl_arrivals`). `Default` is disabled.
     pub tfl_arrivals: Arc<crate::data::tfl_arrivals::TflArrivals>,
+    /// Read-only personal API tokens (`crate::personal_tokens`). `Default`
+    /// is off.
+    pub personal_tokens: Arc<crate::personal_tokens::PersonalTokens>,
 }
 
 /// Dead-client detection (`client_connection_check_interval` and TCP
@@ -115,6 +118,7 @@ impl std::fmt::Debug for AppState {
             .field("schedule_crs_line_index", &self.schedule_crs_line_index)
             .field("delegated", &self.delegated)
             .field("tfl_arrivals", &self.tfl_arrivals)
+            .field("personal_tokens", &self.personal_tokens)
             .finish()
     }
 }
@@ -295,6 +299,12 @@ impl AppState {
             &db,
         )?);
 
+        // Personal API tokens (docs/specs/personal-api-tokens.md): off
+        // unless PERSONAL_TOKENS_ENABLED.
+        let personal_tokens = Arc::new(crate::personal_tokens::PersonalTokens::new(
+            crate::personal_tokens::PersonalTokenSettings::from_env()?,
+        ));
+
         Ok(Arc::new(Self {
             config,
             database: db,
@@ -304,6 +314,7 @@ impl AppState {
             line_matcher,
             delegated,
             tfl_arrivals,
+            personal_tokens,
         }))
     }
 }

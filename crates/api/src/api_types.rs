@@ -82,6 +82,10 @@ fn visit_roots(v: &mut Collector) {
     v.visit::<crate::routes::journey_replan::SuggestionStaleResponse>();
     v.visit::<crate::data::journey_replace::ReplaceResponse>();
     v.visit::<crate::routes::journey_replan::RevisionsResponse>();
+    // Personal API tokens (Connected apps).
+    v.visit::<crate::routes::personal_tokens::PersonalTokensResponse>();
+    v.visit::<crate::routes::personal_tokens::CreatePersonalTokenRequest>();
+    v.visit::<crate::routes::personal_tokens::CreatedPersonalTokenResponse>();
 }
 
 /// Collects one declaration per exportable type, keyed by its TypeScript
