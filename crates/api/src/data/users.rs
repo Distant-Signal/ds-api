@@ -999,10 +999,25 @@ pub async fn revoke_all_sessions(
     let grants_revoked =
         crate::data::delegated::revoke_grants_for_user(&mut *tx, user_id, None, grant_reason)
             .await?;
+    // An administrator's revocation also ends the user's personal API
+    // tokens. A back-channel logout does not: a token exists to keep a
+    // device working across the user's own logouts
+    // (docs/specs/personal-api-tokens.md §8.3).
+    let tokens_revoked = if grant_reason == crate::data::delegated::RevokeReason::Admin {
+        crate::data::personal_tokens::revoke_all_for_user(
+            &mut *tx,
+            user_id,
+            crate::data::personal_tokens::RevokeReason::Admin,
+        )
+        .await?
+    } else {
+        0
+    };
     tx.commit().await?;
     Ok(Some(SessionRevocation {
         sessions_deleted,
         grants_revoked,
+        tokens_revoked,
     }))
 }
 
@@ -1011,6 +1026,8 @@ pub async fn revoke_all_sessions(
 pub struct SessionRevocation {
     pub sessions_deleted: u64,
     pub grants_revoked: u64,
+    /// Personal API tokens revoked (an admin revocation only).
+    pub tokens_revoked: u64,
 }
 
 /// The ids of every user whose stored username (the `preferred_username`

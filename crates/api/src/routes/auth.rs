@@ -659,11 +659,17 @@ struct SessionResponse {
     /// The user's usage-analytics choice (DS-190); `false` when logged
     /// out, where the browser keeps its own choice.
     analytics_opt_in: bool,
+    /// Whether personal API tokens are on (`PERSONAL_TOKENS_ENABLED`), so
+    /// the account menu can offer "Revoke all API tokens"; `false` when
+    /// logged out.
+    personal_tokens_enabled: bool,
 }
 
 async fn session(
+    State(app): State<App>,
     OptionalAuthenticatedUser(user): OptionalAuthenticatedUser,
 ) -> Json<SessionResponse> {
+    let personal_tokens_enabled = app.personal_tokens.enabled();
     match user {
         Some(u) => Json(SessionResponse {
             authenticated: true,
@@ -672,6 +678,7 @@ async fn session(
             username: u.username,
             groups: u.groups,
             analytics_opt_in: u.analytics_opt_in,
+            personal_tokens_enabled,
         }),
         None => Json(SessionResponse {
             authenticated: false,
@@ -680,6 +687,7 @@ async fn session(
             username: None,
             groups: vec![],
             analytics_opt_in: false,
+            personal_tokens_enabled: false,
         }),
     }
 }
@@ -778,6 +786,7 @@ mod tests {
             username: Some("ada".to_string()),
             groups: vec!["mcp-users".to_string(), "mcp-live-boards".to_string()],
             analytics_opt_in: true,
+            personal_tokens_enabled: true,
         };
         let json = serde_json::to_value(&response).expect("serializes");
         assert_eq!(
@@ -796,6 +805,7 @@ mod tests {
             username: None,
             groups: vec![],
             analytics_opt_in: false,
+            personal_tokens_enabled: false,
         };
         let json = serde_json::to_value(&response).expect("serializes");
         assert_eq!(json["groups"], serde_json::json!([]));

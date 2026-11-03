@@ -152,6 +152,7 @@ fn config_defaults() -> ds_runtime::service_args::ConfigDefaults {
         .args(&api::edge::EdgeSettings::command())
         .args(&api::rate_limit::RateLimitSettings::command())
         .args(&api::auth::delegated::DelegatedSettings::command())
+        .args(&api::personal_tokens::PersonalTokenSettings::command())
         .args(&data::tfl_arrivals::TflArrivalsSettings::command())
         .postgres_pool(api::app::DB_POOL_SIZE)
         .db_role(ds_store::schema::DbRole::Api.key())
@@ -441,8 +442,35 @@ async fn server_main() -> anyhow::Result<()> {
             app.delegated.clone(),
             api::auth::delegated::gate,
         ))
+        // A personal API token (`dsp_...`) is refused here, on the public
+        // and delegated listeners, before anything else reads the bearer:
+        // it works only on the token listener (D-14 as amended,
+        // docs/specs/personal-api-tokens.md §3.3). Always on.
+        .layer(axum::middleware::from_fn(
+            api::personal_tokens::refuse_on_main_listener,
+        ))
         .layer(TraceLayer::new_for_http().make_span_with(request_span))
         .with_state(app.clone());
+    // The token listener's router: its own allowlisted `/v1` routes, not a
+    // copy of the router above. Built only while the feature is on.
+    let token_listener = app.personal_tokens.listen_addr().map(|addr| {
+        (
+            addr.to_string(),
+            api::personal_tokens::router(&app, &edge_settings)
+                .layer(TraceLayer::new_for_http().make_span_with(request_span))
+                .with_state(app.clone()),
+        )
+    });
+    if let Some((addr, _)) = &token_listener {
+        tracing::info!(
+            listen_addr = %addr,
+            public_base_url = %app.personal_tokens.settings.public_base_url,
+            trust_cf_connecting_ip = app.personal_tokens.settings.trust_cf_connecting_ip,
+            "personal API tokens enabled: accepted only on this listener"
+        );
+    } else {
+        tracing::info!("PERSONAL_TOKENS_ENABLED is false: personal API tokens are off");
+    }
     // The delegated listener's copy of the router: the same routes, with
     // every request marked as having arrived there. Only that mark lets
     // `gate` accept a delegated bearer; the public listener never sets it.
@@ -549,6 +577,12 @@ async fn server_main() -> anyhow::Result<()> {
                 )),
                 None => None,
             };
+            let tokens = match token_listener {
+                Some((addr, token_router)) => {
+                    Some((tokio::net::TcpListener::bind(&addr).await?, token_router))
+                }
+                None => None,
+            };
             // Installed only now: until the listener is up, SIGTERM keeps
             // its default action, so a pod stopped mid-migration or at the
             // schema gate exits at once.
@@ -561,7 +595,7 @@ async fn server_main() -> anyhow::Result<()> {
             serve_until_shutdown(
                 listener,
                 router,
-                delegated,
+                SideListeners { delegated, tokens },
                 header_read_timeout,
                 &shutdown,
                 drain_deadline,
@@ -573,6 +607,14 @@ async fn server_main() -> anyhow::Result<()> {
     .await
 }
 
+/// The listeners beside the public one, each bound only while its feature
+/// is on: the delegated listener (D-14) and the personal-token listener
+/// (D-14 as amended, docs/specs/personal-api-tokens.md).
+struct SideListeners {
+    delegated: Option<(tokio::net::TcpListener, axum::Router)>,
+    tokens: Option<(tokio::net::TcpListener, axum::Router)>,
+}
+
 /// Serves until `shutdown` fires, then drains the connections and stops the
 /// background loops side by side, both within `drain_deadline`, so the
 /// loops' advisory locks are released while the last requests finish
@@ -580,7 +622,7 @@ async fn server_main() -> anyhow::Result<()> {
 async fn serve_until_shutdown(
     listener: tokio::net::TcpListener,
     router: axum::Router,
-    delegated: Option<(tokio::net::TcpListener, axum::Router)>,
+    side: SideListeners,
     header_read_timeout: std::time::Duration,
     shutdown: &api::shutdown::ShutdownSignal,
     drain_deadline: std::time::Duration,
@@ -598,6 +640,7 @@ async fn serve_until_shutdown(
         }
     };
     // The delegated listener (when bound) drains alongside the public one.
+    let SideListeners { delegated, tokens } = side;
     let serve_delegated = async {
         match delegated {
             Some((listener, router)) => api::edge::serve_with_shutdown(
@@ -612,7 +655,22 @@ async fn serve_until_shutdown(
             None => Ok(()),
         }
     };
-    let (served, delegated_outcome, ()) = tokio::join!(
+    // So does the personal-token listener.
+    let serve_tokens = async {
+        match tokens {
+            Some((listener, router)) => api::edge::serve_with_shutdown(
+                listener,
+                router,
+                header_read_timeout,
+                shutdown.triggered(),
+                drain_deadline,
+            )
+            .await
+            .map(drop),
+            None => Ok(()),
+        }
+    };
+    let (served, delegated_outcome, tokens_outcome, ()) = tokio::join!(
         api::edge::serve_with_shutdown(
             listener,
             router,
@@ -621,10 +679,12 @@ async fn serve_until_shutdown(
             drain_deadline,
         ),
         serve_delegated,
+        serve_tokens,
         stop_loops,
     );
     served?;
     delegated_outcome?;
+    tokens_outcome?;
     tracing::info!("api shut down");
     Ok(())
 }
@@ -1015,6 +1075,20 @@ async fn session_cleanup_sweep_loop(app: App) {
             app.delegated.revoked_grant_retention_days,
         )
         .await;
+        // Personal API tokens (docs/specs/personal-api-tokens.md §8.5):
+        // expired and idle tokens end, and rows a year past their end go.
+        // Only while the feature is on, so turning it off and on again
+        // keeps the tokens that have not expired.
+        if app.personal_tokens.enabled() {
+            let settings = &app.personal_tokens.settings;
+            data::personal_tokens::run_sweep(
+                &app.database,
+                chrono::Utc::now(),
+                settings.idle_days,
+                settings.revoked_retention_days,
+            )
+            .await;
+        }
         // Open journey breaks whose journey is over end here too, whether
         // or not the break sweep (`JOURNEY_BREAKS_ENABLED`) runs, so none
         // lingers on a journey page with the sweep off.

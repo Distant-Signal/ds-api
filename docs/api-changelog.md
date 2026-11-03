@@ -3,6 +3,32 @@
 Changes to the Distant Signal (DS) HTTP API that a client such as DS-MCP
 needs to know about. Newest first. Field names are as served (camelCase).
 
+## 2026-11-03: read-only personal API tokens (off by default)
+
+New, behind `api.personalTokens.enabled` (off). A user creates a `dsp_`
+token on the Connected apps page (`GET`, `POST` and `DELETE
+/public/account/personal-tokens`, session cookie only; the `POST`
+response is the only place the token appears) and uses it as
+`Authorization: Bearer dsp_...` on a separate API hostname, served by its
+own listener. That listener serves only `/v1` read routes: `GET
+/v1/status` (no token), `/v1/me`, `/v1/Journeys/mine`,
+`/v1/Journeys/{journeyId}`, `/v1/Line/Mode/{mode}/Status`,
+`/v1/Line/{ids}/Status`, `/v1/StopPoint/{crs}/Disruption`,
+`/v1/Train/by-uid/{trainUid}/{date}`, `/v1/stations/{crs}/departures`,
+`/v1/preferences` and `/v1/preferences/notifications`, each needing one of
+`journeys:read`, `lines:read`, `trains:read` or `preferences:read`. A
+`2xx` body is `{data, attribution}`, where `data` is what the website's
+route returns; errors are `{error, message}`. Responses carry
+`Cache-Control: private, max-age=N`, a weak `ETag` (a matching
+`If-None-Match` gets `304`) and `DS-Poll-Interval: 60`. A `dsp_` token
+sent to the website's API (or the delegated listener) is answered `401
+invalid_token`. `GET /public/preferences` now also accepts a personal
+token on the token listener; for the website it is unchanged. The account
+export gains `personalApiTokens` (without the hash), and `GET
+/public/auth/session` gains `personalTokensEnabled` (`false` when logged
+out). DS-MCP: no change
+needed. Spec: [personal-api-tokens.md](specs/personal-api-tokens.md);
+operator guide: [personal-api-tokens.md](personal-api-tokens.md).
 ## 2026-11-03: Atom feeds of line status and incidents
 
 New, unauthenticated, `application/atom+xml`: `GET /public/feeds/network`

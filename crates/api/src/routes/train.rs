@@ -1039,7 +1039,7 @@ async fn patch_tracked_train(
 ///
 /// Additive (2026-10-08): the body also carries `provisional` and
 /// `provisionalFrom` for `date` -- see [`PublicTrainResponse`].
-async fn get_by_uid_and_date(
+pub(crate) async fn get_by_uid_and_date(
     State(app): State<App>,
     Path((train_uid, date)): Path<(String, NaiveDate)>,
 ) -> Result<Json<PublicTrainResponse>, (StatusCode, String)> {
@@ -3064,6 +3064,7 @@ mod db_tests {
             .expect("construct placeholder internal-oauth verifier"),
             delegated: std::sync::Arc::default(),
             tfl_arrivals: std::sync::Arc::default(),
+            personal_tokens: std::sync::Arc::default(),
             schedule_crs_line_index,
         })
     }

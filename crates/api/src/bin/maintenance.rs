@@ -19,7 +19,10 @@
 //!    days, `delegated_deletions` past 30 days, expired idempotency keys
 //!    and consent confirmation tokens;
 //! 5. `data::journey_breaks::expire_finished`: open journey breaks whose
-//!    journey is over, whether or not the break sweep is on.
+//!    journey is over, whether or not the break sweep is on;
+//! 6. `data::personal_tokens::run_sweep`, only with
+//!    `PERSONAL_TOKENS_ENABLED`: expired and idle personal API tokens end,
+//!    and rows past `PERSONAL_TOKENS_REVOKED_RETENTION_DAYS` go.
 //!
 //! It connects with the shared retry (`ds_runtime::startup`), giving up after
 //! `MAINTENANCE_CONNECT_DEADLINE_SECS` (default 120): a fresh pod on a
@@ -27,7 +30,7 @@
 //! otherwise fail on its first 5 s acquire.
 //!
 //! Each step runs even if an earlier one failed, as in the loop. The exit
-//! status is 0 only if all five succeeded, so a failing step fails the
+//! status is 0 only if every step succeeded, so a failing step fails the
 //! Job. Every step is idempotent. The loop stays in the api, behind
 //! `API_BACKGROUND_LOOPS`, until the `CronJob` is on.
 
@@ -84,6 +87,7 @@ struct PassReport {
     personal_data: Option<RetentionOutcome>,
     delegated: Option<api::data::delegated::SweepOutcome>,
     expired_breaks: Option<u64>,
+    personal_tokens: Option<api::data::personal_tokens::SweepOutcome>,
     failed: Vec<&'static str>,
 }
 
@@ -94,6 +98,10 @@ async fn main() -> std::process::ExitCode {
 
 async fn run() -> anyhow::Result<()> {
     let args = Args::parse();
+    // The api's own personal-token settings (`PERSONAL_TOKENS_*`, read the
+    // same way, from the environment only): the token sweep runs only while
+    // the feature is on.
+    let personal_tokens = api::personal_tokens::PersonalTokenSettings::from_env()?;
     ds_runtime::logging::init_with_filter(
         "api-maintenance",
         ds_runtime::logging::EnvFilter::try_from_default_env()
@@ -110,13 +118,25 @@ async fn run() -> anyhow::Result<()> {
         || settings.connect(args.database_url.expose()),
     )
     .await?;
-    let report = run_pass(
+    let mut report = run_pass(
         &pool,
         args.retention_policy(),
         args.delegated_revoked_grant_retention_days,
         chrono::Utc::now(),
     )
     .await;
+    if personal_tokens.enabled {
+        report.personal_tokens = api::data::personal_tokens::run_sweep(
+            &pool,
+            chrono::Utc::now(),
+            personal_tokens.idle_days,
+            personal_tokens.revoked_retention_days,
+        )
+        .await;
+        if report.personal_tokens.is_none() {
+            report.failed.push("personal_tokens");
+        }
+    }
     pool.close().await;
     tracing::info!(
         expired_sessions = report.expired_sessions,
@@ -124,6 +144,7 @@ async fn run() -> anyhow::Result<()> {
         personal_data = ?report.personal_data,
         delegated = ?report.delegated,
         expired_breaks = report.expired_breaks,
+        personal_tokens = ?report.personal_tokens,
         failed = ?report.failed,
         "maintenance pass finished"
     );

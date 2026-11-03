@@ -47,6 +47,13 @@ mod notification_settings_db_tests;
 pub mod notifications;
 pub mod operator_history;
 pub mod operators;
+pub mod personal_tokens;
+#[cfg(test)]
+#[expect(
+    clippy::too_many_lines,
+    reason = "test code: scenario tests read top to bottom"
+)]
+mod personal_tokens_db_tests;
 pub mod preferences;
 pub mod provisional;
 pub mod reference;
@@ -160,6 +167,7 @@ pub fn public_router() -> Router {
         .merge(admin::router())
         .merge(account::router())
         .merge(connected_apps::router())
+        .merge(personal_tokens::router())
         .merge(groups::router())
         .merge(station_stats::router())
         .merge(departures::router())

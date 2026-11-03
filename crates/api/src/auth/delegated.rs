@@ -771,6 +771,11 @@ pub enum Via {
         client: Arc<ClientConfig>,
         grant_id: i64,
     },
+    /// A read-only personal API token, on the token listener
+    /// (`crate::personal_tokens`).
+    PersonalToken {
+        token_id: i64,
+    },
 }
 
 /// The principal of an opted-in route: a session user, or a user whose
@@ -786,13 +791,19 @@ impl<S: RequiredScope> DelegatedOrSessionUser<S> {
     /// The delegated client, if any.
     pub fn client(&self) -> Option<&Arc<ClientConfig>> {
         match &self.via {
-            Via::Session => None,
+            Via::Session | Via::PersonalToken { .. } => None,
             Via::Delegated { client, .. } => Some(client),
         }
     }
 
     pub fn is_delegated(&self) -> bool {
         matches!(self.via, Via::Delegated { .. })
+    }
+
+    /// A bearer caller (a delegated client or a personal token) rather than
+    /// the web app: owner-only reads, no share link, JSON errors.
+    pub fn is_bearer(&self) -> bool {
+        !matches!(self.via, Via::Session)
     }
 }
 
@@ -814,6 +825,30 @@ impl<S: RequiredScope> FromRequestParts<App> for DelegatedOrSessionUser<S> {
     async fn from_request_parts(parts: &mut Parts, app: &App) -> Result<Self, Self::Rejection> {
         if let Some(token) = parts.extensions.get::<DelegatedToken>().cloned() {
             return resolve_delegated::<S>(app, &token).await;
+        }
+        // The token listener's gate verified a personal token. Its scope is
+        // checked again here, the last line if a route is ever mounted
+        // without its `TOKEN_ROUTES` entry.
+        if let Some(auth) = parts
+            .extensions
+            .get::<crate::personal_tokens::PersonalTokenAuth>()
+        {
+            let allowed = crate::personal_tokens::PersonalScope::for_delegated(S::SCOPE)
+                .is_some_and(|scope| auth.scopes.contains(&scope));
+            if !allowed {
+                return Err(error_response(
+                    StatusCode::FORBIDDEN,
+                    "insufficient_scope",
+                    "this token cannot read this",
+                ));
+            }
+            return Ok(Self {
+                user_id: auth.user_id.clone(),
+                via: Via::PersonalToken {
+                    token_id: auth.token_id,
+                },
+                _scope: std::marker::PhantomData,
+            });
         }
         // A bearer [`gate`] did not verify as delegated (an internal
         // service token, an unknown issuer, or the feature off): never fall
@@ -1457,6 +1492,9 @@ mod tests {
                     "routes/journeys.rs DeleteScope",
                     "routes/journeys.rs ReadScope",
                     "routes/journeys.rs ReadScope",
+                    // `GET /public/preferences`: personal tokens only
+                    // (`personal_tokens::TOKEN_ROUTES`); not delegated.
+                    "routes/preferences.rs PreferencesReadScope",
                     "routes/preferences.rs PreferencesReadScope",
                 ],
                 "the handlers taking DelegatedOrSessionUser changed; update DELEGATED_ROUTES, \
