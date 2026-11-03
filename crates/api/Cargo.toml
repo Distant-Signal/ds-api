@@ -17,14 +17,14 @@ clap = { version = "4.6.1", features = ["derive", "env"] }
 # The checksum on a personal API token (`personal_tokens::token`), so secret
 # scanners and the api can recognise a real one without a lookup.
 crc32fast = "1.5"
-common = { path = "../common", features = ["postgres", "ts"] }
+common = { workspace = true, features = ["default", "postgres", "ts"] }
 # The line catalogue, embedded (`--lines-dir` defaults to it).
-ds-lines = { path = "../ds-lines" }
-ds-runtime = { path = "../ds-runtime", features = ["postgres"] }
+ds-lines = { workspace = true }
+ds-runtime = { workspace = true, features = ["default", "postgres"] }
 dotenvy = "0.15.7"
 # The shared data access (ingest architecture phase 1A): `data::*` keeps
 # `pub use ds_store::...` shims as functions move there.
-ds-store = { path = "../ds-store", features = ["ts"] }
+ds-store = { workspace = true, features = ["ts"] }
 # Explicit, not merely transitive-via-`pdf-extract`/`lopdf`/`zip`: used
 # directly by `ticket_extraction::reject_pdf_compression_bombs` to run our
 # OWN bounded zlib decompression pass over a candidate PDF, ahead of
@@ -64,7 +64,7 @@ regex = "1"
 # site with no mention of the version split. Bump this only together with
 # an oauth2/openidconnect release that targets the newer reqwest.
 reqwest = { version = "0.12", default-features = false, features = ["json", "native-tls", "gzip"] }
-schedule-query = { path = "../schedule-query" }
+schedule-query = { workspace = true }
 serde = { version = "1.0.228", features = ["derive"] }
 serde-inline-default = "1.0.1"
 # The OpenAPI document of the personal-token `/v1` routes
@@ -94,13 +94,13 @@ tower = "0.5.3"
 tower-http = { version = "0.6.10", features = ["cors", "limit", "normalize-path", "timeout", "trace"] }
 tracing = "0.1.44"
 trip-planner = { path = "../trip-planner" }
-trust-schema = { path = "../trust-schema" }
+trust-schema = { workspace = true }
 zip = { version = "9", default-features = false, features = ["deflate"] }
 
 [dev-dependencies]
 # `test-support`: the shared DB-test fixtures (`ds_store::test_support`) and
 # `ds_store::sweeps::reconciliation::enrichment_candidate_ids_for_tests`.
-ds-store = { path = "../ds-store", features = ["test-support"] }
+ds-store = { workspace = true, features = ["test-support"] }
 wiremock = "0.6"
 # The Atom feed tests parse the documents (`routes::feeds`).
 quick-xml = "0.41.0"

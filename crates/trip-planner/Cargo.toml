@@ -7,7 +7,7 @@ publish.workspace = true
 license.workspace = true
 
 [dependencies]
-schedule-query = { path = "../schedule-query" }
+schedule-query = { workspace = true }
 chrono = { version = "0.4.44", features = ["serde"] }
 
 [lints]
