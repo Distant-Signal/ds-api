@@ -56,6 +56,7 @@ pub const USER_KEYED_TABLES: &[&str] = &[
     "line_notification_state",
     "notification_holds",
     "notification_preferences",
+    "personal_api_tokens",
     "pinned_lines",
     "pinned_operators",
     "pinned_stations",
@@ -196,6 +197,9 @@ pub struct AccountExport {
     pub connected_app_deletions: Value,
     /// `Idempotency-Key`s of the last 24 hours' itinerary saves.
     pub journey_save_keys: Value,
+    /// Personal API tokens (docs/specs/personal-api-tokens.md §8.5): every
+    /// token, working or ended, without its hash.
+    pub personal_api_tokens: Value,
     pub notification_state: NotificationStateExport,
     pub omitted: Vec<&'static str>,
     pub notes: Vec<&'static str>,
@@ -410,6 +414,13 @@ pub async fn export_account(pool: &PgPool, user_id: &str) -> Result<Option<Accou
             user_id,
         )
         .await?,
+        personal_api_tokens: rows(
+            pool,
+            "SELECT to_jsonb(t) - 'token_hash' FROM personal_api_tokens t \
+             WHERE user_id = $1 ORDER BY id",
+            user_id,
+        )
+        .await?,
         notification_state: NotificationStateExport {
             trains: rows(
                 pool,
@@ -443,6 +454,7 @@ pub async fn export_account(pool: &PgPool, user_id: &str) -> Result<Option<Accou
             "share_links.token_hash and group_invite_links.token_hash: hashed link credentials",
             "connected_app_confirmations.token_hash and session_id: a hashed one-time credential \
              and the hashed session it belongs to",
+            "personal_api_tokens.token_hash: the hashed token",
         ],
         notes: vec![
             "Your login identity (name, username, email) comes from the single sign-on provider; \
@@ -586,6 +598,8 @@ pub(crate) mod db_tests {
         exec(pool, "INSERT INTO delegated_grant_confirmations (token_hash, session_id, user_id, client, expires_at) VALUES (encode(sha256(convert_to('conf-' || $1, 'UTF8')), 'hex'), 'sess-' || $1, $1, 'ds-mcp', NOW() + INTERVAL '10 minutes')", u).await;
         exec(pool, "INSERT INTO delegated_deletions (user_id, client, grant_id, journey_id, summary) VALUES ($1, 'ds-mcp', (SELECT id FROM delegated_grants WHERE user_id = $1 LIMIT 1), 0, '{\"legs\": []}')", u).await;
         exec(pool, "INSERT INTO journey_idempotency_keys (user_id, idempotency_key, request_hash, response) VALUES ($1, 'key-' || $1, repeat('a', 64), '{}')", u).await;
+        // A personal API token (its hash must never be exported).
+        exec(pool, "INSERT INTO personal_api_tokens (user_id, name, token_hash, hint, scopes, expires_at) VALUES ($1, 'Display', sha256(convert_to('ptok-' || $1, 'UTF8')), 'AbC1', '{lines:read}', NOW() + INTERVAL '90 days')", u).await;
 
         // Owned, with another member (an admin who should inherit it).
         let shared = format!("{user}-g-shared");
