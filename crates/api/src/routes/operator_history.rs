@@ -25,13 +25,12 @@ use axum::extract::{Path, State};
 use axum::http::StatusCode;
 use axum::{Json, Router as AxumRouter};
 use chrono::{DateTime, Utc};
-use serde_json::Value;
 
 use crate::app::{App, Router};
 use crate::data::{operators, queries};
 use crate::routes::line_status::{
-    clamp_date_range, clamp_instant_range, daily_stats_to_json, half_hourly_retention,
-    half_hourly_stats_to_json, sub_daily_stats_to_json,
+    DailyStats, HalfHourlyStats, SubDailyStats, clamp_date_range, clamp_instant_range,
+    daily_stats_to_json, half_hourly_retention, half_hourly_stats_to_json, sub_daily_stats_to_json,
 };
 
 pub fn router() -> Router {
@@ -101,7 +100,7 @@ fn internal_error(err: anyhow::Error) -> (StatusCode, String) {
 async fn get_operator_daily_stats(
     State(app): State<App>,
     Path((code, from, to)): Path<(String, chrono::NaiveDate, chrono::NaiveDate)>,
-) -> Result<Json<Vec<Value>>, (StatusCode, String)> {
+) -> Result<Json<Vec<DailyStats>>, (StatusCode, String)> {
     let Some((from, to)) = clamp_date_range(
         from,
         to,
@@ -125,7 +124,7 @@ async fn get_operator_daily_stats(
 async fn get_operator_half_hourly_stats(
     State(app): State<App>,
     Path((code, from, to)): Path<(String, DateTime<Utc>, DateTime<Utc>)>,
-) -> Result<Json<Vec<Value>>, (StatusCode, String)> {
+) -> Result<Json<Vec<HalfHourlyStats>>, (StatusCode, String)> {
     let Some((from, to)) = clamp_instant_range(from, to, half_hourly_retention(&app), Utc::now())?
     else {
         return Ok(Json(vec![]));
@@ -146,7 +145,7 @@ async fn get_operator_half_hourly_stats(
 async fn get_operator_hourly_stats(
     State(app): State<App>,
     Path((code, from, to)): Path<(String, DateTime<Utc>, DateTime<Utc>)>,
-) -> Result<Json<Vec<Value>>, (StatusCode, String)> {
+) -> Result<Json<Vec<SubDailyStats>>, (StatusCode, String)> {
     let Some((from, to)) = clamp_instant_range(from, to, half_hourly_retention(&app), Utc::now())?
     else {
         return Ok(Json(vec![]));
@@ -167,7 +166,7 @@ async fn get_operator_hourly_stats(
 async fn get_operator_six_hourly_stats(
     State(app): State<App>,
     Path((code, from, to)): Path<(String, DateTime<Utc>, DateTime<Utc>)>,
-) -> Result<Json<Vec<Value>>, (StatusCode, String)> {
+) -> Result<Json<Vec<SubDailyStats>>, (StatusCode, String)> {
     let Some((from, to)) = clamp_instant_range(from, to, half_hourly_retention(&app), Utc::now())?
     else {
         return Ok(Json(vec![]));
@@ -188,7 +187,7 @@ async fn get_operator_six_hourly_stats(
 async fn get_network_daily_stats(
     State(app): State<App>,
     Path((from, to)): Path<(chrono::NaiveDate, chrono::NaiveDate)>,
-) -> Result<Json<Vec<Value>>, (StatusCode, String)> {
+) -> Result<Json<Vec<DailyStats>>, (StatusCode, String)> {
     let Some((from, to)) = clamp_date_range(
         from,
         to,
@@ -208,7 +207,7 @@ async fn get_network_daily_stats(
 async fn get_network_half_hourly_stats(
     State(app): State<App>,
     Path((from, to)): Path<(DateTime<Utc>, DateTime<Utc>)>,
-) -> Result<Json<Vec<Value>>, (StatusCode, String)> {
+) -> Result<Json<Vec<HalfHourlyStats>>, (StatusCode, String)> {
     let Some((from, to)) = clamp_instant_range(from, to, half_hourly_retention(&app), Utc::now())?
     else {
         return Ok(Json(vec![]));
@@ -225,7 +224,7 @@ async fn get_network_half_hourly_stats(
 async fn get_network_hourly_stats(
     State(app): State<App>,
     Path((from, to)): Path<(DateTime<Utc>, DateTime<Utc>)>,
-) -> Result<Json<Vec<Value>>, (StatusCode, String)> {
+) -> Result<Json<Vec<SubDailyStats>>, (StatusCode, String)> {
     let Some((from, to)) = clamp_instant_range(from, to, half_hourly_retention(&app), Utc::now())?
     else {
         return Ok(Json(vec![]));
@@ -242,7 +241,7 @@ async fn get_network_hourly_stats(
 async fn get_network_six_hourly_stats(
     State(app): State<App>,
     Path((from, to)): Path<(DateTime<Utc>, DateTime<Utc>)>,
-) -> Result<Json<Vec<Value>>, (StatusCode, String)> {
+) -> Result<Json<Vec<SubDailyStats>>, (StatusCode, String)> {
     let Some((from, to)) = clamp_instant_range(from, to, half_hourly_retention(&app), Utc::now())?
     else {
         return Ok(Json(vec![]));

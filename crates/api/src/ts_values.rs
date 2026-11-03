@@ -261,3 +261,123 @@ pub enum AutoCommitRule {
     Earliest,
     NearestToNow,
 }
+
+/// Where an incident stands: `queries::IncidentState::as_str`.
+#[derive(TS)]
+#[ts(rename_all = "snake_case")]
+pub enum IncidentState {
+    Active,
+    Upcoming,
+    Ended,
+    Cleared,
+}
+
+/// A line train's `scope`: `schedule_line_population`'s membership
+/// (`data::queries` population entries; line membership design).
+#[derive(TS)]
+#[ts(rename_all = "snake_case")]
+pub enum LineTrainScope {
+    Line,
+    Shared,
+    Touch,
+}
+
+/// A line train's `direction` by the line's catalogue order.
+#[derive(TS)]
+#[ts(rename_all = "snake_case")]
+pub enum LineDirection {
+    Up,
+    Down,
+    Loop,
+}
+
+/// A schedule calling point's `kind`, as `schedule-query` writes it.
+#[derive(TS)]
+pub enum CallingPointKind {
+    Origin,
+    Intermediate,
+    Terminate,
+}
+
+/// One calling point of a `schedule_line_population` entry, served
+/// verbatim as a line train's `callingPoints`: `schedule-query`'s
+/// `records::CallingPoint` serialization (snake case, times `HH:MM:SS`),
+/// which the api never parses. A field added there is added here.
+#[derive(TS)]
+pub struct LineTrainCallingPoint {
+    pub tiploc: String,
+    pub kind: CallingPointKind,
+    pub booked_arrival: Option<String>,
+    pub booked_departure: Option<String>,
+    pub is_half_minute_arrival: bool,
+    pub is_half_minute_departure: bool,
+    pub day_offset: u32,
+    /// CIF's packed activity codes.
+    pub activity: String,
+    pub public_arrival: Option<String>,
+    pub public_departure: Option<String>,
+    pub platform: Option<String>,
+    /// A passing point's booked pass; absent at a call.
+    #[ts(optional)]
+    pub booked_pass: Option<String>,
+}
+
+/// How `GET /public/trains/resolve` matched: `train_resolve::MatchedOn`.
+#[derive(TS)]
+#[ts(rename_all = "camelCase")]
+pub enum ResolveMatchedOn {
+    Rsid,
+    RsidPrefix,
+    Timetable,
+}
+
+/// A non-station location suggestion's `kind`:
+/// `reference::Suggestion::from_location`.
+#[derive(TS)]
+#[ts(rename_all = "snake_case")]
+pub enum LocationSuggestionKind {
+    Bus,
+    Ferry,
+}
+
+/// `GET /public/stations/{crs}/accessibility`: the station's RDM
+/// accessibility JSON filtered to `reference::ACCESSIBILITY_KEYS` (each
+/// present only when the feed published it, non-null), every value the
+/// feed's own JSON, untouched.
+#[derive(TS)]
+#[ts(rename_all = "camelCase")]
+pub struct StationAccessibility {
+    #[ts(optional)]
+    pub station_accessibility: Option<serde_json::Value>,
+    #[ts(optional)]
+    pub staff_assistance: Option<serde_json::Value>,
+    #[ts(optional)]
+    pub toilets_and_changing: Option<serde_json::Value>,
+    #[ts(optional)]
+    pub lifts: Option<serde_json::Value>,
+    #[ts(optional)]
+    pub transport_links: Option<serde_json::Value>,
+    #[ts(optional)]
+    pub cycling: Option<serde_json::Value>,
+    #[ts(optional)]
+    pub car_parks: Option<serde_json::Value>,
+    #[ts(optional)]
+    pub drop_off_pick_up: Option<serde_json::Value>,
+    #[ts(optional)]
+    pub platform_facilities: Option<serde_json::Value>,
+    #[ts(optional)]
+    pub station_facilities: Option<serde_json::Value>,
+    #[ts(optional)]
+    pub help_and_support: Option<serde_json::Value>,
+    #[ts(optional)]
+    pub lounges_and_waiting: Option<serde_json::Value>,
+}
+
+/// Where a `GET /public/lines` row comes from: `routes::lines::list_lines`.
+#[derive(TS)]
+#[ts(rename_all = "snake_case")]
+pub enum LineSource {
+    Catalogue,
+    Custom,
+    Tfl,
+}

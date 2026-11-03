@@ -53,12 +53,13 @@ pub fn router() -> Router {
         )
 }
 
-#[derive(Debug, Serialize)]
-struct LineSummary {
+#[derive(Debug, Serialize, ts_rs::TS)]
+pub(crate) struct LineSummary {
     id: String,
     name: String,
     category: String,
     operators: Vec<String>,
+    #[ts(as = "crate::ts_values::LineSource")]
     source: &'static str,
 }
 
@@ -92,9 +93,9 @@ struct LineSummary {
 /// (which keeps its grant, per §2.7) -- hiding a live grant from the
 /// person entitled to revoke it would be the real privacy failure. See
 /// `groups::groups_shared_with_line`.
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, ts_rs::TS)]
 #[serde(rename_all = "camelCase")]
-struct CustomLineDetail {
+pub(crate) struct CustomLineDetail {
     id: String,
     name: String,
     operators: Vec<String>,
@@ -113,9 +114,9 @@ struct CustomLineDetail {
 /// lines apart — see `frontend/app/lines/[id]/page.tsx`'s `isCustom`
 /// check), so extending it to also serve catalogue lines would silently
 /// break that detection instead of adding a tooltip.
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, ts_rs::TS)]
 #[serde(rename_all = "camelCase")]
-struct LineDefinitionSummary {
+pub(crate) struct LineDefinitionSummary {
     stations: Vec<String>,
     operators: Vec<String>,
 }

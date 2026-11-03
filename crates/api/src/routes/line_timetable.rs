@@ -86,9 +86,10 @@ pub(crate) fn parse_cursor(raw: Option<&str>) -> Result<Option<(i32, String)>, S
     Ok(Some((minute, uid.to_string())))
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, ts_rs::TS)]
 #[serde(rename_all = "camelCase")]
-struct TimetableTrainJson {
+#[ts(rename = "LineTimetableTrain")]
+pub(crate) struct TimetableTrainJson {
     #[serde(flatten)]
     train: TrainJson,
     /// When the train is listed: its departure from `from`, else its time
@@ -98,13 +99,16 @@ struct TimetableTrainJson {
     arrival: Option<DueJson>,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, ts_rs::TS)]
 #[serde(rename_all = "camelCase")]
-struct TimetableJson {
+#[ts(rename = "LineTimetablePage")]
+pub(crate) struct TimetableJson {
     line_id: String,
     date: chrono::NaiveDate,
     scope_applied: bool,
+    #[ts(as = "Vec<crate::ts_values::LineTrainScope>")]
     scopes: Vec<String>,
+    #[ts(as = "Option<Vec<crate::ts_values::LineDirection>>")]
     directions: Option<Vec<String>>,
     from: Option<String>,
     to: Option<String>,

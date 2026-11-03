@@ -82,12 +82,24 @@ export type AccessLegEnd = "origin" | "destination" | "both";
  */
 export type AccessResponse = { origin: StopAccess | null, destination: StopAccess | null, };
 
+/**
+ * One affected route of a [`DisruptionJson`], by CRS.
+ */
+export type AffectedRoute = { from: string, to: string, };
+
 export type AttachTicketResponse = { ticketId: number, trackedTrainId: number, };
 
 /**
  * `journey_templates.auto_commit_rule` (its CHECK constraint).
  */
 export type AutoCommitRule = "earliest" | "nearest_to_now";
+
+/**
+ * One `callingPoints` entry of [`StationDepartureJson`]. `st`/`et`/`at`
+ * are LDBWS's own strings: `"HH:MM"` London local time, or for `et` a
+ * status word ("On time", "Delayed", "Cancelled").
+ */
+export type BoardCallingPoint = { crs: string, locationName: string | null, st: string | null, et: string | null, at: string | null, isCancelled: boolean, };
 
 /**
  * `journey_breaks.cause` (its CHECK constraint).
@@ -119,6 +131,11 @@ faultNote: string | null, suggestions: SuggestionSet | null, stale: boolean, };
  * `journey_breaks.status` (its CHECK constraint).
  */
 export type BreakStatus = "open" | "accepted" | "dismissed" | "recovered" | "expired";
+
+/**
+ * A schedule calling point's `kind`, as `schedule-query` writes it.
+ */
+export type CallingPointKind = "Origin" | "Intermediate" | "Terminate";
 
 export type Cancellation = { kind: CancellationKind, 
 /**
@@ -207,6 +224,65 @@ export type Confidence = "low" | "medium" | "high";
 export type ConnectionState = "ok" | "atRisk" | "missed" | "unknown";
 
 export type CreateJourneyTemplateResponse = { templateId: number, };
+
+/**
+ * Full custom-line record, returned by `GET /lines/{id}` to pre-populate
+ * an edit form. `LineSummary` (above) is deliberately a smaller
+ * projection used by the list endpoint for both catalogue and custom
+ * lines — it lacks `stations`/`headcodePrefixes`/`destinationCrsFilter`,
+ * which only exist for custom lines and are exactly what an edit form
+ * needs to pre-fill.
+ *
+ * `isOwner` exists again, and this is load-bearing. The 2026-08-31
+ * privacy hardening removed it on the (then true) grounds that "a `200`
+ * from this endpoint is by construction always the real owner's own
+ * line." Custom-line group sharing
+ * (docs/superpowers/specs/2026-09-12-custom-line-group-sharing-design.md)
+ * made that false: a granted group member now gets a `200` here too, with
+ * the same full detail (§3.5 -- full detail or nothing; a custom line has
+ * no private per-viewer overlay to withhold). `frontend/app/lines/[id]/page.tsx`
+ * had come to use "did `getCustomLine` succeed" as its ownership gate for
+ * the Edit/Delete controls, so without this flag a granted member would
+ * be shown mutation controls for someone else's line whose only possible
+ * outcome is a `404`. The backend is still the authority
+ * (`update_line`/`delete_line` are completely grant-blind and unchanged);
+ * this is the "never render a control that can only fail" half.
+ *
+ * `sharedWithGroups` is populated ONLY when `isOwner` is true, and is
+ * `[]` for every other caller -- that, not a query-level scope, is what
+ * keeps a fellow group member from learning which OTHER groups the owner
+ * shared this line into (design §3.5). For the owner it lists every group
+ * the line is currently granted into, including one they have since left
+ * (which keeps its grant, per §2.7) -- hiding a live grant from the
+ * person entitled to revoke it would be the real privacy failure. See
+ * `groups::groups_shared_with_line`.
+ */
+export type CustomLineDetail = { id: string, name: string, operators: Array<string>, stations: Array<string>, headcodePrefixes: Array<string>, destinationCrsFilter: Array<string>, isOwner: boolean, sharedWithGroups: Array<LineGroupRef>, };
+
+/**
+ * One day of a line's full-coverage stats.
+ */
+export type DailyCoverageStats = { day: string, resolvedWindows: number, 
+/**
+ * The credits the line's data needs (`render::line_attribution`): on
+ * the line routes, absent from the operator and network ones.
+ */
+attribution?: Array<TransitAttribution>, total: number, delayed: number, cancelled: number, skipped: number, avgDelayMinutes: number, delayRate: number, cancellationRate: number, skipRate: number, };
+
+/**
+ * One day of a line's (or operator's, or the network's) sampled stats.
+ */
+export type DailyStats = { day: string, sampleCycles: number, 
+/**
+ * The credits the line's data needs (`render::line_attribution`): on
+ * the line routes, absent from the operator and network ones.
+ */
+attribution?: Array<TransitAttribution>, total: number, delayed: number, cancelled: number, skipped: number, avgDelayMinutes: number, delayRate: number, cancellationRate: number, skipRate: number, };
+
+/**
+ * How confident are we in this status?
+ */
+export type DataQuality = "knowledgebase" | "ldbws-inferred" | "trust-inferred" | "planned" | "tfl" | "transit";
 
 /**
  * Which baseline a delay was measured against. See the module doc.
@@ -403,6 +479,11 @@ rulesCheckedOn: string, };
 export type DelayRepayScheme = "DR15" | "DR30" | "HX";
 
 /**
+ * A status's disruption detail.
+ */
+export type Disruption = { category: string, description: string, affectedStops: Array<string>, affectedRoutes: Array<AffectedRoute>, source: string | null, impactType: string | null, };
+
+/**
  * Where an estimate came from: `train_current_state.eta_source` (its
  * CHECK constraint) and `ds_store::trains::predicted_start::BASIS`.
  */
@@ -441,6 +522,12 @@ ownerName: string | null, ownerTag: string | null,
  * The group the journey was followed through; `None` for a link.
  */
 groupId: string | null, groupName: string | null, followedAt: string, };
+
+/**
+ * Why `fullCoverageStats` is (or isn't) there:
+ * `common::FullCoverageAvailability` without its stats.
+ */
+export type FullCoverageAvailability = { "state": "not-enabled" } | { "state": "pending" } | { "state": "available" };
 
 /**
  * A custom line granted into a group, as `GET /groups/{id}/lines/custom`
@@ -629,6 +716,89 @@ trackingPhase: TrackingPhase | null,
  * See `TrackedTrainState::first_report_expected_at`.
  */
 firstReportExpectedAt: string | null, serviceMode: ServiceMode, liveTracking: boolean, };
+
+/**
+ * One half hour of a line's full-coverage stats.
+ */
+export type HalfHourlyCoverageStats = { halfHourStart: string, resolvedWindows: number, 
+/**
+ * The credits the line's data needs (`render::line_attribution`): on
+ * the line routes, absent from the operator and network ones.
+ */
+attribution?: Array<TransitAttribution>, total: number, delayed: number, cancelled: number, skipped: number, avgDelayMinutes: number, delayRate: number, cancellationRate: number, skipRate: number, };
+
+/**
+ * One half hour of sampled stats.
+ */
+export type HalfHourlyStats = { halfHourStart: string, sampleCycles: number, 
+/**
+ * The credits the line's data needs (`render::line_attribution`): on
+ * the line routes, absent from the operator and network ones.
+ */
+attribution?: Array<TransitAttribution>, total: number, delayed: number, cancelled: number, skipped: number, avgDelayMinutes: number, delayRate: number, cancellationRate: number, skipRate: number, };
+
+/**
+ * Renders `serde_json::Value` field-by-field via `json!()`, exactly like
+ * `crates/api/src/render.rs::status_to_json` -- deliberately NOT
+ * `#[derive(Serialize)] #[serde(rename_all = "camelCase")]` on a struct
+ * that embeds `validity_periods` directly, because `rename_all` is not
+ * inherited into a nested type. See this plan's Status note Correction A
+ * and Global Constraints for the concrete failure mode that would produce
+ * (a response that's camelCase at the top level but `snake_case` inside
+ * every validity period). Pure function, no I/O -- unit-testable without
+ * a database, matching `to_tfl_shape`'s own testable shape in `render.rs`.
+ * `GET /public/incidents/{incidentId}`. `description` is raw HTML.
+ * `currentlyAffectsLines` is computed per request and may be empty.
+ */
+export type IncidentDetail = { incidentId: string, summary: string, description: string, operators: Array<string>, affectedStations: Array<string>, priority: number, validityPeriods: Array<ValidityPeriod>, isPlanned: boolean, isCleared: boolean, firstSeenAt: string, fetchedAt: string, sourceRemovedAt: string | null, currentlyAffectsLines: Array<IncidentLineRef>, history: Array<IncidentHistoryEntry>, state: IncidentState, startsAt: string | null, validityEndedAt: string | null, };
+
+/**
+ * One earlier version of an incident, as the feed published it.
+ */
+export type IncidentHistoryEntry = { summary: string, description: string, operators: Array<string>, affectedStations: Array<string>, priority: number, validityPeriods: Array<ValidityPeriod>, isPlanned: boolean, isCleared: boolean, recordedAt: string, };
+
+/**
+ * One item of `GET /public/incidents/recently-cleared`; see
+ * docs/api-changelog.md (2026-10-12) for the shape. `affectedLines` names
+ * catalogue lines only (all `affected_lines` can hold), so no private
+ * custom line can appear.
+ * A line an incident affects, by catalogue id and name.
+ */
+export type IncidentLineRef = { id: string, name: string, };
+
+/**
+ * `GET /public/incidents`: a page of matches, newest first.
+ */
+export type IncidentSearchResponse = { results: Array<IncidentSummary>, 
+/**
+ * Pass back as `after` for the next page; `null` on the last.
+ */
+nextCursor: string | null, 
+/**
+ * Every match across all pages; first page only, `null` with `after`.
+ */
+total: number | null, };
+
+/**
+ * Where an incident stands: `queries::IncidentState::as_str`.
+ */
+export type IncidentState = "active" | "upcoming" | "ended" | "cleared";
+
+/**
+ * One row of `GET /public/incidents`: lighter than [`IncidentDetailJson`]
+ * (no description, validity periods, history or current lines).
+ */
+export type IncidentSummary = { incidentId: string, summary: string, operators: Array<string>, affectedStations: Array<string>, affectedLines: Array<string>, priority: number, isPlanned: boolean, isCleared: boolean, firstSeenAt: string, fetchedAt: string, sourceRemovedAt: string | null, state: IncidentState, startsAt: string | null, validityEndedAt: string | null, };
+
+/**
+ * `state`, `startsAt` and `validityEndedAt` (2026-10-20), shared by a list
+ * row and the detail so the two can't disagree. See
+ * `queries::IncidentState` for the rule.
+ * Where an incident stands (2026-10-20, `queries::IncidentState`): its
+ * `state`, when its next validity window starts (for `upcoming`), and when
+ * its last one finished (once every one has). Times RFC 3339 (`+00:00`).
+ */
+export type IncidentTiming = { state: IncidentState, startsAt: string | null, validityEndedAt: string | null, };
 
 export type InviteLink = { 
 /**
@@ -1372,11 +1542,181 @@ notices: Array<TransitLegNotice>,
  */
 liveArrivals?: LiveArrivalsFilter, };
 
+export type LineCatalogueStation = { crs: string, name: string | null, role: string, };
+
+/**
+ * Minimal cross-source projection — just enough to answer "what stations
+ * and operators does this line cover", for both catalogue and custom
+ * lines alike. Deliberately separate from `CustomLineDetail`/`get_line`:
+ * that endpoint is custom-only by design (its 404-for-a-catalogue-id
+ * behavior is how the frontend detail page tells custom and catalogue
+ * lines apart — see `frontend/app/lines/[id]/page.tsx`'s `isCustom`
+ * check), so extending it to also serve catalogue lines would silently
+ * break that detection instead of adding a tooltip.
+ */
+export type LineDefinitionSummary = { stations: Array<string>, operators: Array<string>, };
+
+/**
+ * A line train's `direction` by the line's catalogue order.
+ */
+export type LineDirection = "up" | "down" | "loop";
+
+/**
+ * `lineDue`: Europe/London local `HH:MM:SS`, `dayOffset` days after the
+ * service date.
+ */
+export type LineDue = { time: string, dayOffset: number, };
+
 /**
  * A group a custom line is shared into, as the line's OWNER sees it on
  * their own edit page ("Shared with: Family, Commute Buddies").
  */
 export type LineGroupRef = { id: string, name: string, };
+
+/**
+ * Where a `GET /public/lines` row comes from: `routes::lines::list_lines`.
+ */
+export type LineSource = "catalogue" | "custom" | "tfl";
+
+export type LineStationRef = { crs: string, name: string | null, };
+
+/**
+ * One status of a [`LineStatusReportJson`].
+ */
+export type LineStatus = { statusSeverity: number, statusSeverityDescription: string, reason: string, dataQuality: DataQuality, validityPeriods: Array<ValidityPeriod>, sampleStats?: SampleStats, sampleAvailability: SampleAvailability, fullCoverageStats?: SampleStats, fullCoverageAvailability: FullCoverageAvailability, 
+/**
+ * Only with `?detail=true` (and always on `StopPoint`).
+ */
+disruption?: Disruption, };
+
+/**
+ * A line's status report, TfL-shaped: `GET /Line/Mode/{mode}/Status`,
+ * `GET /Line/{ids}/Status`, `GET /StopPoint/{crs}/Disruption` and the
+ * status history.
+ */
+export type LineStatusReport = { $type: "DistantSignal.LineStatusReport", id: string, name: string, modeName: string, operators: Array<string>, 
+/**
+ * RFC 3339, `+00:00`.
+ */
+computedAt: string, lineStatuses: Array<LineStatus>, 
+/**
+ * A line with a `TfL` counterpart merged away from `/public/lines`:
+ * the counterpart's current statuses (see
+ * [`to_tfl_shape_with_overlay`]). Absent otherwise.
+ */
+tflStatus?: Array<LineStatus>, 
+/**
+ * The current-status routes' disruptions announced for the line that
+ * have not started yet ([`upcoming_json`]). Absent from the history
+ * and `StopPoint` routes.
+ */
+upcoming?: Array<UpcomingDisruption>, 
+/**
+ * The credits the line's data needs ([`line_attribution`]), plus
+ * `TfL`'s with a `tflStatus` overlay.
+ */
+attribution: Array<TransitAttribution>, };
+
+export type LineSummary = { id: string, name: string, category: string, operators: Array<string>, source: LineSource, };
+
+/**
+ * A time with its day offset, as the API writes `lineDue`.
+ */
+export type LineTime = { time: string, dayOffset: number, };
+
+export type LineTimetablePage = { lineId: string, date: string, scopeApplied: boolean, scopes: Array<LineTrainScope>, directions: Array<LineDirection> | null, from: string | null, to: string | null, at: string | null, stations: Array<LineCatalogueStation>, 
+/**
+ * The day's trains under `scope`, `from` and `to`, per scope and
+ * direction (`none` without one) -- before `dir`, `at` and the
+ * cursor: the direction tabs' counts.
+ */
+counts: { [key in string]: { [key in string]: number } }, trains: Array<LineTimetableTrain>, 
+/**
+ * Pass back as `after` for the next page; `null` on the last.
+ */
+nextCursor: string | null, };
+
+export type LineTimetableTrain = { 
+/**
+ * When the train is listed: its departure from `from`, else its time
+ * on the line (`lineDue`).
+ */
+time: LineTime, 
+/**
+ * Its arrival at `to`, when `to` was given.
+ */
+arrival: LineTime | null, uid: string, operator: string | null, scope: LineTrainScope | null, direction: LineDirection | null, lineDue: LineTime | null, origin: LineStationRef | null, destination: LineStationRef | null, onLineStops: Array<LineTrainStop>, live: LineTrainSummaryLive | null, serviceMode: ServiceMode, liveTracking: boolean, };
+
+/**
+ * One calling point of a `schedule_line_population` entry, served
+ * verbatim as a line train's `callingPoints`: `schedule-query`'s
+ * `records::CallingPoint` serialization (snake case, times `HH:MM:SS`),
+ * which the api never parses. A field added there is added here.
+ */
+export type LineTrainCallingPoint = { tiploc: string, kind: CallingPointKind, booked_arrival: string | null, booked_departure: string | null, is_half_minute_arrival: boolean, is_half_minute_departure: boolean, day_offset: number, 
+/**
+ * CIF's packed activity codes.
+ */
+activity: string, public_arrival: string | null, public_departure: string | null, platform: string | null, 
+/**
+ * A passing point's booked pass; absent at a call.
+ */
+booked_pass?: string, };
+
+/**
+ * One `GET /public/lines/{id}/trains` result entry, as built by
+ * [`line_train_json`]. Same wire shape the route has always had (it used
+ * to be a `json!` object with exactly these keys).
+ */
+export type LineTrainEntry = { uid: string, 
+/**
+ * The population entry's own calling points, verbatim.
+ */
+callingPoints: Array<LineTrainCallingPoint> | null, scheduleOriginCrs: string | null, scheduleOriginName: string | null, scheduleDestinationCrs: string | null, scheduleDestinationName: string | null, liveStatus: LineTrainLiveStatus | null, scope?: LineTrainScope, direction?: LineDirection, runFirstCrs?: string, runLastCrs?: string, lineDue?: LineDue, serviceMode: ServiceMode, liveTracking: boolean, };
+
+/**
+ * A line train's live state, when a `trains` row exists for it: a
+ * hand-picked subset of `PublicTrainState` (no calling points or journey
+ * stops).
+ */
+export type LineTrainLiveStatus = { trainsId: number, trainId: string | null, originCrs: string | null, originName: string | null, destinationCrs: string | null, destinationName: string | null, scheduledDeparture: string | null, status: JourneyStatus | null, lastReportedLocation: string | null, lastEventType: string | null, delayMinutes: number | null, delayBasis: DelayBasis | null, delayProvisional: boolean, nextCallingPoint: string | null, etaNext: string | null, etaSource: EtaSource | null, operatorCode: string | null, operatorName: string | null, cancelled: boolean, cancelReasonCode: string | null, cancelReason: string | null, changeOfOriginReasonCode: string | null, changeOfOriginReason: string | null, };
+
+/**
+ * A line train's `scope`: `schedule_line_population`'s membership
+ * (`data::queries` population entries; line membership design).
+ */
+export type LineTrainScope = "line" | "shared" | "touch";
+
+export type LineTrainStop = { crs: string, time: string, dayOffset: number, };
+
+export type LineTrainSummary = { uid: string, operator: string | null, scope: LineTrainScope | null, direction: LineDirection | null, lineDue: LineTime | null, origin: LineStationRef | null, destination: LineStationRef | null, onLineStops: Array<LineTrainStop>, live: LineTrainSummaryLive | null, serviceMode: ServiceMode, liveTracking: boolean, };
+
+/**
+ * The compact live status the summary carries.
+ */
+export type LineTrainSummaryLive = { status: JourneyStatus | null, delayMinutes: number | null, delayProvisional: boolean, cancelled: boolean, 
+/**
+ * The cancellation's TRUST glossary text while `cancelled` (DS-181;
+ * `PublicTrainState::cancel_reason`), `null` without one. These rows
+ * have no calling points to place a partial cancellation on.
+ */
+cancelReason: string | null, lastReportedLocation: string | null, };
+
+/**
+ * The whole summary body.
+ */
+export type LineTrainsSummary = { lineId: string, date: string, scopeApplied: boolean, scopes: Array<LineTrainScope>, window: LineTrainsWindow | null, at: string | null, directions: Array<LineDirection> | null, stations: Array<LineCatalogueStation>, 
+/**
+ * Trains in the window, per scope and direction (`none` for a train
+ * without one), before the `direction` filter -- for tab counts.
+ */
+counts: { [key in string]: { [key in string]: number } }, truncated: boolean, trains: Array<LineTrainSummary>, 
+/**
+ * Only with `at`.
+ */
+running: Array<LineTrainSummary> | null, };
+
+export type LineTrainsWindow = { from: string, to: string, };
 
 /**
  * A ride's line, as a plan's transit leg shows it.
@@ -1419,6 +1759,12 @@ destinations: Array<string>, };
 export type LiveStopStatus = "OnTime" | "Late" | "Cancelled" | "NoReport" | "Arrived" | "Departed" | "Scheduled";
 
 /**
+ * A non-station location suggestion's `kind`:
+ * `reference::Suggestion::from_location`.
+ */
+export type LocationSuggestionKind = "bus" | "ferry";
+
+/**
  * What kind of place a TIPLOC is, as far as a passenger cares.
  *
  * Derived by `schedule-reference` from, in order: whether the TIPLOC is a
@@ -1439,6 +1785,18 @@ export type MatchMode = "unmatched" | "manual" | "auto";
 export type MatchState = "matched" | "retimed" | "notInTimetable" | "noService" | "noTimetable";
 
 export type MaterializeTemplateResponse = { journeyId: number, legIds: Array<number>, };
+
+/**
+ * A station returned by [`nearest_stations`]: the same `code`/`name` shape
+ * as [`Suggestion`] plus the great-circle distance from the caller's point,
+ * in kilometres (this app has no other established distance unit anywhere
+ * in its schema or docs -- see `docs/superpowers/specs/2026-08-31-other-uk-
+ * transit-networks-research.md` and `2026-09-05-ireland-vs-northern-
+ * ireland-friction-research.md`, both of which quote UK/Ireland network
+ * distances in km -- so km is the default for a UK-facing app rather than
+ * miles).
+ */
+export type NearbyStation = { code: string, name: string, distanceKm: number, };
 
 /**
  * Why a segment has no itineraries -- served as the segment's
@@ -1494,6 +1852,13 @@ stationName: string | null, destinationName: string | null, suggestionCount: num
  * `journeys.operator_filter_mode` (its CHECK constraint).
  */
 export type OperatorMode = "only" | "avoid" | "prefer";
+
+/**
+ * One operator's status rollup: `GET /public/operators` and
+ * `GET /public/operators/{code}`. `sampleStats` is the stats (camelCase)
+ * rendered by `render::sample_stats_json`, absent when there are none.
+ */
+export type OperatorSummary = { code: string, name: string, lineIds: Array<string>, worstSeverity: number, reason: string, worstLineId: string | null, worstLineName: string | null, computedAt: string | null, sampleStats?: SampleStats, };
 
 /**
  * One label of a `results=options` journey (DS-196), served as
@@ -1967,6 +2332,25 @@ cancellation: Cancellation | null, serviceMode: ServiceMode, liveTracking: boole
  */
 export type ReasonSource = "darwin" | "ldbws" | "trust";
 
+/**
+ * One item of `GET /public/incidents/recently-cleared` (2026-10-12): an
+ * incident National Rail has cleared but still lists.
+ */
+export type RecentlyClearedIncident = { incidentId: string, summary: string, description: string, operators: Array<string>, affectedLines: Array<IncidentLineRef>, clearedAt: string, lastListedAt: string, 
+/**
+ * The end time the last live text stated, if any.
+ */
+expectedUntil: string | null, 
+/**
+ * The last live text said "expected until the end of the day".
+ */
+expectedUntilEndOfDay: boolean, };
+
+/**
+ * `GET /public/incidents/recently-cleared`'s body.
+ */
+export type RecentlyClearedResponse = { results: Array<RecentlyClearedIncident>, };
+
 export type RenameResponse = { 
 /**
  * The normalized value actually stored -- `None` if the name was
@@ -2052,6 +2436,11 @@ reliesOnLateDeparture?: LateDepartureReliance<string>, } | { "kind": "untracked"
 export type ResolutionStatus = "pending" | "schedule_matched" | "resolved" | "unresolved";
 
 /**
+ * How `GET /public/trains/resolve` matched: `train_resolve::MatchedOn`.
+ */
+export type ResolveMatchedOn = "rsid" | "rsidPrefix" | "timetable";
+
+/**
  * `journey_revisions.actor` (its CHECK constraint).
  */
 export type RevisionActor = "owner" | "system";
@@ -2112,6 +2501,34 @@ export type RevisionsResponse = { revisions: Array<RevisionResponse>, };
  * a thing to keep in sync.
  */
 export type RoleChangeResponse = { userId: string, role: GroupRole, };
+
+/**
+ * Why `sampleStats` is (or isn't) there: `common::SampleAvailability`
+ * without its stats, which `sampleStats` already carries.
+ */
+export type SampleAvailability = { "state": "no-coverage" } | { "state": "below-threshold", observed: number, required: number, } | { "state": "available" };
+
+/**
+ * A status's sample: `common::SampleStats` on the wire.
+ */
+export type SampleStats = { total: number, delayed: number, cancelled: number, skipped: number, avgDelayMinutes: number, };
+
+/**
+ * One row of `GET /public/stations/{crs}/schedule-departures`
+ * ([`schedule_departure_json`]): the timetabled departure, the train's true
+ * origin and its live state and service mode, which the route fills in.
+ */
+export type ScheduleDepartureRow = { 
+/**
+ * `null` only for a stored row without one, which `schedule-reference`
+ * never writes: typed as always set.
+ */
+uid: string, 
+/**
+ * `null` only for a stored row with no departure time, which a
+ * departure row always has: typed as always set.
+ */
+scheduled: string, publicDeparture: string | null, workingDeparture: string | null, workingDayOffset: number, dayOffset: number, destinationCrs: string | null, destinationName: string | null, originCrs: string | null, originName: string | null, live: LineTrainSummaryLive | null, serviceMode: ServiceMode, liveTracking: boolean, };
 
 /**
  * A time on the plan's clock: `time` (`HH:MM:SS`) and how many days after
@@ -2309,6 +2726,33 @@ addedByName: string | null, addedByTag: string | null, addedAt: string, };
 export type SkipSource = "Darwin" | "Trust" | "Both";
 
 /**
+ * `GET /public/stations/{crs}/accessibility`: the station's RDM
+ * accessibility JSON filtered to `reference::ACCESSIBILITY_KEYS` (each
+ * present only when the feed published it, non-null), every value the
+ * feed's own JSON, untouched.
+ */
+export type StationAccessibility = { stationAccessibility?: JsonValue, staffAssistance?: JsonValue, toiletsAndChanging?: JsonValue, lifts?: JsonValue, transportLinks?: JsonValue, cycling?: JsonValue, carParks?: JsonValue, dropOffPickUp?: JsonValue, platformFacilities?: JsonValue, stationFacilities?: JsonValue, helpAndSupport?: JsonValue, loungesAndWaiting?: JsonValue, };
+
+/**
+ * `GET /public/stations/codes`'s body.
+ */
+export type StationCodes = { codes: Array<string>, };
+
+/**
+ * One row of `GET /public/stations/{crs}/departures`: a live board row,
+ * every absent value a present `null`. `scheduled`/`estimated` are LDBWS's
+ * own strings.
+ */
+export type StationDeparture = { serviceId: string, operator: string, destinationCrs: string, destinationName: string | null, scheduled: string, estimated: string, isCancelled: boolean, delayMinutes: number, cancelReason: string | null, delayReason: string | null, skippedStations: Array<string>, platform: string | null, plannedPlatform: string | null, platformChanged: boolean, rsid: string | null, callingPoints: Array<BoardCallingPoint>, };
+
+/**
+ * One operator's row of `GET /public/stations/{crs}/sample-stats`.
+ * `sampleAvailability` is never `no-coverage` here (the route's own
+ * invariant); `fullCoverageAvailability` is always present.
+ */
+export type StationOperatorSampleStats = { operator: string, sampleAvailability: SampleAvailability, sampleStats?: SampleStats, fullCoverageStats?: SampleStats, fullCoverageAvailability: FullCoverageAvailability, };
+
+/**
  * The walks a Tube transfer leg's `minutes` include, at each end
  * (additive, 2026-11-02).
  */
@@ -2386,6 +2830,28 @@ observedAt: string, };
  * (`frontend/lib/types.ts`'s `JourneyStopKind` mirrors it the same way).
  */
 export type StopStatus = "Unknown" | "Scheduled" | "Called" | "Skipped";
+
+/**
+ * One hourly or six-hourly bucket of sampled stats.
+ */
+export type SubDailyStats = { bucketStart: string, sampleCycles: number, 
+/**
+ * The credits the line's data needs (`render::line_attribution`): on
+ * the line routes, absent from the operator and network ones.
+ */
+attribution?: Array<TransitAttribution>, total: number, delayed: number, cancelled: number, skipped: number, avgDelayMinutes: number, delayRate: number, cancellationRate: number, skipRate: number, };
+
+export type Suggestion = { code: string, name: string, 
+/**
+ * Only on a `?stops=true` station search's bus stops and ferry
+ * terminals: `bus` or `ferry`. Absent for a station or operator.
+ */
+kind?: LocationSuggestionKind, 
+/**
+ * The stop's parent station, when it has one (same rule as
+ * `JourneyStop.parentCrs`).
+ */
+parentCrs?: string, };
 
 /**
  * The alternatives for one break point, as served and stored.
@@ -2966,6 +3432,150 @@ currentDepartureDate: string | null, source: TicketSource, createdAt: string, cu
 export type TrackingPhase = "timetableOnly" | "live" | "noTimetable" | "planned" | "awaitingReport";
 
 /**
+ * One row of `GET /public/trains/arrivals`: the search's row plus the
+ * arrival at the station. For a train terminating there, `scheduled`,
+ * `publicDeparture` and `workingDeparture` are `null` (there is no
+ * departure onward) and `dayOffset` is absent.
+ */
+export type TrainArrivalResult = { 
+/**
+ * `"HH:MM"`, the public arrival, else the working one.
+ */
+arrival: string, arrivalDayOffset: number, terminates: boolean, 
+/**
+ * The row's service date: the searched date, or with
+ * `across_midnight` the day before.
+ */
+serviceDate: string, originName: string | null, live: LineTrainSummaryLive | null, 
+/**
+ * Days after `serviceDate` that `scheduled` falls on. Absent for a
+ * train terminating at an arrivals board's station.
+ */
+dayOffset?: number, 
+/**
+ * `workingDeparture`'s day offset (the search only).
+ */
+workingDayOffset?: number, 
+/**
+ * The search with `stops_at`: the arrival there (public, `HH:MM`),
+ * its day offset, and the same for the working arrival. `null`
+ * together when the call has no such time.
+ */
+stopsAtArrival?: string | null, stopsAtArrivalDayOffset?: number | null, stopsAtWorkingArrival?: string | null, stopsAtWorkingArrivalDayOffset?: number | null, 
+/**
+ * `null` only for a stored row without one, which `schedule-reference`
+ * never writes: typed as always set.
+ */
+uid: string, scheduled: string | null, stationCrs: string, originCrs: string | null, destinationCrs: string | null, destinationName: string | null, destinationArrival: string | null, destinationArrivalDayOffset: number, publicDeparture: string | null, publicDestinationArrival: string | null, workingDeparture: string | null, workingDestinationArrival: string | null, 
+/**
+ * The operator's ATOC code.
+ */
+operator: string | null, 
+/**
+ * The CIF Train Identity (headcode, e.g. `1S00`).
+ */
+identity: string | null, serviceMode: ServiceMode, liveTracking: boolean, };
+
+/**
+ * `GET /public/trains/arrivals`'s body.
+ */
+export type TrainArrivalsPage = { results: Array<TrainArrivalResult>, nextCursor: string | null, serviceDate: string, window: TrainArrivalsWindow, provisional: boolean, provisionalFrom: string, };
+
+/**
+ * The arrivals board's `window` as applied: `to` is `null` when
+ * unbounded.
+ */
+export type TrainArrivalsWindow = { from: WindowBound, to: WindowBound | null, };
+
+/**
+ * `GET /public/trains/by-headcode`'s body.
+ */
+export type TrainHeadcodePage = { results: Array<TrainSearchResult>, serviceDate: string, provisional: boolean, provisionalFrom: string, };
+
+/**
+ * `GET /public/trains/resolve`'s 200 body: the live board row's train, as
+ * `GET /Train/by-uid/{uid}/{date}` (`href`) keys it.
+ */
+export type TrainResolveResult = { href: string, trainUid: string, serviceDate: string, matchedOn: ResolveMatchedOn, };
+
+/**
+ * `GET /public/trains/search/dates`'s body.
+ */
+export type TrainSearchDates = { from: string, to: string, publishedFrom: string | null, publishedTo: string | null, provisionalFrom: string, };
+
+/**
+ * An operator the search's `operator` can name; `name` is `null` for a
+ * code `tocs` lacks.
+ */
+export type TrainSearchOperator = { code: string, name: string | null, };
+
+/**
+ * `GET /public/trains/search/operators`'s body.
+ */
+export type TrainSearchOperators = { operators: Array<TrainSearchOperator>, };
+
+/**
+ * `GET /public/trains/search`'s body.
+ */
+export type TrainSearchPage = { results: Array<TrainSearchResult>, nextCursor: string | null, serviceDate: string, window: TrainSearchWindow, acrossMidnight: boolean, serviceDates: Array<string>, provisional: boolean, provisionalFrom: string, };
+
+/**
+ * One row of the train search, arrivals and headcode boards
+ * (`routes::trains`): the calling-point departure and what every board
+ * adds to it. The board-specific fields are absent elsewhere.
+ */
+export type TrainSearchResult = { 
+/**
+ * The row's service date: the searched date, or with
+ * `across_midnight` the day before.
+ */
+serviceDate: string, originName: string | null, live: LineTrainSummaryLive | null, 
+/**
+ * Days after `serviceDate` that `scheduled` falls on. Absent for a
+ * train terminating at an arrivals board's station.
+ */
+dayOffset?: number, 
+/**
+ * `workingDeparture`'s day offset (the search only).
+ */
+workingDayOffset?: number, 
+/**
+ * The search with `stops_at`: the arrival there (public, `HH:MM`),
+ * its day offset, and the same for the working arrival. `null`
+ * together when the call has no such time.
+ */
+stopsAtArrival?: string | null, stopsAtArrivalDayOffset?: number | null, stopsAtWorkingArrival?: string | null, stopsAtWorkingArrivalDayOffset?: number | null, 
+/**
+ * `null` only for a stored row without one, which `schedule-reference`
+ * never writes: typed as always set.
+ */
+uid: string, scheduled: string | null, stationCrs: string, originCrs: string | null, destinationCrs: string | null, destinationName: string | null, destinationArrival: string | null, destinationArrivalDayOffset: number, publicDeparture: string | null, publicDestinationArrival: string | null, workingDeparture: string | null, workingDestinationArrival: string | null, 
+/**
+ * The operator's ATOC code.
+ */
+operator: string | null, 
+/**
+ * The CIF Train Identity (headcode, e.g. `1S00`).
+ */
+identity: string | null, serviceMode: ServiceMode, liveTracking: boolean, };
+
+/**
+ * The search's `window`: `from`/`to` bound the departure from `station`,
+ * `arrivalFrom`/`arrivalTo` the arrival at `stops_at`; `null` where
+ * unbounded.
+ */
+export type TrainSearchWindow = { from: WindowBound, to: WindowBound | null, arrivalFrom: WindowBound | null, arrivalTo: WindowBound | null, };
+
+/**
+ * The licence notice a network's data needs (spec §12.3).
+ */
+export type TransitAttribution = { 
+/**
+ * SPDX-style id (`OGL-UK-3.0`).
+ */
+licence: string, text: string, };
+
+/**
  * A `transit` leg's TypeScript, named `TransitLeg`: `TransitLeg`'s own
  * derive takes its name from its tag value, `transit`.
  */
@@ -3235,6 +3845,18 @@ noResultReason: NoResultReason | null, };
 export type UntrackedStatus = "planned" | "inProgress" | "done";
 
 /**
+ * One of a line's `upcoming` notes (2026-10-06): a disruption announced
+ * for the line that has not started yet. `to` is exclusive and may be
+ * `null` (no stated end); both RFC 3339 (`+00:00`).
+ */
+export type UpcomingDisruption = { from: string, to: string | null, summary: string, incidentId: string, };
+
+/**
+ * A status's validity window, times RFC 3339 (`+00:00`).
+ */
+export type ValidityPeriod = { fromDate: string, toDate: string | null, isNow: boolean, };
+
+/**
  * How a trip plan passed a via (`ViaSatisfied::how`, from
  * `trip_planner::ViaHow`).
  */
@@ -3305,3 +3927,9 @@ segment: number,
  * is a member; see [`waypoints_at_ends`]).
  */
 how: WaypointHow, };
+
+/**
+ * One end of a board's window as applied: `"HH:MM"` on day `dayOffset`
+ * of the train day.
+ */
+export type WindowBound = { time: string, dayOffset: number, };

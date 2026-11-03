@@ -5,12 +5,15 @@
 use axum::Json;
 use axum::extract::{Path, State};
 use axum::http::StatusCode;
-use serde_json::{Value, json};
+use serde::Serialize;
 
 use crate::app::{App, Router};
 use crate::data::queries;
-use crate::data::station_stats::compute_station_operator_stats;
-use crate::render::{full_coverage_availability_json, sample_availability_json, sample_stats_json};
+use crate::data::station_stats::{OperatorSampleStats, compute_station_operator_stats};
+use crate::render::{
+    FullCoverageAvailabilityJson, SampleAvailabilityJson, SampleStatsJson,
+    full_coverage_availability_json, sample_availability_json, sample_stats_json,
+};
 
 pub fn router() -> Router {
     Router::new().route(
@@ -31,7 +34,7 @@ pub fn router() -> Router {
 async fn get_station_sample_stats(
     State(app): State<App>,
     Path(crs): Path<String>,
-) -> Result<Json<Vec<Value>>, (StatusCode, String)> {
+) -> Result<Json<Vec<StationOperatorSampleStatsJson>>, (StatusCode, String)> {
     let sample = queries::latest_station_sample(&app.database, &crs)
         .await
         .map_err(internal_error)?;
@@ -87,26 +90,38 @@ async fn get_station_sample_stats(
         app.config.full_coverage_enabled_default,
     );
 
-    Ok(Json(
-        stats
-            .into_iter()
-            .map(|s| {
-                let mut out = json!({
-                    "operator": s.operator,
-                    "sampleAvailability": sample_availability_json(&s.availability),
-                });
-                if let Some(stats) = s.availability.sample_stats() {
-                    out["sampleStats"] = sample_stats_json(&stats);
-                }
-                if let Some(stats) = &s.full_coverage_stats {
-                    out["fullCoverageStats"] = sample_stats_json(stats);
-                }
-                out["fullCoverageAvailability"] =
-                    full_coverage_availability_json(&s.full_coverage_availability);
-                out
-            })
-            .collect(),
-    ))
+    Ok(Json(stats.into_iter().map(operator_sample_stats).collect()))
+}
+
+/// One operator's row of `GET /public/stations/{crs}/sample-stats`.
+/// `sampleAvailability` is never `no-coverage` here (the route's own
+/// invariant); `fullCoverageAvailability` is always present.
+#[derive(Debug, Clone, Serialize, ts_rs::TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(rename = "StationOperatorSampleStats")]
+pub(crate) struct StationOperatorSampleStatsJson {
+    operator: String,
+    sample_availability: SampleAvailabilityJson,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    sample_stats: Option<SampleStatsJson>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    full_coverage_stats: Option<SampleStatsJson>,
+    full_coverage_availability: FullCoverageAvailabilityJson,
+}
+
+fn operator_sample_stats(s: OperatorSampleStats) -> StationOperatorSampleStatsJson {
+    StationOperatorSampleStatsJson {
+        sample_availability: sample_availability_json(&s.availability),
+        sample_stats: s
+            .availability
+            .sample_stats()
+            .map(|stats| sample_stats_json(&stats)),
+        full_coverage_stats: s.full_coverage_stats.as_ref().map(sample_stats_json),
+        full_coverage_availability: full_coverage_availability_json(&s.full_coverage_availability),
+        operator: s.operator,
+    }
 }
 
 #[expect(
@@ -131,6 +146,65 @@ mod tests {
     use tower::ServiceExt;
 
     use super::*;
+
+    /// The `json!` row this route built before it was typed, verbatim.
+    fn legacy_row(s: &OperatorSampleStats) -> serde_json::Value {
+        use crate::render::legacy::{
+            full_coverage_availability_json, sample_availability_json, sample_stats_json,
+        };
+        let mut out = serde_json::json!({
+            "operator": s.operator,
+            "sampleAvailability": sample_availability_json(&s.availability),
+        });
+        if let Some(stats) = s.availability.sample_stats() {
+            out["sampleStats"] = sample_stats_json(&stats);
+        }
+        if let Some(stats) = &s.full_coverage_stats {
+            out["fullCoverageStats"] = sample_stats_json(stats);
+        }
+        out["fullCoverageAvailability"] =
+            full_coverage_availability_json(&s.full_coverage_availability);
+        out
+    }
+
+    /// Every row shape serves what the `json!` row did.
+    #[test]
+    fn typed_rows_match_the_json_rows() {
+        let stats = common::SampleStats {
+            total: 9,
+            delayed: 3,
+            cancelled: 1,
+            skipped: 0,
+            avg_delay_minutes: 4.25,
+        };
+        let rows = || {
+            [
+                OperatorSampleStats {
+                    operator: "SW".to_string(),
+                    availability: common::SampleAvailability::Available(stats.clone()),
+                    full_coverage_stats: Some(stats.clone()),
+                    full_coverage_availability: common::FullCoverageAvailability::Available(
+                        stats.clone(),
+                    ),
+                },
+                OperatorSampleStats {
+                    operator: "GW".to_string(),
+                    availability: common::SampleAvailability::BelowThreshold {
+                        observed: 1,
+                        required: 3,
+                    },
+                    full_coverage_stats: None,
+                    full_coverage_availability: common::FullCoverageAvailability::NotEnabled,
+                },
+            ]
+        };
+        for (row, legacy) in rows().into_iter().zip(rows()) {
+            assert_eq!(
+                serde_json::to_value(operator_sample_stats(row)).unwrap(),
+                legacy_row(&legacy)
+            );
+        }
+    }
 
     #[tokio::test]
     async fn route_path_parses_and_dispatches() {
@@ -184,6 +258,7 @@ mod db_tests {
     use crate::app::{App, AppState};
     use crate::auth::oidc::{OidcClient, OidcConfig};
     use crate::data::config::{LineCatalogue, ServiceArguments};
+    use serde_json::Value;
 
     /// Copied from `routes::line_status::db_tests::test_app` (that
     /// module's own doc comment: colocated per-file rather than shared,

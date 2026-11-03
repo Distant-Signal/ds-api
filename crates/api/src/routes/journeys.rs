@@ -2638,8 +2638,12 @@ fn leg_candidate_json(
     leg_destination_crs: &str,
     destination_names: &std::collections::HashMap<String, String>,
 ) -> serde_json::Value {
-    let mut json =
-        crate::render::calling_point_departure_json(row, leg_origin_crs, destination_names);
+    let mut json = serde_json::to_value(crate::render::calling_point_departure_json(
+        row,
+        leg_origin_crs,
+        destination_names,
+    ))
+    .unwrap_or_default();
     // The public arrival at the leg's destination, else the working one,
     // trimmed "HH:MM:SS" -> "HH:MM" exactly as the shared renderer serves
     // `scheduled` and `destinationArrival`, so the times on one row are

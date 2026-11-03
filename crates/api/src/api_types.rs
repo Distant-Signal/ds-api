@@ -82,6 +82,41 @@ fn visit_roots(v: &mut Collector) {
     v.visit::<crate::routes::journey_replan::SuggestionStaleResponse>();
     v.visit::<crate::data::journey_replace::ReplaceResponse>();
     v.visit::<crate::routes::journey_replan::RevisionsResponse>();
+    // Line status and stats.
+    v.visit::<crate::render::LineStatusReportJson>();
+    v.visit::<crate::routes::line_status::DailyStats>();
+    v.visit::<crate::routes::line_status::HalfHourlyStats>();
+    v.visit::<crate::routes::line_status::SubDailyStats>();
+    v.visit::<crate::routes::line_status::DailyCoverageStats>();
+    v.visit::<crate::routes::line_status::HalfHourlyCoverageStats>();
+    v.visit::<crate::routes::operators::OperatorSummaryJson>();
+    // Incidents.
+    v.visit::<crate::routes::incidents::IncidentDetailJson>();
+    v.visit::<crate::routes::incidents::IncidentTimingJson>();
+    v.visit::<crate::routes::incidents::IncidentSearchResponse>();
+    v.visit::<crate::routes::incidents::RecentlyClearedResponse>();
+    // Stations.
+    v.visit::<crate::data::reference::Suggestion>();
+    v.visit::<crate::data::reference::NearbyStation>();
+    v.visit::<crate::routes::reference::StationCodes>();
+    v.visit::<crate::ts_values::StationAccessibility>();
+    v.visit::<crate::routes::station_stats::StationOperatorSampleStatsJson>();
+    v.visit::<crate::render::StationDepartureJson>();
+    v.visit::<crate::render::ScheduleDepartureJson>();
+    // Lines.
+    v.visit::<crate::routes::lines::LineSummary>();
+    v.visit::<crate::routes::lines::CustomLineDetail>();
+    v.visit::<crate::routes::lines::LineDefinitionSummary>();
+    v.visit::<crate::render::LineTrainJson>();
+    v.visit::<crate::routes::line_trains_summary::SummaryJson>();
+    v.visit::<crate::routes::line_timetable::TimetableJson>();
+    // Train search.
+    v.visit::<crate::routes::trains::TrainSearchPage>();
+    v.visit::<crate::routes::trains::boards::TrainArrivalsPage>();
+    v.visit::<crate::routes::trains::boards::TrainHeadcodePage>();
+    v.visit::<crate::routes::trains::TrainSearchDates>();
+    v.visit::<crate::routes::trains::TrainSearchOperators>();
+    v.visit::<crate::routes::trains::TrainResolveResult>();
 }
 
 /// Collects one declaration per exportable type, keyed by its TypeScript
@@ -138,6 +173,21 @@ pub(crate) fn render() -> String {
 #[cfg(test)]
 mod tests {
     use std::path::Path;
+
+    /// `StationAccessibility` describes the accessibility route's
+    /// passthrough: one optional field per allowlisted key, and no other.
+    #[test]
+    fn station_accessibility_names_every_allowlisted_key() {
+        use ts_rs::TS;
+        let decl = crate::ts_values::StationAccessibility::decl(&ts_rs::Config::new());
+        for key in crate::data::reference::ACCESSIBILITY_KEYS {
+            assert!(decl.contains(&format!("{key}?:")), "{key} missing: {decl}");
+        }
+        assert_eq!(
+            decl.matches("?:").count(),
+            crate::data::reference::ACCESSIBILITY_KEYS.len()
+        );
+    }
 
     #[test]
     fn api_types_are_current() {

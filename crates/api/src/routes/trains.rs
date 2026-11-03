@@ -133,16 +133,17 @@ use axum::extract::{Query, State};
 use axum::http::StatusCode;
 use base64::Engine;
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
-use serde::Deserialize;
-use serde_json::{Value, json};
+use serde::{Deserialize, Serialize};
+use serde_json::Value;
 
 use crate::app::{App, Router};
 use crate::data::queries;
 use crate::data::queries::CallingPointDepartureCursor;
 use crate::data::train_resolve;
 use crate::render::calling_point_departure_json;
+use crate::routes::schedule_rows::TrainSearchRow;
 
-mod boards;
+pub(crate) mod boards;
 pub(crate) mod leg_filters;
 mod stop_filters;
 
@@ -462,7 +463,7 @@ fn normalize_operator(raw: &str) -> Result<String, (StatusCode, String)> {
 async fn get_trains_resolve(
     State(app): State<App>,
     Query(params): Query<TrainResolveParams>,
-) -> Result<Json<Value>, (StatusCode, String)> {
+) -> Result<Json<TrainResolveResult>, (StatusCode, String)> {
     let station = normalize_crs("station", &params.station)?;
     let time = normalize_time("time", params.time.trim())?;
     let rsid = non_empty(&params.rsid).map(normalize_rsid).transpose()?;
@@ -502,12 +503,12 @@ async fn get_trains_resolve(
             train_uid,
             service_date,
             matched_on,
-        } => Ok(Json(json!({
-            "href": format!("/Train/by-uid/{train_uid}/{service_date}"),
-            "trainUid": train_uid,
-            "serviceDate": service_date,
-            "matchedOn": matched_on.as_str(),
-        }))),
+        } => Ok(Json(TrainResolveResult {
+            href: format!("/Train/by-uid/{train_uid}/{service_date}"),
+            train_uid,
+            service_date,
+            matched_on: matched_on.as_str(),
+        })),
         train_resolve::ResolveOutcome::NotFound => Err((
             StatusCode::NOT_FOUND,
             format!("no scheduled train matches that board row at {station}"),
@@ -523,6 +524,18 @@ async fn get_trains_resolve(
             ),
         )),
     }
+}
+
+/// `GET /public/trains/resolve`'s 200 body: the live board row's train, as
+/// `GET /Train/by-uid/{uid}/{date}` (`href`) keys it.
+#[derive(Debug, Clone, Serialize, ts_rs::TS)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct TrainResolveResult {
+    href: String,
+    train_uid: String,
+    service_date: chrono::NaiveDate,
+    #[ts(as = "crate::ts_values::ResolveMatchedOn")]
+    matched_on: &'static str,
 }
 
 /// Parses a caller-supplied `"HH:MM"` into a real `NaiveTime`.
@@ -646,19 +659,30 @@ fn out_of_range_message(
 /// provisional (see `routes::provisional`); it may lie past `to`.
 async fn get_trains_search_dates(
     State(app): State<App>,
-) -> Result<Json<Value>, (StatusCode, String)> {
+) -> Result<Json<TrainSearchDates>, (StatusCode, String)> {
     let today = super::london_today();
     let published = queries::schedule_destination_departures_date_range(&app.database)
         .await
         .map_err(internal_error)?;
     let (from, to) = searchable_range(today, published);
-    Ok(Json(json!({
-        "from": from,
-        "to": to,
-        "publishedFrom": published.map(|(earliest, _)| earliest),
-        "publishedTo": published.map(|(_, latest)| latest),
-        "provisionalFrom": crate::routes::provisional::provisional_from(today),
-    })))
+    Ok(Json(TrainSearchDates {
+        from,
+        to,
+        published_from: published.map(|(earliest, _)| earliest),
+        published_to: published.map(|(_, latest)| latest),
+        provisional_from: crate::routes::provisional::provisional_from(today),
+    }))
+}
+
+/// `GET /public/trains/search/dates`'s body.
+#[derive(Debug, Clone, Serialize, ts_rs::TS)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct TrainSearchDates {
+    from: chrono::NaiveDate,
+    to: chrono::NaiveDate,
+    published_from: Option<chrono::NaiveDate>,
+    published_to: Option<chrono::NaiveDate>,
+    provisional_from: chrono::NaiveDate,
 }
 
 /// `GET /public/trains/search/operators` (2026-10-22) -- the operators
@@ -673,16 +697,30 @@ async fn get_trains_search_dates(
 /// match no train on a given date.
 async fn get_trains_search_operators(
     State(app): State<App>,
-) -> Result<Json<Value>, (StatusCode, String)> {
+) -> Result<Json<TrainSearchOperators>, (StatusCode, String)> {
     let operators = crate::data::reference::train_search_operators(&app.database)
         .await
         .map_err(internal_error)?;
-    Ok(Json(json!({
-        "operators": operators
+    Ok(Json(TrainSearchOperators {
+        operators: operators
             .into_iter()
-            .map(|(code, name)| json!({"code": code, "name": name}))
-            .collect::<Vec<_>>(),
-    })))
+            .map(|(code, name)| TrainSearchOperator { code, name })
+            .collect(),
+    }))
+}
+
+/// `GET /public/trains/search/operators`'s body.
+#[derive(Debug, Clone, Serialize, ts_rs::TS)]
+pub(crate) struct TrainSearchOperators {
+    operators: Vec<TrainSearchOperator>,
+}
+
+/// An operator the search's `operator` can name; `name` is `null` for a
+/// code `tocs` lacks.
+#[derive(Debug, Clone, Serialize, ts_rs::TS)]
+pub(crate) struct TrainSearchOperator {
+    code: String,
+    name: Option<String>,
 }
 
 /// Validates and uppercases a CRS code.
@@ -730,12 +768,35 @@ impl WindowBound {
     }
 
     /// `{"time": "HH:MM", "dayOffset": n}`, `/Trips/plan`'s echo shape.
-    fn to_json(self) -> Value {
-        json!({
-            "time": self.time.format("%H:%M").to_string(),
-            "dayOffset": self.day_offset,
-        })
+    fn to_json(self) -> WindowBoundJson {
+        WindowBoundJson {
+            time: self.time.format("%H:%M").to_string(),
+            day_offset: self.day_offset,
+        }
     }
+}
+
+/// One end of a board's window as applied: `"HH:MM"` on day `dayOffset`
+/// of the train day.
+#[derive(Debug, Clone, Serialize, ts_rs::TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(rename = "WindowBound")]
+pub(crate) struct WindowBoundJson {
+    time: String,
+    day_offset: u32,
+}
+
+/// The search's `window`: `from`/`to` bound the departure from `station`,
+/// `arrivalFrom`/`arrivalTo` the arrival at `stops_at`; `null` where
+/// unbounded.
+#[derive(Debug, Clone, Serialize, ts_rs::TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(rename = "TrainSearchWindow")]
+pub(crate) struct SearchWindowJson {
+    from: WindowBoundJson,
+    to: Option<WindowBoundJson>,
+    arrival_from: Option<WindowBoundJson>,
+    arrival_to: Option<WindowBoundJson>,
 }
 
 /// The search window, every bound resolved.
@@ -751,13 +812,13 @@ impl Window {
     /// The response's `window`: `from`/`to` bound the departure from
     /// `station`, `arrivalFrom`/`arrivalTo` the arrival at `stops_at`;
     /// `null` where unbounded.
-    fn to_json(self) -> Value {
-        json!({
-            "from": self.from.to_json(),
-            "to": self.to.map(WindowBound::to_json),
-            "arrivalFrom": self.arrival_from.map(WindowBound::to_json),
-            "arrivalTo": self.arrival_to.map(WindowBound::to_json),
-        })
+    fn to_json(self) -> SearchWindowJson {
+        SearchWindowJson {
+            from: self.from.to_json(),
+            to: self.to.map(WindowBound::to_json),
+            arrival_from: self.arrival_from.map(WindowBound::to_json),
+            arrival_to: self.arrival_to.map(WindowBound::to_json),
+        }
     }
 }
 
@@ -1010,7 +1071,7 @@ fn decode_search_cursor(
 async fn get_trains_search(
     State(app): State<App>,
     Query(params): Query<TrainSearchParams>,
-) -> Result<Json<Value>, (StatusCode, String)> {
+) -> Result<Json<TrainSearchPage>, (StatusCode, String)> {
     let station = normalize_crs("station", &params.station)?;
     let origin = params
         .origin
@@ -1247,68 +1308,52 @@ async fn get_trains_search(
         .await
         .map_err(internal_error)?;
 
-    let mut results: Vec<Value> = page
+    let mut results: Vec<TrainSearchRow> = page
         .departures
         .iter()
         .map(|row| {
-            let mut rendered = calling_point_departure_json(row, &station, &destination_names);
-            // `dayOffset`: days after the row's service date the departure
-            // from `station` falls on, the same convention as
-            // `/schedule-departures`' own `dayOffset` -- it moves the
-            // departure's calendar day, never the service date, so the
-            // row's `GET /Train/by-uid/{uid}/{date}` stays its
-            // `serviceDate` (the searched date, or with `across_midnight`
-            // the day before). It is `scheduled`'s (the public departure,
-            // else the working one); `workingDayOffset` is
-            // `workingDeparture`'s.
-            if let Some(object) = rendered.as_object_mut() {
-                object.insert(
-                    "serviceDate".to_string(),
-                    row.get("service_date")
-                        .cloned()
-                        .unwrap_or_else(|| json!(service_date)),
-                );
-                let working_day_offset = row.get("day_offset").and_then(Value::as_u64).unwrap_or(0);
-                let (_, day_offset) = crate::render::public_else_working(
-                    row,
-                    "public_departure",
-                    "scheduled",
-                    working_day_offset,
-                );
-                object.insert("dayOffset".to_string(), Value::from(day_offset));
-                object.insert(
-                    "workingDayOffset".to_string(),
-                    Value::from(working_day_offset),
-                );
-                if stops_at.is_some() {
-                    insert_stops_at_arrival(object, row);
-                }
-            }
-            rendered
+            search_row(
+                row,
+                &station,
+                &destination_names,
+                service_date,
+                stops_at.is_some(),
+            )
         })
         .collect();
     crate::routes::schedule_rows::attach_origin_names(&mut results, &destination_names);
     let results = annotate_by_service_date(&app, results, service_date, previous_date).await;
-    let mut body = json!({
-        "results": results,
-        "nextCursor": page.next_cursor.as_ref().map(encode_cursor),
+    Ok(Json(TrainSearchPage {
+        results,
+        next_cursor: page.next_cursor.as_ref().map(encode_cursor),
         // Additive (2026-10-22): the train day searched, and the time
         // window as applied -- `from` filled in with the `now` default,
         // every day offset resolved.
-        "serviceDate": service_date,
-        "window": window.to_json(),
+        service_date,
+        window: window.to_json(),
         // Additive (2026-10-22): whether the previous date's late trains
         // were asked for, and every service date the rows can be of.
-        "acrossMidnight": across_midnight,
-        "serviceDates": service_dates,
-    });
-    // Additive (2026-10-08): whether `service_date`'s timetable is still
-    // provisional -- once per response, since every row shares the date.
-    if let Some(object) = body.as_object_mut() {
-        crate::routes::provisional::TimetableCertainty::for_date(service_date, today)
-            .insert_into(object);
-    }
-    Ok(Json(body))
+        across_midnight,
+        service_dates,
+        // Additive (2026-10-08): whether `service_date`'s timetable is
+        // still provisional -- once per response, since every row shares
+        // the date.
+        certainty: crate::routes::provisional::TimetableCertainty::for_date(service_date, today),
+    }))
+}
+
+/// `GET /public/trains/search`'s body.
+#[derive(Debug, Clone, Serialize, ts_rs::TS)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct TrainSearchPage {
+    results: Vec<TrainSearchRow>,
+    next_cursor: Option<String>,
+    service_date: chrono::NaiveDate,
+    window: SearchWindowJson,
+    across_midnight: bool,
+    service_dates: Vec<chrono::NaiveDate>,
+    #[serde(flatten)]
+    certainty: crate::routes::provisional::TimetableCertainty,
 }
 
 /// `?across_midnight=`: absent, empty or `false` is off, `true` on (any
@@ -1329,24 +1374,59 @@ fn parse_across_midnight(raw: Option<&str>) -> Result<bool, (StatusCode, String)
     }
 }
 
+/// One search row from its stored row, before its origin name, live state
+/// and service mode are looked up.
+///
+/// `dayOffset`: days after the row's service date the departure from
+/// `station` falls on, the same convention as `/schedule-departures`' own
+/// `dayOffset` -- it moves the departure's calendar day, never the service
+/// date, so the row's `GET /Train/by-uid/{uid}/{date}` stays its
+/// `serviceDate` (the searched date, or with `across_midnight` the day
+/// before). It is `scheduled`'s (the public departure, else the working
+/// one); `workingDayOffset` is `workingDeparture`'s.
+fn search_row(
+    row: &Value,
+    station: &str,
+    destination_names: &std::collections::HashMap<String, String>,
+    service_date: chrono::NaiveDate,
+    stops_at: bool,
+) -> TrainSearchRow {
+    let departure = calling_point_departure_json(row, station, destination_names);
+    let row_date = row
+        .get("service_date")
+        .and_then(Value::as_str)
+        .map_or_else(|| service_date.to_string(), str::to_string);
+    let mut rendered = TrainSearchRow::new(departure, row_date);
+    let working_day_offset = row.get("day_offset").and_then(Value::as_u64).unwrap_or(0);
+    let (_, day_offset) = crate::render::public_else_working(
+        row,
+        "public_departure",
+        "scheduled",
+        working_day_offset,
+    );
+    rendered.day_offset = Some(i64::try_from(day_offset).unwrap_or(i64::MAX));
+    rendered.working_day_offset = Some(working_day_offset);
+    if stops_at {
+        set_stops_at_arrival(&mut rendered, row);
+    }
+    rendered
+}
+
 /// Attaches each row's live state and service mode, both read per service
 /// date: the rows of `previous_date` (an `across_midnight` search's, their
 /// `serviceDate` the day before) against that date, the rest against
 /// `service_date`. Row order is kept.
 async fn annotate_by_service_date(
     app: &App,
-    results: Vec<Value>,
+    results: Vec<TrainSearchRow>,
     service_date: chrono::NaiveDate,
     previous_date: Option<chrono::NaiveDate>,
-) -> Vec<Value> {
-    let previous_key = previous_date.map(|date| json!(date));
-    let is_previous = |row: &Value| {
-        previous_key
-            .as_ref()
-            .is_some_and(|key| row.get("serviceDate") == Some(key))
-    };
+) -> Vec<TrainSearchRow> {
+    let previous_key = previous_date.map(|date| date.to_string());
+    let is_previous =
+        |row: &TrainSearchRow| previous_key.as_deref() == Some(row.service_date.as_str());
     let flags: Vec<bool> = results.iter().map(is_previous).collect();
-    let (mut previous_rows, mut own_rows): (Vec<Value>, Vec<Value>) =
+    let (mut previous_rows, mut own_rows): (Vec<TrainSearchRow>, Vec<TrainSearchRow>) =
         results.into_iter().partition(is_previous);
     for (date, rows) in [
         (Some(service_date), &mut own_rows),
@@ -1357,7 +1437,7 @@ async fn annotate_by_service_date(
             continue;
         }
         crate::routes::schedule_rows::attach_live(&app.database, date, rows).await;
-        crate::data::schedule_services::annotate_uid_rows(&app.database, date, rows).await;
+        crate::routes::schedule_rows::annotate_service_modes(&app.database, date, rows).await;
     }
     let mut own = own_rows.into_iter();
     let mut previous = previous_rows.into_iter();
@@ -1381,26 +1461,18 @@ async fn annotate_by_service_date(
 ///
 /// A time and its offset are `null` together when the call has no such
 /// time stored (a public time before the schedule's next publish).
-fn insert_stops_at_arrival(object: &mut serde_json::Map<String, Value>, row: &Value) {
+fn set_stops_at_arrival(rendered: &mut TrainSearchRow, row: &Value) {
     let hh_mm = |key: &str| {
         row.get(key)
             .and_then(Value::as_str)
-            .map_or(Value::Null, |s| Value::String(s.chars().take(5).collect()))
+            .map(|s| s.chars().take(5).collect::<String>())
     };
-    let offset = |key: &str| row.get(key).cloned().unwrap_or(Value::Null);
-    object.insert("stopsAtArrival".to_string(), hh_mm("stops_at_arrival"));
-    object.insert(
-        "stopsAtArrivalDayOffset".to_string(),
-        offset("stops_at_arrival_day_offset"),
-    );
-    object.insert(
-        "stopsAtWorkingArrival".to_string(),
-        hh_mm("stops_at_working_arrival"),
-    );
-    object.insert(
-        "stopsAtWorkingArrivalDayOffset".to_string(),
-        offset("stops_at_working_arrival_day_offset"),
-    );
+    let offset = |key: &str| row.get(key).and_then(Value::as_i64);
+    rendered.stops_at_arrival = Some(hh_mm("stops_at_arrival"));
+    rendered.stops_at_arrival_day_offset = Some(offset("stops_at_arrival_day_offset"));
+    rendered.stops_at_working_arrival = Some(hh_mm("stops_at_working_arrival"));
+    rendered.stops_at_working_arrival_day_offset =
+        Some(offset("stops_at_working_arrival_day_offset"));
 }
 
 #[expect(
@@ -1421,6 +1493,128 @@ fn internal_error(err: anyhow::Error) -> (StatusCode, String) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The `json!` search row before it was typed, verbatim: the shared
+    /// renderer's row, then the route's own fields, then the lookups'.
+    fn legacy_search_row(
+        row: &Value,
+        station: &str,
+        names: &std::collections::HashMap<String, String>,
+        service_date: chrono::NaiveDate,
+        stops_at: bool,
+        live: Option<&crate::routes::line_trains_summary::LiveSummary>,
+        mode: crate::data::schedule_services::ServiceMode,
+    ) -> Value {
+        use serde_json::json;
+        let mut rendered = crate::render::legacy::calling_point_departure_json(row, station, names);
+        if let Some(object) = rendered.as_object_mut() {
+            object.insert(
+                "serviceDate".to_string(),
+                row.get("service_date")
+                    .cloned()
+                    .unwrap_or_else(|| json!(service_date)),
+            );
+            let working_day_offset = row.get("day_offset").and_then(Value::as_u64).unwrap_or(0);
+            let (_, day_offset) = crate::render::public_else_working(
+                row,
+                "public_departure",
+                "scheduled",
+                working_day_offset,
+            );
+            object.insert("dayOffset".to_string(), Value::from(day_offset));
+            object.insert(
+                "workingDayOffset".to_string(),
+                Value::from(working_day_offset),
+            );
+            if stops_at {
+                let hh_mm = |key: &str| {
+                    row.get(key)
+                        .and_then(Value::as_str)
+                        .map_or(Value::Null, |s| Value::String(s.chars().take(5).collect()))
+                };
+                let offset = |key: &str| row.get(key).cloned().unwrap_or(Value::Null);
+                object.insert("stopsAtArrival".to_string(), hh_mm("stops_at_arrival"));
+                object.insert(
+                    "stopsAtArrivalDayOffset".to_string(),
+                    offset("stops_at_arrival_day_offset"),
+                );
+                object.insert(
+                    "stopsAtWorkingArrival".to_string(),
+                    hh_mm("stops_at_working_arrival"),
+                );
+                object.insert(
+                    "stopsAtWorkingArrivalDayOffset".to_string(),
+                    offset("stops_at_working_arrival_day_offset"),
+                );
+            }
+            let origin_name = object
+                .get("originCrs")
+                .and_then(Value::as_str)
+                .and_then(|crs| names.get(&crs.to_uppercase()))
+                .map_or(Value::Null, |name| Value::String(name.clone()));
+            object.insert("originName".to_string(), origin_name);
+            object.insert(
+                "live".to_string(),
+                live.and_then(|summary| serde_json::to_value(summary).ok())
+                    .unwrap_or(Value::Null),
+            );
+        }
+        crate::data::schedule_services::annotate_json(&mut rendered, mode);
+        rendered
+    }
+
+    /// A search row serves what the `json!` row did: with `stops_at` and
+    /// without, a row of the previous date, live state or none, a bus.
+    #[test]
+    fn typed_search_rows_match_the_json_rows() {
+        use crate::data::schedule_services::ServiceMode;
+        use crate::routes::schedule_rows::ScheduleRow;
+
+        let names = std::collections::HashMap::from([
+            ("EUS".to_string(), "London Euston".to_string()),
+            ("BHM".to_string(), "Birmingham New Street".to_string()),
+        ]);
+        let live = crate::routes::line_trains_summary::LiveSummary {
+            status: Some("en_route".to_string()),
+            delay_minutes: Some(4),
+            delay_provisional: true,
+            cancelled: false,
+            cancel_reason: None,
+            last_reported_location: Some("Watford Junction".to_string()),
+        };
+        let date: chrono::NaiveDate = "2026-10-20".parse().unwrap();
+        let rows = [
+            serde_json::json!({
+                "uid": "C1", "scheduled": "23:59:30", "public_departure": "00:00:00",
+                "day_offset": 0, "destination_crs": "BHM", "true_origin_crs": "eus",
+                "destination_arrival": "01:30:00", "destination_arrival_day_offset": 1,
+                "operator_atoc": "LM", "headcode": "1A11", "service_date": "2026-10-19",
+                "stops_at_arrival": "00:40:00", "stops_at_arrival_day_offset": 1,
+                "stops_at_working_arrival": null, "stops_at_working_arrival_day_offset": null,
+            }),
+            serde_json::json!({
+                "uid": "C2", "scheduled": "10:00:00", "destination_crs": "XVR",
+                "true_origin_crs": null,
+            }),
+        ];
+        for row in &rows {
+            for (stops_at, summary, mode) in [
+                (true, Some(&live), ServiceMode::Train),
+                (false, None, ServiceMode::Bus),
+            ] {
+                let mut new = search_row(row, "RDG", &names, date, stops_at);
+                let mut one = [new];
+                crate::routes::schedule_rows::attach_origin_names(&mut one, &names);
+                [new] = one;
+                new.set_live(summary.cloned());
+                new.set_service_mode(mode);
+                assert_eq!(
+                    serde_json::to_value(new).unwrap(),
+                    legacy_search_row(row, "RDG", &names, date, stops_at, summary, mode),
+                );
+            }
+        }
+    }
 
     fn hm(h: u32, m: u32) -> chrono::NaiveTime {
         chrono::NaiveTime::from_hms_opt(h, m, 0).unwrap()
@@ -1578,6 +1772,7 @@ mod tests {
 mod db_tests {
     use axum::body::Body;
     use axum::http::Request;
+    use serde_json::json;
     use sqlx::PgPool;
     use sqlx::postgres::PgPoolOptions;
     use tower::ServiceExt;

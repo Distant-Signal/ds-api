@@ -10,11 +10,12 @@
 use axum::Json;
 use axum::extract::{Path, State};
 use axum::http::StatusCode;
-use serde_json::{Value, json};
+use chrono::{DateTime, Utc};
+use serde::Serialize;
 
 use crate::app::{App, Router};
 use crate::data::operators;
-use crate::render::sample_stats_json;
+use crate::render::{SampleStatsJson, sample_stats_json};
 
 pub fn router() -> Router {
     Router::new()
@@ -22,7 +23,9 @@ pub fn router() -> Router {
         .route("/operators/{code}", axum::routing::get(get_operator))
 }
 
-async fn list_operators(State(app): State<App>) -> Result<Json<Vec<Value>>, (StatusCode, String)> {
+async fn list_operators(
+    State(app): State<App>,
+) -> Result<Json<Vec<OperatorSummaryJson>>, (StatusCode, String)> {
     let rollups = operators::all_operator_rollups(&app.database, &app.config.lines)
         .await
         .map_err(internal_error)?;
@@ -32,7 +35,7 @@ async fn list_operators(State(app): State<App>) -> Result<Json<Vec<Value>>, (Sta
 async fn get_operator(
     State(app): State<App>,
     Path(code): Path<String>,
-) -> Result<Json<Value>, (StatusCode, String)> {
+) -> Result<Json<OperatorSummaryJson>, (StatusCode, String)> {
     let rollup = operators::operator_rollup(&app.database, &app.config.lines, &code)
         .await
         .map_err(internal_error)?;
@@ -42,28 +45,38 @@ async fn get_operator(
     Ok(Json(operator_rollup_json(&rollup)))
 }
 
-/// Hand-built camelCase JSON -- NOT a derived `#[serde(rename_all = "camelCase")]`
-/// struct embedding `common::SampleStats` directly, which would leak
-/// `avg_delay_minutes` (`snake_case`) one level down (a parent struct's
-/// `rename_all` does not recurse into a nested type with no rename
-/// attribute of its own). Same rationale, and the same reused
-/// `sample_stats_json` helper, as `routes/station_stats.rs`'s own
-/// `get_station_sample_stats` -- see this plan's Judgment Call 1.
-fn operator_rollup_json(r: &operators::OperatorRollup) -> Value {
-    let mut out = json!({
-        "code": r.code,
-        "name": r.name,
-        "lineIds": r.line_ids,
-        "worstSeverity": r.worst_severity as i32,
-        "reason": r.reason,
-        "worstLineId": r.worst_line_id,
-        "worstLineName": r.worst_line_name,
-        "computedAt": r.computed_at,
-    });
-    if let Some(stats) = &r.sample_stats {
-        out["sampleStats"] = sample_stats_json(stats);
+/// One operator's status rollup: `GET /public/operators` and
+/// `GET /public/operators/{code}`. `sampleStats` is the stats (camelCase)
+/// rendered by `render::sample_stats_json`, absent when there are none.
+#[derive(Debug, Clone, Serialize, ts_rs::TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(rename = "OperatorSummary")]
+pub(crate) struct OperatorSummaryJson {
+    code: String,
+    name: String,
+    line_ids: Vec<String>,
+    worst_severity: i32,
+    reason: String,
+    worst_line_id: Option<String>,
+    worst_line_name: Option<String>,
+    computed_at: Option<DateTime<Utc>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    sample_stats: Option<SampleStatsJson>,
+}
+
+fn operator_rollup_json(r: &operators::OperatorRollup) -> OperatorSummaryJson {
+    OperatorSummaryJson {
+        code: r.code.clone(),
+        name: r.name.clone(),
+        line_ids: r.line_ids.clone(),
+        worst_severity: r.worst_severity as i32,
+        reason: r.reason.clone(),
+        worst_line_id: r.worst_line_id.clone(),
+        worst_line_name: r.worst_line_name.clone(),
+        computed_at: r.computed_at,
+        sample_stats: r.sample_stats.as_ref().map(sample_stats_json),
     }
-    out
 }
 
 #[expect(
@@ -79,6 +92,64 @@ fn internal_error(err: anyhow::Error) -> (StatusCode, String) {
         StatusCode::INTERNAL_SERVER_ERROR,
         "query failed".to_string(),
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The `json!` body these routes built before it was typed, verbatim.
+    fn legacy_rollup_json(r: &operators::OperatorRollup) -> serde_json::Value {
+        let mut out = serde_json::json!({
+            "code": r.code,
+            "name": r.name,
+            "lineIds": r.line_ids,
+            "worstSeverity": r.worst_severity as i32,
+            "reason": r.reason,
+            "worstLineId": r.worst_line_id,
+            "worstLineName": r.worst_line_name,
+            "computedAt": r.computed_at,
+        });
+        if let Some(stats) = &r.sample_stats {
+            out["sampleStats"] = crate::render::legacy::sample_stats_json(stats);
+        }
+        out
+    }
+
+    /// A rollup serves what its `json!` body did, with stats and without.
+    #[test]
+    fn typed_rollup_matches_the_json_body() {
+        let with_stats = operators::OperatorRollup {
+            code: "SW".to_string(),
+            name: "South Western Railway".to_string(),
+            line_ids: vec!["south-western".to_string()],
+            worst_severity: common::Severity::MinorDelays,
+            reason: "Signal failure".to_string(),
+            worst_line_id: Some("south-western".to_string()),
+            worst_line_name: Some("South Western Main Line".to_string()),
+            sample_stats: Some(common::SampleStats {
+                total: 9,
+                delayed: 3,
+                cancelled: 1,
+                skipped: 0,
+                avg_delay_minutes: 4.25,
+            }),
+            computed_at: Some("2026-09-27T08:00:00Z".parse().unwrap()),
+        };
+        let without = operators::OperatorRollup {
+            sample_stats: None,
+            worst_line_id: None,
+            worst_line_name: None,
+            computed_at: None,
+            ..with_stats.clone()
+        };
+        for rollup in [with_stats, without] {
+            assert_eq!(
+                serde_json::to_value(operator_rollup_json(&rollup)).unwrap(),
+                legacy_rollup_json(&rollup)
+            );
+        }
+    }
 }
 
 #[cfg(test)]
@@ -213,12 +284,7 @@ mod db_tests {
         .expect("seed fixture toc");
     }
 
-    async fn seed_line_status(
-        pool: &PgPool,
-        line_id: &str,
-        operators: &[&str],
-        statuses: serde_json::Value,
-    ) {
+    async fn seed_line_status(pool: &PgPool, line_id: &str, operators: &[&str], statuses: Value) {
         sqlx::query(
             "INSERT INTO line_status (line_id, name, mode_name, operators, statuses, source) \
              VALUES ($1, $1, 'national-rail', $2, $3, 'aggregator') \

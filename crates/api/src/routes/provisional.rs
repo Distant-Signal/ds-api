@@ -34,7 +34,6 @@ use std::sync::LazyLock;
 
 use chrono::NaiveDate;
 use serde::Serialize;
-use serde_json::{Map, Value};
 
 /// Days after today a service date's timetable is still treated as firm.
 /// Seven: the forward publish window before it was widened to 28 days,
@@ -103,15 +102,6 @@ impl TimetableCertainty {
             provisional_from,
         }
     }
-
-    /// Adds `provisional` and `provisionalFrom` to a JSON response object.
-    pub(crate) fn insert_into(self, object: &mut Map<String, Value>) {
-        object.insert("provisional".to_string(), Value::Bool(self.provisional));
-        object.insert(
-            "provisionalFrom".to_string(),
-            Value::String(self.provisional_from.format("%Y-%m-%d").to_string()),
-        );
-    }
 }
 
 #[cfg(test)]
@@ -155,16 +145,10 @@ mod tests {
     }
 
     #[test]
-    fn serializes_and_inserts_camel_case_fields() {
+    fn serializes_camel_case_fields() {
         let certainty = TimetableCertainty::from_threshold(d(2026, 11, 1), d(2026, 10, 16));
         assert_eq!(
             serde_json::to_value(certainty).unwrap(),
-            serde_json::json!({"provisional": true, "provisionalFrom": "2026-10-16"})
-        );
-        let mut object = Map::new();
-        certainty.insert_into(&mut object);
-        assert_eq!(
-            Value::Object(object),
             serde_json::json!({"provisional": true, "provisionalFrom": "2026-10-16"})
         );
     }
