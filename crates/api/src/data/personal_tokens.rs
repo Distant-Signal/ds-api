@@ -345,8 +345,7 @@ mod tests {
 
     #[test]
     fn reasons_match_the_check_constraint() {
-        let migration =
-            include_str!("../../../ds-store/migrations/20261103120000_personal_api_tokens.sql");
+        let migration = ds_store::migrate::migration_sql(20_261_103_120_000);
         for reason in [
             RevokeReason::User,
             RevokeReason::Admin,

@@ -1934,7 +1934,7 @@ mod sliding_session_db_tests {
 
     const DAY: i64 = 24 * 60 * 60;
 
-    #[sqlx::test(migrations = "../ds-store/migrations")]
+    #[sqlx::test(migrator = "ds_store::migrate::MIGRATOR")]
     #[ignore = "needs DATABASE_URL (a role that can create databases)"]
     async fn a_due_session_slides_to_the_idle_timeout_from_now(pool: PgPool) {
         let user_id = user(&pool).await;
@@ -1965,7 +1965,7 @@ mod sliding_session_db_tests {
         assert_eq!(expires_in_secs(&pool, "due").await, Some(14 * DAY));
     }
 
-    #[sqlx::test(migrations = "../ds-store/migrations")]
+    #[sqlx::test(migrator = "ds_store::migrate::MIGRATOR")]
     #[ignore = "needs DATABASE_URL (a role that can create databases)"]
     async fn a_session_moved_within_the_throttle_is_left_alone(pool: PgPool) {
         let user_id = user(&pool).await;
@@ -2013,7 +2013,7 @@ mod sliding_session_db_tests {
         );
     }
 
-    #[sqlx::test(migrations = "../ds-store/migrations")]
+    #[sqlx::test(migrator = "ds_store::migrate::MIGRATOR")]
     #[ignore = "needs DATABASE_URL (a role that can create databases)"]
     async fn a_session_never_slides_past_its_absolute_cap(pool: PgPool) {
         let user_id = user(&pool).await;
@@ -2043,7 +2043,7 @@ mod sliding_session_db_tests {
         assert_eq!(expires_in_secs(&pool, "old").await, Some(5 * DAY));
     }
 
-    #[sqlx::test(migrations = "../ds-store/migrations")]
+    #[sqlx::test(migrator = "ds_store::migrate::MIGRATOR")]
     #[ignore = "needs DATABASE_URL (a role that can create databases)"]
     async fn an_expired_deleted_or_revoked_session_is_never_brought_back(pool: PgPool) {
         let user_id = user(&pool).await;

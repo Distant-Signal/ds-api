@@ -240,9 +240,7 @@ async fn the_backfill_writes_revision_one_once() {
         &format!("DELETE FROM journey_revisions WHERE journey_id = {journey_id}"),
     )
     .await;
-    let backfill = include_str!(
-        "../../../../ds-store/migrations/20261023090500_journey_revisions_backfill.sql"
-    );
+    let backfill = ds_store::migrate::migration_sql(20_261_023_090_500);
     for _ in 0..2 {
         let mut tx = pool.begin().await.expect("begin");
         sqlx::raw_sql(backfill)

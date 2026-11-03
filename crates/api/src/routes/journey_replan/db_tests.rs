@@ -1086,9 +1086,7 @@ async fn the_cleanup_dismisses_unconfirmed_missed_breaks_once() {
     let (_, detail) = call(&router, "GET", &journey, Some(&token), None, None).await;
     assert_eq!(detail["openBreak"]["id"], open, "{detail}");
 
-    let migration = include_str!(
-        "../../../../ds-store/migrations/20261023091000_journey_breaks_close_unconfirmed_missed.sql"
-    );
+    let migration = ds_store::migrate::migration_sql(20_261_023_091_000);
     for _ in 0..2 {
         let mut tx = pool.begin().await.expect("begin");
         sqlx::raw_sql(migration)

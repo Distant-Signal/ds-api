@@ -612,8 +612,7 @@ mod tests {
 
     #[test]
     fn scopes_round_trip_and_match_the_migration() {
-        let migration =
-            include_str!("../../../ds-store/migrations/20261103120000_personal_api_tokens.sql");
+        let migration = ds_store::migrate::migration_sql(20_261_103_120_000);
         for scope in PersonalScope::ALL {
             assert_eq!(PersonalScope::parse(scope.as_str()), Some(scope));
             assert!(migration.contains(&format!("'{}'", scope.as_str())));

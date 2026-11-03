@@ -5257,9 +5257,7 @@ mod db_tests {
     #[ignore = "requires a live database; run with `DATABASE_URL=... cargo test -p api \
                 tracked_trains_as_journeys_migration -- --ignored --test-threads=1`"]
     async fn tracked_trains_as_journeys_migration_converts_and_rolls_back() {
-        const MIGRATION: &str = include_str!(
-            "../../../ds-store/migrations/20261022090000_tracked_trains_as_journeys.sql"
-        );
+        let migration = ds_store::migrate::migration_sql(20_261_022_090_000);
         const ROLLBACK: &str =
             include_str!("../../../../scripts/rollback-tracked-trains-as-journeys.sql");
         let pool = connect().await;
@@ -5336,7 +5334,7 @@ mod db_tests {
         .await
         .expect("seed shares");
 
-        sqlx::raw_sql(MIGRATION)
+        sqlx::raw_sql(migration)
             .execute(&mut *tx)
             .await
             .expect("run the migration");
@@ -5417,7 +5415,7 @@ mod db_tests {
                 .expect("count journeys")
         }
         assert_eq!(journeys_after(&mut tx).await, 3);
-        sqlx::raw_sql(MIGRATION)
+        sqlx::raw_sql(migration)
             .execute(&mut *tx)
             .await
             .expect("rerun the migration");

@@ -407,7 +407,7 @@ mod sliding_session_tests {
 
     /// An authenticated request slides a due session to 14 days from now,
     /// and one inside the throttle leaves it where it is.
-    #[sqlx::test(migrations = "../ds-store/migrations")]
+    #[sqlx::test(migrator = "ds_store::migrate::MIGRATOR")]
     #[ignore = "needs DATABASE_URL (a role that can create databases)"]
     async fn an_authenticated_request_slides_a_due_session(pool: PgPool) {
         let app = crate::test_support::inert_app(pool.clone());

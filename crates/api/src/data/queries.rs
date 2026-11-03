@@ -5393,9 +5393,7 @@ mod incident_search_text_tests {
     /// `INCIDENT_SEARCH_DOCUMENT_SQL`).
     #[test]
     fn incident_search_document_matches_its_index() {
-        let migration = include_str!(
-            "../../../ds-store/migrations/20261014230000_incidents_search_document_index.sql"
-        );
+        let migration = ds_store::migrate::migration_sql(20_261_014_230_000);
         assert!(
             migration.contains(&format!("USING GIN ({INCIDENT_SEARCH_DOCUMENT_SQL})")),
             "the migration's index expression must be INCIDENT_SEARCH_DOCUMENT_SQL"
@@ -9455,12 +9453,10 @@ mod db_review_guard_and_normalisation_tests {
         }
 
         let mut tx = pool.begin().await.unwrap();
-        sqlx::raw_sql(include_str!(
-            "../../../ds-store/migrations/20261006130100_incidents_active_since_backfill.sql"
-        ))
-        .execute(&mut *tx)
-        .await
-        .unwrap();
+        sqlx::raw_sql(ds_store::migrate::migration_sql(20_261_006_130_100))
+            .execute(&mut *tx)
+            .await
+            .unwrap();
         tx.commit().await.unwrap();
 
         let read = |id: &'static str| {

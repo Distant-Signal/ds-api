@@ -17,45 +17,19 @@
 use sqlx::postgres::{PgConnectOptions, PgPoolOptions};
 use sqlx::{Connection, Row};
 
-/// Embedded at compile time instead of read from `env!("CARGO_MANIFEST_DIR")`
-/// at run time: with `CARGO_TARGET_DIR` shared between worktrees, cargo can
-/// reuse a binary built in another worktree, which would then read (or fail
-/// to find) THAT worktree's files (Train Register verification 2026-10-01,
-/// N6). `include_str!` also makes cargo rebuild this test whenever one of
-/// these files changes.
-const MIGRATIONS: &[(&str, &str)] = &[
-    (
-        "20260904100000_full_coverage_line_stats.sql",
-        include_str!("../../ds-store/migrations/20260904100000_full_coverage_line_stats.sql"),
-    ),
-    (
-        "20260927050000_full_coverage_line_stats_partial.sql",
-        include_str!(
-            "../../ds-store/migrations/20260927050000_full_coverage_line_stats_partial.sql"
-        ),
-    ),
-    (
-        "20260927050100_full_coverage_line_stats_line_date_key.sql",
-        include_str!(
-            "../../ds-store/migrations/20260927050100_full_coverage_line_stats_line_date_key.sql"
-        ),
-    ),
-    (
-        "20260927050200_full_coverage_line_stats_line_date_pkey.sql",
-        include_str!(
-            "../../ds-store/migrations/20260927050200_full_coverage_line_stats_line_date_pkey.sql"
-        ),
-    ),
-];
-
+/// From ds-store's embedded migrations (`ds_store::migrate::migration_sql`)
+/// rather than read from `env!("CARGO_MANIFEST_DIR")` at run time: with
+/// `CARGO_TARGET_DIR` shared between worktrees, cargo can reuse a binary
+/// built in another worktree, which would then read (or fail to find) THAT
+/// worktree's files (Train Register verification 2026-10-01, N6). The
+/// embedding also makes cargo rebuild this test whenever one of them
+/// changes, and the migrations stay in ds-core (repo split spec §9, phase 4).
 fn migration(name: &str) -> &'static str {
-    MIGRATIONS
-        .iter()
-        .find(|(file, _)| *file == name)
-        .map_or_else(
-            || panic!("{name} is not embedded in MIGRATIONS"),
-            |(_, sql)| *sql,
-        )
+    let version = name
+        .split_once('_')
+        .and_then(|(version, _)| version.parse().ok())
+        .unwrap_or_else(|| panic!("{name} is not a migration file name"));
+    ds_store::migrate::migration_sql(version)
 }
 
 async fn apply(conn: &mut sqlx::PgConnection, name: &str) {
