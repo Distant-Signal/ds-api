@@ -38,6 +38,7 @@ use crate::app::{App, Router};
 use crate::atom::{self, Entry, Feed};
 use crate::data::feeds::{self, FeedIncidentRow, IncidentScope, StatusHistoryRow};
 use crate::data::{operators, queries};
+use crate::render::{KNOWLEDGEBASE_INCIDENTS_CREDIT, NATIONAL_RAIL_CREDIT, TFL_CREDIT};
 
 pub fn router() -> Router {
     Router::new()
@@ -57,9 +58,12 @@ pub const WINDOW_DAYS: i64 = 30;
 /// can cause on the network feed.
 const MAX_HISTORY_ROWS: i64 = 5000;
 
-/// `max-age` for the edge and the reader: line status is recomputed every
-/// few minutes, and readers poll far less often.
-pub const CACHE_CONTROL: &str = "public, max-age=300";
+/// Five minutes for the reader (`max-age`) and the edge (`s-maxage`, as
+/// the public TfL-shaped routes set it, `frontend/lib/tflPublicApi.ts`):
+/// line status is recomputed every few minutes, and readers poll far less
+/// often. The edge may serve a stale copy for as long again while it
+/// refreshes.
+pub const CACHE_CONTROL: &str = "public, max-age=300, s-maxage=300, stale-while-revalidate=300";
 
 pub const CONTENT_TYPE: &str = "application/atom+xml; charset=utf-8";
 
@@ -76,10 +80,11 @@ pub const NON_AFFILIATION_STATEMENT: &str = "Distant Signal is an independent, u
 const NATIONAL_RAIL_URL: &str = "https://www.nationalrail.co.uk";
 const NRIL_LICENCE_URL: &str = "https://www.networkrail.co.uk/who-we-are/transparency-and-ethics/transparency/open-data-feeds/network-rail-infrastructure-limited-data-feeds-licence/";
 
-/// A credit a feed or entry carries. The wording of the first four is the
-/// licences' own, as `frontend/components/OpenDataAttribution.tsx` and
-/// `frontend/lib/tflAttribution.ts` render it; the last two mark what
-/// Distant Signal itself worked out or wrote.
+/// A credit a feed or entry carries. The first four are the credits the
+/// public TfL-shaped routes send (`render::NATIONAL_RAIL_CREDIT` and its
+/// siblings) and the site renders (`frontend/components/OpenDataAttribution.tsx`,
+/// `frontend/lib/tflAttribution.ts`); the last two mark what Distant
+/// Signal itself worked out or wrote.
 ///
 /// `TfL`'s Ordnance Survey and Geomni statements are not needed: they cover
 /// `TfL`'s geographic data (stop locations), and no feed carries any.
@@ -104,17 +109,12 @@ pub enum Credit {
 impl Credit {
     pub fn text(self) -> String {
         match self {
-            Self::NationalRail => {
-                format!("powered by NationalRail (Train Information Services Ltd): {NATIONAL_RAIL_URL}")
-            }
-            Self::KnowledgebaseIncidents => {
-                "Incident text from the National Rail Knowledgebase, published by Rail Delivery Group."
-                    .to_string()
-            }
+            Self::NationalRail => format!("{NATIONAL_RAIL_CREDIT}: {NATIONAL_RAIL_URL}"),
+            Self::KnowledgebaseIncidents => format!("{KNOWLEDGEBASE_INCIDENTS_CREDIT}."),
             Self::NetworkRail => format!(
                 "Contains Information of Network Rail Infrastructure Limited licensed under the following licence: {NRIL_LICENCE_URL}"
             ),
-            Self::Tfl => "Powered by TfL Open Data".to_string(),
+            Self::Tfl => TFL_CREDIT.to_string(),
             Self::DsStatus => {
                 "Line status worked out by Distant Signal from this data; not an official status."
                     .to_string()
@@ -460,6 +460,7 @@ pub fn build_feed(
         updated,
         self_url: site.url(&format!("/api/feeds/{}", scope.path)),
         alternate_url: site.url(&scope.page_path),
+        license_url: site.url("/attribution"),
         rights,
         author_name: AUTHOR.to_string(),
         author_uri: site.url("/"),
@@ -873,6 +874,9 @@ mod tests {
             texts(&parsed, &["feed", "author", "name"]),
             ["Distant Signal"]
         );
+        assert!(xml.contains(
+            "<link rel=\"license\" type=\"text/html\" href=\"https://rail.example.org/attribution\"/>"
+        ));
         assert_eq!(
             texts(&parsed, &["feed", "id"]),
             ["tag:rail.example.org,2026:feeds/network"]
@@ -950,9 +954,9 @@ mod tests {
         assert!(
             entry_rights[1].contains("powered by NationalRail (Train Information Services Ltd)")
         );
-        assert!(entry_rights[1].contains("Rail Delivery Group"));
+        assert!(entry_rights[1].contains(KNOWLEDGEBASE_INCIDENTS_CREDIT));
         // The TfL line: TfL's credit, and nothing claiming it as DS's.
-        assert_eq!(entry_rights[2], "Powered by TfL Open Data");
+        assert_eq!(entry_rights[2], TFL_CREDIT);
         // The LDBWS-inferred delay: marked as DS's own summary.
         assert!(entry_rights[3].contains("Delay summary written by Distant Signal"));
         assert!(entry_rights[3].contains("powered by NationalRail"));

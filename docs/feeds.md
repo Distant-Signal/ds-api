@@ -51,7 +51,8 @@ operator rollups.
 
 The data's licences make the credits conditions, so the feed's `<rights>`
 lists every credit its lines can need, followed by the non-affiliation
-statement and a link to `/attribution`, and each entry's own `<rights>`
+statement and a link to `/attribution` (also the feed's
+`<link rel="license">`), and each entry's own `<rights>`
 (repeated at the end of its content) lists the credits for that entry's
 data:
 
@@ -59,7 +60,8 @@ data:
   Ltd)" (Darwin and Knowledgebase Stations), and "Line status worked out
   by Distant Signal from this data; not an official status.", since the
   severity of a National Rail line is DS's own reading of the data. Text
-  from a Knowledgebase incident adds the Rail Delivery Group credit; a
+  from a Knowledgebase incident adds "Incidents from the Knowledgebase,
+  published by Rail Delivery Group"; a
   delay summary DS wrote from departure or train movement data is marked
   as DS's, and one from train movements adds the Network Rail
   Infrastructure Limited licence statement.
@@ -68,8 +70,11 @@ data:
   carries.
 - Incidents: the National Rail and Rail Delivery Group credits.
 
-The wording matches `frontend/components/OpenDataAttribution.tsx` and
-`frontend/lib/tflAttribution.ts`; change them together.
+The three licence credits are the api's `render::NATIONAL_RAIL_CREDIT`,
+`KNOWLEDGEBASE_INCIDENTS_CREDIT` and `TFL_CREDIT`, which the public
+TfL-shaped routes send too; the site renders the same wording
+(`frontend/components/OpenDataAttribution.tsx`,
+`frontend/lib/tflAttribution.ts`). Change them together.
 
 Nothing in a feed may read as an official railway, operator or TfL source:
 titles say "(unofficial, from Distant Signal)", the author is always
@@ -78,12 +83,14 @@ the feeds have no icon or logo.
 
 ## Caching and limits
 
-Every response carries `Cache-Control: public, max-age=300` and a strong
-`ETag` over the document; a request whose `If-None-Match` matches gets a
-`304` with no body. The frontend proxy relays both headers. The feeds are
-identical for every caller (no cookies are read), so the edge may cache
-them: Cloudflare only caches these paths with a cache rule for
-`/api/feeds/*` that respects the origin's `Cache-Control`.
+Every response carries `Cache-Control: public, max-age=300,
+s-maxage=300, stale-while-revalidate=300` and a strong `ETag` over the
+document; a request whose `If-None-Match` matches gets a `304` with no
+body. The frontend proxy relays both headers. The feeds are identical for
+every caller (no cookies are read), so the edge may cache them, as it
+caches the public TfL-shaped routes (docs/public-api.md): Cloudflare only
+caches these paths with a cache rule for `/api/feeds/*` that respects the
+origin's `Cache-Control`.
 
 A cache miss reads Postgres, so the api rate-limits the feeds per client IP
 in the `/Train/by-uid` budget (`API_RATE_LIMIT_TRAIN_BY_UID_*`,

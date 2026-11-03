@@ -22,6 +22,8 @@ pub struct Feed {
     pub self_url: String,
     /// The page the feed follows (`rel="alternate"`).
     pub alternate_url: String,
+    /// The data's sources and licences (`rel="license"`, RFC 4946).
+    pub license_url: String,
     /// The credits and licence statements the feed's data needs.
     pub rights: String,
     pub author_name: String,
@@ -59,6 +61,7 @@ pub fn render(feed: &Feed) -> String {
     element(&mut out, 1, "updated", &timestamp(feed.updated));
     link(&mut out, 1, "self", "application/atom+xml", &feed.self_url);
     link(&mut out, 1, "alternate", "text/html", &feed.alternate_url);
+    link(&mut out, 1, "license", "text/html", &feed.license_url);
     text_element(&mut out, 1, "rights", &feed.rights);
     out.push_str("  <author>\n");
     element(&mut out, 2, "name", &feed.author_name);

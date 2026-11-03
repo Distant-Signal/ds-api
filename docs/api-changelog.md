@@ -14,7 +14,8 @@ New, unauthenticated, `application/atom+xml`: `GET /public/feeds/network`
 entry is a change of a line's severity rank or a Knowledgebase incident,
 the newest 50 from the last 30 days, with stable `tag:` ids; every feed
 and entry carries its data credits in `<rights>`. Responses carry
-`Cache-Control: public, max-age=300` and an `ETag`; a matching
+`Cache-Control: public, max-age=300, s-maxage=300,
+stale-while-revalidate=300` and an `ETag`; a matching
 `If-None-Match` gets a `304`. Rate limited per client IP in the
 `/Train/by-uid` budget. The frontend proxy now relays `If-None-Match` and
 `ETag`, and passes a `304` through instead of treating it as a redirect.
