@@ -209,11 +209,12 @@ async fn a_created_token_reads_within_its_scopes_only() {
     .await;
     assert_eq!(status, StatusCode::OK, "{mine}");
     assert_eq!(mine["data"], json!([]));
-    assert!(
-        !mine["attribution"]["sources"]
+    assert_ne!(
+        mine["attribution"]["sources"]
             .as_array()
             .unwrap()
-            .is_empty()
+            .as_slice(),
+        [] as [Value; 0]
     );
     assert_eq!(headers[header::CACHE_CONTROL], "private, max-age=30");
     assert_eq!(headers[header::VARY], "Authorization");

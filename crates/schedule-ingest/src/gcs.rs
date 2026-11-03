@@ -803,7 +803,7 @@ pub(crate) mod tests {
             .mount(&server)
             .await;
         let client = GcsClient::new(Some(&server.uri()), "b-1x", Credentials::key(key)).unwrap();
-        assert!(client.list_root().await.unwrap().is_empty());
+        assert_eq!(client.list_root().await.unwrap(), []);
         let requests = server.received_requests().await.unwrap();
         assert_eq!(requests.len(), 2);
         let bearer = |i: usize| {

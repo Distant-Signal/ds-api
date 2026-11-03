@@ -433,7 +433,7 @@ mod sample_db_tests {
             .await
             .expect("fetch")
             .expect("row still present");
-        assert!(fetched.departures.is_empty());
+        assert_eq!(fetched.departures, []);
 
         delete_fixture(&pool, "ZSAMP1").await;
     }

@@ -5762,7 +5762,9 @@ mod tests {
     #[ignore = "requires a live database; run with `DATABASE_URL=... cargo test -p api \
                 sub_daily_stats_for_range_groups_half_hourly_rows_into_hourly_buckets -- --ignored --test-threads=1` \
                 against docker compose's postgres"]
-    #[expect(
+    // `allow`, not `expect`: clippy 1.99's `float_cmp` no longer fires
+    // here, but older toolchains' does (workspace Cargo.toml).
+    #[allow(
         clippy::float_cmp,
         reason = "sums of whole-number minutes are exact in f64"
     )]
@@ -5901,7 +5903,9 @@ mod tests {
     #[tokio::test]
     #[ignore = "requires a live database; run with `DATABASE_URL=... cargo test -p api \
                 daily_stats_for_range_multi -- --ignored --test-threads=1`"]
-    #[expect(
+    // `allow`, not `expect`: clippy 1.99's `float_cmp` no longer fires
+    // here, but older toolchains' does (workspace Cargo.toml).
+    #[allow(
         clippy::float_cmp,
         reason = "sums of whole-number minutes are exact in f64"
     )]

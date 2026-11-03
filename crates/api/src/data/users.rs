@@ -233,7 +233,10 @@ mod tests {
 
     #[test]
     fn retain_allowed_groups_with_an_empty_allowlist_keeps_nothing() {
-        assert!(retain_allowed_groups(&strings(&["a", "b"]), &[]).is_empty());
+        assert_eq!(
+            retain_allowed_groups(&strings(&["a", "b"]), &[]),
+            [] as [String; 0]
+        );
     }
 
     #[test]

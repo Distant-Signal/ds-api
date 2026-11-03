@@ -980,7 +980,7 @@ mod graph_cache_tests {
             .await
             .unwrap();
         assert!(result.is_none());
-        assert!(cache.cached_dates().is_empty());
+        assert_eq!(cache.cached_dates(), []);
     }
 
     #[tokio::test]
@@ -992,7 +992,7 @@ mod graph_cache_tests {
             get(&cache, &builds, 1, marker(1)).await,
             (101, CacheOutcome::Built(BuildReason::Absent))
         );
-        assert!(cache.cached_dates().is_empty());
+        assert_eq!(cache.cached_dates(), []);
     }
 
     /// A new transit feed version, or the same one activated again,
@@ -1555,7 +1555,7 @@ mod parent_walk_tests {
             conn("T15", "HTRWAPT", "PADTON", 615, 630),
         ]);
         assert!(csa(&connections, &network(), "WOK", "PAD", 530).is_none());
-        assert!(raptor(&connections, &network(), "WOK", "PAD", 530).is_empty());
+        assert_eq!(raptor(&connections, &network(), "WOK", "PAD", 530), []);
 
         // Keswick is never linked: a train to Penrith does not reach the
         // Keswick bus, even with the Heathrow stop linked.

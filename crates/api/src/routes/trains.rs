@@ -2161,7 +2161,7 @@ mod db_tests {
         seed_today(&pool, "ZRB").await;
         let (status, body) = get(&pool, "/trains/search?station=ZRF").await;
         assert_eq!(status, StatusCode::OK);
-        assert!(results(&body).is_empty());
+        assert_eq!(results(&body), [] as [Value; 0]);
         assert!(next_cursor(&body).is_none());
         delete_today(&pool).await;
     }
@@ -2178,7 +2178,7 @@ mod db_tests {
             StatusCode::OK,
             "published-but-unmatched is a 200 with an empty results array, never a 404"
         );
-        assert!(results(&body).is_empty());
+        assert_eq!(results(&body), [] as [Value; 0]);
         assert!(next_cursor(&body).is_none());
         delete_today(&pool).await;
     }
@@ -3761,7 +3761,7 @@ mod db_tests {
         // An explicit offset wins, even one that leaves nothing.
         let (status, body) = get(&pool, &search("from=22:00&to=01:30&to_day_offset=0")).await;
         assert_eq!(status, StatusCode::OK, "{body}");
-        assert!(uids(&body).is_empty());
+        assert_eq!(uids(&body), [] as [String; 0]);
 
         // A window that starts after midnight.
         let (status, body) = get(&pool, &search("from=00:15&from_day_offset=1")).await;
@@ -3772,7 +3772,7 @@ mod db_tests {
         let (_, body) = get(&pool, &search("from=22:00&to=22:00")).await;
         assert_eq!(uids(&body), ["MNPB01"]);
         let (_, body) = get(&pool, &search("from=21:00&to=21:59")).await;
-        assert!(uids(&body).is_empty());
+        assert_eq!(uids(&body), [] as [String; 0]);
 
         // Pages run across midnight, one row at a time.
         let mut seen = Vec::new();
@@ -4884,11 +4884,12 @@ mod db_tests {
         )
         .await;
         assert_eq!(status, StatusCode::OK, "{body}");
-        assert!(
+        assert_eq!(
             serde_json::from_str::<Value>(&body).unwrap()["results"]
                 .as_array()
                 .unwrap()
-                .is_empty()
+                .as_slice(),
+            [] as [Value; 0]
         );
 
         for bad in [
@@ -5233,7 +5234,10 @@ mod db_tests {
         // ADV003's ZQB call is not in the public timetable.
         assert_eq!(uids("station=ZQS&calls_at=ZQB").await, ["ADV001"]);
         assert_eq!(uids("station=ZQS&calls_at=ZQA,ZQB").await, ["ADV001"]);
-        assert!(uids("station=ZQS&calls_at=ZQB,ZQA").await.is_empty());
+        assert_eq!(
+            uids("station=ZQS&calls_at=ZQB,ZQA").await,
+            [] as [String; 0]
+        );
         // An OR choice: either station.
         assert_eq!(
             uids("station=ZQS&calls_at=ZQJ%7CZQB").await,
@@ -5312,7 +5316,10 @@ mod db_tests {
             uids("station=ZQO&stops_at=ZQA&avoid_stop=ZQB").await,
             ["ADV001"]
         );
-        assert!(uids("station=ZQO&stops_at=ZQA&via=ZQJ").await.is_empty());
+        assert_eq!(
+            uids("station=ZQO&stops_at=ZQA&via=ZQJ").await,
+            [] as [String; 0]
+        );
         assert_eq!(uids("station=ZQO&stops_at=ZQB&via=ZQJ").await, ["ADV001"]);
     }
 
@@ -5353,7 +5360,10 @@ mod db_tests {
             uids("station=ZQS&previously_calls_at=ZQO").await,
             ["ADV001", "ADV002"]
         );
-        assert!(uids("station=ZQS&previously_stops_at=ZQO").await.is_empty());
+        assert_eq!(
+            uids("station=ZQS&previously_stops_at=ZQO").await,
+            [] as [String; 0]
+        );
         // ADV004 starts at ZQA; ADV001 calls there only AFTER ZQS.
         assert_eq!(
             uids("station=ZQS&previously_calls_at=ZQA").await,
@@ -5374,18 +5384,23 @@ mod db_tests {
             uids("station=ZQA&previously_calls_at=ZQO,ZQS").await,
             ["ADV001"]
         );
-        assert!(
-            uids("station=ZQA&previously_calls_at=ZQS,ZQO")
-                .await
-                .is_empty()
+        assert_eq!(
+            uids("station=ZQA&previously_calls_at=ZQS,ZQO").await,
+            [] as [String; 0]
         );
         assert_eq!(
             uids("station=ZQA&previously_stops_at=ZQB%7CZQS").await,
             ["ADV001"]
         );
         // ADV003's ZQB call is working-only, and ADV001 only passes ZQJ.
-        assert!(uids("station=ZQA&previously_calls_at=ZQB").await.is_empty());
-        assert!(uids("station=ZQA&previously_calls_at=ZQJ").await.is_empty());
+        assert_eq!(
+            uids("station=ZQA&previously_calls_at=ZQB").await,
+            [] as [String; 0]
+        );
+        assert_eq!(
+            uids("station=ZQA&previously_calls_at=ZQJ").await,
+            [] as [String; 0]
+        );
         // With the ride's own filters too.
         assert_eq!(
             uids("station=ZQA&previously_calls_at=ZQS&calls_at=ZQB").await,
@@ -5421,10 +5436,9 @@ mod db_tests {
             ["ADV001"]
         );
         // ZQB lies between the stations on ADV001, not before them.
-        assert!(
-            search("station=ZQA&stops_at=ZQT&previously_calls_at=ZQB")
-                .await
-                .is_empty()
+        assert_eq!(
+            search("station=ZQA&stops_at=ZQT&previously_calls_at=ZQB").await,
+            [] as [String; 0]
         );
         // Arrivals at ZQT: every train came from or through ZQS, but ADV003
         // started there.
@@ -5445,10 +5459,9 @@ mod db_tests {
             arrivals("station=ZQS&previously_calls_at=ZQO").await,
             ["ADV001", "ADV002"]
         );
-        assert!(
-            arrivals("station=ZQS&previously_stops_at=ZQO")
-                .await
-                .is_empty()
+        assert_eq!(
+            arrivals("station=ZQS&previously_stops_at=ZQO").await,
+            [] as [String; 0]
         );
     }
 
@@ -5467,16 +5480,18 @@ mod db_tests {
         };
         // Every fixture train ends at ZQT; ZQA is only ever a call.
         assert_eq!(search("station=ZQS&terminates_at=ZQT").await.len(), 4);
-        assert!(search("station=ZQS&terminates_at=zqa").await.is_empty());
+        assert_eq!(
+            search("station=ZQS&terminates_at=zqa").await,
+            [] as [String; 0]
+        );
         // Between two stations: where the train goes on to end.
         assert_eq!(
             search("station=ZQO&stops_at=ZQS&terminates_at=ZQT").await,
             ["ADV001", "ADV002"]
         );
-        assert!(
-            search("station=ZQO&stops_at=ZQS&terminates_at=ZQS")
-                .await
-                .is_empty()
+        assert_eq!(
+            search("station=ZQO&stops_at=ZQS&terminates_at=ZQS").await,
+            [] as [String; 0]
         );
         // Avoiding the terminus is fine when the ride stops short of it.
         assert_eq!(
@@ -5494,7 +5509,10 @@ mod db_tests {
             arrivals("station=ZQS&terminates_at=ZQT").await,
             ["ADV001", "ADV002", "ADV004"]
         );
-        assert!(arrivals("station=ZQS&terminates_at=ZQS").await.is_empty());
+        assert_eq!(
+            arrivals("station=ZQS&terminates_at=ZQS").await,
+            [] as [String; 0]
+        );
         assert_eq!(
             arrivals("station=ZQT&origin=ZQO").await,
             ["ADV001", "ADV002"]

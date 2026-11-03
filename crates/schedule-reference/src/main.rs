@@ -3122,7 +3122,7 @@ mod poll_once_tests {
         let published: Vec<&str> = lines_to_publish(&lines, &crs_to_tiploc)
             .map(|l| l.id.as_str())
             .collect();
-        assert!(published.is_empty());
+        assert_eq!(published, [] as [&str; 0]);
     }
 
     /// The actual regression test for the tiploc-schedule-matching-gap bug
@@ -4065,7 +4065,7 @@ mod poll_once_tests {
                 &index,
                 chrono::NaiveDate::from_ymd_opt(2026, 5, 18).unwrap(),
             );
-            assert!(rows.is_empty());
+            assert_eq!(rows, [] as [serde_json::Value; 0]);
         }
     }
 
@@ -5436,7 +5436,7 @@ mod chunked_publish_tests {
             })
             .collect();
         let publish_id = ids[0].clone();
-        assert!(!publish_id.is_empty());
+        assert_ne!(publish_id, "");
         assert!(
             ids.iter().all(|id| *id == publish_id),
             "every chunk of one publish must carry the same publish_id; got {ids:?}"
@@ -5522,7 +5522,7 @@ mod chunked_publish_tests {
         .await
         .expect_err("refused");
         assert!(err.downcast_ref::<RefusedToClear>().is_some());
-        assert!(capture_posts(&sink).is_empty());
+        assert_eq!(capture_posts(&sink), []);
 
         let mut outcome = CycleOutcome::default();
         outcome.failed("schedule_calling_points_full/2026-09-27", &err);
@@ -6263,7 +6263,7 @@ mod db_sink_tests {
         )
         .await
         .unwrap();
-        assert!(calling_point_uids(&pool, date).await.is_empty());
+        assert_eq!(calling_point_uids(&pool, date).await, [] as [String; 0]);
         clear_calling_points(&pool, date).await;
     }
 

@@ -1257,7 +1257,7 @@ pub(crate) mod tests {
         run(watch.path(), storage.path(), &args, &sink, &mut state, 3).await;
 
         assert_eq!(names(watch.path()), ["CORPUSExtract.json.gz"]);
-        assert!(names(storage.path()).is_empty());
+        assert_eq!(names(storage.path()), [] as [String; 0]);
     }
 
     /// An extract that is not CORPUS is never loaded: it is moved to the
@@ -1288,8 +1288,8 @@ pub(crate) mod tests {
                 .is_some_and(|r| r.contains("not a CORPUS extract")),
             "{audit:?}"
         );
-        assert!(names(watch.path()).is_empty());
-        assert!(sink.corpus_loads().is_empty());
+        assert_eq!(names(watch.path()), [] as [String; 0]);
+        assert_eq!(sink.corpus_loads(), [] as [serde_json::Value; 0]);
         let rejected = names(&storage.path().join(ARCHIVE_DIR).join(REJECTED_DIR));
         assert_eq!(rejected.len(), 1);
         assert!(
@@ -1429,7 +1429,7 @@ pub(crate) mod tests {
         assert_eq!(locations[1]["nlc_desc"], "BRAMBLE & THORN");
         assert_eq!(locations[2]["crs"], serde_json::Value::Null);
 
-        assert!(names(watch.path()).is_empty());
+        assert_eq!(names(watch.path()), [] as [String; 0]);
         let archived = names(&storage.path().join(ARCHIVE_DIR));
         assert_eq!(archived.len(), 1);
         assert!(archived[0].ends_with("-NLC20261009.xml.gz"), "{archived:?}");
@@ -1457,9 +1457,9 @@ pub(crate) mod tests {
         run(watch.path(), storage.path(), &args(), &sink, &mut state, 4).await;
         drop(guard);
 
-        assert!(sink.corpus_loads().is_empty());
+        assert_eq!(sink.corpus_loads(), [] as [serde_json::Value; 0]);
         assert_eq!(names(watch.path()), ["NLC20261009.xml", "NLC20261009.zip"]);
-        assert!(names(storage.path()).is_empty());
+        assert_eq!(names(storage.path()), [] as [String; 0]);
         let warnings = logged(&logs, "format may have drifted");
         assert_eq!(warnings.len(), 2, "{warnings:?}");
         assert!(warnings.iter().all(|w| w["level"] == "WARN"));
@@ -1497,7 +1497,7 @@ pub(crate) mod tests {
         drop(guard);
 
         assert_eq!(loaded_files(&sink), ["CORPUSExtract.json.gz"]);
-        assert!(names(watch.path()).is_empty());
+        assert_eq!(names(watch.path()), [] as [String; 0]);
         let superseded = names(&storage.path().join(ARCHIVE_DIR).join(SUPERSEDED_DIR));
         assert_eq!(superseded.len(), 1);
         assert!(
@@ -1560,7 +1560,7 @@ pub(crate) mod tests {
         run(watch.path(), storage.path(), &args, &sink, &mut state, 3).await;
         drop(guard);
         assert_eq!(sink.corpus_loads().len(), 2);
-        assert!(names(watch.path()).is_empty());
+        assert_eq!(names(watch.path()), [] as [String; 0]);
         assert!(
             names(&storage.path().join(ARCHIVE_DIR).join(SUPERSEDED_DIR))
                 .iter()
@@ -1667,7 +1667,7 @@ pub(crate) mod tests {
             .await
             .unwrap();
         }
-        assert!(sink.corpus_loads().is_empty());
+        assert_eq!(sink.corpus_loads(), [] as [serde_json::Value; 0]);
         assert_eq!(names(watch.path()), ["NLC20261009.xml.gz"]);
     }
 
@@ -1726,8 +1726,8 @@ pub(crate) mod tests {
         run(watch.path(), storage.path(), &args(), &sink, &mut state, 3).await;
         drop(guard);
 
-        assert!(sink.corpus_loads().is_empty());
-        assert!(names(watch.path()).is_empty());
+        assert_eq!(sink.corpus_loads(), [] as [serde_json::Value; 0]);
+        assert_eq!(names(watch.path()), [] as [String; 0]);
         let rejected = names(&storage.path().join(ARCHIVE_DIR).join(REJECTED_DIR));
         assert_eq!(rejected.len(), 1);
         let audit = logs.audit_lines();

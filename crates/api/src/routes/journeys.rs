@@ -572,7 +572,7 @@ mod wire_format_tests {
         else {
             panic!("expected a Pin-mode leg, got {leg:?}");
         };
-        assert!(skipped_stations.is_empty());
+        assert_eq!(skipped_stations, [] as [String; 0]);
     }
 
     #[test]
@@ -6298,7 +6298,7 @@ mod db_tests {
         .await;
         assert_eq!(status, StatusCode::OK, "create share link: {body:?}");
         let token = body["token"].as_str().expect("token present").to_string();
-        assert!(!token.is_empty());
+        assert_ne!(token, "");
         // L17: every journey share link now carries a 30-day expiry.
         let expires_at: chrono::DateTime<chrono::Utc> = body["expiresAt"]
             .as_str()

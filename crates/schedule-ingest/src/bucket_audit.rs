@@ -800,7 +800,7 @@ mod tests {
         *f.bucket.corrupt.lock().unwrap() = Some(name);
         let (delay, lines) = f.poll(&mut shipper).await;
         assert_eq!(delay, Duration::from_secs(1200), "backs off");
-        assert!(lines.is_empty());
+        assert_eq!(lines, [] as [serde_json::Value; 0]);
         *f.bucket.corrupt.lock().unwrap() = None;
         let (delay, lines) = f.poll(&mut shipper).await;
         assert_eq!(delay, Duration::from_secs(600));

@@ -570,7 +570,7 @@ async fn downloads_are_pinned_to_the_listed_generation() {
         "a failed get backs off"
     );
     assert!(!f.incoming("timetable_full.zip").exists());
-    assert!(f.seen().is_empty());
+    assert_eq!(f.seen(), []);
     let objects = f.objects().await;
     assert_eq!(names(&objects), ["timetable_full.zip"]);
     let second = objects[0].1;
@@ -811,7 +811,7 @@ async fn a_delivery_through_both_sources_is_ingested_once() {
         // poll and later cycles add nothing.
         f.advance(Duration::from_secs(3601));
         source.poll_once().await;
-        assert!(f.objects().await.is_empty());
+        assert_eq!(f.objects().await, []);
         let audit = setup
             .cycles(&sink, &Routing::defaults(), &multi, &mut lanes, 2)
             .await;
@@ -932,7 +932,10 @@ async fn the_audit_log_shipper_ships_each_sink_file_once() {
     // A restart ships nothing again; a late shard is shipped.
     drop(shipper);
     let mut shipper = f.audit_shipper();
-    assert!(audit_poll(&mut shipper).await.1.is_empty());
+    assert_eq!(
+        audit_poll(&mut shipper).await.1,
+        [] as [serde_json::Value; 0]
+    );
     f.proxy
         .upload(
             &audit_file("data_access", 0, 1),

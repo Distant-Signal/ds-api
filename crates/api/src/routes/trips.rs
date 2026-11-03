@@ -3260,11 +3260,10 @@ mod tests {
                 .all(|w| w.label == "YRK" && w.is_single_station())
         );
 
-        assert!(parse_waypoints(None).expect("absent is fine").is_empty());
-        assert!(
-            parse_waypoints(Some(" ,, "))
-                .expect("empty entries are dropped")
-                .is_empty()
+        assert_eq!(parse_waypoints(None).expect("absent is fine"), []);
+        assert_eq!(
+            parse_waypoints(Some(" ,, ")).expect("empty entries are dropped"),
+            []
         );
     }
 
@@ -3508,7 +3507,7 @@ mod tests {
         let applied = lists.applied();
         assert_eq!(applied.avoid.len(), 19);
         assert!(applied.avoid.contains(&"KGX".to_string()));
-        assert!(applied.avoid_stop.is_empty());
+        assert_eq!(applied.avoid_stop, [] as [String; 0]);
         assert_eq!(
             used_station_groups(lists.all()).keys().collect::<Vec<_>>(),
             vec!["LON"]
@@ -6841,7 +6840,10 @@ mod db_tests {
         let (status, capped) = plan("&results=options&maxChanges=1").await;
         assert_eq!(status, StatusCode::OK, "{capped:?}");
         for segment in capped["segments"].as_array().unwrap() {
-            assert!(segment["itineraries"].as_array().unwrap().is_empty());
+            assert_eq!(
+                segment["itineraries"].as_array().unwrap().as_slice(),
+                [] as [Value; 0]
+            );
             assert_eq!(segment["cappedByMaxChanges"], true, "{capped:?}");
             assert_eq!(segment["noResultReason"]["constraint"], "maxChanges");
         }

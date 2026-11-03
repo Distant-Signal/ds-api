@@ -916,7 +916,7 @@ mod resolve_tiploc_crs_tests {
         // is skipped before CRS resolution is even attempted.
         let ti_records = vec![ti("FOO", "n", "", "BAR")];
         let rows = resolve_tiploc_crs(&ti_records, &HashMap::new(), &HashMap::new());
-        assert!(rows.is_empty());
+        assert_eq!(rows, []);
     }
 }
 

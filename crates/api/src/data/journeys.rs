@@ -3961,7 +3961,7 @@ mod db_tests {
     fn validate_window_leg_rejects_an_all_blank_window() {
         let err = validate_window_leg("WAT", "RDG", &TimeWindow::default(), &TimeWindow::default())
             .unwrap_err();
-        assert!(!err.is_empty());
+        assert_ne!(err, "");
     }
 
     #[test]
@@ -4015,7 +4015,7 @@ mod db_tests {
         };
         let err =
             validate_window_leg("WAT", "RDG", &depart_window, &TimeWindow::default()).unwrap_err();
-        assert!(!err.is_empty());
+        assert_ne!(err, "");
     }
 
     #[test]
@@ -4026,7 +4026,7 @@ mod db_tests {
         };
         let err =
             validate_window_leg("WAT", "RDG", &TimeWindow::default(), &arrive_window).unwrap_err();
-        assert!(!err.is_empty());
+        assert_ne!(err, "");
     }
 
     #[test]
@@ -4050,7 +4050,7 @@ mod db_tests {
                 .unwrap_err(),
         ];
         for message in messages {
-            assert!(!message.is_empty());
+            assert_ne!(message, "");
             assert!(
                 !message.contains('_'),
                 "user-facing copy leaked an identifier: {message}"
@@ -4065,7 +4065,7 @@ mod db_tests {
             validate_known_train_overrides(None, Some("Y")).unwrap_err(),
         ];
         for message in messages {
-            assert!(!message.is_empty());
+            assert_ne!(message, "");
             assert!(
                 !message.contains('_'),
                 "user-facing copy leaked an identifier: {message}"
@@ -4150,7 +4150,7 @@ mod db_tests {
     #[test]
     fn validate_train_uid_message_carries_no_internal_field_names() {
         let err = validate_train_uid("nope").unwrap_err();
-        assert!(!err.is_empty());
+        assert_ne!(err, "");
         assert!(
             !err.contains('_'),
             "user-facing copy leaked an identifier: {err}"
@@ -4768,7 +4768,7 @@ mod db_tests {
 
         assert!(subscription_exists(&pool, changed.old_tracking_id).await);
         assert!(notifications_enabled_of(&pool, changed.old_tracking_id).await);
-        assert!(standalone_listed(&pool, user_id).await.is_empty());
+        assert_eq!(standalone_listed(&pool, user_id).await, [] as [i64; 0]);
         assert_eq!(
             own_journeys_listed(&pool, user_id, changed.old_tracking_id)
                 .await
@@ -4830,7 +4830,7 @@ mod db_tests {
         .await;
 
         assert!(!subscription_exists(&pool, changed.old_tracking_id).await);
-        assert!(standalone_listed(&pool, user_id).await.is_empty());
+        assert_eq!(standalone_listed(&pool, user_id).await, [] as [i64; 0]);
         assert_eq!(
             own_journeys_listed(&pool, user_id, pin).await,
             Some(vec![pin_journey])
@@ -4928,7 +4928,7 @@ mod db_tests {
             !subscription_exists(&pool, tracking_id).await,
             "no leg uses it and it was never tracked on its own"
         );
-        assert!(standalone_listed(&pool, user_id).await.is_empty());
+        assert_eq!(standalone_listed(&pool, user_id).await, [] as [i64; 0]);
         let tickets: i64 =
             sqlx::query_scalar("SELECT COUNT(*) FROM tracked_train_tickets WHERE user_id = $1")
                 .bind(user_id)
@@ -4969,7 +4969,7 @@ mod db_tests {
             .expect("leg is the caller's");
 
         assert!(notifications_enabled_of(&pool, tracking_id).await);
-        assert!(standalone_listed(&pool, user_id).await.is_empty());
+        assert_eq!(standalone_listed(&pool, user_id).await, [] as [i64; 0]);
         assert_eq!(
             own_journeys_listed(&pool, user_id, tracking_id).await,
             Some(vec![own_journey])
@@ -5588,7 +5588,7 @@ mod db_tests {
                 .expect("delete journey C")
         );
         assert!(notifications_enabled_of(&pool, standalone).await);
-        assert!(standalone_listed(&pool, user_id).await.is_empty());
+        assert_eq!(standalone_listed(&pool, user_id).await, [] as [i64; 0]);
         assert_eq!(
             own_journeys_listed(&pool, user_id, standalone).await,
             Some(vec![own_journey])
@@ -5642,7 +5642,7 @@ mod db_tests {
             crate::data::delegated::DelegatedDeleteOutcome::Deleted
         ));
         assert!(!subscription_exists(&pool, tracking_id).await);
-        assert!(standalone_listed(&pool, user_id).await.is_empty());
+        assert_eq!(standalone_listed(&pool, user_id).await, [] as [i64; 0]);
 
         cleanup_user(&pool, user_id).await;
     }
@@ -5839,7 +5839,7 @@ mod db_tests {
                 "subscription {tracking_id}, used only by this journey, is released"
             );
         }
-        assert!(standalone_listed(&pool, user_id).await.is_empty());
+        assert_eq!(standalone_listed(&pool, user_id).await, [] as [i64; 0]);
         assert_eq!(
             own_journeys_listed(&pool, user_id, own_sub).await,
             Some(vec![own_journey])
@@ -5934,7 +5934,7 @@ mod db_tests {
             !subscription_exists(&pool, auto_sub).await,
             "the train matched mid-delete is released too"
         );
-        assert!(standalone_listed(&pool, user_id).await.is_empty());
+        assert_eq!(standalone_listed(&pool, user_id).await, [] as [i64; 0]);
 
         cleanup_user(&pool, user_id).await;
     }
@@ -5969,7 +5969,7 @@ mod db_tests {
             !subscription_exists(&pool, auto_sub).await,
             "the train matched mid-delete is released"
         );
-        assert!(standalone_listed(&pool, user_id).await.is_empty());
+        assert_eq!(standalone_listed(&pool, user_id).await, [] as [i64; 0]);
 
         cleanup_user(&pool, user_id).await;
     }
