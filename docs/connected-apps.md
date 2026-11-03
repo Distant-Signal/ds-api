@@ -7,6 +7,11 @@ saved itself. Design and threat model:
 [the delegated-access spec](superpowers/specs/2026-10-14-ds-mcp-delegated-access-design.md).
 Client-facing contract: [api-changelog.md](api-changelog.md), 2026-10-15.
 
+Personal API tokens, which a user creates for their own devices and which
+work on a separate API hostname, are a different credential: see
+[the personal API tokens spec](specs/personal-api-tokens.md), which also
+records the amendment to decision D-14.
+
 **It is off by default.** With `api.delegated.clients` empty (the default)
 the api binds no delegated listener, the chart creates no delegated Service,
 and every delegated bearer is refused.

@@ -225,6 +225,22 @@ export type ConnectionState = "ok" | "atRisk" | "missed" | "unknown";
 
 export type CreateJourneyTemplateResponse = { templateId: number, };
 
+export type CreatePersonalTokenRequest = { name: string, scopes: Array<string>, lifetimeDays: number, };
+
+/**
+ * `POST /public/account/personal-tokens`: the only response that ever
+ * carries the token itself.
+ */
+export type CreatedPersonalTokenResponse = { 
+/**
+ * The token. Shown once; Distant Signal keeps only its hash.
+ */
+token: string, id: number, name: string, 
+/**
+ * The token's last 4 characters, shown as `dsp_...hint`.
+ */
+hint: string, scopes: Array<string>, createdAt: string, expiresAt: string, lastUsedAt: string | null, };
+
 /**
  * Full custom-line record, returned by `GET /lines/{id}` to pre-populate
  * an edit form. `LineSummary` (above) is deliberately a smaller
@@ -1930,6 +1946,39 @@ originCrs: string | null, destinationCrs: string | null,
  * match target the way `TrackPinRequest::scheduled_departure` is.
  */
 currentDepartureDate?: string, source: TicketSource, };
+
+/**
+ * A scope the page can offer.
+ */
+export type PersonalScopeView = { 
+/**
+ * `journeys:read`, `lines:read`, `trains:read` or `preferences:read`.
+ */
+name: string, };
+
+/**
+ * A token as the Connected apps page and the account export show it.
+ * Never carries the hash.
+ */
+export type PersonalTokenRow = { id: number, name: string, 
+/**
+ * The token's last 4 characters, shown as `dsp_...hint`.
+ */
+hint: string, scopes: Array<string>, createdAt: string, expiresAt: string, lastUsedAt: string | null, };
+
+/**
+ * `GET /public/account/personal-tokens`.
+ */
+export type PersonalTokensResponse = { 
+/**
+ * The API hostname's base URL, for the page to show (empty when the
+ * operator has not set one).
+ */
+apiBaseUrl: string, scopes: Array<PersonalScopeView>, 
+/**
+ * The lifetimes a token may have, in days.
+ */
+lifetimes: Array<number>, defaultLifetimeDays: number, maxActive: number, tokens: Array<PersonalTokenRow>, };
 
 /**
  * One of the badged picks (§17.6), in display order.

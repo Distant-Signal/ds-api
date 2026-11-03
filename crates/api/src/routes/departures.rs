@@ -90,7 +90,7 @@ pub fn router() -> Router {
 /// field, because the body is a bare JSON array that existing clients
 /// (`frontend/components/TrackTrainForm.tsx`, the MCP) index directly;
 /// wrapping it in an object would break them.
-async fn get_station_departures(
+pub(crate) async fn get_station_departures(
     State(app): State<App>,
     Path(crs): Path<String>,
     Query(params): Query<StationDeparturesParams>,
@@ -171,7 +171,7 @@ pub(crate) const GENERATED_AT_HEADER: HeaderName = HeaderName::from_static("x-ge
 /// (not `deny_unknown_fields`): this route took no query string before, so
 /// a client's cache-buster must keep working.
 #[derive(Debug, Deserialize)]
-struct StationDeparturesParams {
+pub(crate) struct StationDeparturesParams {
     #[serde(rename = "callingAt")]
     calling_at: Option<String>,
 }
@@ -423,6 +423,7 @@ mod db_tests {
             .expect("construct placeholder internal-oauth verifier"),
             delegated: std::sync::Arc::default(),
             tfl_arrivals: std::sync::Arc::default(),
+            personal_tokens: std::sync::Arc::default(),
             schedule_crs_line_index: std::collections::HashMap::new(),
         })
     }

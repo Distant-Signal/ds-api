@@ -832,9 +832,101 @@ impl RateLimiter {
     }
 }
 
+/// A GCRA table keyed by `K`, for a limiter outside [`RateLimiter`]'s
+/// classes: the personal-token listener's buckets (`crate::personal_tokens`).
+/// The same algorithm, pruning and fail-open bound as
+/// [`RateLimiter::check_at`]. State is per pod, in memory.
+pub struct KeyedLimiter<K> {
+    state: Mutex<KeyedState<K>>,
+}
+
+struct KeyedState<K> {
+    tat: HashMap<K, Instant>,
+    checks: u64,
+}
+
+impl<K: Copy + Eq + std::hash::Hash> Default for KeyedLimiter<K> {
+    fn default() -> Self {
+        Self {
+            state: Mutex::new(KeyedState {
+                tat: HashMap::new(),
+                checks: 0,
+            }),
+        }
+    }
+}
+
+impl<K: Copy + Eq + std::hash::Hash> KeyedLimiter<K> {
+    /// Charges one request to every `(key, per_minute, burst)` bucket, or to
+    /// none: `Err(retry_after)` (the longest wait) when any is empty, and
+    /// then nothing is recorded.
+    #[expect(
+        clippy::expect_used,
+        reason = "a poisoned lock means another thread already panicked"
+    )]
+    pub fn check_all(&self, buckets: &[(K, u32, u32)], now: Instant) -> Result<(), Duration> {
+        let mut state = self.state.lock().expect("keyed limiter lock poisoned");
+        state.checks += 1;
+        if state.checks.is_multiple_of(PRUNE_EVERY) || state.tat.len() >= MAX_TRACKED_KEYS {
+            state.tat.retain(|_, tat| *tat > now);
+            if state.tat.len() >= MAX_TRACKED_KEYS {
+                tracing::warn!(
+                    keys = state.tat.len(),
+                    "keyed rate limiter table full; clearing it"
+                );
+                metrics::counter!(ds_runtime::metrics::metric_name(
+                    "api_rate_limit_table_resets_total"
+                ))
+                .increment(1);
+                state.tat.clear();
+            }
+        }
+        let mut updates = Vec::with_capacity(buckets.len());
+        let mut wait = Duration::ZERO;
+        for &(key, per_minute, burst) in buckets {
+            let quota = Quota::new(per_minute, burst);
+            let tat = state.tat.get(&key).copied().unwrap_or(now).max(now);
+            let new_tat = tat + quota.interval;
+            let ahead = new_tat - now;
+            if ahead > quota.tolerance {
+                wait = wait.max(ahead.saturating_sub(quota.tolerance));
+            } else {
+                updates.push((key, new_tat));
+            }
+        }
+        if wait > Duration::ZERO {
+            return Err(wait);
+        }
+        for (key, new_tat) in updates {
+            state.tat.insert(key, new_tat);
+        }
+        Ok(())
+    }
+
+    /// Whether `key`'s bucket would refuse a request now, without charging
+    /// it.
+    #[expect(
+        clippy::expect_used,
+        reason = "a poisoned lock means another thread already panicked"
+    )]
+    pub fn would_refuse(
+        &self,
+        key: K,
+        per_minute: u32,
+        burst: u32,
+        now: Instant,
+    ) -> Option<Duration> {
+        let quota = Quota::new(per_minute, burst);
+        let state = self.state.lock().expect("keyed limiter lock poisoned");
+        let tat = state.tat.get(&key).copied().unwrap_or(now).max(now);
+        let ahead = tat + quota.interval - now;
+        (ahead > quota.tolerance).then(|| ahead.saturating_sub(quota.tolerance))
+    }
+}
+
 /// IPv4-mapped IPv6 as IPv4; other IPv6 cut to its /64, since one client
 /// usually holds a whole /64.
-fn normalise(ip: IpAddr) -> IpAddr {
+pub(crate) fn normalise(ip: IpAddr) -> IpAddr {
     match ip {
         IpAddr::V4(_) => ip,
         IpAddr::V6(v6) => {
