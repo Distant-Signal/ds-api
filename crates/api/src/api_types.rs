@@ -18,9 +18,15 @@
 //! `Deserialize` (types in `common` and `ds-store` under their `ts`
 //! feature) and, if nothing already reaches it, by a line in
 //! [`visit_roots`]. `i64` fields are `number`, as `serde_json` sends them.
+//!
+//! After the types, [`render_values`] writes the values the web app keeps
+//! its own copy of (the personal-token attribution and the usage-event
+//! allowlist) as `as const` objects. The frontend's tests compare its
+//! copies against them, so no test here reads `frontend/`.
 
 use std::any::TypeId;
 use std::collections::BTreeMap;
+use std::fmt::Write as _;
 
 use ts_rs::{Config, TS, TypeVisitor};
 
@@ -222,7 +228,57 @@ pub(crate) fn render() -> String {
         out.push_str(decl);
         out.push('\n');
     }
+    render_values(&mut out);
     out
+}
+
+/// The values the web app mirrors, each as `export const NAME = <json> as
+/// const;`. Its tests (`lib/apiValues.test.ts`) fail when its copy drifts.
+fn render_values(out: &mut String) {
+    use crate::personal_tokens as tokens;
+    use crate::usage_events as usage;
+    let values = [
+        (
+            "ATTRIBUTION_SOURCES",
+            "The data sources a personal-token response credits, in the\n * website's own words (personal API tokens spec §5.2).",
+            serde_json::json!({
+                "nationalRail": tokens::NATIONAL_RAIL,
+                "networkRail": tokens::NETWORK_RAIL,
+                "railDeliveryGroup": tokens::RAIL_DELIVERY_GROUP,
+                "rsp": tokens::RSP,
+                "tfl": tokens::TFL,
+            }),
+        ),
+        (
+            "NON_AFFILIATION",
+            "The non-affiliation statement every personal-token response carries.",
+            serde_json::json!(tokens::NON_AFFILIATION),
+        ),
+        (
+            "USAGE_EVENTS",
+            "What `POST /public/events` accepts: anything else is dropped.",
+            serde_json::json!({
+                "routeTemplates": usage::ROUTE_TEMPLATES,
+                "events": usage::EVENTS.iter().map(|spec| spec.name).collect::<Vec<_>>(),
+                "features": usage::FEATURES,
+                "featureSteps": usage::FEATURE_STEPS
+                    .iter()
+                    .map(|(feature, steps)| ((*feature).to_string(), serde_json::json!(steps)))
+                    .collect::<serde_json::Map<_, _>>(),
+                "emptyStateKinds": usage::EMPTY_STATE_KINDS,
+                "apiErrorStatuses": usage::API_ERROR_STATUSES,
+                "displayModes": usage::DISPLAY_MODES,
+            }),
+        ),
+    ];
+    for (name, doc, value) in values {
+        let json = serde_json::to_string_pretty(&value).expect("a JSON value serialises");
+        writeln!(
+            out,
+            "\n/**\n * {doc}\n */\nexport const {name} = {json} as const;",
+        )
+        .expect("writing to a String cannot fail");
+    }
 }
 
 #[cfg(test)]

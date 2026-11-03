@@ -103,8 +103,8 @@ pub enum RouteClass {
 
 /// A data source a route's response can carry (spec §5.2). The wording is
 /// `crate::render`'s credits (shared with the public routes and feeds), and
-/// the website's (`frontend/components/OpenDataAttribution.tsx`), checked
-/// by `the_attribution_matches_the_website`.
+/// the website's: `crate::api_types` exports them as `ATTRIBUTION_SOURCES`
+/// and the web app's tests compare its wording against that.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 pub struct Source {
     pub name: &'static str,
@@ -658,38 +658,5 @@ mod tests {
             .map(|route| route.path.to_string())
             .collect();
         assert_eq!(mounted, table);
-    }
-
-    /// The notices are the website's own words (spec §5.2).
-    #[test]
-    fn the_attribution_matches_the_website() {
-        let site = std::fs::read_to_string(
-            std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-                .join("../../frontend/components/OpenDataAttribution.tsx"),
-        )
-        .unwrap();
-        for text in [
-            NETWORK_RAIL.notice,
-            NETWORK_RAIL.url.unwrap(),
-            TFL.url.unwrap(),
-            NON_AFFILIATION,
-        ] {
-            assert!(site.contains(text), "{text:?} is not on the website");
-        }
-        let credit = std::fs::read_to_string(
-            std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-                .join("../../frontend/components/NationalRailCredit.tsx"),
-        )
-        .unwrap();
-        assert!(credit.contains("powered by NationalRail"));
-        assert!(credit.contains("(Train Information Services Ltd)"));
-        assert!(credit.contains(NATIONAL_RAIL.url.unwrap()));
-        let attribution_page = std::fs::read_to_string(
-            std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-                .join("../../frontend/components/OpenDataAttribution.tsx"),
-        )
-        .unwrap();
-        assert!(attribution_page.contains("Powered by TfL Open Data"));
-        assert!(attribution_page.contains("Source: RSP"));
     }
 }
