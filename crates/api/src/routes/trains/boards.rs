@@ -22,19 +22,20 @@ use axum::extract::{Query, State};
 use axum::http::StatusCode;
 use base64::Engine;
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use sqlx::PgPool;
 
 use super::{
-    WindowBound, WindowDayOffsets, WindowTimes, check_known_operators, check_search_date,
-    internal_error, non_empty, normalize_crs, normalize_limit, normalize_time, parse_date,
-    parse_day_offset, parse_operators, resolve_window,
+    WindowBound, WindowBoundJson, WindowDayOffsets, WindowTimes, check_known_operators,
+    check_search_date, internal_error, non_empty, normalize_crs, normalize_limit, normalize_time,
+    parse_date, parse_day_offset, parse_operators, resolve_window,
 };
 use crate::app::App;
 use crate::data::queries;
 use crate::data::stop_filters;
 use crate::render::calling_point_departure_json;
+use crate::routes::schedule_rows::TrainSearchRow;
 
 /// The most trains `by-headcode` returns. A headcode is reused across the
 /// network (a `2C10` in Kent and another in Scotland), but rarely more than
@@ -282,33 +283,95 @@ impl Arrival {
     }
 
     /// The raw row, the station and the arrival fields, for `render_rows`.
-    fn render_parts(
-        self,
-        service_date: chrono::NaiveDate,
-        station: &str,
-    ) -> (Value, String, serde_json::Map<String, Value>) {
-        let mut extra = serde_json::Map::new();
-        extra.insert(
-            "arrival".to_string(),
-            json!(self.time.format("%H:%M").to_string()),
-        );
-        extra.insert("arrivalDayOffset".to_string(), json!(self.day_offset));
-        extra.insert("terminates".to_string(), json!(self.terminates));
-        if self.terminates {
-            // The row read is the train's first call, not a departure from
-            // `station`: there is none, so no `dayOffset` either.
-            extra.insert("scheduled".to_string(), Value::Null);
-            extra.insert("publicDeparture".to_string(), Value::Null);
-            extra.insert("workingDeparture".to_string(), Value::Null);
-        } else {
-            let (_, day_offset) = self.row.shown_departure();
-            extra.insert("dayOffset".to_string(), json!(day_offset));
-        }
-        (self.row.raw_json(service_date), station.to_string(), extra)
+    fn render_parts(self, service_date: chrono::NaiveDate) -> (Value, ArrivalFields) {
+        let fields = ArrivalFields {
+            arrival: self.time.format("%H:%M").to_string(),
+            arrival_day_offset: self.day_offset,
+            terminates: self.terminates,
+            // The row read for a terminating train is its first call, not
+            // a departure from `station`: there is none, so no `dayOffset`
+            // either.
+            day_offset: (!self.terminates).then(|| self.row.shown_departure().1),
+        };
+        (self.row.raw_json(service_date), fields)
     }
 }
 
-/// What `GET /public/trains/arrivals` keeps of a station's arrivals.
+/// What an arrival adds to its board row.
+struct ArrivalFields {
+    arrival: String,
+    arrival_day_offset: i64,
+    terminates: bool,
+    day_offset: Option<i64>,
+}
+
+/// What an arrival changes on its search row: its `dayOffset`, and no
+/// departure for a train terminating at the station.
+fn apply_arrival(row: &mut TrainSearchRow, fields: &ArrivalFields) {
+    row.day_offset = fields.day_offset;
+    if fields.terminates {
+        row.departure.scheduled = None;
+        row.departure.public_departure = None;
+        row.departure.working_departure = None;
+    }
+}
+
+fn arrival_row(row: TrainSearchRow, fields: ArrivalFields) -> TrainArrivalRow {
+    TrainArrivalRow {
+        row,
+        arrival: fields.arrival,
+        arrival_day_offset: fields.arrival_day_offset,
+        terminates: fields.terminates,
+    }
+}
+
+/// One row of `GET /public/trains/arrivals`: the search's row plus the
+/// arrival at the station. For a train terminating there, `scheduled`,
+/// `publicDeparture` and `workingDeparture` are `null` (there is no
+/// departure onward) and `dayOffset` is absent.
+#[derive(Debug, Clone, Serialize, ts_rs::TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(rename = "TrainArrivalResult")]
+pub(crate) struct TrainArrivalRow {
+    #[serde(flatten)]
+    row: TrainSearchRow,
+    /// `"HH:MM"`, the public arrival, else the working one.
+    arrival: String,
+    arrival_day_offset: i64,
+    terminates: bool,
+}
+
+/// `GET /public/trains/arrivals`'s body.
+#[derive(Debug, Clone, Serialize, ts_rs::TS)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct TrainArrivalsPage {
+    results: Vec<TrainArrivalRow>,
+    next_cursor: Option<String>,
+    service_date: chrono::NaiveDate,
+    window: ArrivalsWindowJson,
+    #[serde(flatten)]
+    certainty: crate::routes::provisional::TimetableCertainty,
+}
+
+/// The arrivals board's `window` as applied: `to` is `null` when
+/// unbounded.
+#[derive(Debug, Clone, Serialize, ts_rs::TS)]
+#[ts(rename = "TrainArrivalsWindow")]
+pub(crate) struct ArrivalsWindowJson {
+    from: WindowBoundJson,
+    to: Option<WindowBoundJson>,
+}
+
+/// `GET /public/trains/by-headcode`'s body.
+#[derive(Debug, Clone, Serialize, ts_rs::TS)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct TrainHeadcodePage {
+    results: Vec<TrainSearchRow>,
+    service_date: chrono::NaiveDate,
+    #[serde(flatten)]
+    certainty: crate::routes::provisional::TimetableCertainty,
+}
+
 struct ArrivalsFilter<'a> {
     /// The window, train-day minutes, inclusive.
     from_minutes: i32,
@@ -516,12 +579,15 @@ fn decode_arrivals_cursor(raw: &str) -> Result<(i32, String), (StatusCode, Strin
 }
 
 /// Renders rows through the search's renderer, names their origins and
-/// destinations, and attaches live state and service mode.
-async fn render_rows(
+/// destinations, and attaches live state and service mode. Each row is a
+/// stored-shape row and the station it is rendered at, and `extend` sets
+/// what the board adds to the rendered row.
+async fn render_rows<X>(
     app: &App,
     service_date: chrono::NaiveDate,
-    rows: Vec<(Value, String, serde_json::Map<String, Value>)>,
-) -> Result<Vec<Value>, (StatusCode, String)> {
+    rows: Vec<(Value, String, X)>,
+    extend: impl Fn(&mut TrainSearchRow, &X),
+) -> Result<Vec<(TrainSearchRow, X)>, (StatusCode, String)> {
     let codes: Vec<String> = rows
         .iter()
         .flat_map(|(raw, _, _)| {
@@ -536,22 +602,22 @@ async fn render_rows(
         queries::station_names_for_crs_batch(&app.database, &codes)
             .await
             .map_err(internal_error)?;
-    let mut results: Vec<Value> = rows
+    let (mut results, extras): (Vec<TrainSearchRow>, Vec<X>) = rows
         .into_iter()
         .map(|(raw, station, extra)| {
-            let mut rendered = calling_point_departure_json(&raw, &station, &names);
-            if let Some(object) = rendered.as_object_mut() {
-                object.insert("serviceDate".to_string(), json!(service_date));
-                object.extend(extra);
-            }
-            rendered
+            let mut rendered = TrainSearchRow::new(
+                calling_point_departure_json(&raw, &station, &names),
+                service_date.to_string(),
+            );
+            extend(&mut rendered, &extra);
+            (rendered, extra)
         })
-        .collect();
+        .unzip();
     crate::routes::schedule_rows::attach_origin_names(&mut results, &names);
     crate::routes::schedule_rows::attach_live(&app.database, service_date, &mut results).await;
-    crate::data::schedule_services::annotate_uid_rows(&app.database, service_date, &mut results)
+    crate::routes::schedule_rows::annotate_service_modes(&app.database, service_date, &mut results)
         .await;
-    Ok(results)
+    Ok(results.into_iter().zip(extras).collect())
 }
 
 /// `GET /public/trains/arrivals?station=[&date=][&from=][&to=][&from_day_offset=][&to_day_offset=][&origin=][&terminates_at=][&operator=][&limit=][&after=]`
@@ -578,7 +644,7 @@ async fn render_rows(
 pub(super) async fn get_trains_arrivals(
     State(app): State<App>,
     Query(params): Query<ArrivalsParams>,
-) -> Result<Json<Value>, (StatusCode, String)> {
+) -> Result<Json<TrainArrivalsPage>, (StatusCode, String)> {
     let station = normalize_crs("station", &params.station)?;
     let origin = non_empty(&params.origin)
         .map(|s| normalize_crs("origin", s))
@@ -682,23 +748,25 @@ pub(super) async fn get_trains_arrivals(
     };
     let rows = page
         .into_iter()
-        .map(|arrival| arrival.render_parts(service_date, &station))
+        .map(|arrival| {
+            let (raw, fields) = arrival.render_parts(service_date);
+            (raw, station.clone(), fields)
+        })
         .collect();
-    let results = render_rows(&app, service_date, rows).await?;
-    let mut body = json!({
-        "results": results,
-        "nextCursor": next_cursor,
-        "serviceDate": service_date,
-        "window": {
-            "from": window.from.to_json(),
-            "to": window.to.map(WindowBound::to_json),
+    let results = render_rows(&app, service_date, rows, apply_arrival).await?;
+    Ok(Json(TrainArrivalsPage {
+        results: results
+            .into_iter()
+            .map(|(row, fields)| arrival_row(row, fields))
+            .collect(),
+        next_cursor,
+        service_date,
+        window: ArrivalsWindowJson {
+            from: window.from.to_json(),
+            to: window.to.map(WindowBound::to_json),
         },
-    });
-    if let Some(object) = body.as_object_mut() {
-        crate::routes::provisional::TimetableCertainty::for_date(service_date, today)
-            .insert_into(object);
-    }
-    Ok(Json(body))
+        certainty: crate::routes::provisional::TimetableCertainty::for_date(service_date, today),
+    }))
 }
 
 /// `GET /public/trains/by-headcode?headcode=[&date=]` -- the trains
@@ -715,7 +783,7 @@ pub(super) async fn get_trains_arrivals(
 pub(super) async fn get_trains_by_headcode(
     State(app): State<App>,
     Query(params): Query<HeadcodeParams>,
-) -> Result<Json<Value>, (StatusCode, String)> {
+) -> Result<Json<TrainHeadcodePage>, (StatusCode, String)> {
     let headcode = normalize_headcode(&params.headcode)?;
     let today = crate::routes::london_today();
     let service_date = requested_date(&app, params.date.as_deref(), today).await?;
@@ -748,28 +816,124 @@ pub(super) async fn get_trains_by_headcode(
     let rendered = rows
         .into_iter()
         .map(|row| {
-            let mut extra = serde_json::Map::new();
             let (_, day_offset) = row.shown_departure();
-            extra.insert("dayOffset".to_string(), json!(day_offset));
             let origin = row.origin_crs.clone();
-            (row.raw_json(service_date), origin, extra)
+            (row.raw_json(service_date), origin, day_offset)
         })
         .collect();
-    let results = render_rows(&app, service_date, rendered).await?;
-    let mut body = json!({
-        "results": results,
-        "serviceDate": service_date,
-    });
-    if let Some(object) = body.as_object_mut() {
-        crate::routes::provisional::TimetableCertainty::for_date(service_date, today)
-            .insert_into(object);
-    }
-    Ok(Json(body))
+    let results = render_rows(&app, service_date, rendered, |row, day_offset: &i64| {
+        row.day_offset = Some(*day_offset);
+    })
+    .await?;
+    Ok(Json(TrainHeadcodePage {
+        results: results.into_iter().map(|(row, _)| row).collect(),
+        service_date,
+        certainty: crate::routes::provisional::TimetableCertainty::for_date(service_date, today),
+    }))
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn board_row(scheduled: &str, public: Option<&str>) -> BoardRow {
+        let t = |s: &str| chrono::NaiveTime::parse_from_str(s, "%H:%M:%S").unwrap();
+        BoardRow {
+            train_uid: "C12345".to_string(),
+            origin_crs: "RDG".to_string(),
+            destination_crs: "PAD".to_string(),
+            true_origin_crs: Some("OXF".to_string()),
+            scheduled: t(scheduled),
+            day_offset: 0,
+            public_departure: public.map(t),
+            calling_point_arrival: Some(t("09:58:30")),
+            public_calling_point_arrival: Some(t("09:59:00")),
+            destination_arrival: Some(t("10:30:00")),
+            destination_arrival_day_offset: 0,
+            public_destination_arrival: None,
+            operator_atoc: Some("GW".to_string()),
+            headcode: Some("1A11".to_string()),
+        }
+    }
+
+    /// The `json!` arrival extras before they were typed, verbatim.
+    fn legacy_extras(arrival: &Arrival) -> serde_json::Map<String, Value> {
+        let mut extra = serde_json::Map::new();
+        extra.insert(
+            "arrival".to_string(),
+            json!(arrival.time.format("%H:%M").to_string()),
+        );
+        extra.insert("arrivalDayOffset".to_string(), json!(arrival.day_offset));
+        extra.insert("terminates".to_string(), json!(arrival.terminates));
+        if arrival.terminates {
+            extra.insert("scheduled".to_string(), Value::Null);
+            extra.insert("publicDeparture".to_string(), Value::Null);
+            extra.insert("workingDeparture".to_string(), Value::Null);
+        } else {
+            let (_, day_offset) = arrival.row.shown_departure();
+            extra.insert("dayOffset".to_string(), json!(day_offset));
+        }
+        extra
+    }
+
+    /// An arrivals row (calling and terminating) and a headcode row serve
+    /// what the `json!` rows did, before the lookups (which the search's
+    /// own test covers).
+    #[test]
+    fn typed_board_rows_match_the_json_rows() {
+        let date: chrono::NaiveDate = "2026-10-30".parse().unwrap();
+        let names = HashMap::from([("PAD".to_string(), "London Paddington".to_string())]);
+        for terminates in [false, true] {
+            let row = board_row("10:00:00", Some("10:00:00"));
+            let arrival = Arrival {
+                time: chrono::NaiveTime::from_hms_opt(9, 59, 0).unwrap(),
+                day_offset: 0,
+                terminates,
+                row,
+            };
+            let mut legacy = crate::render::legacy::calling_point_departure_json(
+                &arrival.row.raw_json(date),
+                "RDG",
+                &names,
+            );
+            let extras = legacy_extras(&arrival);
+            if let Some(object) = legacy.as_object_mut() {
+                object.insert("serviceDate".to_string(), json!(date));
+                object.extend(extras);
+            }
+            let (stored, fields) = arrival.render_parts(date);
+            let mut search_row = TrainSearchRow::new(
+                calling_point_departure_json(&stored, "RDG", &names),
+                date.to_string(),
+            );
+            apply_arrival(&mut search_row, &fields);
+            let mut new = serde_json::to_value(arrival_row(search_row, fields)).unwrap();
+            // The lookups' fields, which the search's own test compares.
+            for key in ["originName", "live", "serviceMode", "liveTracking"] {
+                new.as_object_mut().unwrap().remove(key);
+            }
+            assert_eq!(new, legacy);
+        }
+
+        let row = board_row("23:59:30", Some("00:00:00"));
+        let (_, day_offset) = row.shown_departure();
+        let mut legacy =
+            crate::render::legacy::calling_point_departure_json(&row.raw_json(date), "OXF", &names);
+        if let Some(object) = legacy.as_object_mut() {
+            object.insert("serviceDate".to_string(), json!(date));
+            object.insert("dayOffset".to_string(), json!(day_offset));
+        }
+        let mut new = TrainSearchRow::new(
+            calling_point_departure_json(&row.raw_json(date), "OXF", &names),
+            date.to_string(),
+        );
+        new.day_offset = Some(day_offset);
+        let mut new = serde_json::to_value(new).unwrap();
+        for key in ["originName", "live", "serviceMode", "liveTracking"] {
+            new.as_object_mut().unwrap().remove(key);
+        }
+        assert_eq!(new, legacy);
+    }
 
     #[test]
     fn headcodes_are_a_digit_a_letter_and_two_digits() {

@@ -201,20 +201,20 @@ pub(crate) const ID_LIST_CACHE: &str = "public, max-age=3600";
 /// primary-key scan, cacheable).
 async fn list_station_codes(
     State(app): State<App>,
-) -> Result<
-    (
-        [(header::HeaderName, &'static str); 1],
-        Json<serde_json::Value>,
-    ),
-    (StatusCode, String),
-> {
+) -> Result<([(header::HeaderName, &'static str); 1], Json<StationCodes>), (StatusCode, String)> {
     let codes = reference::all_station_codes(&app.database)
         .await
         .map_err(internal_error)?;
     Ok((
         [(header::CACHE_CONTROL, ID_LIST_CACHE)],
-        Json(serde_json::json!({ "codes": codes })),
+        Json(StationCodes { codes }),
     ))
+}
+
+/// `GET /public/stations/codes`'s body.
+#[derive(Debug, serde::Serialize, ts_rs::TS)]
+pub(crate) struct StationCodes {
+    codes: Vec<String>,
 }
 
 async fn list_all_tocs(

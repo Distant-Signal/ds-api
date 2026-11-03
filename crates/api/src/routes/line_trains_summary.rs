@@ -193,9 +193,11 @@ pub(crate) fn is_running_candidate(row: &SummaryRow, at: i32) -> bool {
 }
 
 /// The compact live status the summary carries.
-#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, PartialEq, Eq, ts_rs::TS)]
 #[serde(rename_all = "camelCase")]
+#[ts(rename = "LineTrainSummaryLive")]
 pub(crate) struct LiveSummary {
+    #[ts(as = "Option<crate::ts_values::JourneyStatus>")]
     pub status: Option<String>,
     pub delay_minutes: Option<i32>,
     pub delay_provisional: bool,
@@ -239,24 +241,27 @@ pub(crate) async fn live_summaries(
         .collect())
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, ts_rs::TS)]
 #[serde(rename_all = "camelCase")]
+#[ts(rename = "LineStationRef")]
 pub(crate) struct StationRef {
     crs: String,
     name: Option<String>,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, ts_rs::TS)]
 #[serde(rename_all = "camelCase")]
-struct StopJson {
+#[ts(rename = "LineTrainStop")]
+pub(crate) struct StopJson {
     crs: String,
     time: String,
     day_offset: i32,
 }
 
 /// A time with its day offset, as the API writes `lineDue`.
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, ts_rs::TS)]
 #[serde(rename_all = "camelCase")]
+#[ts(rename = "LineTime")]
 pub(crate) struct DueJson {
     time: String,
     day_offset: i32,
@@ -271,15 +276,18 @@ impl DueJson {
     }
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, ts_rs::TS)]
 #[serde(rename_all = "camelCase")]
+#[ts(rename = "LineTrainSummary")]
 pub(crate) struct TrainJson {
     uid: String,
     operator: Option<String>,
     /// `serviceMode` and `liveTracking`, as on every schedule surface.
     #[serde(flatten)]
     service_mode: ServiceModeFields,
+    #[ts(as = "Option<crate::ts_values::LineTrainScope>")]
     scope: Option<String>,
+    #[ts(as = "Option<crate::ts_values::LineDirection>")]
     direction: Option<String>,
     line_due: Option<DueJson>,
     origin: Option<StationRef>,
@@ -288,31 +296,36 @@ pub(crate) struct TrainJson {
     live: Option<LiveSummary>,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, ts_rs::TS)]
 #[serde(rename_all = "camelCase")]
+#[ts(rename = "LineCatalogueStation")]
 pub(crate) struct LineStationJson {
     crs: String,
     name: Option<String>,
     role: String,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, ts_rs::TS)]
 #[serde(rename_all = "camelCase")]
-struct WindowJson {
+#[ts(rename = "LineTrainsWindow")]
+pub(crate) struct WindowJson {
     from: String,
     to: String,
 }
 
 /// The whole summary body.
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, ts_rs::TS)]
 #[serde(rename_all = "camelCase")]
-struct SummaryJson {
+#[ts(rename = "LineTrainsSummary")]
+pub(crate) struct SummaryJson {
     line_id: String,
     date: chrono::NaiveDate,
     scope_applied: bool,
+    #[ts(as = "Vec<crate::ts_values::LineTrainScope>")]
     scopes: Vec<String>,
     window: Option<WindowJson>,
     at: Option<String>,
+    #[ts(as = "Option<Vec<crate::ts_values::LineDirection>>")]
     directions: Option<Vec<String>>,
     stations: Vec<LineStationJson>,
     /// Trains in the window, per scope and direction (`none` for a train

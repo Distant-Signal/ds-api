@@ -24,14 +24,13 @@ use axum::http::StatusCode;
 use axum::{Json, Router as AxumRouter};
 use chrono::{DateTime, Utc};
 use common::{LineStatus, LineStatusReport, Severity};
-use serde::Deserialize;
-use serde_json::Value;
+use serde::{Deserialize, Serialize};
 
 use crate::app::{App, Router};
 use crate::auth::OptionalAuthenticatedUser;
 use crate::data::custom_lines;
 use crate::data::queries;
-use crate::render::{to_tfl_shape, with_stats_attribution};
+use crate::render::{HasAttribution, LineStatusReportJson, to_tfl_shape, with_stats_attribution};
 
 pub fn router() -> Router {
     AxumRouter::new()
@@ -122,14 +121,14 @@ fn overlay_for(
         .map(|r| r.statuses.clone())
 }
 
-fn rows_to_json(rows: Vec<queries::LineStatusRow>, detail: bool) -> Vec<Value> {
+fn rows_to_json(rows: Vec<queries::LineStatusRow>, detail: bool) -> Vec<LineStatusReportJson> {
     rows.into_iter()
         .map(|row| {
             let computed_at = row.computed_at;
             let upcoming = crate::render::upcoming_json(&row.upcoming);
             let report = to_report(row);
             let mut out = to_tfl_shape(&report, computed_at, detail);
-            out["upcoming"] = upcoming;
+            out.upcoming = Some(upcoming);
             out
         })
         .collect()
@@ -222,7 +221,7 @@ pub(crate) async fn get_mode_status(
     Path(modes): Path<String>,
     Query(query): Query<DetailQuery>,
     OptionalAuthenticatedUser(user): OptionalAuthenticatedUser,
-) -> Result<Json<Vec<Value>>, (StatusCode, String)> {
+) -> Result<Json<Vec<LineStatusReportJson>>, (StatusCode, String)> {
     let modes = parse_modes(&modes).map_err(|message| (StatusCode::BAD_REQUEST, message))?;
 
     let rows = queries::line_status_for_modes(&app.database, &modes)
@@ -283,7 +282,7 @@ pub(crate) async fn get_line_status(
     Path(ids): Path<String>,
     Query(query): Query<DetailQuery>,
     OptionalAuthenticatedUser(user): OptionalAuthenticatedUser,
-) -> Result<Json<Vec<Value>>, (StatusCode, String)> {
+) -> Result<Json<Vec<LineStatusReportJson>>, (StatusCode, String)> {
     let ids = parse_line_status_ids(&ids)?;
 
     let rows = queries::line_status_for_ids(&app.database, &ids)
@@ -328,7 +327,7 @@ pub(crate) async fn get_line_status(
                     query.detail,
                     overlay.as_deref(),
                 );
-                out["upcoming"] = upcoming;
+                out.upcoming = Some(upcoming);
                 out
             })
             .collect(),
@@ -357,7 +356,7 @@ pub(crate) async fn get_line_status(
 pub(crate) async fn get_stop_point_disruption(
     State(app): State<App>,
     Path(crs): Path<String>,
-) -> Result<Json<Vec<Value>>, (StatusCode, String)> {
+) -> Result<Json<Vec<LineStatusReportJson>>, (StatusCode, String)> {
     let matching_line_ids: Vec<String> = app
         .config
         .lines
@@ -377,7 +376,7 @@ pub(crate) async fn get_stop_point_disruption(
         .await
         .map_err(internal_error)?;
 
-    let disruptions: Vec<Value> = rows
+    let disruptions: Vec<LineStatusReportJson> = rows
         .into_iter()
         .filter_map(|row| {
             let computed_at = row.computed_at;
@@ -427,11 +426,11 @@ pub(crate) async fn get_stop_point_disruption(
     clippy::ref_option,
     reason = "callers hold the Option by reference in a struct field"
 )]
-async fn empty_if_unreadable(
+async fn empty_if_unreadable<T>(
     pool: &sqlx::PgPool,
     id: &str,
     user: &Option<crate::auth::AuthenticatedUser>,
-) -> Result<Option<Json<Vec<Value>>>, (StatusCode, String)> {
+) -> Result<Option<Json<Vec<T>>>, (StatusCode, String)> {
     let readable =
         custom_lines::caller_may_read_line_id(pool, id, user.as_ref().map(|c| c.id.as_str()))
             .await
@@ -443,7 +442,7 @@ async fn get_line_status_history(
     State(app): State<App>,
     Path((id, from, to)): Path<(String, DateTime<Utc>, DateTime<Utc>)>,
     OptionalAuthenticatedUser(user): OptionalAuthenticatedUser,
-) -> Result<Json<Vec<Value>>, (StatusCode, String)> {
+) -> Result<Json<Vec<LineStatusReportJson>>, (StatusCode, String)> {
     let Some((from, to)) = clamp_instant_range(
         from,
         to,
@@ -483,49 +482,195 @@ async fn get_line_status_history(
     ))
 }
 
+/// The counts and rates every stats bucket carries: the bucket's sample
+/// totals, the mean delay of the trains that ran, and each count as a
+/// share of `total` (`0` when there is none).
+#[derive(Debug, Clone, Serialize, ts_rs::TS)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct StatsFigures {
+    pub total: i64,
+    pub delayed: i64,
+    pub cancelled: i64,
+    pub skipped: i64,
+    pub avg_delay_minutes: f64,
+    pub delay_rate: f64,
+    pub cancellation_rate: f64,
+    pub skip_rate: f64,
+}
+
+impl StatsFigures {
+    #[expect(
+        clippy::cast_precision_loss,
+        reason = "counts stay far below 2^52, so the f64 ratio is exact"
+    )]
+    pub(crate) fn new(
+        total: i64,
+        delayed: i64,
+        cancelled: i64,
+        skipped: i64,
+        running_count: i64,
+        delay_minutes_sum: f64,
+    ) -> Self {
+        let avg_delay_minutes = if running_count > 0 {
+            delay_minutes_sum / running_count as f64
+        } else {
+            0.0
+        };
+        let rate = |numerator: i64| {
+            if total > 0 {
+                numerator as f64 / total as f64
+            } else {
+                0.0
+            }
+        };
+        Self {
+            total,
+            delayed,
+            cancelled,
+            skipped,
+            avg_delay_minutes,
+            delay_rate: rate(delayed),
+            cancellation_rate: rate(cancelled),
+            skip_rate: rate(skipped),
+        }
+    }
+}
+
+/// One day of a line's (or operator's, or the network's) sampled stats.
+#[derive(Debug, Clone, Serialize, ts_rs::TS)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct DailyStats {
+    pub day: chrono::NaiveDate,
+    pub sample_cycles: i64,
+    #[serde(flatten)]
+    pub figures: StatsFigures,
+    /// The credits the line's data needs (`render::line_attribution`): on
+    /// the line routes, absent from the operator and network ones.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub attribution: Option<Vec<common::transit::TransitAttribution>>,
+}
+
+impl HasAttribution for DailyStats {
+    fn set_attribution(&mut self, credits: Vec<common::transit::TransitAttribution>) {
+        self.attribution = Some(credits);
+    }
+}
+
+/// One half hour of sampled stats.
+#[derive(Debug, Clone, Serialize, ts_rs::TS)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct HalfHourlyStats {
+    pub half_hour_start: DateTime<Utc>,
+    pub sample_cycles: i64,
+    #[serde(flatten)]
+    pub figures: StatsFigures,
+    /// The credits the line's data needs (`render::line_attribution`): on
+    /// the line routes, absent from the operator and network ones.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub attribution: Option<Vec<common::transit::TransitAttribution>>,
+}
+
+impl HasAttribution for HalfHourlyStats {
+    fn set_attribution(&mut self, credits: Vec<common::transit::TransitAttribution>) {
+        self.attribution = Some(credits);
+    }
+}
+
+/// One hourly or six-hourly bucket of sampled stats.
+#[derive(Debug, Clone, Serialize, ts_rs::TS)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct SubDailyStats {
+    pub bucket_start: DateTime<Utc>,
+    pub sample_cycles: i64,
+    #[serde(flatten)]
+    pub figures: StatsFigures,
+    /// The credits the line's data needs (`render::line_attribution`): on
+    /// the line routes, absent from the operator and network ones.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub attribution: Option<Vec<common::transit::TransitAttribution>>,
+}
+
+impl HasAttribution for SubDailyStats {
+    fn set_attribution(&mut self, credits: Vec<common::transit::TransitAttribution>) {
+        self.attribution = Some(credits);
+    }
+}
+
+/// One day of a line's full-coverage stats.
+#[derive(Debug, Clone, Serialize, ts_rs::TS)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct DailyCoverageStats {
+    pub day: chrono::NaiveDate,
+    pub resolved_windows: i64,
+    #[serde(flatten)]
+    pub figures: StatsFigures,
+    /// The credits the line's data needs (`render::line_attribution`): on
+    /// the line routes, absent from the operator and network ones.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub attribution: Option<Vec<common::transit::TransitAttribution>>,
+}
+
+impl HasAttribution for DailyCoverageStats {
+    fn set_attribution(&mut self, credits: Vec<common::transit::TransitAttribution>) {
+        self.attribution = Some(credits);
+    }
+}
+
+/// One half hour of a line's full-coverage stats.
+#[derive(Debug, Clone, Serialize, ts_rs::TS)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct HalfHourlyCoverageStats {
+    pub half_hour_start: DateTime<Utc>,
+    pub resolved_windows: i64,
+    #[serde(flatten)]
+    pub figures: StatsFigures,
+    /// The credits the line's data needs (`render::line_attribution`): on
+    /// the line routes, absent from the operator and network ones.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub attribution: Option<Vec<common::transit::TransitAttribution>>,
+}
+
+impl HasAttribution for HalfHourlyCoverageStats {
+    fn set_attribution(&mut self, credits: Vec<common::transit::TransitAttribution>) {
+        self.attribution = Some(credits);
+    }
+}
+
 /// Derives the four rate/average fields from one stored rollup row,
 /// guarding every division against a zero denominator -- a day CAN have
 /// total: 0 if every contributing cycle itself had total: 0 (rare given
 /// `min_sample_size`, not impossible). Pure so it's unit-testable without a
 /// database.
 #[expect(
-    clippy::cast_precision_loss,
     clippy::needless_pass_by_value,
-    reason = "counts stay far below 2^52, so the f64 ratio is exact; callers hand over values they no longer need"
+    reason = "callers hand over values they no longer need"
 )]
-pub(crate) fn daily_stats_to_json(row: queries::DailyStatsRow) -> Value {
-    let avg_delay_minutes = if row.running_count > 0 {
-        row.delay_minutes_sum / row.running_count as f64
-    } else {
-        0.0
-    };
-    let rate = |numerator: i64| {
-        if row.total > 0 {
-            numerator as f64 / row.total as f64
-        } else {
-            0.0
-        }
-    };
-
-    serde_json::json!({
-        "day": row.day,
-        "sampleCycles": row.sample_cycles,
-        "total": row.total,
-        "delayed": row.delayed,
-        "cancelled": row.cancelled,
-        "skipped": row.skipped,
-        "avgDelayMinutes": avg_delay_minutes,
-        "delayRate": rate(row.delayed),
-        "cancellationRate": rate(row.cancelled),
-        "skipRate": rate(row.skipped),
-    })
+pub(crate) fn daily_stats_to_json(row: queries::DailyStatsRow) -> DailyStats {
+    DailyStats {
+        day: row.day,
+        sample_cycles: row.sample_cycles,
+        figures: StatsFigures::new(
+            row.total,
+            row.delayed,
+            row.cancelled,
+            row.skipped,
+            row.running_count,
+            row.delay_minutes_sum,
+        ),
+        attribution: None,
+    }
 }
 
 async fn get_line_daily_stats(
     State(app): State<App>,
     Path((id, from, to)): Path<(String, chrono::NaiveDate, chrono::NaiveDate)>,
     OptionalAuthenticatedUser(user): OptionalAuthenticatedUser,
-) -> Result<Json<Vec<Value>>, (StatusCode, String)> {
+) -> Result<Json<Vec<DailyStats>>, (StatusCode, String)> {
     let Some((from, to)) = clamp_date_range(
         from,
         to,
@@ -555,43 +700,30 @@ async fn get_line_daily_stats(
 /// alongside the table/route when the bucket size was halved -- see git
 /// history for the hourly-era version.
 #[expect(
-    clippy::cast_precision_loss,
     clippy::needless_pass_by_value,
-    reason = "counts stay far below 2^52, so the f64 ratio is exact; callers hand over values they no longer need"
+    reason = "callers hand over values they no longer need"
 )]
-pub(crate) fn half_hourly_stats_to_json(row: queries::HalfHourlyStatsRow) -> Value {
-    let avg_delay_minutes = if row.running_count > 0 {
-        row.delay_minutes_sum / row.running_count as f64
-    } else {
-        0.0
-    };
-    let rate = |numerator: i64| {
-        if row.total > 0 {
-            numerator as f64 / row.total as f64
-        } else {
-            0.0
-        }
-    };
-
-    serde_json::json!({
-        "halfHourStart": row.half_hour_start,
-        "sampleCycles": row.sample_cycles,
-        "total": row.total,
-        "delayed": row.delayed,
-        "cancelled": row.cancelled,
-        "skipped": row.skipped,
-        "avgDelayMinutes": avg_delay_minutes,
-        "delayRate": rate(row.delayed),
-        "cancellationRate": rate(row.cancelled),
-        "skipRate": rate(row.skipped),
-    })
+pub(crate) fn half_hourly_stats_to_json(row: queries::HalfHourlyStatsRow) -> HalfHourlyStats {
+    HalfHourlyStats {
+        half_hour_start: row.half_hour_start,
+        sample_cycles: row.sample_cycles,
+        figures: StatsFigures::new(
+            row.total,
+            row.delayed,
+            row.cancelled,
+            row.skipped,
+            row.running_count,
+            row.delay_minutes_sum,
+        ),
+        attribution: None,
+    }
 }
 
 async fn get_line_half_hourly_stats(
     State(app): State<App>,
     Path((id, from, to)): Path<(String, DateTime<Utc>, DateTime<Utc>)>,
     OptionalAuthenticatedUser(user): OptionalAuthenticatedUser,
-) -> Result<Json<Vec<Value>>, (StatusCode, String)> {
+) -> Result<Json<Vec<HalfHourlyStats>>, (StatusCode, String)> {
     let Some((from, to)) = clamp_instant_range(from, to, half_hourly_retention(&app), Utc::now())?
     else {
         return Ok(Json(vec![]));
@@ -619,43 +751,30 @@ async fn get_line_half_hourly_stats(
 /// `queries::sub_daily_stats_for_range` itself (Decision 2 of
 /// docs/superpowers/specs/2026-09-05-configurable-trend-granularity-design.md).
 #[expect(
-    clippy::cast_precision_loss,
     clippy::needless_pass_by_value,
-    reason = "counts stay far below 2^52, so the f64 ratio is exact; callers hand over values they no longer need"
+    reason = "callers hand over values they no longer need"
 )]
-pub(crate) fn sub_daily_stats_to_json(row: queries::HalfHourlyStatsRow) -> Value {
-    let avg_delay_minutes = if row.running_count > 0 {
-        row.delay_minutes_sum / row.running_count as f64
-    } else {
-        0.0
-    };
-    let rate = |numerator: i64| {
-        if row.total > 0 {
-            numerator as f64 / row.total as f64
-        } else {
-            0.0
-        }
-    };
-
-    serde_json::json!({
-        "bucketStart": row.half_hour_start,
-        "sampleCycles": row.sample_cycles,
-        "total": row.total,
-        "delayed": row.delayed,
-        "cancelled": row.cancelled,
-        "skipped": row.skipped,
-        "avgDelayMinutes": avg_delay_minutes,
-        "delayRate": rate(row.delayed),
-        "cancellationRate": rate(row.cancelled),
-        "skipRate": rate(row.skipped),
-    })
+pub(crate) fn sub_daily_stats_to_json(row: queries::HalfHourlyStatsRow) -> SubDailyStats {
+    SubDailyStats {
+        bucket_start: row.half_hour_start,
+        sample_cycles: row.sample_cycles,
+        figures: StatsFigures::new(
+            row.total,
+            row.delayed,
+            row.cancelled,
+            row.skipped,
+            row.running_count,
+            row.delay_minutes_sum,
+        ),
+        attribution: None,
+    }
 }
 
 async fn get_line_hourly_stats(
     State(app): State<App>,
     Path((id, from, to)): Path<(String, DateTime<Utc>, DateTime<Utc>)>,
     OptionalAuthenticatedUser(user): OptionalAuthenticatedUser,
-) -> Result<Json<Vec<Value>>, (StatusCode, String)> {
+) -> Result<Json<Vec<SubDailyStats>>, (StatusCode, String)> {
     let Some((from, to)) = clamp_instant_range(from, to, half_hourly_retention(&app), Utc::now())?
     else {
         return Ok(Json(vec![]));
@@ -677,7 +796,7 @@ async fn get_line_six_hourly_stats(
     State(app): State<App>,
     Path((id, from, to)): Path<(String, DateTime<Utc>, DateTime<Utc>)>,
     OptionalAuthenticatedUser(user): OptionalAuthenticatedUser,
-) -> Result<Json<Vec<Value>>, (StatusCode, String)> {
+) -> Result<Json<Vec<SubDailyStats>>, (StatusCode, String)> {
     let Some((from, to)) = clamp_instant_range(from, to, half_hourly_retention(&app), Utc::now())?
     else {
         return Ok(Json(vec![]));
@@ -700,43 +819,30 @@ async fn get_line_six_hourly_stats(
 /// See docs/superpowers/specs/2026-09-03-full-coverage-metrics-transition-design.md
 /// Decision 4.
 #[expect(
-    clippy::cast_precision_loss,
     clippy::needless_pass_by_value,
-    reason = "counts stay far below 2^52, so the f64 ratio is exact; callers hand over values they no longer need"
+    reason = "callers hand over values they no longer need"
 )]
-fn daily_coverage_stats_to_json(row: queries::DailyCoverageStatsRow) -> Value {
-    let avg_delay_minutes = if row.running_count > 0 {
-        row.delay_minutes_sum / row.running_count as f64
-    } else {
-        0.0
-    };
-    let rate = |numerator: i64| {
-        if row.total > 0 {
-            numerator as f64 / row.total as f64
-        } else {
-            0.0
-        }
-    };
-
-    serde_json::json!({
-        "day": row.day,
-        "resolvedWindows": row.resolved_windows,
-        "total": row.total,
-        "delayed": row.delayed,
-        "cancelled": row.cancelled,
-        "skipped": row.skipped,
-        "avgDelayMinutes": avg_delay_minutes,
-        "delayRate": rate(row.delayed),
-        "cancellationRate": rate(row.cancelled),
-        "skipRate": rate(row.skipped),
-    })
+fn daily_coverage_stats_to_json(row: queries::DailyCoverageStatsRow) -> DailyCoverageStats {
+    DailyCoverageStats {
+        day: row.day,
+        resolved_windows: row.resolved_windows,
+        figures: StatsFigures::new(
+            row.total,
+            row.delayed,
+            row.cancelled,
+            row.skipped,
+            row.running_count,
+            row.delay_minutes_sum,
+        ),
+        attribution: None,
+    }
 }
 
 async fn get_line_daily_coverage_stats(
     State(app): State<App>,
     Path((id, from, to)): Path<(String, chrono::NaiveDate, chrono::NaiveDate)>,
     OptionalAuthenticatedUser(user): OptionalAuthenticatedUser,
-) -> Result<Json<Vec<Value>>, (StatusCode, String)> {
+) -> Result<Json<Vec<DailyCoverageStats>>, (StatusCode, String)> {
     let Some((from, to)) = clamp_date_range(
         from,
         to,
@@ -764,43 +870,32 @@ async fn get_line_daily_coverage_stats(
 /// in place of `day` -- mirrors `half_hourly_stats_to_json`'s own
 /// relationship to `daily_stats_to_json`.
 #[expect(
-    clippy::cast_precision_loss,
     clippy::needless_pass_by_value,
-    reason = "counts stay far below 2^52, so the f64 ratio is exact; callers hand over values they no longer need"
+    reason = "callers hand over values they no longer need"
 )]
-fn half_hourly_coverage_stats_to_json(row: queries::HalfHourlyCoverageStatsRow) -> Value {
-    let avg_delay_minutes = if row.running_count > 0 {
-        row.delay_minutes_sum / row.running_count as f64
-    } else {
-        0.0
-    };
-    let rate = |numerator: i64| {
-        if row.total > 0 {
-            numerator as f64 / row.total as f64
-        } else {
-            0.0
-        }
-    };
-
-    serde_json::json!({
-        "halfHourStart": row.half_hour_start,
-        "resolvedWindows": row.resolved_windows,
-        "total": row.total,
-        "delayed": row.delayed,
-        "cancelled": row.cancelled,
-        "skipped": row.skipped,
-        "avgDelayMinutes": avg_delay_minutes,
-        "delayRate": rate(row.delayed),
-        "cancellationRate": rate(row.cancelled),
-        "skipRate": rate(row.skipped),
-    })
+fn half_hourly_coverage_stats_to_json(
+    row: queries::HalfHourlyCoverageStatsRow,
+) -> HalfHourlyCoverageStats {
+    HalfHourlyCoverageStats {
+        half_hour_start: row.half_hour_start,
+        resolved_windows: row.resolved_windows,
+        figures: StatsFigures::new(
+            row.total,
+            row.delayed,
+            row.cancelled,
+            row.skipped,
+            row.running_count,
+            row.delay_minutes_sum,
+        ),
+        attribution: None,
+    }
 }
 
 async fn get_line_half_hourly_coverage_stats(
     State(app): State<App>,
     Path((id, from, to)): Path<(String, DateTime<Utc>, DateTime<Utc>)>,
     OptionalAuthenticatedUser(user): OptionalAuthenticatedUser,
-) -> Result<Json<Vec<Value>>, (StatusCode, String)> {
+) -> Result<Json<Vec<HalfHourlyCoverageStats>>, (StatusCode, String)> {
     let Some((from, to)) = clamp_instant_range(from, to, half_hourly_retention(&app), Utc::now())?
     else {
         return Ok(Json(vec![]));
@@ -908,12 +1003,260 @@ fn internal_error(err: anyhow::Error) -> (StatusCode, String) {
 mod tests {
     use super::*;
 
+    fn v<T: Serialize>(body: T) -> serde_json::Value {
+        serde_json::to_value(body).unwrap()
+    }
+
     fn utc(s: &str) -> DateTime<Utc> {
         s.parse().expect("valid RFC3339")
     }
 
     fn date(s: &str) -> chrono::NaiveDate {
         s.parse().expect("valid date")
+    }
+
+    /// The `json!` stats renderers before these bodies were typed,
+    /// verbatim.
+    mod legacy {
+        use serde_json::Value;
+
+        use crate::data::queries;
+
+        #[expect(
+            clippy::cast_precision_loss,
+            clippy::needless_pass_by_value,
+            reason = "verbatim"
+        )]
+        pub(super) fn daily_stats_to_json(row: queries::DailyStatsRow) -> Value {
+            let avg_delay_minutes = if row.running_count > 0 {
+                row.delay_minutes_sum / row.running_count as f64
+            } else {
+                0.0
+            };
+            let rate = |numerator: i64| {
+                if row.total > 0 {
+                    numerator as f64 / row.total as f64
+                } else {
+                    0.0
+                }
+            };
+
+            serde_json::json!({
+                "day": row.day,
+                "sampleCycles": row.sample_cycles,
+                "total": row.total,
+                "delayed": row.delayed,
+                "cancelled": row.cancelled,
+                "skipped": row.skipped,
+                "avgDelayMinutes": avg_delay_minutes,
+                "delayRate": rate(row.delayed),
+                "cancellationRate": rate(row.cancelled),
+                "skipRate": rate(row.skipped),
+            })
+        }
+
+        #[expect(
+            clippy::cast_precision_loss,
+            clippy::needless_pass_by_value,
+            reason = "verbatim"
+        )]
+        pub(super) fn half_hourly_stats_to_json(row: queries::HalfHourlyStatsRow) -> Value {
+            let avg_delay_minutes = if row.running_count > 0 {
+                row.delay_minutes_sum / row.running_count as f64
+            } else {
+                0.0
+            };
+            let rate = |numerator: i64| {
+                if row.total > 0 {
+                    numerator as f64 / row.total as f64
+                } else {
+                    0.0
+                }
+            };
+
+            serde_json::json!({
+                "halfHourStart": row.half_hour_start,
+                "sampleCycles": row.sample_cycles,
+                "total": row.total,
+                "delayed": row.delayed,
+                "cancelled": row.cancelled,
+                "skipped": row.skipped,
+                "avgDelayMinutes": avg_delay_minutes,
+                "delayRate": rate(row.delayed),
+                "cancellationRate": rate(row.cancelled),
+                "skipRate": rate(row.skipped),
+            })
+        }
+
+        #[expect(
+            clippy::cast_precision_loss,
+            clippy::needless_pass_by_value,
+            reason = "verbatim"
+        )]
+        pub(super) fn sub_daily_stats_to_json(row: queries::HalfHourlyStatsRow) -> Value {
+            let avg_delay_minutes = if row.running_count > 0 {
+                row.delay_minutes_sum / row.running_count as f64
+            } else {
+                0.0
+            };
+            let rate = |numerator: i64| {
+                if row.total > 0 {
+                    numerator as f64 / row.total as f64
+                } else {
+                    0.0
+                }
+            };
+
+            serde_json::json!({
+                "bucketStart": row.half_hour_start,
+                "sampleCycles": row.sample_cycles,
+                "total": row.total,
+                "delayed": row.delayed,
+                "cancelled": row.cancelled,
+                "skipped": row.skipped,
+                "avgDelayMinutes": avg_delay_minutes,
+                "delayRate": rate(row.delayed),
+                "cancellationRate": rate(row.cancelled),
+                "skipRate": rate(row.skipped),
+            })
+        }
+
+        #[expect(
+            clippy::cast_precision_loss,
+            clippy::needless_pass_by_value,
+            reason = "verbatim"
+        )]
+        pub(super) fn daily_coverage_stats_to_json(row: queries::DailyCoverageStatsRow) -> Value {
+            let avg_delay_minutes = if row.running_count > 0 {
+                row.delay_minutes_sum / row.running_count as f64
+            } else {
+                0.0
+            };
+            let rate = |numerator: i64| {
+                if row.total > 0 {
+                    numerator as f64 / row.total as f64
+                } else {
+                    0.0
+                }
+            };
+
+            serde_json::json!({
+                "day": row.day,
+                "resolvedWindows": row.resolved_windows,
+                "total": row.total,
+                "delayed": row.delayed,
+                "cancelled": row.cancelled,
+                "skipped": row.skipped,
+                "avgDelayMinutes": avg_delay_minutes,
+                "delayRate": rate(row.delayed),
+                "cancellationRate": rate(row.cancelled),
+                "skipRate": rate(row.skipped),
+            })
+        }
+
+        #[expect(
+            clippy::cast_precision_loss,
+            clippy::needless_pass_by_value,
+            reason = "verbatim"
+        )]
+        pub(super) fn half_hourly_coverage_stats_to_json(
+            row: queries::HalfHourlyCoverageStatsRow,
+        ) -> Value {
+            let avg_delay_minutes = if row.running_count > 0 {
+                row.delay_minutes_sum / row.running_count as f64
+            } else {
+                0.0
+            };
+            let rate = |numerator: i64| {
+                if row.total > 0 {
+                    numerator as f64 / row.total as f64
+                } else {
+                    0.0
+                }
+            };
+
+            serde_json::json!({
+                "halfHourStart": row.half_hour_start,
+                "resolvedWindows": row.resolved_windows,
+                "total": row.total,
+                "delayed": row.delayed,
+                "cancelled": row.cancelled,
+                "skipped": row.skipped,
+                "avgDelayMinutes": avg_delay_minutes,
+                "delayRate": rate(row.delayed),
+                "cancellationRate": rate(row.cancelled),
+                "skipRate": rate(row.skipped),
+            })
+        }
+    }
+
+    /// Every stats bucket serves what its `json!` renderer did, with and
+    /// without trains that ran.
+    #[test]
+    fn typed_stats_match_the_json_renderers() {
+        for (total, running_count) in [(0, 0), (12, 0), (12, 9)] {
+            let figures = (total, 3_i64, 1_i64, 2_i64, running_count, 31.5);
+            let daily = || queries::DailyStatsRow {
+                day: date("2026-09-27"),
+                sample_cycles: 40,
+                total: figures.0,
+                delayed: figures.1,
+                cancelled: figures.2,
+                skipped: figures.3,
+                running_count: figures.4,
+                delay_minutes_sum: figures.5,
+            };
+            assert_eq!(
+                v(daily_stats_to_json(daily())),
+                legacy::daily_stats_to_json(daily())
+            );
+            let half = || queries::HalfHourlyStatsRow {
+                half_hour_start: utc("2026-09-27T08:30:00Z"),
+                sample_cycles: 4,
+                total: figures.0,
+                delayed: figures.1,
+                cancelled: figures.2,
+                skipped: figures.3,
+                running_count: figures.4,
+                delay_minutes_sum: figures.5,
+            };
+            assert_eq!(
+                v(half_hourly_stats_to_json(half())),
+                legacy::half_hourly_stats_to_json(half())
+            );
+            assert_eq!(
+                v(sub_daily_stats_to_json(half())),
+                legacy::sub_daily_stats_to_json(half())
+            );
+            let coverage = || queries::DailyCoverageStatsRow {
+                day: date("2026-09-27"),
+                resolved_windows: 7,
+                total: figures.0,
+                delayed: figures.1,
+                cancelled: figures.2,
+                skipped: figures.3,
+                running_count: figures.4,
+                delay_minutes_sum: figures.5,
+            };
+            assert_eq!(
+                v(daily_coverage_stats_to_json(coverage())),
+                legacy::daily_coverage_stats_to_json(coverage())
+            );
+            let half_coverage = || queries::HalfHourlyCoverageStatsRow {
+                half_hour_start: utc("2026-09-27T08:30:00Z"),
+                resolved_windows: 7,
+                total: figures.0,
+                delayed: figures.1,
+                cancelled: figures.2,
+                skipped: figures.3,
+                running_count: figures.4,
+                delay_minutes_sum: figures.5,
+            };
+            assert_eq!(
+                v(half_hourly_coverage_stats_to_json(half_coverage())),
+                legacy::half_hourly_coverage_stats_to_json(half_coverage())
+            );
+        }
     }
 
     /// API-10: a reversed range is a 400.
@@ -1155,7 +1498,10 @@ mod tests {
             summary: "Industrial action to affect TransPennine Express services".to_string(),
             incident_id: "1D3D4694".to_string(),
         }];
-        let json = rows_to_json(vec![with_note, row("tpe-south", vec![])], false);
+        let json = v(rows_to_json(
+            vec![with_note, row("tpe-south", vec![])],
+            false,
+        ));
         assert_eq!(
             json[0]["upcoming"],
             serde_json::json!([{
@@ -1239,7 +1585,7 @@ mod tests {
     #[test]
     fn daily_stats_to_json_computes_rates_for_a_normal_row() {
         let row = daily_stats_row(100, 10, 5, 2, 95, 190.0);
-        let json = daily_stats_to_json(row);
+        let json = v(daily_stats_to_json(row));
 
         assert_eq!(json["day"], serde_json::json!("2026-08-15"));
         assert_eq!(json["sampleCycles"], serde_json::json!(12));
@@ -1260,7 +1606,7 @@ mod tests {
     )]
     fn daily_stats_to_json_zero_total_and_running_count_never_produces_nan_or_infinity() {
         let row = daily_stats_row(0, 0, 0, 0, 0, 0.0);
-        let json = daily_stats_to_json(row);
+        let json = v(daily_stats_to_json(row));
 
         for field in [
             "avgDelayMinutes",
@@ -1409,7 +1755,7 @@ mod tests {
     #[test]
     fn half_hourly_stats_to_json_computes_rates_for_a_normal_row() {
         let row = half_hourly_stats_row(100, 10, 5, 2, 95, 190.0);
-        let json = half_hourly_stats_to_json(row);
+        let json = v(half_hourly_stats_to_json(row));
 
         assert_eq!(
             json["halfHourStart"],
@@ -1422,7 +1768,7 @@ mod tests {
     #[test]
     fn half_hourly_stats_to_json_zero_total_never_produces_nan_or_infinity() {
         let row = half_hourly_stats_row(0, 0, 0, 0, 0, 0.0);
-        let json = half_hourly_stats_to_json(row);
+        let json = v(half_hourly_stats_to_json(row));
         for field in [
             "avgDelayMinutes",
             "delayRate",
@@ -1515,7 +1861,7 @@ mod tests {
     #[test]
     fn sub_daily_stats_to_json_uses_bucket_start_not_half_hour_start() {
         let row = half_hourly_stats_row(100, 10, 5, 2, 95, 190.0);
-        let json = sub_daily_stats_to_json(row);
+        let json = v(sub_daily_stats_to_json(row));
 
         assert_eq!(
             json["bucketStart"],
@@ -1532,7 +1878,7 @@ mod tests {
     #[test]
     fn sub_daily_stats_to_json_zero_total_never_produces_nan_or_infinity() {
         let row = half_hourly_stats_row(0, 0, 0, 0, 0, 0.0);
-        let json = sub_daily_stats_to_json(row);
+        let json = v(sub_daily_stats_to_json(row));
         for field in [
             "avgDelayMinutes",
             "delayRate",
@@ -1653,7 +1999,7 @@ mod tests {
     #[test]
     fn daily_coverage_stats_to_json_computes_rates_for_a_normal_row() {
         let row = daily_coverage_stats_row(100, 10, 5, 2, 95, 190.0);
-        let json = daily_coverage_stats_to_json(row);
+        let json = v(daily_coverage_stats_to_json(row));
 
         assert_eq!(json["day"], serde_json::json!("2026-09-03"));
         assert_eq!(json["resolvedWindows"], serde_json::json!(12));
@@ -1674,7 +2020,7 @@ mod tests {
     )]
     fn daily_coverage_stats_to_json_zero_total_and_running_count_never_produces_nan_or_infinity() {
         let row = daily_coverage_stats_row(0, 0, 0, 0, 0, 0.0);
-        let json = daily_coverage_stats_to_json(row);
+        let json = v(daily_coverage_stats_to_json(row));
 
         for field in [
             "avgDelayMinutes",
@@ -1716,7 +2062,7 @@ mod tests {
     #[test]
     fn half_hourly_coverage_stats_to_json_computes_rates_for_a_normal_row() {
         let row = half_hourly_coverage_stats_row(100, 10, 5, 2, 95, 190.0);
-        let json = half_hourly_coverage_stats_to_json(row);
+        let json = v(half_hourly_coverage_stats_to_json(row));
 
         assert_eq!(
             json["halfHourStart"],
@@ -1730,7 +2076,7 @@ mod tests {
     #[test]
     fn half_hourly_coverage_stats_to_json_zero_total_never_produces_nan_or_infinity() {
         let row = half_hourly_coverage_stats_row(0, 0, 0, 0, 0, 0.0);
-        let json = half_hourly_coverage_stats_to_json(row);
+        let json = v(half_hourly_coverage_stats_to_json(row));
         for field in [
             "avgDelayMinutes",
             "delayRate",
