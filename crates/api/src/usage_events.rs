@@ -216,6 +216,8 @@ pub const ROUTE_TEMPLATES: &[&str] = &[
     "/connect-claude/authorize",
     "/contact",
     "/cookies",
+    "/developers",
+    "/developers/api",
     "/groups",
     "/groups/[id]",
     "/groups/join/[token]",

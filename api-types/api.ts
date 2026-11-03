@@ -5390,6 +5390,8 @@ export const USAGE_EVENTS = {
     "/connect-claude/authorize",
     "/contact",
     "/cookies",
+    "/developers",
+    "/developers/api",
     "/groups",
     "/groups/[id]",
     "/groups/join/[token]",
