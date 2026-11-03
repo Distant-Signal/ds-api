@@ -567,71 +567,26 @@ impl BucketArgs {
     }
 }
 
-/// Every routing/CORPUS/URL env var this `Config` declares must be set on
-/// the `ingest` container in
-/// `charts/distant-signal/templates/schedulefeed-deployment.yaml` -- the
-/// same declared-but-unwired guard as
-/// `crates/schedule-reference/src/config.rs`'s own `chart_env_wiring_tests`.
-/// An unwired `CORPUS_*`/`CIF_*` means the chart value an operator sets
-/// does nothing.
+/// The env names this `Config` declares. The chart side (every one set on
+/// the `ingest` container, nothing stale) is
+/// `scripts/check-config-defaults-chart.py`, against
+/// `schedule-ingest --print-config-defaults`.
 #[cfg(test)]
-mod chart_env_wiring_tests {
+mod env_contract_tests {
     use clap::CommandFactory;
 
     use super::Config;
 
-    /// The `ingest` container's slice of the schedulefeed Deployment: from
-    /// its `- name: ingest` line to the next container (`reference`), so a
-    /// var set only on a sibling container cannot satisfy the check, plus
-    /// the `distant-signal.scheduleFeedIngestEnv` define its env is
-    /// rendered from (through `distant-signal.mergeEnv`, so
-    /// `scheduleFeed.ingest.extraEnv` can override it).
-    fn ingest_container_block() -> String {
-        const DEFINE: &str = "{{- define \"distant-signal.scheduleFeedIngestEnv\" }}";
-        let chart = common::manifest_dir!()
-            .join("../../charts/distant-signal/templates/schedulefeed-deployment.yaml");
-        let rendered = std::fs::read_to_string(&chart)
-            .unwrap_or_else(|err| panic!("read {}: {err}", chart.display()));
-        let start = rendered
-            .find("- name: ingest\n")
-            .expect("the schedulefeed Deployment must still declare a container named `ingest`");
-        let end = rendered[start..]
-            .find("- name: reference\n")
-            .map_or(rendered.len(), |offset| start + offset);
-        let mut block = rendered[start..end].to_string();
-        let at = rendered
-            .find(DEFINE)
-            .expect("the ingest env define must exist");
-        let rest = &rendered[at + DEFINE.len()..];
-        let end_def = rest
-            .find("{{- define ")
-            .map_or(rendered.len(), |offset| at + DEFINE.len() + offset);
-        block.push_str(&rendered[at..end_def]);
-        block
-    }
-
+    /// The source and bucket settings exist, `DATABASE_URL` is required (the
+    /// chart sets the `schedule_ingest` role's), and `INGEST_SINK` stays
+    /// removed (release D).
     #[test]
-    fn every_routing_corpus_and_url_env_var_is_set_on_the_charts_ingest_container() {
-        let block = ingest_container_block();
+    fn the_source_settings_and_the_db_sink_env_are_declared() {
         let command = Config::command();
-        let declared: Vec<String> = command
+        let declared: Vec<&str> = command
             .get_arguments()
             .filter_map(|arg| arg.get_env().and_then(|env| env.to_str()))
-            // DATABASE_URL: from the shared databaseEnvFor helper
-            // (checked below).
-            .filter(|env| *env != "DATABASE_URL")
-            .filter(|env| {
-                ["CORPUS_", "CIF_", "SFTP_SOURCE_", "BUCKET_", "SOURCE_", "DISAGREEMENT_", "GOOGLE_"]
-                    .iter()
-                    .any(|prefix| env.starts_with(prefix))
-                    || env.ends_with("_URL")
-            })
-            .map(str::to_string)
             .collect();
-        assert!(
-            declared.len() >= 35,
-            "sanity check: expected the CIF_*, CORPUS_*, source, BUCKET_*, GOOGLE_* and *_URL env vars; got {declared:?}"
-        );
         for env in [
             "SFTP_SOURCE_ENABLED",
             "BUCKET_SOURCE_ENABLED",
@@ -643,64 +598,21 @@ mod chart_env_wiring_tests {
             "BUCKET_EXPECTED_KEYS",
             "BUCKET_MAX_BACKOFF_SECS",
         ] {
-            assert!(declared.iter().any(|d| d == env), "{env} is declared");
-        }
-        let missing: Vec<&String> = declared
-            .iter()
-            .filter(|env| !block.contains(&format!("- name: {env}\n")))
-            .collect();
-        assert!(
-            missing.is_empty(),
-            "declared by crates/schedule-ingest/src/config.rs but not set on the `ingest` \
-             container in charts/distant-signal/templates/schedulefeed-deployment.yaml: \
-             {missing:?}"
-        );
-    }
-
-    /// The chart sets the `schedule_ingest` role's `DATABASE_URL` on this
-    /// container, and no longer the api URLs or the internal OAuth settings
-    /// (release B) or `INGEST_SINK` (release D, which also removed the
-    /// variable from this crate).
-    #[test]
-    fn the_db_sink_env_is_set_on_the_charts_ingest_container() {
-        let block = ingest_container_block();
-        for gone in [
-            "INGEST_SINK",
-            "API_INGEST_URL",
-            "CORPUS_API_URL",
-            "INTERNAL_OAUTH_TOKEN_URL",
-            "INTERNAL_OAUTH_USERNAME",
-            "INTERNAL_OAUTH_PASSWORD",
-        ] {
-            assert!(
-                !block.contains(&format!("- name: {gone}\n")),
-                "{gone} is no longer rendered"
-            );
+            assert!(declared.contains(&env), "{env} is declared");
         }
         assert!(
-            block.contains(
-                "include \"distant-signal.databaseEnvFor\" (dict \"root\" . \"service\" \"schedule_ingest\")"
-            ),
-            "DATABASE_URL from databaseEnvFor, as the schedule_ingest role"
-        );
-        let command = Config::command();
-        let arg = |id: &str| {
-            command
-                .get_arguments()
-                .find(|arg| arg.get_id() == id)
-                .unwrap_or_else(|| panic!("no argument {id}"))
-        };
-        assert!(
-            command
-                .get_arguments()
-                .all(|arg| arg.get_env().is_none_or(|env| env != "INGEST_SINK")),
+            !declared.contains(&"INGEST_SINK"),
             "INGEST_SINK was removed in release D"
         );
+        let database_url = command
+            .get_arguments()
+            .find(|arg| arg.get_id() == "database_url")
+            .expect("database_url is declared");
         assert_eq!(
-            arg("database_url").get_env().and_then(|env| env.to_str()),
+            database_url.get_env().and_then(|env| env.to_str()),
             Some("DATABASE_URL")
         );
-        assert!(arg("database_url").is_required_set());
+        assert!(database_url.is_required_set());
     }
 }
 

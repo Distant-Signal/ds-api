@@ -40,7 +40,7 @@ use crate::ScheduleFeedIngestRequest;
 const APPLICATION_NAME: &str = "distant-signal-schedule-ingest";
 /// Spec §6.6: pool 1, role limit 2. Scans are sequential: the feed marker
 /// and the CORPUS load never run at once.
-const DEFAULT_MAX_CONNECTIONS: u32 = 1;
+pub(crate) const DEFAULT_MAX_CONNECTIONS: u32 = 1;
 
 /// Why a write failed, as far as retrying it is concerned.
 #[derive(Debug)]

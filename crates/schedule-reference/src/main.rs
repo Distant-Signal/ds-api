@@ -92,8 +92,24 @@ fn poll_interval(poll_interval_secs: u64) -> tokio::time::Interval {
     interval
 }
 
+/// What `--print-config-defaults` prints (`ds_runtime::service_args`).
+fn config_defaults() -> ds_runtime::service_args::ConfigDefaults {
+    ds_runtime::service_args::ConfigDefaults::for_config::<Config>("schedule-reference")
+        .postgres_pool(config::DB_POOL_SIZE)
+        .env(
+            ds_store::corpus::FALLBACK_ENV,
+            Some(
+                &ds_store::corpus::parse_fallback_flag(None)
+                    .unwrap_or_default()
+                    .to_string(),
+            ),
+        )
+        .db_role(ds_store::schema::DbRole::ScheduleReference.key())
+}
+
 #[tokio::main]
 async fn main() -> std::process::ExitCode {
+    ds_runtime::service_args::exit_if_print_config_defaults(config_defaults);
     ds_runtime::logging::exit_code(run().await)
 }
 
