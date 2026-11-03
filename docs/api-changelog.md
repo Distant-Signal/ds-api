@@ -3,6 +3,26 @@
 Changes to the Distant Signal (DS) HTTP API that a client such as DS-MCP
 needs to know about. Newest first. Field names are as served (camelCase).
 
+## 2026-11-03: `attribution` on the TfL-shaped routes, served publicly
+
+Additive. Each element of the bare-array answers of `GET
+/Line/Mode/{modes}/Status`, `/Line/{ids}/Status`,
+`/StopPoint/{crs}/Disruption`, `/Line/{id}/Status/{from}/to/{to}` and
+the six `/Line/{id}/Stats/...` routes gains `attribution`, an array of
+`{licence, text}` (the transit networks' attribution shape): the credits
+its data needs. A National Rail line's status carries "powered by
+NationalRail (Train Information Services Ltd)" and the Knowledgebase
+incidents credit (Rail Delivery Group), its statistics the first only;
+a `tfl-` line carries "Powered by TfL Open Data", which a National Rail
+line with a `tflStatus` overlay also gains. `licence` is
+`LicenseRef-RDM-Data-Sharing-Agreement` or
+`LicenseRef-TfL-Transport-Data-Service`.
+
+The site now serves these routes anonymously at the same paths
+(`https://ds.cursed.solutions/Line/Mode/national-rail/Status`), cached,
+with no cookie forwarded; see `docs/public-api.md`. The api routes
+themselves are unchanged otherwise. DS-MCP: no change needed.
+
 ## 2026-11-02: `GET /public/version`
 
 New, unauthenticated: the images this deployment runs and the source each

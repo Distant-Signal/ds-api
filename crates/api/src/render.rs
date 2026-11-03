@@ -10,10 +10,83 @@
 use std::collections::HashMap;
 
 use chrono::{DateTime, Utc};
+use common::transit::TransitAttribution;
 use common::{LineStatus, LineStatusReport, Severity};
 use serde_json::{Value, json};
 
 use crate::data::queries;
+
+/// SPDX-style `LicenseRef` for the Rail Data Marketplace data sharing
+/// agreements (Darwin and the Knowledgebase feeds), an adapted Open
+/// Government Licence v3.0; `/attribution` has the details.
+pub const RDM_LICENCE: &str = "LicenseRef-RDM-Data-Sharing-Agreement";
+
+/// SPDX-style `LicenseRef` for `TfL`'s transport data service terms, a
+/// modified Open Government Licence v2.0.
+pub const TFL_LICENCE: &str = "LicenseRef-TfL-Transport-Data-Service";
+
+/// The Darwin and Knowledgebase Stations credits, joined as the site
+/// footer joins them (`frontend/components/OpenDataAttribution.tsx` has
+/// why): both prescribed strings stay intact. Do not paraphrase.
+pub const NATIONAL_RAIL_CREDIT: &str = "powered by NationalRail (Train Information Services Ltd)";
+
+/// Knowledgebase incidents carry no prescribed wording; their publisher is
+/// credited by name, as on `/attribution`.
+pub const KNOWLEDGEBASE_INCIDENTS_CREDIT: &str =
+    "Incidents from the Knowledgebase, published by Rail Delivery Group";
+
+/// `TfL`'s licence makes this exact wording a condition of use.
+pub const TFL_CREDIT: &str = "Powered by TfL Open Data";
+
+/// Which data a response element is built from, for its `attribution`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AttributionScope {
+    /// A line's status: incidents and live samples.
+    Status,
+    /// A line's sample statistics: live samples only.
+    Stats,
+}
+
+fn credit(licence: &str, text: &str) -> TransitAttribution {
+    TransitAttribution {
+        licence: licence.to_string(),
+        text: text.to_string(),
+    }
+}
+
+/// The credits a line's data needs, by where the line comes from: a
+/// `TfL`-sourced line (`common::TFL_LINE_ID_PREFIX`) gets `TfL`'s; every
+/// other line these routes serve (catalogue and custom lines) is built
+/// from Darwin samples, plus Knowledgebase incidents for a status. Transit
+/// lines never reach these routes (`source <> 'transit'`).
+pub fn line_attribution(line_id: &str, scope: AttributionScope) -> Vec<TransitAttribution> {
+    if line_id.starts_with(common::TFL_LINE_ID_PREFIX) {
+        return vec![credit(TFL_LICENCE, TFL_CREDIT)];
+    }
+    let mut credits = vec![credit(RDM_LICENCE, NATIONAL_RAIL_CREDIT)];
+    if scope == AttributionScope::Status {
+        credits.push(credit(RDM_LICENCE, KNOWLEDGEBASE_INCIDENTS_CREDIT));
+    }
+    credits
+}
+
+/// `attribution` on each element of the TfL-shaped routes' bare-array
+/// responses (a top-level field would break `TfL` clients): an array of
+/// `{licence, text}`, the transit networks' `TransitAttribution` shape.
+pub fn attribution_json(credits: &[TransitAttribution]) -> Value {
+    Value::Array(
+        credits
+            .iter()
+            .map(|c| json!({ "licence": c.licence, "text": c.text }))
+            .collect(),
+    )
+}
+
+/// Adds `attribution` for `line_id` to one stats row.
+pub fn with_stats_attribution(mut row: Value, line_id: &str) -> Value {
+    row["attribution"] = attribution_json(&line_attribution(line_id, AttributionScope::Stats));
+    row
+}
 
 pub fn to_tfl_shape(report: &LineStatusReport, computed_at: DateTime<Utc>, detail: bool) -> Value {
     json!({
@@ -24,6 +97,7 @@ pub fn to_tfl_shape(report: &LineStatusReport, computed_at: DateTime<Utc>, detai
         "operators": report.operators,
         "computedAt": computed_at.to_rfc3339(),
         "lineStatuses": report.statuses.iter().map(|s| status_to_json(s, detail)).collect::<Vec<_>>(),
+        "attribution": attribution_json(&line_attribution(&report.id, AttributionScope::Status)),
     })
 }
 
@@ -45,6 +119,10 @@ pub fn to_tfl_shape_with_overlay(
     if let Some(statuses) = tfl_overlay {
         out["tflStatus"] =
             Value::Array(statuses.iter().map(|s| status_to_json(s, detail)).collect());
+        let mut credits = line_attribution(&report.id, AttributionScope::Status);
+        // The overlay is the `TfL` counterpart's own status.
+        credits.push(credit(TFL_LICENCE, TFL_CREDIT));
+        out["attribution"] = attribution_json(&credits);
     }
     out
 }
@@ -957,6 +1035,86 @@ mod tests {
         let overlay = vec![overlay_status("Some TfL text")];
         let with = to_tfl_shape_with_overlay(&report, sample_computed_at(), false, Some(&overlay));
         assert_eq!(without["lineStatuses"], with["lineStatuses"]);
+    }
+
+    fn credit_texts(json: &Value) -> Vec<(String, String)> {
+        json.as_array()
+            .expect("attribution is an array")
+            .iter()
+            .map(|c| {
+                (
+                    c["licence"].as_str().unwrap().to_string(),
+                    c["text"].as_str().unwrap().to_string(),
+                )
+            })
+            .collect()
+    }
+
+    #[test]
+    fn national_rail_status_credits_darwin_and_knowledgebase() {
+        let json = to_tfl_shape(&sample_report(None), sample_computed_at(), false);
+        assert_eq!(
+            credit_texts(&json["attribution"]),
+            vec![
+                (RDM_LICENCE.to_string(), NATIONAL_RAIL_CREDIT.to_string()),
+                (
+                    RDM_LICENCE.to_string(),
+                    KNOWLEDGEBASE_INCIDENTS_CREDIT.to_string()
+                ),
+            ]
+        );
+        // The prescribed strings, verbatim.
+        assert_eq!(
+            NATIONAL_RAIL_CREDIT,
+            "powered by NationalRail (Train Information Services Ltd)"
+        );
+        assert!(KNOWLEDGEBASE_INCIDENTS_CREDIT.contains("Rail Delivery Group"));
+    }
+
+    #[test]
+    fn tfl_line_status_credits_tfl_only() {
+        let mut report = sample_report(None);
+        report.id = "tfl-victoria".to_string();
+        report.mode_name = "tube".to_string();
+        let json = to_tfl_shape(&report, sample_computed_at(), false);
+        assert_eq!(
+            credit_texts(&json["attribution"]),
+            vec![(
+                TFL_LICENCE.to_string(),
+                "Powered by TfL Open Data".to_string()
+            )]
+        );
+    }
+
+    #[test]
+    fn overlay_adds_the_tfl_credit() {
+        let report = sample_report(None);
+        let overlay = vec![overlay_status("Some TfL text")];
+        let json = to_tfl_shape_with_overlay(&report, sample_computed_at(), false, Some(&overlay));
+        let credits = credit_texts(&json["attribution"]);
+        assert_eq!(credits.len(), 3);
+        assert_eq!(credits[0].1, NATIONAL_RAIL_CREDIT);
+        assert_eq!(
+            credits[2],
+            (TFL_LICENCE.to_string(), TFL_CREDIT.to_string())
+        );
+        let without = to_tfl_shape_with_overlay(&report, sample_computed_at(), false, None);
+        assert_eq!(credit_texts(&without["attribution"]).len(), 2);
+    }
+
+    #[test]
+    fn stats_rows_credit_darwin_only_for_national_rail() {
+        let row = with_stats_attribution(json!({ "day": "2026-07-15" }), "wcml");
+        assert_eq!(row["day"], "2026-07-15");
+        assert_eq!(
+            credit_texts(&row["attribution"]),
+            vec![(RDM_LICENCE.to_string(), NATIONAL_RAIL_CREDIT.to_string())]
+        );
+        let tfl = with_stats_attribution(json!({}), "tfl-elizabeth");
+        assert_eq!(
+            credit_texts(&tfl["attribution"]),
+            vec![(TFL_LICENCE.to_string(), TFL_CREDIT.to_string())]
+        );
     }
 
     #[test]

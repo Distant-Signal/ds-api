@@ -31,7 +31,7 @@ use crate::app::{App, Router};
 use crate::auth::OptionalAuthenticatedUser;
 use crate::data::custom_lines;
 use crate::data::queries;
-use crate::render::to_tfl_shape;
+use crate::render::{to_tfl_shape, with_stats_attribution};
 
 pub fn router() -> Router {
     AxumRouter::new()
@@ -542,7 +542,11 @@ async fn get_line_daily_stats(
         .await
         .map_err(internal_error)?;
 
-    Ok(Json(rows.into_iter().map(daily_stats_to_json).collect()))
+    Ok(Json(
+        rows.into_iter()
+            .map(|row| with_stats_attribution(daily_stats_to_json(row), &id))
+            .collect(),
+    ))
 }
 
 /// Half-hourly sibling of `daily_stats_to_json` -- identical
@@ -600,7 +604,9 @@ async fn get_line_half_hourly_stats(
         .map_err(internal_error)?;
 
     Ok(Json(
-        rows.into_iter().map(half_hourly_stats_to_json).collect(),
+        rows.into_iter()
+            .map(|row| with_stats_attribution(half_hourly_stats_to_json(row), &id))
+            .collect(),
     ))
 }
 
@@ -661,7 +667,9 @@ async fn get_line_hourly_stats(
         .await
         .map_err(internal_error)?;
     Ok(Json(
-        rows.into_iter().map(sub_daily_stats_to_json).collect(),
+        rows.into_iter()
+            .map(|row| with_stats_attribution(sub_daily_stats_to_json(row), &id))
+            .collect(),
     ))
 }
 
@@ -681,7 +689,9 @@ async fn get_line_six_hourly_stats(
         .await
         .map_err(internal_error)?;
     Ok(Json(
-        rows.into_iter().map(sub_daily_stats_to_json).collect(),
+        rows.into_iter()
+            .map(|row| with_stats_attribution(sub_daily_stats_to_json(row), &id))
+            .collect(),
     ))
 }
 
@@ -744,7 +754,9 @@ async fn get_line_daily_coverage_stats(
         .map_err(internal_error)?;
 
     Ok(Json(
-        rows.into_iter().map(daily_coverage_stats_to_json).collect(),
+        rows.into_iter()
+            .map(|row| with_stats_attribution(daily_coverage_stats_to_json(row), &id))
+            .collect(),
     ))
 }
 
@@ -802,7 +814,7 @@ async fn get_line_half_hourly_coverage_stats(
 
     Ok(Json(
         rows.into_iter()
-            .map(half_hourly_coverage_stats_to_json)
+            .map(|row| with_stats_attribution(half_hourly_coverage_stats_to_json(row), &id))
             .collect(),
     ))
 }
