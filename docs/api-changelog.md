@@ -3,6 +3,24 @@
 Changes to the Distant Signal (DS) HTTP API that a client such as DS-MCP
 needs to know about. Newest first. Field names are as served (camelCase).
 
+## 2026-11-03: Atom feeds of line status and incidents
+
+New, unauthenticated, `application/atom+xml`: `GET /public/feeds/network`
+(every public National Rail and TfL line), `GET /public/feeds/lines/{id}`
+(a catalogue or TfL line; `404` for a custom, transit or unknown id) and
+`GET /public/feeds/operators/{code}` (an operator's lines as
+`GET /public/operators/{code}` rolls them up, the synthetic `TfL` included;
+`404` for an unknown code). The site serves them at `/api/feeds/...`. Each
+entry is a change of a line's severity rank or a Knowledgebase incident,
+the newest 50 from the last 30 days, with stable `tag:` ids; every feed
+and entry carries its data credits in `<rights>`. Responses carry
+`Cache-Control: public, max-age=300, s-maxage=300,
+stale-while-revalidate=300` and an `ETag`; a matching
+`If-None-Match` gets a `304`. Rate limited per client IP in the
+`/Train/by-uid` budget. The frontend proxy now relays `If-None-Match` and
+`ETag`, and passes a `304` through instead of treating it as a redirect.
+See docs/feeds.md. DS-MCP: no change needed.
+
 ## 2026-11-03: `attribution` on the TfL-shaped routes, served publicly
 
 Additive. Each element of the bare-array answers of `GET

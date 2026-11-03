@@ -58,6 +58,14 @@ pub(crate) async fn fixture_trains_cleanup(pool: &PgPool) -> FixtureCleanup {
 /// placeholders as `routes::departures`' test module, which predates this
 /// helper).
 pub(crate) fn inert_app(pool: PgPool) -> crate::app::App {
+    inert_app_with_lines(pool, Vec::new())
+}
+
+/// [`inert_app`] with `lines` as the line catalogue.
+pub(crate) fn inert_app_with_lines(
+    pool: PgPool,
+    lines: Vec<common::LineDefinition>,
+) -> crate::app::App {
     use crate::auth::oidc::{OidcClient, OidcConfig};
     use crate::data::config::{LineCatalogue, ServiceArguments};
 
@@ -85,7 +93,7 @@ pub(crate) fn inert_app(pool: PgPool) -> crate::app::App {
         metrics_enabled: false,
         metrics_port: 9091,
         defaults_file: None,
-        lines: LineCatalogue(vec![]),
+        lines: LineCatalogue(lines),
         vapid_public_key: "test-vapid-public-key".to_string(),
         full_coverage_enabled_default: false,
         schedule_match_interval_secs: 300,

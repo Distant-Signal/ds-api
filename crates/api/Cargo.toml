@@ -90,6 +90,8 @@ zip = { version = "9", default-features = false, features = ["deflate"] }
 # `ds_store::sweeps::reconciliation::enrichment_candidate_ids_for_tests`.
 ds-store = { path = "../ds-store", features = ["test-support"] }
 wiremock = "0.6"
+# The Atom feed tests parse the documents (`routes::feeds`).
+quick-xml = "0.41.0"
 metrics-exporter-prometheus = { version = "0.18", default-features = false }
 
 [lints]

@@ -60,6 +60,12 @@ the `text` with the data. `licence` is an SPDX-style id:
 Every response also carries `Link: </attribution>; rel="license"`,
 the site's page of data sources and licences.
 
+## Feeds
+
+Atom feeds of line status changes and incidents, per line, per operator
+and for the whole network, are at `/api/feeds/...`, with the same credits
+in `<rights>`: see `docs/feeds.md`.
+
 ## Example
 
 ```sh
