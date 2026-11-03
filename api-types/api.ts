@@ -5200,3 +5200,235 @@ how: WaypointHow, };
  * of the train day.
  */
 export type WindowBound = { time: string, dayOffset: number, };
+
+/**
+ * The data sources a personal-token response credits, in the
+ * website's own words (personal API tokens spec §5.2).
+ */
+export const ATTRIBUTION_SOURCES = {
+  "nationalRail": {
+    "name": "National Rail",
+    "notice": "powered by NationalRail (Train Information Services Ltd)",
+    "url": "https://www.nationalrail.co.uk"
+  },
+  "networkRail": {
+    "name": "Network Rail",
+    "notice": "Contains Information of Network Rail Infrastructure Limited licensed under the following licence",
+    "url": "https://www.networkrail.co.uk/who-we-are/transparency-and-ethics/transparency/open-data-feeds/network-rail-infrastructure-limited-data-feeds-licence/"
+  },
+  "railDeliveryGroup": {
+    "name": "Rail Delivery Group",
+    "notice": "Incidents from the Knowledgebase, published by Rail Delivery Group"
+  },
+  "rsp": {
+    "name": "RSP",
+    "notice": "Source: RSP"
+  },
+  "tfl": {
+    "name": "Transport for London",
+    "notice": "Powered by TfL Open Data",
+    "url": "https://tfl.gov.uk/corporate/terms-and-conditions/transport-data-service"
+  }
+} as const;
+
+/**
+ * The non-affiliation statement every personal-token response carries.
+ */
+export const NON_AFFILIATION = "Distant Signal is an independent, unofficial service and is not affiliated with or endorsed by National Rail, Network Rail, Rail Delivery Group, TfL, the National Transport Authority, Iarnród Éireann, Translink or any train operator." as const;
+
+/**
+ * What `POST /public/events` accepts: anything else is dropped.
+ */
+export const USAGE_EVENTS = {
+  "apiErrorStatuses": [
+    "4xx",
+    "5xx",
+    "network"
+  ],
+  "displayModes": [
+    "standalone",
+    "browser"
+  ],
+  "emptyStateKinds": [
+    "trains_station_board_none",
+    "trains_between_none",
+    "trains_headcode_none",
+    "station_search_no_results",
+    "departures_none",
+    "journeys_none",
+    "groups_none",
+    "line_trains_none"
+  ],
+  "events": [
+    "page_view",
+    "display_mode",
+    "feature",
+    "empty_state",
+    "api_error",
+    "error_boundary",
+    "offline_shown"
+  ],
+  "featureSteps": {
+    "chat": [
+      "opened",
+      "message_sent"
+    ],
+    "compare_options": [
+      "searched",
+      "alternative_selected",
+      "alternative_saved",
+      "operator_option_selected"
+    ],
+    "connected_app": [
+      "enabled",
+      "revoked"
+    ],
+    "group_join": [
+      "joined",
+      "failed"
+    ],
+    "journey_start": [
+      "plan",
+      "known",
+      "untracked"
+    ],
+    "leg_stops": [
+      "earlier_expanded",
+      "later_expanded"
+    ],
+    "notifications": [
+      "prompted",
+      "granted",
+      "denied",
+      "subscribed",
+      "failed"
+    ],
+    "plan": [
+      "searched",
+      "results",
+      "no_route",
+      "failed",
+      "saved_journey"
+    ],
+    "plan_filters": [
+      "operator_only",
+      "operator_avoid",
+      "operator_prefer",
+      "operator_add_underground",
+      "journey_operator_filter_changed",
+      "journey_operator_filter_removed"
+    ],
+    "share_link": [
+      "created",
+      "copied"
+    ],
+    "shared_journeys": [
+      "shown",
+      "opened"
+    ],
+    "stop_finder": [
+      "stop_opened",
+      "all_matches_opened"
+    ],
+    "track_train": [
+      "submitted",
+      "succeeded",
+      "failed"
+    ],
+    "trains": [
+      "station_departures",
+      "station_arrivals",
+      "between",
+      "headcode",
+      "uid",
+      "results",
+      "no_results",
+      "failed"
+    ],
+    "trains_filters": [
+      "calls_at",
+      "via",
+      "avoid",
+      "avoid_stop",
+      "previously_calls_at",
+      "previously_stops_at",
+      "origin",
+      "terminates_at"
+    ]
+  },
+  "features": [
+    "track_train",
+    "plan",
+    "share_link",
+    "notifications",
+    "group_join",
+    "chat",
+    "connected_app",
+    "trains",
+    "trains_filters",
+    "plan_filters",
+    "compare_options",
+    "shared_journeys",
+    "leg_stops",
+    "journey_start",
+    "stop_finder"
+  ],
+  "routeTemplates": [
+    "/",
+    "/_not-found",
+    "/accessibility",
+    "/account",
+    "/account/connected-apps",
+    "/account/connected-apps/[client]",
+    "/account/deleted",
+    "/account/notifications",
+    "/account/preferences",
+    "/attribution",
+    "/chat",
+    "/chat/callback",
+    "/connect-claude",
+    "/connect-claude/authorize",
+    "/contact",
+    "/cookies",
+    "/groups",
+    "/groups/[id]",
+    "/groups/join/[token]",
+    "/groups/new",
+    "/incidents",
+    "/incidents/[id]",
+    "/journeys",
+    "/journeys/[id]",
+    "/journeys/shared/[token]",
+    "/journeys/templates",
+    "/journeys/templates/[id]",
+    "/lines",
+    "/lines/[id]",
+    "/lines/[id]/edit",
+    "/lines/[id]/history",
+    "/lines/[id]/timetable",
+    "/lines/new",
+    "/network/history",
+    "/offline",
+    "/operators",
+    "/operators/[code]/history",
+    "/plan",
+    "/privacy",
+    "/stations",
+    "/stations/[crs]",
+    "/status",
+    "/terms",
+    "/tfl/stops/[id]",
+    "/track",
+    "/track/mine/add-ticket",
+    "/train/[uid]/[date]",
+    "/train/by-id/[trackingId]",
+    "/trains",
+    "/transit",
+    "/transit/[network]",
+    "/transit/[network]/incidents/[id]",
+    "/transit/[network]/lines/[line]",
+    "/transit/[network]/lines/[line]/timetable",
+    "/transit/[network]/stops",
+    "/transit/[network]/stops/[stop]"
+  ]
+} as const;

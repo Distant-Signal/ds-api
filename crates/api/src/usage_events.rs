@@ -16,10 +16,10 @@
 //!   Mirrored into `distant_signal_api_usage_events_total{event,signed_in}`
 //!   and, for page views, `distant_signal_api_usage_page_views_total{route}`.
 //!
-//! The allowlist is mirrored by the web app in `frontend/lib/usageEvents.ts`;
-//! `tests::the_frontend_mirrors_the_allowlist` keeps the two in step, and
-//! `tests::route_templates_match_the_frontend_pages` keeps
-//! [`ROUTE_TEMPLATES`] in step with `frontend/app`'s pages.
+//! The allowlist is mirrored by the web app in `frontend/lib/usageEvents.ts`.
+//! `crate::api_types` exports it as `USAGE_EVENTS` in `api-types/api.ts`,
+//! and the web app's tests compare its copy (and, for
+//! [`ROUTE_TEMPLATES`], its pages) against that.
 
 use std::collections::BTreeMap;
 
@@ -380,7 +380,7 @@ pub const API_ERROR_STATUSES: &[&str] = &["4xx", "5xx", "network"];
 pub const DISPLAY_MODES: &[&str] = &["standalone", "browser"];
 
 /// Every feature named in [`FEATURE_STEPS`].
-const FEATURES: &[&str] = &[
+pub const FEATURES: &[&str] = &[
     "track_train",
     "plan",
     "share_link",
@@ -585,9 +585,6 @@ pub fn has_privacy_signal(headers: &axum::http::HeaderMap) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use std::collections::BTreeSet;
-    use std::path::{Path, PathBuf};
-
     use super::*;
 
     fn body(name: &str, route: &str, props: &[(&str, &str)]) -> EventBody {
@@ -746,77 +743,5 @@ mod tests {
             .filter(|line| !line.starts_with('#') && !line.is_empty())
             .count();
         assert!(series < 120, "{series} series");
-    }
-
-    fn repo_root() -> PathBuf {
-        common::manifest_dir!().join("../..")
-    }
-
-    /// Every `page.tsx` under `frontend/app` as a route template.
-    fn page_templates(dir: &Path, prefix: &str, out: &mut BTreeSet<String>) {
-        for entry in std::fs::read_dir(dir).unwrap() {
-            let entry = entry.unwrap();
-            let name = entry.file_name().to_string_lossy().into_owned();
-            if entry.file_type().unwrap().is_dir() {
-                if name == "api" {
-                    continue;
-                }
-                // A route group, `(home)`, adds no segment.
-                let next = if name.starts_with('(') {
-                    prefix.to_string()
-                } else {
-                    format!("{prefix}/{name}")
-                };
-                page_templates(&entry.path(), &next, out);
-            } else if name == "page.tsx" {
-                out.insert(if prefix.is_empty() {
-                    "/".to_string()
-                } else {
-                    prefix.to_string()
-                });
-            }
-        }
-    }
-
-    #[test]
-    fn route_templates_match_the_frontend_pages() {
-        let app = repo_root().join("frontend/app");
-        if !app.is_dir() {
-            // A crate-only checkout (the image build): nothing to compare.
-            return;
-        }
-        let mut pages = BTreeSet::new();
-        page_templates(&app, "", &mut pages);
-        pages.insert("/offline".to_string());
-        pages.insert("/_not-found".to_string());
-        let ours: BTreeSet<String> = ROUTE_TEMPLATES.iter().map(|r| (*r).to_string()).collect();
-        assert_eq!(
-            ours, pages,
-            "ROUTE_TEMPLATES must list exactly the web app's pages"
-        );
-    }
-
-    #[test]
-    fn the_frontend_mirrors_the_allowlist() {
-        let path = repo_root().join("frontend/lib/usageEvents.ts");
-        let Ok(source) = std::fs::read_to_string(&path) else {
-            return;
-        };
-        let mut expected: Vec<&str> = Vec::new();
-        expected.extend(ROUTE_TEMPLATES);
-        expected.extend(EVENTS.iter().map(|spec| spec.name));
-        expected.extend(FEATURES);
-        for (_, steps) in FEATURE_STEPS {
-            expected.extend(*steps);
-        }
-        expected.extend(EMPTY_STATE_KINDS);
-        expected.extend(API_ERROR_STATUSES);
-        expected.extend(DISPLAY_MODES);
-        for value in expected {
-            assert!(
-                source.contains(&format!("'{value}'")),
-                "frontend/lib/usageEvents.ts does not name '{value}'"
-            );
-        }
     }
 }
