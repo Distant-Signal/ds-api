@@ -37,13 +37,7 @@ pub fn router() -> Router {
 /// can never be a stop id (`is_stop_id`) and `/tfl/stops/{id}` never sees it.
 async fn list_stop_ids(
     State(app): State<App>,
-) -> Result<
-    (
-        [(header::HeaderName, &'static str); 1],
-        Json<serde_json::Value>,
-    ),
-    (StatusCode, String),
-> {
+) -> Result<([(header::HeaderName, &'static str); 1], Json<TflStopIds>), (StatusCode, String)> {
     let ids = tfl_stops::all_stop_ids(&app.database)
         .await
         .map_err(|err| internal_error(&err))?;
@@ -52,8 +46,14 @@ async fn list_stop_ids(
             header::CACHE_CONTROL,
             crate::routes::reference::ID_LIST_CACHE,
         )],
-        Json(serde_json::json!({ "ids": ids })),
+        Json(TflStopIds { ids }),
     ))
+}
+
+/// `GET /public/tfl/stops/ids`'s body: every Tube, DLR and tram stop id.
+#[derive(Debug, serde::Serialize, ts_rs::TS)]
+pub(crate) struct TflStopIds {
+    ids: Vec<String>,
 }
 
 #[derive(Debug, Deserialize)]

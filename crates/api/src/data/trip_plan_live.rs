@@ -1002,6 +1002,7 @@ pub async fn fetch_snapshot_states(
 pub struct LegLive {
     /// `Cancelled`, `Departed`, `Late`, `Delayed`, `OnTime` or `Scheduled`
     /// -- the `stop_live_status` vocabulary, for the boarding call.
+    #[ts(as = "crate::ts_values::LegLiveStatus")]
     pub status: &'static str,
     /// The train does not call at the boarding or alighting stop today.
     pub cancelled: bool,

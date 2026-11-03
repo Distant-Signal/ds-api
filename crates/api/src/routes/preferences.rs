@@ -52,7 +52,7 @@ pub fn router() -> Router {
 /// timezone}`, `HH:MM` local times and an IANA zone, or `null` for none);
 /// `snoozedUntil` (pushes held until then as in quiet hours, at most a
 /// week ahead; `null` when not snoozed).
-#[derive(Debug, Serialize, schemars::JsonSchema)]
+#[derive(Debug, Serialize, schemars::JsonSchema, ts_rs::TS)]
 #[serde(rename_all = "camelCase")]
 #[expect(
     clippy::struct_excessive_bools,
@@ -66,14 +66,17 @@ pub(crate) struct NotificationPreferences {
     predicted_start: bool,
     station_skip: bool,
     template_attention: bool,
+    // `notification_settings::DELAY_THRESHOLDS` (and its CHECK constraint).
+    #[ts(type = "5 | 10 | 15 | 30 | null")]
     delay_threshold_minutes: Option<i16>,
     quiet_hours: Option<QuietHoursBody>,
     snoozed_until: Option<chrono::DateTime<chrono::Utc>>,
 }
 
-#[derive(Debug, Clone, serde::Deserialize, Serialize, schemars::JsonSchema)]
+#[derive(Debug, Clone, serde::Deserialize, Serialize, schemars::JsonSchema, ts_rs::TS)]
+#[ts(rename = "QuietHours")]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
-struct QuietHoursBody {
+pub(crate) struct QuietHoursBody {
     start: String,
     end: String,
     timezone: String,
@@ -82,25 +85,35 @@ struct QuietHoursBody {
 /// A `PUT` body: only the fields present change, so a client that knows
 /// only `journeySuggestions` keeps working. `null` clears the threshold
 /// (back to the default) or the quiet hours. Unknown fields are refused.
-#[derive(Debug, Default, serde::Deserialize)]
+#[derive(Debug, Default, serde::Deserialize, ts_rs::TS)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 #[expect(
     clippy::option_option,
     reason = "absent (unchanged) and null (cleared) are different requests"
 )]
-struct NotificationPreferencesUpdate {
+pub(crate) struct NotificationPreferencesUpdate {
+    #[ts(optional)]
     journey_suggestions: Option<bool>,
+    #[ts(optional)]
     line_status: Option<bool>,
+    #[ts(optional)]
     train_delay: Option<bool>,
+    #[ts(optional)]
     train_cancel: Option<bool>,
+    #[ts(optional)]
     predicted_start: Option<bool>,
+    #[ts(optional)]
     station_skip: Option<bool>,
+    #[ts(optional)]
     template_attention: Option<bool>,
     #[serde(default, deserialize_with = "present")]
+    #[ts(optional, type = "5 | 10 | 15 | 30 | null")]
     delay_threshold_minutes: Option<Option<i16>>,
     #[serde(default, deserialize_with = "present")]
+    #[ts(optional)]
     quiet_hours: Option<Option<QuietHoursBody>>,
     #[serde(default, deserialize_with = "present")]
+    #[ts(optional)]
     snoozed_until: Option<Option<chrono::DateTime<chrono::Utc>>>,
 }
 
@@ -224,7 +237,8 @@ async fn put_notification_preferences(
     Ok(Json(settings.into()))
 }
 
-#[derive(Debug, Serialize, schemars::JsonSchema)]
+#[derive(Debug, Serialize, schemars::JsonSchema, ts_rs::TS)]
+#[ts(rename = "Preferences")]
 #[serde(rename_all = "camelCase")]
 pub(crate) struct PreferencesResponse {
     pinned_lines: Vec<String>,
@@ -401,9 +415,9 @@ async fn put_pinned_lines(
 /// are separate: a line can stay on the home page without pushes. 204;
 /// 404 when the caller has not pinned that line. Unknown fields are
 /// refused.
-#[derive(Debug, serde::Deserialize)]
+#[derive(Debug, serde::Deserialize, ts_rs::TS)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
-struct PinnedLineAlerts {
+pub(crate) struct PinnedLineAlerts {
     notify: bool,
 }
 

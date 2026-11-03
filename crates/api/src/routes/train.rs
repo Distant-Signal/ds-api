@@ -139,10 +139,11 @@ pub fn router() -> Router {
         .layer(DefaultBodyLimit::max(8 * 1024 * 1024))
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, ts_rs::TS)]
 #[serde(rename_all = "camelCase")]
-struct TrackPinResponse {
+pub(crate) struct TrackPinResponse {
     tracking_id: i64,
+    #[ts(as = "crate::ts_values::ResolutionStatus")]
     resolution_status: &'static str,
     /// The one-leg journey the pin now belongs to (DS-124). Additive
     /// (2026-10-22).
@@ -155,9 +156,10 @@ pub(crate) struct TicketCreatedResponse {
     ticket_id: i64,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, ts_rs::TS)]
 #[serde(rename_all = "camelCase")]
-struct RenameRequest {
+#[ts(optional_fields = nullable)]
+pub(crate) struct RenameRequest {
     /// Absent, JSON `null`, or an empty/whitespace-only string all mean
     /// "clear the custom name" -- see `train_tracking::validate_custom_name`.
     #[serde(default)]
@@ -249,9 +251,9 @@ async fn post_standalone_ticket(
     Ok(Json(TicketCreatedResponse { ticket_id }))
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, ts_rs::TS)]
 #[serde(rename_all = "camelCase")]
-struct AttachTicketRequest {
+pub(crate) struct AttachTicketRequest {
     tracking_id: i64,
 }
 

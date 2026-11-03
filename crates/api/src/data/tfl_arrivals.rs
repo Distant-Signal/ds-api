@@ -782,7 +782,8 @@ async fn fetch_counted(
 }
 
 /// One arrival as the api serves it.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, ts_rs::TS)]
+#[ts(rename = "TflArrival")]
 #[serde(rename_all = "camelCase")]
 pub struct Arrival {
     /// `TfL`'s prediction id: stable across refreshes, a list key.
@@ -795,11 +796,13 @@ pub struct Arrival {
     pub time_to_station_secs: i64,
     /// `Between Holborn and Russell Square`, when `TfL` says.
     #[serde(skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
     pub current_location: Option<String>,
 }
 
 /// The arrivals at one platform of one line.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, ts_rs::TS)]
+#[ts(rename = "TflArrivalGroup")]
 #[serde(rename_all = "camelCase")]
 pub struct ArrivalGroup {
     pub line_id: String,
@@ -808,13 +811,15 @@ pub struct ArrivalGroup {
     pub platform_name: String,
     /// `inbound` / `outbound`, when `TfL` says.
     #[serde(skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
     pub direction: Option<String>,
     /// Soonest first, at most [`MAX_PER_GROUP`].
     pub arrivals: Vec<Arrival>,
 }
 
 /// `GET /public/tfl/stops/{id}/arrivals`.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, ts_rs::TS)]
+#[ts(rename = "TflStopArrivals")]
 #[serde(rename_all = "camelCase")]
 pub struct StopArrivals {
     pub stop_id: String,

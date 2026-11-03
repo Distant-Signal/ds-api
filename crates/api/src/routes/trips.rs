@@ -14,7 +14,7 @@ use axum::Json;
 use axum::extract::{Query, State};
 use axum::http::StatusCode;
 use chrono::{NaiveDate, NaiveTime};
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 
 use crate::app::App;
 use crate::data::station_groups::{self, StationChoice};
@@ -215,7 +215,7 @@ async fn get_planner_operators(
 ) -> Result<
     (
         [(axum::http::header::HeaderName, &'static str); 1],
-        Json<serde_json::Value>,
+        Json<operator_groups::PlannerOperatorCatalogue>,
     ),
     (StatusCode, String),
 > {
@@ -238,7 +238,7 @@ async fn get_planner_operators(
 /// `tocs` doesn't name. Unauthenticated, no database read: compiled in.
 async fn get_operator_groups() -> (
     [(axum::http::header::HeaderName, &'static str); 1],
-    Json<serde_json::Value>,
+    Json<operator_groups::OperatorGroupsCatalogue>,
 ) {
     (
         [(
@@ -260,15 +260,23 @@ const STATION_GROUPS_CACHE_CONTROL: &str = "public, max-age=3600";
 /// database read: `crates/api/reference-data/station-groups.csv`, compiled in.
 async fn get_station_groups() -> (
     [(axum::http::header::HeaderName, &'static str); 1],
-    Json<serde_json::Value>,
+    Json<StationGroupsResponse>,
 ) {
     (
         [(
             axum::http::header::CACHE_CONTROL,
             STATION_GROUPS_CACHE_CONTROL,
         )],
-        Json(serde_json::json!({ "groups": station_groups::catalogue() })),
+        Json(StationGroupsResponse {
+            groups: station_groups::catalogue(),
+        }),
     )
+}
+
+/// `GET /Trips/station-groups`'s body.
+#[derive(Debug, Serialize, ts_rs::TS)]
+pub(crate) struct StationGroupsResponse {
+    groups: Vec<station_groups::GroupInfo>,
 }
 
 #[derive(Debug, Deserialize)]

@@ -142,13 +142,14 @@ pub fn router() -> Router {
 /// confirmed by writing `wire_format_tests` below against the *actual*
 /// enum (not just believing the doc comments): every field failed to
 /// deserialize with "missing field" until this attribute was added.
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, ts_rs::TS)]
 #[serde(
     tag = "mode",
     rename_all = "camelCase",
     rename_all_fields = "camelCase"
 )]
-enum CreateJourneyLegRequest {
+#[ts(optional_fields = nullable)]
+pub(crate) enum CreateJourneyLegRequest {
     /// The legacy CRS+time GUESS pin, field-for-field identical to
     /// `common::TrackPinRequest` -- what `TrackTrainForm.tsx`'s existing
     /// "Pick a departure" / manual-entry flow submits (Task 15).
@@ -169,6 +170,7 @@ enum CreateJourneyLegRequest {
         /// `train_tracking::create_pin` via the legacy `POST /Train/track`
         /// route.
         #[serde(default)]
+        #[ts(optional = nullable)]
         skipped_stations: Vec<String>,
         /// Darwin's CURRENT platform for the picked departure-board row, and
         /// the earliest platform this poller had seen for it, both captured
@@ -222,8 +224,10 @@ enum CreateJourneyLegRequest {
         destination_crs: String,
         service_date: NaiveDate,
         #[serde(default)]
+        #[ts(optional = nullable)]
         depart_window: TimeWindow,
         #[serde(default)]
+        #[ts(optional = nullable)]
         arrive_window: TimeWindow,
     },
     /// A leg we have no data for: a Tube ride, a bus, a walk (spec
@@ -235,9 +239,11 @@ enum CreateJourneyLegRequest {
 
 /// The fields of an untracked leg, shared by `POST /Journeys` and `POST
 /// /Journeys/{id}/legs` (`mode: "untracked"`).
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, ts_rs::TS)]
 #[serde(rename_all = "camelCase")]
-struct UntrackedLegRequest {
+#[ts(optional_fields = nullable)]
+pub(crate) struct UntrackedLegRequest {
+    #[ts(as = "crate::ts_values::TransitMode")]
     transit_mode: String,
     #[serde(default)]
     origin_name: Option<String>,
@@ -312,9 +318,10 @@ impl UntrackedLegRequest {
     }
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, ts_rs::TS)]
 #[serde(rename_all = "camelCase")]
-struct CreateJourneyRequest {
+#[ts(optional_fields = nullable)]
+pub(crate) struct CreateJourneyRequest {
     #[serde(default)]
     custom_name: Option<String>,
     leg: CreateJourneyLegRequest,
@@ -330,13 +337,14 @@ struct CreateJourneyRequest {
 /// fails to deserialize off camelCase JSON (see `CreateJourneyLegRequest`'s
 /// own doc comment for the full explanation; this plan's `wire_format_tests`
 /// step below reproduces that same regression test against this enum).
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, ts_rs::TS)]
+#[ts(rename = "NewJourneyLegRequest", optional_fields = nullable)]
 #[serde(
     tag = "mode",
     rename_all = "camelCase",
     rename_all_fields = "camelCase"
 )]
-enum AddJourneyLegRequest {
+pub(crate) enum AddJourneyLegRequest {
     /// An already-known identity for an EXISTING journey's next leg -- what
     /// `AddJourneyLegButton.tsx`'s "I know the train" mode submits, and what
     /// `PlanTripFlow.tsx`'s multi-leg commit loop sends for every train leg
@@ -372,8 +380,10 @@ enum AddJourneyLegRequest {
         destination_crs: String,
         service_date: NaiveDate,
         #[serde(default)]
+        #[ts(optional = nullable)]
         depart_window: TimeWindow,
         #[serde(default)]
+        #[ts(optional = nullable)]
         arrive_window: TimeWindow,
         #[serde(default)]
         filters: Option<journeys::LegSearchFilters>,
@@ -385,9 +395,10 @@ enum AddJourneyLegRequest {
     Untracked(UntrackedLegRequest),
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, ts_rs::TS)]
+#[ts(rename = "AddJourneyLegResponse")]
 #[serde(rename_all = "camelCase")]
-struct AddLegResponse {
+pub(crate) struct AddLegResponse {
     leg_id: i64,
     /// `Some` only for a `knownTrain`-mode leg -- mirrors
     /// `CreateJourneyResponse::tracking_id`'s own `None`-for-window
@@ -415,6 +426,74 @@ mod leg_candidate_json_tests {
     use std::collections::HashMap;
 
     use super::leg_candidate_json;
+
+    /// The `json!`-patched row before it was typed, verbatim.
+    fn legacy_leg_candidate_json(
+        row: &serde_json::Value,
+        leg_origin_crs: &str,
+        leg_destination_crs: &str,
+        destination_names: &HashMap<String, String>,
+    ) -> serde_json::Value {
+        let mut json = serde_json::to_value(crate::render::calling_point_departure_json(
+            row,
+            leg_origin_crs,
+            destination_names,
+        ))
+        .unwrap_or_default();
+        // The public arrival at the leg's destination, else the working one,
+        // trimmed "HH:MM:SS" -> "HH:MM" exactly as the shared renderer serves
+        // `scheduled` and `destinationArrival`, so the times on one row are
+        // always the same shape and basis.
+        let working_day_offset = row
+            .get("leg_destination_arrival_day_offset")
+            .and_then(serde_json::Value::as_u64)
+            .unwrap_or(0);
+        let (arrival, day_offset) = crate::render::public_else_working(
+            row,
+            "leg_public_destination_arrival",
+            "leg_destination_arrival",
+            working_day_offset,
+        );
+        if let Some(object) = json.as_object_mut() {
+            object.insert(
+                "legOriginCrs".to_string(),
+                serde_json::Value::String(leg_origin_crs.to_string()),
+            );
+            object.insert(
+                "legDestinationCrs".to_string(),
+                serde_json::Value::String(leg_destination_crs.to_string()),
+            );
+            object.insert(
+                "legDestinationArrival".to_string(),
+                arrival.map_or(serde_json::Value::Null, serde_json::Value::String),
+            );
+            object.insert(
+                "legDestinationArrivalDayOffset".to_string(),
+                serde_json::Value::from(day_offset),
+            );
+            // The PUBLIC arrival at the leg's destination (`publicDeparture`
+            // comes from the shared renderer). `null` when the call has none,
+            // e.g. until the next schedule publish.
+            let public_arrival = row
+                .get("leg_public_destination_arrival")
+                .and_then(serde_json::Value::as_str)
+                .map(|s| s.chars().take(5).collect::<String>());
+            object.insert(
+                "legPublicDestinationArrival".to_string(),
+                public_arrival.map_or(serde_json::Value::Null, serde_json::Value::String),
+            );
+            let working_arrival = row
+                .get("leg_destination_arrival")
+                .and_then(serde_json::Value::as_str)
+                .map(|s| s.chars().take(5).collect::<String>());
+            object.insert(
+                "legWorkingDestinationArrival".to_string(),
+                working_arrival.map_or(serde_json::Value::Null, serde_json::Value::String),
+            );
+        }
+        json
+    }
+
     use serde_json::json;
 
     /// One `search_journey_leg_candidates` row for a York->Newcastle leg
@@ -434,7 +513,8 @@ mod leg_candidate_json_tests {
 
     #[test]
     fn renders_the_leg_s_own_endpoints_and_arrival_alongside_the_train_s_own_route() {
-        let json = leg_candidate_json(&row(), "YRK", "NCL", &HashMap::new());
+        let json = serde_json::to_value(leg_candidate_json(&row(), "YRK", "NCL", &HashMap::new()))
+            .unwrap();
         // The leg: leaves York 19:00, reaches Newcastle 19:55.
         assert_eq!(json["stationCrs"], "YRK");
         assert_eq!(json["legOriginCrs"], "YRK");
@@ -458,7 +538,8 @@ mod leg_candidate_json_tests {
         row["scheduled"] = json!("18:59:00");
         row["public_departure"] = json!("19:00:00");
         row["leg_public_destination_arrival"] = json!("19:57:00");
-        let json = leg_candidate_json(&row, "YRK", "NCL", &HashMap::new());
+        let json =
+            serde_json::to_value(leg_candidate_json(&row, "YRK", "NCL", &HashMap::new())).unwrap();
         assert_eq!(json["scheduled"], "19:00");
         assert_eq!(json["workingDeparture"], "18:59");
         assert_eq!(json["legDestinationArrival"], "19:57");
@@ -470,7 +551,8 @@ mod leg_candidate_json_tests {
     fn a_missing_leg_arrival_is_an_explicit_null_not_a_guess_from_the_terminus() {
         let mut row = row();
         row["leg_destination_arrival"] = serde_json::Value::Null;
-        let json = leg_candidate_json(&row, "YRK", "NCL", &HashMap::new());
+        let json =
+            serde_json::to_value(leg_candidate_json(&row, "YRK", "NCL", &HashMap::new())).unwrap();
         assert!(json["legDestinationArrival"].is_null());
         // Specifically NOT silently backfilled from the terminus arrival,
         // which is a different station.
@@ -483,13 +565,15 @@ mod leg_candidate_json_tests {
         row.as_object_mut()
             .unwrap()
             .remove("leg_destination_arrival_day_offset");
-        let json = leg_candidate_json(&row, "YRK", "NCL", &HashMap::new());
+        let json =
+            serde_json::to_value(leg_candidate_json(&row, "YRK", "NCL", &HashMap::new())).unwrap();
         assert_eq!(json["legDestinationArrivalDayOffset"], 0);
     }
 
     #[test]
     fn a_leg_that_ends_at_the_schedule_s_own_terminus_still_names_the_leg_s_end() {
-        let json = leg_candidate_json(&row(), "KGX", "EDB", &HashMap::new());
+        let json = serde_json::to_value(leg_candidate_json(&row(), "KGX", "EDB", &HashMap::new()))
+            .unwrap();
         assert_eq!(json["legOriginCrs"], "KGX");
         assert_eq!(json["legDestinationCrs"], "EDB");
         assert_eq!(json["stationCrs"], "KGX");
@@ -507,7 +591,7 @@ mod leg_candidate_json_tests {
             ("EDB".to_string(), "Edinburgh".to_string()),
             ("NCL".to_string(), "Newcastle".to_string()),
         ]);
-        let json = leg_candidate_json(&row(), "YRK", "NCL", &names);
+        let json = serde_json::to_value(leg_candidate_json(&row(), "YRK", "NCL", &names)).unwrap();
         assert_eq!(json["destinationCrs"], "EDB");
         assert_eq!(json["destinationName"], "Edinburgh");
     }
@@ -519,12 +603,37 @@ mod leg_candidate_json_tests {
     /// already establishes.
     #[test]
     fn destination_name_is_null_for_an_unresolved_code() {
-        let json = leg_candidate_json(&row(), "YRK", "NCL", &HashMap::new());
+        let json = serde_json::to_value(leg_candidate_json(&row(), "YRK", "NCL", &HashMap::new()))
+            .unwrap();
         assert!(json["destinationName"].is_null());
         assert!(
             json.get("destinationName").is_some(),
             "must be explicit null, not omitted"
         );
+    }
+
+    /// A candidate row serves what the patched row did, across the stored
+    /// shapes (public times or none, names known or not).
+    #[test]
+    fn typed_candidate_rows_match_the_patched_rows() {
+        let names = HashMap::from([("EDB".to_string(), "Edinburgh".to_string())]);
+        let mut public = row();
+        public["scheduled"] = json!("18:59:30");
+        public["public_departure"] = json!("19:00:00");
+        public["leg_public_destination_arrival"] = json!("19:57:00");
+        public["operator_atoc"] = json!("GR");
+        public["headcode"] = json!("1S11");
+        for row in [row(), public] {
+            for names in [&names, &HashMap::new()] {
+                let mut new =
+                    serde_json::to_value(leg_candidate_json(&row, "YRK", "NCL", names)).unwrap();
+                // The service mode the route fills in after.
+                for key in ["serviceMode", "liveTracking"] {
+                    new.as_object_mut().unwrap().remove(key);
+                }
+                assert_eq!(new, legacy_leg_candidate_json(&row, "YRK", "NCL", names));
+            }
+        }
     }
 }
 
@@ -686,9 +795,9 @@ mod wire_format_tests {
     }
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, ts_rs::TS)]
 #[serde(rename_all = "camelCase")]
-struct CreateJourneyResponse {
+pub(crate) struct CreateJourneyResponse {
     journey_id: i64,
     leg_id: i64,
     /// `None` only for a `window`-mode leg -- no train is bound yet.
@@ -698,6 +807,7 @@ struct CreateJourneyResponse {
     /// which has an equivalent synchronous-match-attempt outcome to report
     /// (a `knownTrain` leg is resolved eagerly, immediately, below; a
     /// `window` leg has no train at all yet).
+    #[ts(as = "Option<crate::ts_values::ResolutionStatus>")]
     resolution_status: Option<&'static str>,
 }
 
@@ -2468,7 +2578,7 @@ async fn get_leg_candidates(
     user: AuthenticatedUser,
     Path((journey_id, leg_id)): Path<(i64, i64)>,
     Query(params): Query<CandidatesParams>,
-) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
+) -> Result<Json<LegCandidatesResponse>, (StatusCode, String)> {
     let leg = journeys::get_owned_leg(&app.database, journey_id, leg_id, &user.id)
         .await
         .map_err(internal_error("read journey leg"))?
@@ -2559,7 +2669,7 @@ async fn get_leg_candidates(
             .await
             .map_err(internal_error("resolve leg candidate destination names"))?;
 
-    let mut results: Vec<serde_json::Value> = page
+    let mut results: Vec<LegCandidateRow> = page
         .departures
         .iter()
         .map(|row| {
@@ -2571,16 +2681,14 @@ async fn get_leg_candidates(
             )
         })
         .collect();
-    crate::data::schedule_services::annotate_uid_rows(
-        &app.database,
-        search.service_date,
-        &mut results,
-    )
-    .await;
-    Ok(Json(serde_json::json!({
-        "results": results,
-        "nextCursor": page.next_cursor.as_ref().map(crate::routes::trains::encode_cursor),
-    })))
+    annotate_candidate_modes(&app, search.service_date, &mut results).await;
+    Ok(Json(LegCandidatesResponse {
+        results,
+        next_cursor: page
+            .next_cursor
+            .as_ref()
+            .map(crate::routes::trains::encode_cursor),
+    }))
 }
 
 /// `GET .../candidates`'s `operator`: comma-split, trimmed, upper-cased,
@@ -2640,13 +2748,7 @@ fn leg_candidate_json(
     leg_origin_crs: &str,
     leg_destination_crs: &str,
     destination_names: &std::collections::HashMap<String, String>,
-) -> serde_json::Value {
-    let mut json = serde_json::to_value(crate::render::calling_point_departure_json(
-        row,
-        leg_origin_crs,
-        destination_names,
-    ))
-    .unwrap_or_default();
+) -> LegCandidateRow {
     // The public arrival at the leg's destination, else the working one,
     // trimmed "HH:MM:SS" -> "HH:MM" exactly as the shared renderer serves
     // `scheduled` and `destinationArrival`, so the times on one row are
@@ -2661,44 +2763,87 @@ fn leg_candidate_json(
         "leg_destination_arrival",
         working_day_offset,
     );
-    if let Some(object) = json.as_object_mut() {
-        object.insert(
-            "legOriginCrs".to_string(),
-            serde_json::Value::String(leg_origin_crs.to_string()),
-        );
-        object.insert(
-            "legDestinationCrs".to_string(),
-            serde_json::Value::String(leg_destination_crs.to_string()),
-        );
-        object.insert(
-            "legDestinationArrival".to_string(),
-            arrival.map_or(serde_json::Value::Null, serde_json::Value::String),
-        );
-        object.insert(
-            "legDestinationArrivalDayOffset".to_string(),
-            serde_json::Value::from(day_offset),
-        );
+    let hh_mm = |key: &str| {
+        row.get(key)
+            .and_then(serde_json::Value::as_str)
+            .map(|s| s.chars().take(5).collect::<String>())
+    };
+    LegCandidateRow {
+        departure: crate::render::calling_point_departure_json(
+            row,
+            leg_origin_crs,
+            destination_names,
+        ),
+        leg_origin_crs: leg_origin_crs.to_string(),
+        leg_destination_crs: leg_destination_crs.to_string(),
+        leg_destination_arrival: arrival,
+        leg_destination_arrival_day_offset: day_offset,
         // The PUBLIC arrival at the leg's destination (`publicDeparture`
         // comes from the shared renderer). `null` when the call has none,
         // e.g. until the next schedule publish.
-        let public_arrival = row
-            .get("leg_public_destination_arrival")
-            .and_then(serde_json::Value::as_str)
-            .map(|s| s.chars().take(5).collect::<String>());
-        object.insert(
-            "legPublicDestinationArrival".to_string(),
-            public_arrival.map_or(serde_json::Value::Null, serde_json::Value::String),
-        );
-        let working_arrival = row
-            .get("leg_destination_arrival")
-            .and_then(serde_json::Value::as_str)
-            .map(|s| s.chars().take(5).collect::<String>());
-        object.insert(
-            "legWorkingDestinationArrival".to_string(),
-            working_arrival.map_or(serde_json::Value::Null, serde_json::Value::String),
-        );
+        leg_public_destination_arrival: hh_mm("leg_public_destination_arrival"),
+        leg_working_destination_arrival: hh_mm("leg_destination_arrival"),
+        service: crate::data::schedule_services::ServiceModeFields::default(),
     }
-    json
+}
+
+/// Sets each candidate's `serviceMode`/`liveTracking` from
+/// `schedule_services`, with one lookup for the page; a read failure leaves
+/// them trains.
+async fn annotate_candidate_modes(
+    app: &App,
+    service_date: NaiveDate,
+    results: &mut [LegCandidateRow],
+) {
+    let mut uids: Vec<String> = results
+        .iter()
+        .filter_map(|row| row.departure.uid.clone())
+        .collect();
+    uids.sort_unstable();
+    uids.dedup();
+    let modes =
+        crate::data::schedule_services::modes_for_or_trains(&app.database, service_date, &uids)
+            .await;
+    for row in results {
+        let mode = row
+            .departure
+            .uid
+            .as_deref()
+            .map_or(crate::data::schedule_services::ServiceMode::Train, |uid| {
+                crate::data::schedule_services::mode_in(&modes, uid)
+            });
+        row.service = crate::data::schedule_services::ServiceModeFields(mode);
+    }
+}
+
+/// One row of `GET .../legs/{legId}/candidates`: the shared calling-point
+/// row (`render::calling_point_departure_json`) at the leg's origin, plus
+/// where the LEG ends and when ([`leg_candidate_json`]), and the train's
+/// service mode.
+#[derive(Debug, Clone, Serialize, ts_rs::TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(rename = "LegCandidate")]
+pub(crate) struct LegCandidateRow {
+    #[serde(flatten)]
+    departure: crate::render::CallingPointDepartureJson,
+    leg_origin_crs: String,
+    leg_destination_crs: String,
+    /// The public arrival at the leg's destination, else the working one;
+    /// `null` when the schedule records neither.
+    leg_destination_arrival: Option<String>,
+    leg_destination_arrival_day_offset: u64,
+    leg_public_destination_arrival: Option<String>,
+    leg_working_destination_arrival: Option<String>,
+    #[serde(flatten)]
+    service: crate::data::schedule_services::ServiceModeFields,
+}
+
+/// `GET .../legs/{legId}/candidates`'s body.
+#[derive(Debug, Serialize, ts_rs::TS)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct LegCandidatesResponse {
+    results: Vec<LegCandidateRow>,
+    next_cursor: Option<String>,
 }
 
 /// 400 for an untracked leg on the two routes that only make sense for a

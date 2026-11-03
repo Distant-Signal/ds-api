@@ -24,7 +24,7 @@ pub fn router() -> Router {
     Router::new().route("/freshness", axum::routing::get(get_freshness))
 }
 
-#[derive(Debug, Serialize, PartialEq)]
+#[derive(Debug, Serialize, PartialEq, ts_rs::TS)]
 pub struct DataFreshness {
     pub stations: Option<DateTime<Utc>>,
     pub tocs: Option<DateTime<Utc>>,

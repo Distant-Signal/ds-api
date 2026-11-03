@@ -67,9 +67,10 @@ pub const MAX_IDEMPOTENCY_KEY_LENGTH: usize = 200;
 
 /// The request body. `Serialize` too: its canonical JSON is what the
 /// idempotency hash covers, so key order and whitespace never matter.
-#[derive(Debug, Deserialize, Serialize)]
+#[derive(Debug, Deserialize, Serialize, ts_rs::TS)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
-struct ItineraryRequest {
+#[ts(optional_fields = nullable)]
+pub(crate) struct ItineraryRequest {
     #[serde(default)]
     custom_name: Option<String>,
     legs: Vec<ItineraryLegRequest>,
@@ -88,8 +89,9 @@ struct ItineraryRequest {
 /// remembered across a deploy: a train leg must serialise byte for byte as
 /// it did when `trainUid`/`serviceDate` were required and these four were
 /// the only fields (`a_train_leg_hashes_as_it_did_before_untracked_legs`).
-#[derive(Debug, Deserialize, Serialize)]
+#[derive(Debug, Deserialize, Serialize, ts_rs::TS)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
+#[ts(optional_fields = nullable)]
 pub(crate) struct ItineraryLegRequest {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     train_uid: Option<String>,
@@ -100,8 +102,10 @@ pub(crate) struct ItineraryLegRequest {
     #[serde(default)]
     destination_crs: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(as = "Option<crate::ts_values::JourneyLegKind>")]
     kind: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(as = "Option<crate::ts_values::TransitMode>")]
     transit_mode: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     origin_name: Option<String>,
@@ -130,15 +134,16 @@ pub(crate) struct ItineraryLegRequest {
     headsign: Option<String>,
 }
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Serialize, Deserialize, ts_rs::TS)]
 #[serde(rename_all = "camelCase")]
-struct ItineraryLegResponse {
+pub(crate) struct ItineraryLegResponse {
     leg_id: i64,
     /// `None` (`null`) for an untracked leg, which tracks no train.
     tracking_id: Option<i64>,
     /// `train` or `untracked`. Absent from a response stored before
     /// 2026-10-20 and replayed (always a train leg then).
     #[serde(default = "train_kind")]
+    #[ts(as = "crate::ts_values::JourneyLegKind")]
     kind: String,
 }
 
@@ -149,12 +154,13 @@ fn train_kind() -> String {
 /// A superset of `POST /Journeys`' response, so the web planner's
 /// `onCreated` handler takes either: `legId` is the first leg's,
 /// `trackingId` the first TRAIN leg's (an itinerary always has one).
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Serialize, Deserialize, ts_rs::TS)]
 #[serde(rename_all = "camelCase")]
-struct ItineraryResponse {
+pub(crate) struct ItineraryResponse {
     journey_id: i64,
     leg_id: i64,
     tracking_id: i64,
+    #[ts(as = "Option<crate::ts_values::ResolutionStatus>")]
     resolution_status: Option<String>,
     legs: Vec<ItineraryLegResponse>,
     created_via: String,

@@ -123,7 +123,7 @@ async fn evict_push_subscriptions_over_cap(pool: &PgPool, user_id: &str) -> Resu
 }
 
 /// One of a user's devices with push on, for the Notifications page.
-#[derive(Debug, Clone, sqlx::FromRow, serde::Serialize)]
+#[derive(Debug, Clone, sqlx::FromRow, serde::Serialize, ts_rs::TS)]
 #[serde(rename_all = "camelCase")]
 pub struct PushDevice {
     pub id: i64,

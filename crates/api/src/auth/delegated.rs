@@ -54,7 +54,10 @@ use crate::auth::{AuthenticatedUser, SESSION_COOKIE_NAME, bearer_token, parse_co
 
 /// A scope a delegated client may hold (§5.5). `journeys:read_shared` is
 /// Phase 3 and not accepted yet.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, PartialOrd, Ord)]
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, PartialOrd, Ord, ts_rs::TS,
+)]
+#[ts(rename = "ConnectedAppScope")]
 pub enum Scope {
     #[serde(rename = "journeys:read")]
     JourneysRead,

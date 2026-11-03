@@ -450,13 +450,16 @@ pub async fn delete_journey_delegated(
 }
 
 /// A delegated delete, as the Connected apps page lists it.
-#[derive(Debug, Clone, sqlx::FromRow, Serialize)]
+#[derive(Debug, Clone, sqlx::FromRow, Serialize, ts_rs::TS)]
+#[ts(rename = "ConnectedAppDeletion")]
 #[serde(rename_all = "camelCase")]
 pub struct DeletionRow {
     pub id: i64,
     pub client: String,
     pub journey_id: i64,
     pub deleted_at: DateTime<Utc>,
+    /// What the journey was, as [`delete_journey_delegated`] stored it.
+    #[ts(as = "crate::ts_values::DeletedJourneySummary")]
     pub summary: serde_json::Value,
 }
 

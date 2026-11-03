@@ -32,8 +32,7 @@ use std::collections::BTreeSet;
 use chrono::{DateTime, NaiveDate, Timelike, Utc};
 use common::transit::{is_id, is_stop_id};
 use ds_store::transit::{disruptions, read};
-use serde::Deserialize;
-use serde_json::{Value, json};
+use serde::{Deserialize, Serialize};
 
 use crate::app::{App, Router};
 
@@ -53,7 +52,7 @@ const MAX_LIMIT: i64 = 100;
 /// The line timetable's default window.
 const DEFAULT_WINDOW_S: i32 = 3 * 3600;
 
-type Reply = Result<([(header::HeaderName, &'static str); 1], Json<Value>), (StatusCode, String)>;
+type Reply<T> = Result<([(header::HeaderName, &'static str); 1], Json<T>), (StatusCode, String)>;
 
 pub fn router() -> Router {
     Router::new()
@@ -129,15 +128,11 @@ fn internal_error(err: anyhow::Error) -> (StatusCode, String) {
     clippy::unnecessary_wraps,
     reason = "every handler returns it as its Reply"
 )]
-fn reply(cache: &'static str, body: Value) -> Reply {
+fn reply<T>(cache: &'static str, body: T) -> Reply<T> {
     Ok(([(header::CACHE_CONTROL, cache)], Json(body)))
 }
 
-fn to_json<T: serde::Serialize>(value: &T) -> Result<Value, (StatusCode, String)> {
-    serde_json::to_value(value).map_err(|err| internal_error(err.into()))
-}
-
-async fn list_networks(State(app): State<App>) -> Reply {
+async fn list_networks(State(app): State<App>) -> Reply<TransitNetworksResponse> {
     let networks = read::list_networks(&app.database, &enabled(&app))
         .await
         .map_err(internal_error)?;
@@ -145,15 +140,42 @@ async fn list_networks(State(app): State<App>) -> Reply {
     // (`API_TRIP_PLAN_TRANSIT_NETWORKS`), so the planner offers its stops.
     // Absent while that list is empty, so the body is as before.
     let planner = crate::data::transit_planning::enabled_networks();
-    let mut body = to_json(&networks)?;
-    if !planner.is_empty()
-        && let Some(list) = body.as_array_mut()
-    {
-        for (entry, network) in list.iter_mut().zip(&networks) {
-            entry["tripPlanning"] = Value::Bool(planner.contains(&network.id));
-        }
+    reply(NETWORKS_CACHE, networks_response(networks, &planner))
+}
+
+/// `GET /public/transit/networks`'s body.
+#[derive(Debug, Serialize, ts_rs::TS)]
+pub(crate) struct TransitNetworksResponse {
+    networks: Vec<TransitNetworkEntry>,
+}
+
+/// One network of [`TransitNetworksResponse`].
+#[derive(Debug, Serialize, ts_rs::TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(rename = "TransitNetwork")]
+pub(crate) struct TransitNetworkEntry {
+    #[serde(flatten)]
+    network: read::NetworkSummary,
+    /// Whether `/Trips/plan` plans with the network; absent while no
+    /// network is planned with.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    trip_planning: Option<bool>,
+}
+
+fn networks_response(
+    networks: Vec<read::NetworkSummary>,
+    planner: &[String],
+) -> TransitNetworksResponse {
+    TransitNetworksResponse {
+        networks: networks
+            .into_iter()
+            .map(|network| TransitNetworkEntry {
+                trip_planning: (!planner.is_empty()).then(|| planner.contains(&network.id)),
+                network,
+            })
+            .collect(),
     }
-    reply(NETWORKS_CACHE, json!({ "networks": body }))
 }
 
 #[derive(Debug, Deserialize)]
@@ -164,7 +186,10 @@ struct RailLinksQuery {
 /// `/transit/rail-links?crs=MAN`: the transit stops of every served network
 /// linked to that National Rail station (spec §12.1), for its station
 /// page. Empty while no network is served, or for a CRS with no link.
-async fn rail_links(State(app): State<App>, Query(query): Query<RailLinksQuery>) -> Reply {
+async fn rail_links(
+    State(app): State<App>,
+    Query(query): Query<RailLinksQuery>,
+) -> Reply<TransitRailLinksResponse> {
     let crs = query.crs.unwrap_or_default().to_ascii_uppercase();
     if crs.len() != 3 || !crs.bytes().all(|b| b.is_ascii_uppercase()) {
         return Err(bad_request("crs must be three letters"));
@@ -177,7 +202,132 @@ async fn rail_links(State(app): State<App>, Query(query): Query<RailLinksQuery>)
             .await
             .map_err(internal_error)?
     };
-    reply(LONG_CACHE, json!({ "links": to_json(&links)? }))
+    reply(LONG_CACHE, TransitRailLinksResponse { links })
+}
+
+/// `GET /public/transit/rail-links`'s body: the transit stops linked to a
+/// station.
+#[derive(Debug, Serialize, ts_rs::TS)]
+pub(crate) struct TransitRailLinksResponse {
+    links: Vec<read::StationTransitLink>,
+}
+
+/// A network's status feed: its `state` and when it was last read.
+#[derive(Debug, Serialize, ts_rs::TS)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct TransitStatusAsOf {
+    state: disruptions::StatusState,
+    as_of: Option<DateTime<Utc>>,
+}
+
+/// A National Rail catalogue line a `TfL` network page links to.
+#[derive(Debug, Serialize, ts_rs::TS)]
+#[ts(rename = "TransitNationalRailLine")]
+pub(crate) struct NationalRailLineRef {
+    id: String,
+    name: String,
+}
+
+/// `GET /public/transit/{network}`'s body.
+#[derive(Debug, Serialize, ts_rs::TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(rename = "TransitNetworkDetail")]
+pub(crate) struct TransitNetworkDetailResponse {
+    #[serde(flatten)]
+    network: read::NetworkSummary,
+    /// The `TfL` network's lines that are National Rail catalogue lines
+    /// here (the `TfL` design §8.2); absent on other networks.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    national_rail_lines: Option<Vec<NationalRailLineRef>>,
+    lines: Vec<TransitNetworkLine>,
+    status: TransitStatusAsOf,
+    #[ts(as = "crate::ts_values::TransitStatusSource")]
+    status_source: &'static str,
+}
+
+/// A line of [`TransitNetworkDetailResponse`], with its status.
+#[derive(Debug, Serialize, ts_rs::TS)]
+pub(crate) struct TransitNetworkLine {
+    #[serde(flatten)]
+    line: read::LineSummary,
+    status: disruptions::LineStatusView,
+}
+
+/// `GET /public/transit/{network}/lines/{line}`'s body.
+#[derive(Debug, Serialize, ts_rs::TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(rename = "TransitLineDetail")]
+pub(crate) struct TransitLineDetailResponse {
+    #[serde(flatten)]
+    line: read::LineDetail,
+    status: disruptions::LineStatusView,
+    situations: disruptions::SituationsView,
+    frequency: Option<read::LineFrequency>,
+    #[ts(as = "crate::ts_values::TransitStatusSource")]
+    status_source: &'static str,
+}
+
+/// `GET /public/transit/{network}/situations/{situation}`'s body.
+#[derive(Debug, Serialize, ts_rs::TS)]
+#[ts(rename = "TransitSituationDetail")]
+pub(crate) struct TransitSituationDetailResponse {
+    #[serde(flatten)]
+    situation: disruptions::SituationDetailView,
+    status: TransitStatusAsOf,
+}
+
+/// A scheduled answer's markers: no live data (`realtime: false`) and
+/// `kind: "scheduled"`.
+#[derive(Debug, Clone, Copy, Serialize, ts_rs::TS)]
+pub(crate) struct ScheduledOnly {
+    #[ts(type = "false")]
+    realtime: bool,
+    #[ts(type = "\"scheduled\"")]
+    kind: &'static str,
+}
+
+const SCHEDULED_ONLY: ScheduledOnly = ScheduledOnly {
+    realtime: false,
+    kind: "scheduled",
+};
+
+/// `GET /public/transit/{network}/lines/{line}/timetable`'s body.
+#[derive(Debug, Serialize, ts_rs::TS)]
+#[ts(rename = "TransitLineTimetable")]
+pub(crate) struct TransitLineTimetableResponse {
+    #[serde(flatten)]
+    timetable: read::LineTimetable,
+    #[serde(flatten)]
+    scheduled: ScheduledOnly,
+}
+
+/// `GET /public/transit/{network}/stops`'s body.
+#[derive(Debug, Serialize, ts_rs::TS)]
+pub(crate) struct TransitStopsResponse {
+    stops: Vec<read::StopSummary>,
+}
+
+/// `GET /public/transit/{network}/stops/{stop}`'s body.
+#[derive(Debug, Serialize, ts_rs::TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(rename = "TransitStopDetail")]
+pub(crate) struct TransitStopDetailResponse {
+    #[serde(flatten)]
+    stop: read::StopDetail,
+    /// The current situations naming this stop.
+    notices: Vec<disruptions::SituationView>,
+    first_last: Vec<read::StopFirstLast>,
+}
+
+/// `GET /public/transit/{network}/stops/{stop}/departures`'s body.
+#[derive(Debug, Serialize, ts_rs::TS)]
+#[ts(rename = "TransitBoard")]
+pub(crate) struct TransitBoardResponse {
+    #[serde(flatten)]
+    board: read::Board,
+    #[serde(flatten)]
+    scheduled: ScheduledOnly,
 }
 
 /// Where `network`'s line status comes from: `tfl` (`TfL`'s own line
@@ -206,7 +356,10 @@ async fn status_state(
 /// statuses while the situations are fresh, "unavailable" with the as-of
 /// time once they are over 30 minutes old, `none` while the network has
 /// no situations at all.
-async fn get_network(State(app): State<App>, Path(network): Path<String>) -> Reply {
+async fn get_network(
+    State(app): State<App>,
+    Path(network): Path<String>,
+) -> Reply<TransitNetworkDetailResponse> {
     check_network(&app, &network)?;
     let Some(summary) = read::get_network(&app.database, &network)
         .await
@@ -221,32 +374,58 @@ async fn get_network(State(app): State<App>, Path(network): Path<String>) -> Rep
     let stored = disruptions::stored_line_statuses(&app.database, &network)
         .await
         .map_err(internal_error)?;
-    let mut body = to_json(&summary)?;
+    reply(
+        SHORT_CACHE,
+        network_detail(
+            summary,
+            &app.config.lines,
+            lines,
+            &stored,
+            TransitStatusAsOf { state, as_of },
+            &network,
+        ),
+    )
+}
+
+/// [`TransitNetworkDetailResponse`] from what `get_network` reads.
+fn network_detail(
+    summary: read::NetworkSummary,
+    catalogue: &[common::LineDefinition],
+    lines: Vec<read::LineSummary>,
+    stored: &std::collections::HashMap<
+        String,
+        (Vec<common::LineStatus>, Vec<common::UpcomingDisruption>),
+    >,
+    status: TransitStatusAsOf,
+    network: &str,
+) -> TransitNetworkDetailResponse {
     // The TfL network (the TfL design §8.2): TfL's lines that are National
     // Rail catalogue lines here (the Overground and the Elizabeth line),
     // which its page links to rather than timetabling again.
-    if common::transit::status_from_tfl(&network) {
-        let catalogue: Vec<Value> = common::TFL_TO_NR_LINE_ID
+    let national_rail_lines = common::transit::status_from_tfl(network).then(|| {
+        common::TFL_TO_NR_LINE_ID
             .iter()
-            .filter_map(|(_, nr)| app.config.lines.iter().find(|line| line.id == *nr))
-            .map(|line| json!({ "id": line.id, "name": line.name }))
-            .collect();
-        body["nationalRailLines"] = Value::Array(catalogue);
+            .filter_map(|(_, nr)| catalogue.iter().find(|line| line.id == *nr))
+            .map(|line| NationalRailLineRef {
+                id: line.id.clone(),
+                name: line.name.clone(),
+            })
+            .collect()
+    });
+    let lines = lines
+        .into_iter()
+        .map(|line| TransitNetworkLine {
+            status: disruptions::line_view(status.state, status.as_of, stored.get(&line.line_id)),
+            line,
+        })
+        .collect();
+    TransitNetworkDetailResponse {
+        network: summary,
+        national_rail_lines,
+        lines,
+        status,
+        status_source: status_source(network),
     }
-    let mut lines_json = Vec::with_capacity(lines.len());
-    for line in &lines {
-        let mut entry = to_json(line)?;
-        entry["status"] = to_json(&disruptions::line_view(
-            state,
-            as_of,
-            stored.get(&line.line_id),
-        ))?;
-        lines_json.push(entry);
-    }
-    body["lines"] = Value::Array(lines_json);
-    body["status"] = json!({ "state": state, "asOf": as_of });
-    body["statusSource"] = json!(status_source(&network));
-    reply(SHORT_CACHE, body)
 }
 
 #[derive(Debug, Deserialize)]
@@ -262,7 +441,7 @@ async fn get_line(
     State(app): State<App>,
     Path((network, line)): Path<(String, String)>,
     Query(query): Query<LineQuery>,
-) -> Reply {
+) -> Reply<TransitLineDetailResponse> {
     check_network(&app, &network)?;
     if !is_id(&line) {
         return Err(not_found("line"));
@@ -294,16 +473,23 @@ async fn get_line(
     let frequency = read::line_frequency(&app.database, &network, &line, date)
         .await
         .map_err(internal_error)?;
-    let mut body = to_json(&detail)?;
-    body["status"] = to_json(&disruptions::line_view(state, as_of, stored.get(&line)))?;
-    body["situations"] = to_json(&view)?;
-    body["frequency"] = to_json(&frequency)?;
-    body["statusSource"] = json!(status_source(&network));
-    reply(SHORT_CACHE, body)
+    reply(
+        SHORT_CACHE,
+        TransitLineDetailResponse {
+            status: disruptions::line_view(state, as_of, stored.get(&line)),
+            line: detail,
+            situations: view,
+            frequency,
+            status_source: status_source(&network),
+        },
+    )
 }
 
 /// `/transit/{network}/situations`: every current and upcoming situation.
-async fn get_situations(State(app): State<App>, Path(network): Path<String>) -> Reply {
+async fn get_situations(
+    State(app): State<App>,
+    Path(network): Path<String>,
+) -> Reply<disruptions::SituationsView> {
     check_network(&app, &network)?;
     if read::get_network(&app.database, &network)
         .await
@@ -318,7 +504,7 @@ async fn get_situations(State(app): State<App>, Path(network): Path<String>) -> 
         .map_err(internal_error)?;
     let view =
         disruptions::situations_view(&network, &situations, state, as_of, Utc::now(), |_| true);
-    reply(SHORT_CACHE, to_json(&view)?)
+    reply(SHORT_CACHE, view)
 }
 
 /// A situation id as the feed gives it: 1 to 128 characters (the
@@ -335,7 +521,7 @@ fn is_situation_id(id: &str) -> bool {
 async fn get_situation(
     State(app): State<App>,
     Path((network, situation)): Path<(String, String)>,
-) -> Reply {
+) -> Reply<TransitSituationDetailResponse> {
     check_network(&app, &network)?;
     if !is_situation_id(&situation) {
         return Err(not_found("disruption"));
@@ -350,14 +536,13 @@ async fn get_situation(
         .await
         .map_err(internal_error)?;
     let (state, as_of) = status_state(&app, &network).await?;
-    let mut body = to_json(&disruptions::detail_view(
-        &network,
-        &stored,
-        &lines,
-        Utc::now(),
-    ))?;
-    body["status"] = json!({ "state": state, "asOf": as_of });
-    reply(SHORT_CACHE, body)
+    reply(
+        SHORT_CACHE,
+        TransitSituationDetailResponse {
+            situation: disruptions::detail_view(&network, &stored, &lines, Utc::now()),
+            status: TransitStatusAsOf { state, as_of },
+        },
+    )
 }
 
 #[derive(Debug, Deserialize)]
@@ -389,7 +574,7 @@ async fn get_line_timetable(
     State(app): State<App>,
     Path((network, line)): Path<(String, String)>,
     Query(query): Query<TimetableQuery>,
-) -> Reply {
+) -> Reply<TransitLineTimetableResponse> {
     check_network(&app, &network)?;
     if !is_id(&line) {
         return Err(not_found("line"));
@@ -430,18 +615,24 @@ async fn get_line_timetable(
     else {
         return Err(not_found("line"));
     };
-    let mut body = to_json(&grid)?;
-    body["realtime"] = json!(false);
-    body["kind"] = json!("scheduled");
-    reply(MEDIUM_CACHE, body)
+    reply(
+        MEDIUM_CACHE,
+        TransitLineTimetableResponse {
+            timetable: grid,
+            scheduled: SCHEDULED_ONLY,
+        },
+    )
 }
 
-async fn list_stops(State(app): State<App>, Path(network): Path<String>) -> Reply {
+async fn list_stops(
+    State(app): State<App>,
+    Path(network): Path<String>,
+) -> Reply<TransitStopsResponse> {
     check_network(&app, &network)?;
     let stops = read::list_stops(&app.database, &network)
         .await
         .map_err(internal_error)?;
-    reply(LONG_CACHE, json!({ "stops": to_json(&stops)? }))
+    reply(LONG_CACHE, TransitStopsResponse { stops })
 }
 
 /// A stop id as the network's tables spell it. The `tfl` network's
@@ -468,7 +659,7 @@ async fn get_stop(
     State(app): State<App>,
     Path((network, stop)): Path<(String, String)>,
     Query(query): Query<StopQuery>,
-) -> Reply {
+) -> Reply<TransitStopDetailResponse> {
     check_network(&app, &network)?;
     if !is_stop_id(&stop) {
         return Err(not_found("stop"));
@@ -496,10 +687,14 @@ async fn get_stop(
         .await
         .map_err(internal_error)?
         .unwrap_or_default();
-    let mut body = to_json(&detail)?;
-    body["notices"] = to_json(&view.current)?;
-    body["firstLast"] = to_json(&first_last)?;
-    reply(SHORT_CACHE, body)
+    reply(
+        SHORT_CACHE,
+        TransitStopDetailResponse {
+            stop: detail,
+            notices: view.current,
+            first_last,
+        },
+    )
 }
 
 #[derive(Debug, Deserialize)]
@@ -515,7 +710,7 @@ async fn get_departures(
     State(app): State<App>,
     Path((network, stop)): Path<(String, String)>,
     Query(query): Query<DeparturesQuery>,
-) -> Reply {
+) -> Reply<TransitBoardResponse> {
     check_network(&app, &network)?;
     if !is_stop_id(&stop) {
         return Err(not_found("stop"));
@@ -551,15 +746,320 @@ async fn get_departures(
     else {
         return Err(not_found("stop"));
     };
-    let mut body = to_json(&board)?;
-    body["realtime"] = json!(false);
-    body["kind"] = json!("scheduled");
-    reply(SHORT_CACHE, body)
+    reply(
+        SHORT_CACHE,
+        TransitBoardResponse {
+            board,
+            scheduled: SCHEDULED_ONLY,
+        },
+    )
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use serde_json::{Value, json};
+
+    fn at(text: &str) -> DateTime<Utc> {
+        text.parse().unwrap()
+    }
+
+    fn v<T: Serialize>(body: &T) -> Value {
+        serde_json::to_value(body).unwrap()
+    }
+
+    /// `base` with `extra`'s keys set, as the handlers built their bodies
+    /// before they were typed (`to_json` then `body[key] = ...`).
+    fn legacy<T: Serialize>(base: &T, extra: &[(&str, Value)]) -> Value {
+        let mut body = v(base);
+        for (key, value) in extra {
+            body[*key] = value.clone();
+        }
+        body
+    }
+
+    fn network() -> read::NetworkSummary {
+        read::NetworkSummary {
+            id: "metrolink".to_string(),
+            name: "Metrolink".to_string(),
+            mode: "tram".to_string(),
+            attribution: json!({ "licence": "OGL-UK-3.0", "text": "TfGM" }),
+            feed_version: "v1".to_string(),
+            horizon_from: Some("2026-11-01".parse().unwrap()),
+            horizon_to: None,
+            timetable_as_of: Some(at("2026-11-01T03:00:00Z")),
+            situations_as_of: None,
+        }
+    }
+
+    fn line() -> read::LineSummary {
+        read::LineSummary {
+            id: "metrolink:blue".to_string(),
+            line_id: "blue".to_string(),
+            name: "Blue".to_string(),
+            colour: Some("0072BC".to_string()),
+            mode: "tram".to_string(),
+            status_line_id: "blue".to_string(),
+        }
+    }
+
+    fn station() -> read::StationRef {
+        read::StationRef {
+            id: "9400ZZMAPIC".to_string(),
+            name: "Piccadilly".to_string(),
+        }
+    }
+
+    fn situation() -> disruptions::SituationView {
+        disruptions::SituationView {
+            id: "s1".to_string(),
+            summary: "Lift out of service".to_string(),
+            description: None,
+            info_url: Some("https://example.invalid".to_string()),
+            planned: false,
+            reason: None,
+            scope: common::transit::SituationScope::Stop,
+            lines: vec!["blue".to_string()],
+            stops: vec!["9400ZZMAPIC".to_string()],
+            advice: vec![],
+            validity: vec![common::transit::Period {
+                start: at("2026-11-01T06:00:00Z"),
+                end: None,
+            }],
+            starts: None,
+        }
+    }
+
+    fn status() -> disruptions::LineStatusView {
+        disruptions::line_view(
+            disruptions::StatusState::Current,
+            Some(at("2026-11-01T08:00:00Z")),
+            None,
+        )
+    }
+
+    /// Every transit body serves what its `json!`-patched version did.
+    #[test]
+    #[expect(
+        clippy::too_many_lines,
+        reason = "one fixture and one comparison per route"
+    )]
+    fn typed_transit_bodies_match_the_patched_bodies() {
+        let state = disruptions::StatusState::Current;
+        let as_of = Some(at("2026-11-01T08:00:00Z"));
+        let status_json = json!({ "state": state, "asOf": as_of });
+
+        // The networks, with and without trip planning.
+        for planner in [vec![], vec!["metrolink".to_string(), "other".to_string()]] {
+            let mut entries = vec![network()];
+            entries.push(read::NetworkSummary {
+                id: "other".to_string(),
+                ..network()
+            });
+            let expected: Vec<Value> = entries
+                .iter()
+                .map(|n| {
+                    if planner.is_empty() {
+                        v(n)
+                    } else {
+                        legacy(n, &[("tripPlanning", Value::Bool(planner.contains(&n.id)))])
+                    }
+                })
+                .collect();
+            assert_eq!(
+                v(&networks_response(entries, &planner)),
+                json!({ "networks": expected })
+            );
+        }
+
+        // A network, `TfL`'s (with its National Rail lines) and another.
+        for id in ["tfl", "metrolink"] {
+            let summary = read::NetworkSummary {
+                id: id.to_string(),
+                ..network()
+            };
+            let stored = std::collections::HashMap::new();
+            let body = network_detail(
+                summary.clone(),
+                &[],
+                vec![line()],
+                &stored,
+                TransitStatusAsOf { state, as_of },
+                id,
+            );
+            let mut extra = vec![
+                (
+                    "lines",
+                    json!([legacy(
+                        &line(),
+                        &[("status", v(&disruptions::line_view(state, as_of, None)))]
+                    )]),
+                ),
+                ("status", status_json.clone()),
+                ("statusSource", json!(status_source(id))),
+            ];
+            if common::transit::status_from_tfl(id) {
+                extra.push(("nationalRailLines", json!([])));
+            }
+            assert_eq!(v(&body), legacy(&summary, &extra));
+        }
+
+        // A line, with a frequency and without.
+        let detail = || read::LineDetail {
+            line: line(),
+            directions: vec![read::LineDirection {
+                direction: "outbound".to_string(),
+                headsign: None,
+                stations: vec![station()],
+            }],
+            branches: vec![],
+        };
+        let situations = || disruptions::SituationsView {
+            state,
+            as_of,
+            current: vec![situation()],
+            upcoming: vec![],
+        };
+        let frequency = read::LineFrequency {
+            date: "2026-11-01".parse().unwrap(),
+            directions: vec![],
+            outside_horizon: false,
+        };
+        for frequency in [None, Some(frequency)] {
+            let body = TransitLineDetailResponse {
+                line: detail(),
+                status: status(),
+                situations: situations(),
+                frequency: frequency.clone(),
+                status_source: "situations",
+            };
+            assert_eq!(
+                v(&body),
+                legacy(
+                    &detail(),
+                    &[
+                        ("status", v(&status())),
+                        ("situations", v(&situations())),
+                        ("frequency", v(&frequency)),
+                        ("statusSource", json!("situations")),
+                    ]
+                )
+            );
+        }
+
+        // A situation.
+        let situation_detail = || disruptions::SituationDetailView {
+            situation: situation(),
+            state: disruptions::SituationState::Active,
+            severity: 6,
+            severity_description: "Minor Delays".to_string(),
+            affects: vec![],
+            first_seen_at: at("2026-11-01T06:00:00Z"),
+            updated_at: at("2026-11-01T07:00:00Z"),
+            ended_at: None,
+            validity_ended_at: None,
+        };
+        assert_eq!(
+            v(&TransitSituationDetailResponse {
+                situation: situation_detail(),
+                status: TransitStatusAsOf { state, as_of },
+            }),
+            legacy(&situation_detail(), &[("status", status_json.clone())])
+        );
+
+        // A timetable and a board: scheduled only.
+        let scheduled = [("realtime", json!(false)), ("kind", json!("scheduled"))];
+        let timetable = || read::LineTimetable {
+            date: "2026-11-01".parse().unwrap(),
+            direction: "inbound".to_string(),
+            branch: None,
+            stations: vec![station()],
+            trips: vec![read::TimetableTrip {
+                trip_id: "t1".to_string(),
+                headsign: Some("Bury".to_string()),
+                times: vec![Some("08:00".to_string()), None],
+            }],
+            outside_horizon: true,
+        };
+        assert_eq!(
+            v(&TransitLineTimetableResponse {
+                timetable: timetable(),
+                scheduled: SCHEDULED_ONLY,
+            }),
+            legacy(&timetable(), &scheduled)
+        );
+        let board = || read::Board {
+            date: "2026-11-01".parse().unwrap(),
+            departures: vec![read::BoardRow {
+                scheduled_departure: "08:00".to_string(),
+                trip_id: "t1".to_string(),
+                line: Some(line()),
+                destination: "Bury".to_string(),
+                platform_id: "p1".to_string(),
+                platform: None,
+                replacement_bus: false,
+            }],
+            next_cursor: Some("c".to_string()),
+            outside_horizon: false,
+        };
+        assert_eq!(
+            v(&TransitBoardResponse {
+                board: board(),
+                scheduled: SCHEDULED_ONLY,
+            }),
+            legacy(&board(), &scheduled)
+        );
+
+        // The stops, and a stop.
+        let stop = || read::StopSummary {
+            id: "9400ZZMAPIC".to_string(),
+            name: "Piccadilly".to_string(),
+            lat: Some(53.477),
+            lon: None,
+            lines: vec!["blue".to_string()],
+            rail_links: vec![],
+        };
+        assert_eq!(
+            v(&TransitStopsResponse {
+                stops: vec![stop()]
+            }),
+            json!({ "stops": [v(&stop())] })
+        );
+        let stop_detail = || read::StopDetail {
+            stop: stop(),
+            platforms: vec![read::Platform {
+                id: "p1".to_string(),
+                indicator: Some("A".to_string()),
+            }],
+        };
+        let first_last = || {
+            vec![read::StopFirstLast {
+                line: line(),
+                direction: "outbound".to_string(),
+                towards: None,
+                first: "05:30".to_string(),
+                last: "23:50".to_string(),
+            }]
+        };
+        assert_eq!(
+            v(&TransitStopDetailResponse {
+                stop: stop_detail(),
+                notices: vec![situation()],
+                first_last: first_last(),
+            }),
+            legacy(
+                &stop_detail(),
+                &[
+                    ("notices", json!([v(&situation())])),
+                    ("firstLast", v(&first_last())),
+                ]
+            )
+        );
+        assert_eq!(
+            v(&TransitRailLinksResponse { links: vec![] }),
+            json!({ "links": [] })
+        );
+    }
 
     #[test]
     fn hhmm_parses_to_a_timetable_day() {
@@ -578,6 +1078,7 @@ mod db_tests {
     use axum::body::Body;
     use axum::http::Request;
     use ds_store::test_support::transit::{A, B, cleanup, seed};
+    use serde_json::{Value, json};
     use tower::ServiceExt;
 
     use super::*;

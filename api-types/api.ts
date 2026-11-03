@@ -82,10 +82,20 @@ export type AccessLegEnd = "origin" | "destination" | "both";
  */
 export type AccessResponse = { origin: StopAccess | null, destination: StopAccess | null, };
 
+export type AddJourneyLegResponse = { legId: number, 
+/**
+ * `Some` only for a `knownTrain`-mode leg -- mirrors
+ * `CreateJourneyResponse::tracking_id`'s own `None`-for-window
+ * convention exactly.
+ */
+trackingId: number | null, };
+
 /**
  * One affected route of a [`DisruptionJson`], by CRS.
  */
 export type AffectedRoute = { from: string, to: string, };
+
+export type AttachTicketRequest = { trackingId: number, };
 
 export type AttachTicketResponse = { ticketId: number, trackedTrainId: number, };
 
@@ -218,10 +228,140 @@ export type CancelledSection = { from: CancellationStop, to: CancellationStop, }
  */
 export type Confidence = "low" | "medium" | "high";
 
+export type ConnectAppConsent = { client: ConnectableApp, 
+/**
+ * Who is signed in, so the page can say whose account this is.
+ */
+username: string | null, name: string | null, confirmationToken: string, expiresAt: string, existingGrant: ConnectedAppGrant | null, };
+
+/**
+ * A client the user could connect.
+ */
+export type ConnectableApp = { name: string, displayName: string, scopes: Array<ConnectedAppScope>, };
+
+/**
+ * A delegated delete, as the Connected apps page lists it.
+ */
+export type ConnectedAppDeletion = { id: number, client: string, journeyId: number, deletedAt: string, 
+/**
+ * What the journey was, as [`delete_journey_delegated`] stored it.
+ */
+summary: DeletedJourneySummary, };
+
+/**
+ * A grant as the page shows it.
+ */
+export type ConnectedAppGrant = { client: string, displayName: string, scopes: Array<ConnectedAppScope>, createdAt: string, lastUsedAt: string | null, 
+/**
+ * `false` when Distant Signal has turned this client off (the kill
+ * switch) or no longer lists it: the grant then does nothing.
+ */
+clientEnabled: boolean, };
+
+export type ConnectedAppNotice = { notice: ConnectedAppGrant | null, 
+/**
+ * The newest personal API token created in the last 7 days, while
+ * personal tokens are on (docs/specs/personal-api-tokens.md §15
+ * decision 3). Additive.
+ */
+tokenNotice: PersonalTokenRow | null, };
+
+/**
+ * A scope a delegated client may hold (§5.5). `journeys:read_shared` is
+ * Phase 3 and not accepted yet.
+ */
+export type ConnectedAppScope = "journeys:read" | "journeys:write" | "journeys:delete" | "preferences:read";
+
+export type ConnectedAppsData = { grants: Array<ConnectedAppGrant>, available: Array<ConnectableApp>, recentDeletions: Array<ConnectedAppDeletion>, };
+
 /**
  * How one change between two consecutive legs stands.
  */
 export type ConnectionState = "ok" | "atRisk" | "missed" | "unknown";
+
+export type CreateGrantRequest = { scopes: Array<ConnectedAppScope>, confirmationToken: string, };
+
+/**
+ * Three mutually-exclusive leg-creation shapes, discriminated by an
+ * explicit `mode` field on the wire (`"pin" | "knownTrain" | "window"`,
+ * `#[serde(tag = "mode", rename_all = "camelCase")]`) rather than an
+ * untagged enum -- an untagged enum's default serde error
+ * ("data did not match any variant of untagged enum...") is exactly the
+ * kind of internal, non-actionable message this codebase's
+ * `validate_pin`/`validate_custom_name` family of user-facing errors
+ * deliberately avoids; a missing/invalid `mode` instead gets serde's own
+ * "unknown variant" message naming the three real, meaningful wire
+ * values. See this plan's own Judgment Call 3 for why THREE shapes, not
+ * two.
+ *
+ * `rename_all_fields = "camelCase"`, ADDITIONALLY to the container-level
+ * `rename_all` above, is load-bearing and not redundant with it: serde's
+ * enum-level `rename_all` only renames the *variant* identifiers used for
+ * the `mode` tag ("Pin" -> "pin" etc.) -- it does NOT cascade into the
+ * fields of a struct-shaped variant the way it would for a plain struct.
+ * Without `rename_all_fields` too, every field below (`originCrs`,
+ * `scheduledDeparture`, `trainUid`, `departWindow`, the `skippedStations`
+ * field this finding adds, ...) would only deserialize off a `snake_case`
+ * wire key, which nothing that calls `POST /Journeys` (`TrackTrainForm.tsx`,
+ * `TrackThisTrainButton.tsx`, this file's own `db_tests`) ever sends --
+ * confirmed by writing `wire_format_tests` below against the *actual*
+ * enum (not just believing the doc comments): every field failed to
+ * deserialize with "missing field" until this attribute was added.
+ */
+export type CreateJourneyLegRequest = { "mode": "pin", originCrs: string, scheduledDeparture: string, serviceDate: string, destinationCrs?: string | null, operator?: string | null, 
+/**
+ * Field-for-field the same as `common::TrackPinRequest::skipped_stations`
+ * (same name, same default-empty-list semantics via
+ * `#[serde(default)]`) -- `TrackTrainForm.tsx`'s departure-board
+ * picker (`pickDeparture`) is the only producer of this signal
+ * anywhere in the codebase, and it's wired straight through to the
+ * `TrackPinRequest` built below, the same way it always reached
+ * `train_tracking::create_pin` via the legacy `POST /Train/track`
+ * route.
+ */
+skippedStations?: Array<string>, 
+/**
+ * Darwin's CURRENT platform for the picked departure-board row, and
+ * the earliest platform this poller had seen for it, both captured
+ * by `TrackTrainForm.tsx`'s `pickDeparture` exactly as
+ * `skipped_stations` above is. Field-for-field the same as
+ * `common::TrackPinRequest::platform`/`planned_platform`, which is
+ * where they are forwarded below.
+ *
+ * Integration note (2026-09-22): these arrived with the legacy
+ * `POST /Train/track` body, which this route replaced. Without them
+ * here the pin-mode leg would deserialize fine but silently drop
+ * the platform snapshot, so the journey page would show no platform
+ * for the origin calling point of any journey pinned this way.
+ * `#[serde(default)]` for the same reason as `skipped_stations`:
+ * the CIF-picker and manual-entry paths have no platform signal at
+ * all, and an older frontend build omits the fields entirely.
+ */
+platform?: string | null, plannedPlatform?: string | null, } | { "mode": "knownTrain", trainUid: string, serviceDate: string, originCrs?: string | null, destinationCrs?: string | null, } | { "mode": "window", originCrs: string, destinationCrs: string, serviceDate: string, departWindow?: TimeWindow, arriveWindow?: TimeWindow, } | { "mode": "untracked" } & UntrackedLegRequest;
+
+export type CreateJourneyRequest = { customName?: string | null, leg: CreateJourneyLegRequest, };
+
+export type CreateJourneyResponse = { journeyId: number, legId: number, 
+/**
+ * `None` only for a `window`-mode leg -- no train is bound yet.
+ */
+trackingId: number | null, 
+/**
+ * Mirrors `train::TrackPinResponse::resolution_status` for a
+ * `pin`-mode leg; `None` for `knownTrain`/`window` modes, neither of
+ * which has an equivalent synchronous-match-attempt outcome to report
+ * (a `knownTrain` leg is resolved eagerly, immediately, below; a
+ * `window` leg has no train at all yet).
+ */
+resolutionStatus: ResolutionStatus | null, };
+
+/**
+ * `POST /JourneyTemplates`'s two mutually-exclusive creation shapes --
+ * mirrors `journeys::CreateJourneyLegRequest`'s own tagged-enum shape and
+ * serde attributes exactly (same `rename_all_fields` requirement, same
+ * reasoning).
+ */
+export type CreateJourneyTemplateRequest = { "mode": "manual", customName?: string | null, legs: Array<TemplateLegRequest>, } | { "mode": "fromJourney", customName?: string | null, journeyId: number, };
 
 export type CreateJourneyTemplateResponse = { templateId: number, };
 
@@ -294,6 +434,29 @@ export type DailyStats = { day: string, sampleCycles: number,
  * the line routes, absent from the operator and network ones.
  */
 attribution?: Array<TransitAttribution>, total: number, delayed: number, cancelled: number, skipped: number, avgDelayMinutes: number, delayRate: number, cancellationRate: number, skipRate: number, };
+
+export type DataFreshness = { stations: string | null, tocs: string | null, incidents: string | null, 
+/**
+ * When `TfL` line status last landed. Unlike its three siblings this is
+ * not a poller-fed raw table but the `computed_at` of the TfL-owned
+ * `line_status` rows themselves — for this source, ingest and
+ * computation are the same event.
+ */
+tfl: string | null, 
+/**
+ * When a CIF SCHEDULE feed delivery was last recorded by
+ * `schedule-ingest`'s push to `/private/schedule-feed-ingests`. Its own
+ * new source, not previously reported by this endpoint.
+ */
+schedule_feed: string | null, 
+/**
+ * The `delivered_at` (the delivered file's own mtime) of the newest
+ * Network Rail CORPUS extract loaded into `corpus_locations`
+ * (`MAX(corpus_deliveries.delivered_at)`, the same read as
+ * `data::corpus::last_corpus_delivery`). `None` until the first load,
+ * and for as long as `scheduleFeed.corpus.enabled` stays off.
+ */
+corpus: string | null, };
 
 /**
  * How confident are we in this status?
@@ -495,6 +658,18 @@ rulesCheckedOn: string, };
 export type DelayRepayScheme = "DR15" | "DR30" | "HX";
 
 /**
+ * One leg of a [`DeletedJourneySummary`].
+ */
+export type DeletedJourneyLeg = { serviceDate?: string | null, originCrs?: string | null, destinationCrs?: string | null, trainUid?: string | null, kind?: JourneyLegKind | null, transitMode?: TransitMode | null, originName?: string | null, destinationName?: string | null, lineName?: string | null, plannedDeparture?: string | null, originStopId?: string | null, destinationStopId?: string | null, };
+
+/**
+ * `delegated_deletions.summary`: the journey a connected app deleted, as
+ * `delegated::delete_journey_delegated` stores it. Rows written before a
+ * field existed lack it.
+ */
+export type DeletedJourneySummary = { customName?: string | null, legs?: Array<DeletedJourneyLeg> | null, };
+
+/**
  * A status's disruption detail.
  */
 export type Disruption = { category: string, description: string, affectedStops: Array<string>, affectedRoutes: Array<AffectedRoute>, source: string | null, impactType: string | null, };
@@ -538,6 +713,11 @@ ownerName: string | null, ownerTag: string | null,
  * The group the journey was followed through; `None` for a link.
  */
 groupId: string | null, groupName: string | null, followedAt: string, };
+
+/**
+ * A frequency band's name: `read::FREQUENCY_BANDS`.
+ */
+export type FrequencyBandName = "early" | "morning-peak" | "daytime" | "evening-peak" | "evening" | "late";
 
 /**
  * Why `fullCoverageStats` is (or isn't) there:
@@ -753,6 +933,8 @@ export type HalfHourlyStats = { halfHourStart: string, sampleCycles: number,
  */
 attribution?: Array<TransitAttribution>, total: number, delayed: number, cancelled: number, skipped: number, avgDelayMinutes: number, delayRate: number, cancellationRate: number, skipRate: number, };
 
+export type HistoryRetention = { historyRetentionDays: number, dailyStatsRetentionDays: number, halfHourlyStatsRetentionHours: number, };
+
 /**
  * Renders `serde_json::Value` field-by-field via `json!()`, exactly like
  * `crates/api/src/render.rs::status_to_json` -- deliberately NOT
@@ -825,6 +1007,59 @@ export type InviteLink = {
  * link is active and when it expires, but can never recover its token.
  */
 token: string | null, expiresAt: string, };
+
+/**
+ * One leg, a train leg or (`kind: "untracked"`) an untracked one. Flat
+ * rather than a tagged enum so a body from before untracked legs existed
+ * (no `kind`) still parses, and errors stay sentences.
+ *
+ * **Field order and `skip_serializing_if` are load-bearing.** The
+ * idempotency hash covers this struct's own serialisation, and keys are
+ * remembered across a deploy: a train leg must serialise byte for byte as
+ * it did when `trainUid`/`serviceDate` were required and these four were
+ * the only fields (`a_train_leg_hashes_as_it_did_before_untracked_legs`).
+ */
+export type ItineraryLegRequest = { trainUid?: string | null, serviceDate?: string | null, originCrs?: string | null, destinationCrs?: string | null, kind?: JourneyLegKind | null, transitMode?: TransitMode | null, originName?: string | null, destinationName?: string | null, lineName?: string | null, plannedDeparture?: string | null, plannedArrival?: string | null, 
+/**
+ * An untracked leg's `TfL` stops (additive, 2026-10-20). Skipped when
+ * absent, so a body without them hashes as before.
+ */
+originStopId?: string | null, destinationStopId?: string | null, 
+/**
+ * A timetabled leg's network ride (DS-237, additive; skipped when
+ * absent, so older bodies hash as before):
+ * `journeys::attach_leg_timetable`.
+ */
+transitNetwork?: string | null, transitLineId?: string | null, headsign?: string | null, };
+
+export type ItineraryLegResponse = { legId: number, 
+/**
+ * `None` (`null`) for an untracked leg, which tracks no train.
+ */
+trackingId: number | null, 
+/**
+ * `train` or `untracked`. Absent from a response stored before
+ * 2026-10-20 and replayed (always a train leg then).
+ */
+kind: JourneyLegKind, };
+
+/**
+ * The request body. `Serialize` too: its canonical JSON is what the
+ * idempotency hash covers, so key order and whitespace never matter.
+ */
+export type ItineraryRequest = { customName?: string | null, legs: Array<ItineraryLegRequest>, 
+/**
+ * The plan's operator filter (additive, 2026-10-31). Last, and skipped
+ * when absent, so a body without it hashes as before.
+ */
+operatorFilter?: OperatorFilterRequest | null, };
+
+/**
+ * A superset of `POST /Journeys`' response, so the web planner's
+ * `onCreated` handler takes either: `legId` is the first leg's,
+ * `trackingId` the first TRAIN leg's (an itinerary always has one).
+ */
+export type ItineraryResponse = { journeyId: number, legId: number, trackingId: number, resolutionStatus: ResolutionStatus | null, legs: Array<ItineraryLegResponse>, createdVia: string, };
 
 export type JoinPreview = { groupId: string, groupName: string, memberCount: number, };
 
@@ -1218,7 +1453,7 @@ estimatedDeparture: string | null,
  * predicted late start from the incoming train (DS-127). `None` for
  * the existing estimate (and for a stop with none).
  */
-estimateSource: string | null, lastEventType: string | null, variationStatus: string | null, 
+estimateSource: "previous-working" | null, lastEventType: string | null, variationStatus: string | null, 
 /**
  * How late the train was at this stop, in whole minutes (negative is
  * early), measured against the PUBLIC timetable on the side the stop's
@@ -1425,6 +1660,37 @@ delayMinutes: number,
 slackIfOnTimeMinutes: number, };
 
 /**
+ * One row of `GET .../legs/{legId}/candidates`: the shared calling-point
+ * row (`render::calling_point_departure_json`) at the leg's origin, plus
+ * where the LEG ends and when ([`leg_candidate_json`]), and the train's
+ * service mode.
+ */
+export type LegCandidate = { legOriginCrs: string, legDestinationCrs: string, 
+/**
+ * The public arrival at the leg's destination, else the working one;
+ * `null` when the schedule records neither.
+ */
+legDestinationArrival: string | null, legDestinationArrivalDayOffset: number, legPublicDestinationArrival: string | null, legWorkingDestinationArrival: string | null, 
+/**
+ * `null` only for a stored row without one, which `schedule-reference`
+ * never writes: typed as always set.
+ */
+uid: string, scheduled: string | null, stationCrs: string, originCrs: string | null, destinationCrs: string | null, destinationName: string | null, destinationArrival: string | null, destinationArrivalDayOffset: number, publicDeparture: string | null, publicDestinationArrival: string | null, workingDeparture: string | null, workingDestinationArrival: string | null, 
+/**
+ * The operator's ATOC code.
+ */
+operator: string | null, 
+/**
+ * The CIF Train Identity (headcode, e.g. `1S00`).
+ */
+identity: string | null, serviceMode: ServiceMode, liveTracking: boolean, };
+
+/**
+ * `GET .../legs/{legId}/candidates`'s body.
+ */
+export type LegCandidatesResponse = { results: Array<LegCandidate>, nextCursor: string | null, };
+
+/**
  * The change onto a leg from the one before it (`connection` on every
  * leg of `GET /Journeys/{id}` after the first).
  */
@@ -1467,7 +1733,7 @@ export type LegLive = {
  * `Cancelled`, `Departed`, `Late`, `Delayed`, `OnTime` or `Scheduled`
  * -- the `stop_live_status` vocabulary, for the boarding call.
  */
-status: string, 
+status: LegLiveStatus, 
 /**
  * The train does not call at the boarding or alighting stop today.
  */
@@ -1506,6 +1772,12 @@ interchangeFeasible: boolean | null,
  * (additive, DS-141; absent otherwise): see [`LateDepartureReliance`].
  */
 reliesOnLateDeparture?: LateDepartureReliance<string>, };
+
+/**
+ * A trip plan train leg's live `status`: `trip_plan_live`'s boarding-call
+ * status.
+ */
+export type LegLiveStatus = "Cancelled" | "Departed" | "Delayed" | "Late" | "OnTime" | "Scheduled";
 
 /**
  * A window leg's search filters (DS-215): the Trains section's Between
@@ -1800,6 +2072,19 @@ export type MatchMode = "unmatched" | "manual" | "auto";
  */
 export type MatchState = "matched" | "retimed" | "notInTimetable" | "noService" | "noTimetable";
 
+export type MaterializeTemplateRequest = { 
+/**
+ * Required, no server-side default -- matches
+ * `journeys::CreateJourneyLegRequest`'s own convention that every
+ * leg-creation wire type takes an explicit `serviceDate`, never an
+ * implicit "today". The frontend's "Run now" button (Task 9) defaults
+ * its own date field to today client-side and lets the user change
+ * it before submitting, the same "user is present and picks a date"
+ * posture the design doc's §1 describes for the whole "reusable"
+ * trigger mechanism.
+ */
+serviceDate: string, };
+
 export type MaterializeTemplateResponse = { journeyId: number, legIds: Array<number>, };
 
 /**
@@ -1813,6 +2098,26 @@ export type MaterializeTemplateResponse = { journeyId: number, legIds: Array<num
  * miles).
  */
 export type NearbyStation = { code: string, name: string, distanceKm: number, };
+
+/**
+ * Two of `CreateJourneyLegRequest`'s three shapes (no `Pin` -- spec §3's
+ * "add a leg" only offers a direct known-train pick or an open
+ * time-window search), for `POST /Journeys/{journeyId}/legs` (Phase 2).
+ * Field names and the `mode` tag are IDENTICAL to the matching
+ * `CreateJourneyLegRequest` variants on purpose -- same wire shape, same
+ * serde gotcha applies: `rename_all_fields = "camelCase"` is REQUIRED in
+ * addition to the container-level `rename_all`, or every field below
+ * fails to deserialize off camelCase JSON (see `CreateJourneyLegRequest`'s
+ * own doc comment for the full explanation; this plan's `wire_format_tests`
+ * step below reproduces that same regression test against this enum).
+ */
+export type NewJourneyLegRequest = { "mode": "knownTrain", trainUid: string, serviceDate: string, originCrs?: string | null, destinationCrs?: string | null, } | { "mode": "window", originCrs: string, destinationCrs: string, serviceDate: string, departWindow?: TimeWindow, arriveWindow?: TimeWindow, filters?: LegSearchFilters | null, } | { "mode": "untracked" } & UntrackedLegRequest;
+
+/**
+ * Which constraint made a trip-plan segment infeasible:
+ * `trip_planning_itinerary::NoResultReason::constraint`.
+ */
+export type NoResultConstraint = "maxChanges" | "avoid" | "avoidStop" | "avoidChange" | "avoidCombined" | "via" | "departAfter" | "arriveBy" | "noRoute" | "previousSegment" | "nextSegment" | "operator" | "avoidOperator";
 
 /**
  * Why a segment has no itineraries -- served as the segment's
@@ -1846,13 +2151,34 @@ export type NearbyStation = { code: string, name: string, distanceKm: number, };
  *   runs that day. A filter that only fails together with the avoid lists
  *   is `avoidCombined`, its `values` then holding the operator codes too.
  */
-export type NoResultReason = { constraint: string, values: Array<string>, message: string, 
+export type NoResultReason = { constraint: NoResultConstraint, values: Array<string>, message: string, 
 /**
  * `operator` / `avoidOperator` only (2026-10-31): the operators whose
  * links or connecting rides, not trains, made the difference (`["LT"]`:
  * crossing London needs the Tube). Absent otherwise.
  */
 linkOperators?: Array<string>, };
+
+/**
+ * `GET`/`PUT /public/preferences/notifications`: the user's push
+ * settings beyond the browser's own permission (mid-journey changes spec
+ * 2026-10-22 §6.5; DS-153). A switch per kind of push, each on unless
+ * turned off: `journeySuggestions` (suggested trains when a journey
+ * breaks), `lineStatus`, `trainDelay`, `trainCancel`, `predictedStart`,
+ * `stationSkip` and `templateAttention`; `delayThresholdMinutes` (5, 10,
+ * 15 or 30; `null` for the default, 15); `quietHours` (`{start, end,
+ * timezone}`, `HH:MM` local times and an IANA zone, or `null` for none);
+ * `snoozedUntil` (pushes held until then as in quiet hours, at most a
+ * week ahead; `null` when not snoozed).
+ */
+export type NotificationPreferences = { journeySuggestions: boolean, lineStatus: boolean, trainDelay: boolean, trainCancel: boolean, predictedStart: boolean, stationSkip: boolean, templateAttention: boolean, delayThresholdMinutes: 5 | 10 | 15 | 30 | null, quietHours: QuietHours | null, snoozedUntil: string | null, };
+
+/**
+ * A `PUT` body: only the fields present change, so a client that knows
+ * only `journeySuggestions` keeps working. `null` clears the threshold
+ * (back to the default) or the quiet hours. Unknown fields are refused.
+ */
+export type NotificationPreferencesUpdate = { journeySuggestions?: boolean, lineStatus?: boolean, trainDelay?: boolean, trainCancel?: boolean, predictedStart?: boolean, stationSkip?: boolean, templateAttention?: boolean, delayThresholdMinutes?: 5 | 10 | 15 | 30 | null, quietHours?: QuietHours | null, snoozedUntil?: string | null, };
 
 /**
  * The open break as `GET /Journeys/{id}` serves it.
@@ -1863,6 +2189,17 @@ export type OpenBreakSummary = { id: number, cause: BreakCause, fault: BreakFaul
  * where, and the best option's arrival.
  */
 stationName: string | null, destinationName: string | null, suggestionCount: number, firstArrival: string | null, };
+
+/**
+ * The request shape (`POST /Journeys/itinerary`'s `operatorFilter`, and
+ * the `PUT` body's): a mode and the entries as `/Trips/plan` takes them.
+ */
+export type OperatorFilterRequest = { mode: OperatorMode, entries: Array<string>, };
+
+/**
+ * `GET /Trips/operator-groups`'s body.
+ */
+export type OperatorGroupsCatalogue = { groups: Array<PlannerOperatorGroup>, dsOperators: Array<PlannerOperator<string>>, names: { [key in string]: string }, };
 
 /**
  * `journeys.operator_filter_mode` (its CHECK constraint).
@@ -1984,6 +2321,15 @@ lifetimes: Array<number>, defaultLifetimeDays: number, maxActive: number, tokens
  * One of the badged picks (§17.6), in display order.
  */
 export type Pick = "recommended" | "fastest" | "fewestChanges" | "sameOperator" | "noTube" | "rejoin";
+
+/**
+ * `PUT /preferences/pinned-lines/{lineId}/alerts` `{notify}`: whether a
+ * pinned line's status changes are pushed (DS-153). Pinning and alerting
+ * are separate: a line can stay on the home page without pushes. 204;
+ * 404 when the caller has not pinned that line. Unknown fields are
+ * refused.
+ */
+export type PinnedLineAlerts = { notify: boolean, };
 
 export type PlannedItinerary = { legs: Array<PlannedLeg>, 
 /**
@@ -2179,6 +2525,25 @@ operator?: string,
 estimatedWalk?: boolean, };
 
 /**
+ * An operator by code and name.
+ */
+export type PlannerOperator<N> = { code: string, name: N, };
+
+/**
+ * `GET /Trips/operators`'s body.
+ */
+export type PlannerOperatorCatalogue = { groups: Array<PlannerOperatorGroup>, dsOperators: Array<PlannerOperator<string>>, 
+/**
+ * The timetable's operators, `name` `null` when none is known.
+ */
+operators: Array<PlannerOperator<string | null>>, };
+
+/**
+ * One named operator group: its members as API codes.
+ */
+export type PlannerOperatorGroup = { code: string, name: string, members: Array<string>, };
+
+/**
  * `JourneyStop.platformBasis` (DS-127): what the stop's `displayPlatform`
  * rests on. Serialized lowercase; `null` when there is no platform at
  * all. Clients must treat an unknown value as `board`.
@@ -2219,6 +2584,13 @@ basis: string, computedAt: string, previousWorking: PreviousWorking, };
  */
 export type PreferOperatorResult = "none" | "tooSlow" | "labelled" | "added";
 
+export type Preferences = { pinnedLines: Array<string>, pinnedStations: Array<string>, pinnedOperators: Array<string>, 
+/**
+ * Of `pinned_lines`, the ones whose status pushes are off
+ * (`PUT /preferences/pinned-lines/{lineId}/alerts`, DS-153). Additive.
+ */
+silentPinnedLines: Array<string>, };
+
 /**
  * `predictedStart.previousWorking`: the incoming train the prediction
  * rests on.
@@ -2228,12 +2600,12 @@ export type PreviousWorking = { trainUid: string, serviceDate: string,
  * [`LINK_INFERRED`] (the platform sequence) or [`LINK_ASSOCIATION`]
  * (Darwin's live next-working link).
  */
-link: string, 
+link: PreviousWorkingLink, 
 /**
  * P's `train_current_state.status` (`en_route`, `completed`,
  * `awaiting_activation`), `None` without a state row.
  */
-status: string | null, 
+status: JourneyStatus | null, 
 /**
  * P's current TRUST delay, against the working timetable.
  */
@@ -2242,6 +2614,12 @@ delayMinutes: number | null,
  * When P's state was last reported.
  */
 observedAt: string | null, bookedTurnaroundMinutes: number, };
+
+/**
+ * How a predicted start found its previous working:
+ * `trains::predicted_start::LINK_INFERRED` and `LINK_ASSOCIATION`.
+ */
+export type PreviousWorkingLink = "inferred" | "association";
 
 /**
  * `GET /Train/by-uid/{uid}/{date}`'s body: the [`PublicTrainState`]
@@ -2376,6 +2754,43 @@ changeOfOriginReason: string | null,
 cancellation: Cancellation | null, serviceMode: ServiceMode, liveTracking: boolean, provisional: boolean, provisionalFrom: string, trackingPhase: TrackingPhase | null, firstReportExpectedAt: string | null, };
 
 /**
+ * One of a user's devices with push on, for the Notifications page.
+ */
+export type PushDevice = { id: number, 
+/**
+ * "Chrome on Android"; `None` when it could not be worked out.
+ */
+label: string | null, createdAt: string, 
+/**
+ * The later of the last push delivered to it and the last time it
+ * subscribed.
+ */
+lastUsedAt: string, 
+/**
+ * The SHA-256 of the push endpoint, hex: the page hashes its own
+ * endpoint to mark "this device" without the endpoint being sent back.
+ */
+endpointSha256: string, };
+
+/**
+ * `PUT /JourneyTemplates/{id}`'s body -- full-resource replace (Judgment
+ * Calls 1 and 4). Same `TemplateLegRequest` shape as the `Manual` create
+ * variant; no `mode` tag needed since there's only one shape for an edit.
+ *
+ * The six recurrence fields (`days_of_week` through `auto_commit_rule`)
+ * are deliberately REQUIRED here, unlike `custom_name`'s
+ * `#[serde(default)]` -- this is a full-resource-replace endpoint (every
+ * save resends the whole `legs` list too), so making these required means
+ * a caller can never accidentally wipe out a template's recurrence config
+ * by omitting them from a plain name/leg edit. The frontend always
+ * populates every field from the currently-loaded template before
+ * submitting.
+ */
+export type PutJourneyTemplateRequest = { customName?: string | null, legs: Array<TemplateLegRequest>, daysOfWeek: number | null, active: boolean, startsOn: string | null, endsOn: string | null, defaultMatchMode: TemplateMatchMode, autoCommitRule: AutoCommitRule | null, };
+
+export type QuietHours = { start: string, end: string, timezone: string, };
+
+/**
  * Where a cancellation's reason came from; see the module doc for the
  * precedence.
  */
@@ -2399,6 +2814,13 @@ expectedUntilEndOfDay: boolean, };
  * `GET /public/incidents/recently-cleared`'s body.
  */
 export type RecentlyClearedResponse = { results: Array<RecentlyClearedIncident>, };
+
+export type RenameRequest = { 
+/**
+ * Absent, JSON `null`, or an empty/whitespace-only string all mean
+ * "clear the custom name" -- see `train_tracking::validate_custom_name`.
+ */
+customName?: string | null, };
 
 export type RenameResponse = { 
 /**
@@ -2591,6 +3013,35 @@ export type SegmentClock = { time: string, dayOffset: number, };
  * (`replacementBus`).
  */
 export type ServiceMode = "train" | "replacementBus" | "bus" | "ferry";
+
+export type SessionInfo = { authenticated: boolean, id: string | null, name: string | null, 
+/**
+ * The user's own username (`preferred_username`), the self-view
+ * fallback label when `name` is empty. Replaced `email` (2026-09-30),
+ * which this app no longer requests or stores.
+ */
+username: string | null, 
+/**
+ * Always present, empty when logged out or when the logged-in user
+ * asserted no groups -- never omitted, so a consumer (Task 9's
+ * adapter, in distant-signal-mcp's own separate repository) can
+ * always treat this as a plain string array rather than an optional
+ * field. See
+ * docs/superpowers/specs/2026-09-02-mcp-server-oauth-access-groups-design.md
+ * Decision 2's "one existing read-back point" framing.
+ */
+groups: Array<string>, 
+/**
+ * The user's usage-analytics choice (DS-190); `false` when logged
+ * out, where the browser keeps its own choice.
+ */
+analyticsOptIn: boolean, 
+/**
+ * Whether personal API tokens are on (`PERSONAL_TOKENS_ENABLED`), so
+ * the account menu can offer "Revoke all API tokens"; `false` when
+ * logged out.
+ */
+personalTokensEnabled: boolean, };
 
 /**
  * The unlisted share link `unlisted_links::UnlistedLink` mapped onto the
@@ -2795,6 +3246,42 @@ export type StationCodes = { codes: Array<string>, };
 export type StationDeparture = { serviceId: string, operator: string, destinationCrs: string, destinationName: string | null, scheduled: string, estimated: string, isCancelled: boolean, delayMinutes: number, cancelReason: string | null, delayReason: string | null, skippedStations: Array<string>, platform: string | null, plannedPlatform: string | null, platformChanged: boolean, rsid: string | null, callingPoints: Array<BoardCallingPoint>, };
 
 /**
+ * One group as `GET /Trips/station-groups` serves it.
+ */
+export type StationGroup = { 
+/**
+ * The group's name in a request: `LON`.
+ */
+group: string, 
+/**
+ * The entry that names it in `via`, `waypoints` or an avoid list:
+ * `group:LON`.
+ */
+code: string, 
+/**
+ * What a person calls it: `London Terminals` (the code when unnamed).
+ */
+name: string, 
+/**
+ * In file order.
+ */
+members: Array<StationGroupMember>, };
+
+/**
+ * One member of a [`GroupInfo`].
+ */
+export type StationGroupMember = { crs: string, 
+/**
+ * The CSV's name for it; `null` when it gives none.
+ */
+name: string | null, };
+
+/**
+ * `GET /Trips/station-groups`'s body.
+ */
+export type StationGroupsResponse = { groups: Array<StationGroup>, };
+
+/**
  * One operator's row of `GET /public/stations/{crs}/sample-stats`.
  * `sampleAvailability` is never `no-coverage` here (the route's own
  * invariant); `fullCoverageAvailability` is always present.
@@ -2942,9 +3429,87 @@ stale: boolean, };
 export type SuggestionStaleResponse = { error: "suggestion_stale", message: string, break: BreakResponse, };
 
 /**
+ * One manually-entered template leg on the wire -- shared by
+ * `CreateJourneyTemplateRequest::Manual` and `PutJourneyTemplateRequest`.
+ * Field-for-field the `window`-mode shape of `journeys::CreateJourneyLegRequest`
+ * minus `service_date` (a template leg is date-less) and minus `mode`
+ * itself (there's only one leg shape here, no pin/knownTrain equivalent
+ * for a template -- see this plan's Judgment Call 2 for why that's fine).
+ */
+export type TemplateLegRequest = { originCrs: string, destinationCrs: string, departWindow?: TimeWindow, arriveWindow?: TimeWindow, };
+
+/**
  * `journey_templates.default_match_mode` (its CHECK constraint).
  */
 export type TemplateMatchMode = "manual" | "auto";
+
+/**
+ * One arrival as the api serves it.
+ */
+export type TflArrival = { 
+/**
+ * `TfL`'s prediction id: stable across refreshes, a list key.
+ */
+id: string, 
+/**
+ * `Cockfosters`; `TfL`'s `towards` when it names no destination.
+ */
+destination: string, expectedArrival: string, 
+/**
+ * Seconds from the response's `now` to `expectedArrival`, never
+ * negative (a train due now is 0).
+ */
+timeToStationSecs: number, 
+/**
+ * `Between Holborn and Russell Square`, when `TfL` says.
+ */
+currentLocation?: string, };
+
+/**
+ * The arrivals at one platform of one line.
+ */
+export type TflArrivalGroup = { lineId: string, lineName: string, 
+/**
+ * `Westbound - Platform 1`; empty when `TfL` names none.
+ */
+platformName: string, 
+/**
+ * `inbound` / `outbound`, when `TfL` says.
+ */
+direction?: string, 
+/**
+ * Soonest first, at most [`MAX_PER_GROUP`].
+ */
+arrivals: Array<TflArrival>, };
+
+/**
+ * `GET /public/tfl/stops/{id}/arrivals`.
+ */
+export type TflStopArrivals = { stopId: string, 
+/**
+ * When `TfL` was asked (the cache's age shows here).
+ */
+fetchedAt: string, 
+/**
+ * By line name, then platform name.
+ */
+groups: Array<TflArrivalGroup>, };
+
+/**
+ * `GET /public/tfl/stops/{id}`.
+ */
+export type TflStopDetail = { id: string, name: string, modes: Array<string>, lines: Array<TflStopLine>, 
+/**
+ * The National Rail stations at this stop, best first
+ * (`tfl_stops::rail_crs_for_stops`: the termini overrides, the hub
+ * crosswalk, then the nearest station within 300 m). Often empty.
+ */
+railStations: Array<TflStopRailStation>, };
+
+/**
+ * `GET /public/tfl/stops/ids`'s body: every Tube, DLR and tram stop id.
+ */
+export type TflStopIds = { ids: Array<string>, };
 
 /**
  * One line serving a stop.
@@ -2958,6 +3523,15 @@ id: string,
  * `TfL`'s line name (`Victoria`).
  */
 name: string, };
+
+/**
+ * A National Rail station at the stop.
+ */
+export type TflStopRailStation = { crs: string, 
+/**
+ * `null` when the station has no reference row.
+ */
+name: string | null, };
 
 /**
  * One stop as the api serves it.
@@ -2977,6 +3551,31 @@ name: string,
 modes: Array<string>, lines: Array<TflStopLine>, };
 
 export type TicketCreatedResponse = { ticketId: number, };
+
+/**
+ * Manual ticket-entry payload for `POST /Train/{trackingId}/tickets`
+ * (`crates/api/src/routes/train.rs`) -- the durable v1 backbone every
+ * ingestion tier ultimately funnels through (see
+ * docs/superpowers/specs/2026-08-29-journey-ticket-tracking-design.md).
+ * `source` defaults to "manual"; a `.pkpass`/PDF
+ * upload preview (Tasks 6-9) is turned into a saved row by the client
+ * re-submitting this same request shape with `source` set to whichever
+ * tier produced the reviewed data ("pkpass-semantics" / "pkpass-heuristic"
+ * / "pdf-heuristic") -- there is no separate "confirm upload" endpoint;
+ * this is the only write path, deliberately.
+ */
+export type TicketEntryRequest = { operator?: string | null, ticket_type?: string | null, origin_crs?: string | null, destination_crs?: string | null, 
+/**
+ * See `ticket_extraction::PartialTicket::current_departure_date`'s own
+ * doc comment -- this is that same value, carried through unedited by
+ * `TicketEntryForm.tsx`'s save step (there is no separate "confirm
+ * upload" endpoint; see this struct's own doc comment). A best-effort
+ * HINT for a later journey-leg-proposal search window
+ * (`data::journey_leg_proposal`), never a hard pin -- persisted
+ * verbatim, never validated against anything, same posture as
+ * `operator`/`ticket_type` above.
+ */
+current_departure_date?: string | null, source?: TicketSource, };
 
 /**
  * Whether a ticket is a single or a return, as far as its free-text
@@ -3076,6 +3675,26 @@ rulesCheckedOn: string, };
 export type TicketSource = "manual" | "pkpass-semantics" | "pkpass-heuristic" | "pdf-heuristic";
 
 /**
+ * A reusable, named "after/before" bound pair on a `NaiveTime` --
+ * closes a real, named gap
+ * (docs/superpowers/specs/2026-09-22-journey-tracking-design.md §0.5,
+ * §2.1): every existing before/after pair in this codebase (e.g.
+ * `queries::search_schedule_calling_point_departures`'s own
+ * `scheduled_from`/`to_time` and `stop_arrival_from`/`stop_arrival_to`
+ * parameters, `TrainSearchParams::from`/`to`/`arrival_from`/`arrival_to`)
+ * is two sibling `Option<NaiveTime>` fields, duplicated at each layer
+ * rather than named once. Used by `CreateJourneyLegRequest::Window`
+ * (`crates/api/src/routes/journeys.rs`) for its `departWindow`/
+ * `arriveWindow` fields -- the request-body/write side only. The read
+ * side (`JourneyLegDetailResponse`, same file) deliberately flattens back
+ * to four individual `departAfter`/`departBefore`/`arriveAfter`/
+ * `arriveBefore` fields, matching how every other optional time pair in
+ * this codebase's existing wire responses is already shaped, rather than
+ * introducing a new nested-object convention on the read side too.
+ */
+export type TimeWindow = { after?: string | null, before?: string | null, };
+
+/**
  * One timetabled call of the ride, from boarding to alighting.
  */
 export type TimetabledCall = { 
@@ -3100,6 +3719,58 @@ scheduledDeparture: string | null, };
  * A ride of a timetabled leg, by its scheduled times.
  */
 export type TimetabledRide = { departure: string, arrival: string, };
+
+/**
+ * Pin-creation payload for `POST /Train/track` (`crates/api/src/routes/train.rs`).
+ * Deliberately does NOT include `train_uid` -- per the design doc's
+ * Tracking semantics, the pinned service is only ever known by what a
+ * departure-board view already has (RDM's ephemeral `serviceID`-adjacent
+ * fields), never by a durable train identity at pin time. Resolution to
+ * `(train_uid, service_date)` happens later, out of band: api's
+ * schedule-first match (`crates/api/src/data/schedule_matching.rs`), or
+ * trust-consumer's live TRUST matching (`crates/trust-consumer/src/matching.rs`).
+ */
+export type TrackPinRequest = { service_date: string, origin_crs: string, scheduled_departure: string, destination_crs?: string | null, operator?: string | null, 
+/**
+ * CRS codes of scheduled calling points the departure-board row the
+ * user picked (`TrackTrainForm.tsx`'s `pickDeparture`) reported as
+ * skipped TODAY, per Darwin's own per-calling-point `isCancelled` flag
+ * -- a same-shape copy of `StationDeparture.skipped_stations`' own
+ * doc comment, carried through this request so the pin's snapshot of
+ * that signal survives past the moment the picker's live board result
+ * itself expires. `#[serde(default)]` so an older frontend build (or
+ * the CIF-picker/manual-entry path, which has no such signal at all)
+ * omitting this field entirely still deserializes, as an empty list --
+ * "no known skip" -- rather than failing the whole pin. See
+ * `data::trains::find_or_create_train_with_schedule_match`'s own doc
+ * comment for where this ends up.
+ */
+skipped_stations: Array<string>, 
+/**
+ * Same idea as `skipped_stations` immediately above, for Darwin's
+ * platform signal instead of its skip signal: the CURRENT platform the
+ * picked departure-board row reported (`DepartureRow.platform`),
+ * carried through so the journey page can show the origin calling
+ * point's platform once a `trains` row exists. See
+ * `StationDeparture.platform`'s own doc comment for why this is only
+ * ever "current", never a distinct "planned" value from Darwin's own
+ * API.
+ */
+platform?: string | null, 
+/**
+ * The EARLIEST platform this poller process had observed for the
+ * picked row's service at pin time (`DepartureRow.plannedPlatform`),
+ * carried through the same way. See
+ * `StationDeparture.planned_platform`'s own doc comment.
+ */
+planned_platform?: string | null, };
+
+export type TrackPinResponse = { trackingId: number, resolutionStatus: ResolutionStatus, 
+/**
+ * The one-leg journey the pin now belongs to (DS-124). Additive
+ * (2026-10-22).
+ */
+journeyId: number, };
 
 /**
  * A user's own tracked-train list, lighter than `TrackedTrainState`
@@ -3616,6 +4287,19 @@ identity: string | null, serviceMode: ServiceMode, liveTracking: boolean, };
 export type TrainSearchWindow = { from: WindowBound, to: WindowBound | null, arrivalFrom: WindowBound | null, arrivalTo: WindowBound | null, };
 
 /**
+ * A line a situation changes the status of, and to what.
+ */
+export type TransitAffectedLine = { 
+/**
+ * The public id (`metrolink:blue`).
+ */
+id: string, name: string, 
+/**
+ * A `common::Severity` number.
+ */
+severity: number, description: string, };
+
+/**
  * The licence notice a network's data needs (spec §12.3).
  */
 export type TransitAttribution = { 
@@ -3623,6 +4307,78 @@ export type TransitAttribution = {
  * SPDX-style id (`OGL-UK-3.0`).
  */
 licence: string, text: string, };
+
+/**
+ * `GET /public/transit/{network}/stops/{stop}/departures`'s body.
+ */
+export type TransitBoard = { date: string, departures: Array<TransitDeparture>, 
+/**
+ * Pass back as `cursor` for the next page.
+ */
+nextCursor: string | null, 
+/**
+ * The date is outside the stored horizon: no rows, not "no service".
+ */
+outsideHorizon: boolean, realtime: false, kind: "scheduled", };
+
+/**
+ * One scheduled departure.
+ */
+export type TransitDeparture = { 
+/**
+ * London local time, RFC 3339 with its offset.
+ */
+scheduledDeparture: string, tripId: string, 
+/**
+ * `None` for a replacement bus.
+ */
+line: TransitLine | null, destination: string, platformId: string, platform: string | null, replacementBus: boolean, };
+
+/**
+ * A pattern's direction: `transit_patterns.direction` (its CHECK
+ * constraint).
+ */
+export type TransitDirection = "outbound" | "inbound";
+
+/**
+ * One direction's frequency summary, at its busiest station.
+ */
+export type TransitDirectionFrequency = { 
+/**
+ * `outbound` or `inbound`.
+ */
+direction: TransitDirection, 
+/**
+ * The station measured: the direction's with the most departures.
+ */
+station: TransitStationRef, 
+/**
+ * `HH:MM` London time: the first and last departure from it.
+ */
+first: string, last: string, bands: Array<TransitFrequencyBand>, };
+
+/**
+ * One band of a direction's frequency summary.
+ */
+export type TransitFrequencyBand = { 
+/**
+ * `early`, `morning-peak`, `daytime`, `evening-peak`, `evening`,
+ * `late`.
+ */
+band: FrequencyBandName, 
+/**
+ * `HH:MM`, its start and end (`24:00` style ends are `00:00`).
+ */
+from: string, to: string, 
+/**
+ * Departures in the band from the station.
+ */
+departures: number, 
+/**
+ * The shortest and longest gap in whole minutes between one departure
+ * in the band and the next; `None` with fewer than two.
+ */
+minGapMinutes: number | null, maxGapMinutes: number | null, };
 
 /**
  * A `transit` leg's TypeScript, named `TransitLeg`: `TransitLeg`'s own
@@ -3690,10 +4446,215 @@ id: string, name: string,
 platform: string | null, };
 
 /**
+ * A line.
+ */
+export type TransitLine = { 
+/**
+ * The public id, `<network>:<line>`.
+ */
+id: string, 
+/**
+ * The local id, the route's path segment.
+ */
+lineId: string, name: string, colour: string | null, 
+/**
+ * The line's own mode (`tube`, `dlr`, `tram`), else its network's
+ * (the `TfL` design §6).
+ */
+mode: string, 
+/**
+ * The `line_status` id its status is read from, and that a pin of it
+ * stores: its own public id, or for a network whose status is `TfL`'s
+ * (`common::transit::status_from_tfl`) `TfL`'s line (`tfl-victoria`).
+ */
+statusLineId: string, };
+
+/**
+ * One branch of a line: a run of stations that at least
+ * [`BRANCH_MIN_SHARE_PERCENT`] of a direction's trips make (a trip making
+ * part of a longer run counts for the longer one).
+ */
+export type TransitLineBranch = { 
+/**
+ * `<direction>-<n>`, stable for a feed version: the timetable's
+ * `branch`.
+ */
+id: string, 
+/**
+ * `outbound` or `inbound`.
+ */
+direction: TransitDirection, 
+/**
+ * `Edgware to Morden`, with `via <station>` when two branches share
+ * their ends.
+ */
+name: string, stations: Array<TransitStationRef>, 
+/**
+ * Its share of the direction's trips, whole percent.
+ */
+sharePercent: number, };
+
+/**
+ * `GET /public/transit/{network}/lines/{line}`'s body.
+ */
+export type TransitLineDetail = { status: TransitLineStatus, situations: TransitSituations, frequency: TransitLineFrequency | null, statusSource: TransitStatusSource, directions: Array<TransitLineDirection>, 
+/**
+ * The line's branches (the `TfL` design §8.3): the station runs its
+ * trips make, each direction's in order of their share of its trips.
+ */
+branches: Array<TransitLineBranch>, 
+/**
+ * The public id, `<network>:<line>`.
+ */
+id: string, 
+/**
+ * The local id, the route's path segment.
+ */
+lineId: string, name: string, colour: string | null, 
+/**
+ * The line's own mode (`tube`, `dlr`, `tram`), else its network's
+ * (the `TfL` design §6).
+ */
+mode: string, 
+/**
+ * The `line_status` id its status is read from, and that a pin of it
+ * stores: its own public id, or for a network whose status is `TfL`'s
+ * (`common::transit::status_from_tfl`) `TfL`'s line (`tfl-victoria`).
+ */
+statusLineId: string, };
+
+/**
+ * One direction of a line, its stations in order.
+ */
+export type TransitLineDirection = { 
+/**
+ * `outbound` or `inbound`.
+ */
+direction: TransitDirection, headsign: string | null, stations: Array<TransitStationRef>, };
+
+/**
+ * A line's frequency summary for a date.
+ */
+export type TransitLineFrequency = { date: string, directions: Array<TransitDirectionFrequency>, 
+/**
+ * The date is outside the timetable's horizon (no directions).
+ */
+outsideHorizon: boolean, };
+
+/**
+ * A line's status as the api shows it.
+ */
+export type TransitLineStatus = { state: TransitStatusState, 
+/**
+ * The situations marker.
+ */
+asOf: string | null, 
+/**
+ * Worst first; the first is the headline. Empty unless `current`.
+ */
+statuses: Array<TransitStatusEntry>, 
+/**
+ * Empty unless `current`.
+ */
+upcoming: Array<TransitUpcomingEntry>, };
+
+/**
+ * `GET /public/transit/{network}/lines/{line}/timetable`'s body.
+ */
+export type TransitLineTimetable = { date: string, direction: TransitDirection, 
+/**
+ * The branch shown (`LineBranch::id`), when one was asked for and is
+ * the direction's: its stations are the rows, and only trips that
+ * stay on it are listed.
+ */
+branch: string | null, stations: Array<TransitStationRef>, trips: Array<TransitTimetableTrip>, outsideHorizon: boolean, realtime: false, kind: "scheduled", };
+
+/**
+ * How a transit stop links to a rail station: `transit_rail_links.kind`
+ * (its CHECK constraint).
+ */
+export type TransitLinkKind = "interchange" | "nearby";
+
+/**
  * An untracked leg's `transit_mode`: `data::journeys::TRANSIT_MODES`,
  * checked on every write.
  */
 export type TransitMode = "tube" | "dlr" | "bus" | "tram" | "metro" | "rail" | "walk" | "transfer" | "ferry" | "taxi" | "cycle" | "other";
+
+/**
+ * A National Rail catalogue line a `TfL` network page links to.
+ */
+export type TransitNationalRailLine = { id: string, name: string, };
+
+/**
+ * One network of [`TransitNetworksResponse`].
+ */
+export type TransitNetwork = { 
+/**
+ * Whether `/Trips/plan` plans with the network; absent while no
+ * network is planned with.
+ */
+tripPlanning?: boolean, id: string, name: string, mode: string, attribution: TransitAttribution, feedVersion: string, horizonFrom: string | null, horizonTo: string | null, 
+/**
+ * The timetable's freshness marker (its last applied commit).
+ */
+timetableAsOf: string | null, 
+/**
+ * The situations' marker (batch 4; `None` until then).
+ */
+situationsAsOf: string | null, };
+
+/**
+ * `GET /public/transit/{network}`'s body.
+ */
+export type TransitNetworkDetail = { 
+/**
+ * The `TfL` network's lines that are National Rail catalogue lines
+ * here (the `TfL` design §8.2); absent on other networks.
+ */
+nationalRailLines?: Array<TransitNationalRailLine>, lines: Array<TransitNetworkLine>, status: TransitStatusAsOf, statusSource: TransitStatusSource, id: string, name: string, mode: string, attribution: TransitAttribution, feedVersion: string, horizonFrom: string | null, horizonTo: string | null, 
+/**
+ * The timetable's freshness marker (its last applied commit).
+ */
+timetableAsOf: string | null, 
+/**
+ * The situations' marker (batch 4; `None` until then).
+ */
+situationsAsOf: string | null, };
+
+/**
+ * A line of [`TransitNetworkDetailResponse`], with its status.
+ */
+export type TransitNetworkLine = { status: TransitLineStatus, 
+/**
+ * The public id, `<network>:<line>`.
+ */
+id: string, 
+/**
+ * The local id, the route's path segment.
+ */
+lineId: string, name: string, colour: string | null, 
+/**
+ * The line's own mode (`tube`, `dlr`, `tram`), else its network's
+ * (the `TfL` design §6).
+ */
+mode: string, 
+/**
+ * The `line_status` id its status is read from, and that a pin of it
+ * stores: its own public id, or for a network whose status is `TfL`'s
+ * (`common::transit::status_from_tfl`) `TfL`'s line (`tfl-victoria`).
+ */
+statusLineId: string, };
+
+/**
+ * `GET /public/transit/networks`'s body.
+ */
+export type TransitNetworksResponse = { networks: Array<TransitNetwork>, };
+
+/**
+ * A time window; `end: None` is open-ended.
+ */
+export type TransitPeriod = { start: string, end: string | null, };
 
 /**
  * One of `GET /Trips/plan`'s `transitNotices` (spec §7.3): a network left
@@ -3706,9 +4667,249 @@ export type TransitPlanNotice = { network: string,
 reason: string, message: string, };
 
 /**
+ * A platform of a station.
+ */
+export type TransitPlatform = { id: string, indicator: string | null, };
+
+/**
+ * A link to a National Rail station.
+ */
+export type TransitRailLink = { crs: string, tiploc: string, 
+/**
+ * `interchange` or `nearby`.
+ */
+kind: TransitLinkKind, note: string | null, 
+/**
+ * The National Rail station's name (`Manchester Piccadilly`), when
+ * the station list has the CRS.
+ */
+stationName: string | null, };
+
+/**
+ * `GET /public/transit/rail-links`'s body: the transit stops linked to a
+ * station.
+ */
+export type TransitRailLinksResponse = { links: Array<TransitStationLink>, };
+
+/**
  * A transit leg's `serviceMode`.
  */
 export type TransitServiceMode = "tram" | "replacementBus" | "tube" | "dlr";
+
+/**
+ * A situation as the api shows it.
+ */
+export type TransitSituation = { id: string, summary: string, 
+/**
+ * Plain text, as published; a client must render it as text.
+ */
+description: string | null, infoUrl: string | null, planned: boolean, reason: string | null, 
+/**
+ * `line`, `stop` or `network`.
+ */
+scope: TransitSituationScope, 
+/**
+ * Public line ids (`metrolink:blue`).
+ */
+lines: Array<string>, 
+/**
+ * Station ids.
+ */
+stops: Array<string>, 
+/**
+ * Advice from its consequences, deduplicated.
+ */
+advice: Array<string>, validity: Array<TransitPeriod>, 
+/**
+ * The upcoming period's start, for an upcoming situation.
+ */
+starts: string | null, };
+
+/**
+ * `GET /public/transit/{network}/situations/{situation}`'s body.
+ */
+export type TransitSituationDetail = { status: TransitStatusAsOf, state: TransitSituationState, 
+/**
+ * Its worst status over the lines it affects (`Information` when it
+ * changes none: a stop notice). A `common::Severity` number.
+ */
+severity: number, severityDescription: string, 
+/**
+ * Worst first, then by name. Empty for a stop notice or a
+ * network-wide one.
+ */
+affects: Array<TransitAffectedLine>, firstSeenAt: string, 
+/**
+ * The snapshot that last listed it.
+ */
+updatedAt: string, 
+/**
+ * When the snapshots stopped listing it (so it is `ended`).
+ */
+endedAt: string | null, 
+/**
+ * For `ended` while still listed: when its last validity period ended.
+ */
+validityEndedAt: string | null, id: string, summary: string, 
+/**
+ * Plain text, as published; a client must render it as text.
+ */
+description: string | null, infoUrl: string | null, planned: boolean, reason: string | null, 
+/**
+ * `line`, `stop` or `network`.
+ */
+scope: TransitSituationScope, 
+/**
+ * Public line ids (`metrolink:blue`).
+ */
+lines: Array<string>, 
+/**
+ * Station ids.
+ */
+stops: Array<string>, 
+/**
+ * Advice from its consequences, deduplicated.
+ */
+advice: Array<string>, validity: Array<TransitPeriod>, 
+/**
+ * The upcoming period's start, for an upcoming situation.
+ */
+starts: string | null, };
+
+/**
+ * What a situation affects (spec §10.2).
+ */
+export type TransitSituationScope = "line" | "stop" | "network";
+
+/**
+ * Where a situation stands, for its own page: the incident pages' words.
+ */
+export type TransitSituationState = "active" | "upcoming" | "ended";
+
+/**
+ * Current and upcoming situations.
+ */
+export type TransitSituations = { state: TransitStatusState, asOf: string | null, 
+/**
+ * Ordered by validity start, then id.
+ */
+current: Array<TransitSituation>, 
+/**
+ * Ordered by start, then id.
+ */
+upcoming: Array<TransitSituation>, };
+
+/**
+ * A transit stop linked to a National Rail station
+ * (`/public/transit/rail-links?crs=`).
+ */
+export type TransitStationLink = { network: string, networkName: string, 
+/**
+ * The transit station's id and name.
+ */
+stopId: string, stopName: string, 
+/**
+ * `interchange` or `nearby`.
+ */
+kind: TransitLinkKind, note: string | null, };
+
+/**
+ * A station, as a list entry or a reference.
+ */
+export type TransitStationRef = { id: string, name: string, };
+
+/**
+ * A network's status feed: its `state` and when it was last read.
+ */
+export type TransitStatusAsOf = { state: TransitStatusState, asOf: string | null, };
+
+/**
+ * One status of a line.
+ */
+export type TransitStatusEntry = { 
+/**
+ * A `common::Severity` number.
+ */
+severity: number, 
+/**
+ * The severity's name (`Minor Delays`).
+ */
+description: string, reason: string, 
+/**
+ * The situation behind it; `None` for "No reported disruption".
+ */
+situationId: string | null, };
+
+/**
+ * Where a transit network's line status comes from:
+ * `routes::transit::status_source`.
+ */
+export type TransitStatusSource = "tfl" | "situations";
+
+/**
+ * What the situations' freshness allows to be shown.
+ */
+export type TransitStatusState = "current" | "unavailable" | "none";
+
+/**
+ * A station with the lines calling there and its rail links.
+ */
+export type TransitStop = { id: string, name: string, lat: number | null, lon: number | null, 
+/**
+ * Public line ids, in line order.
+ */
+lines: Array<string>, railLinks: Array<TransitRailLink>, };
+
+/**
+ * `GET /public/transit/{network}/stops/{stop}`'s body.
+ */
+export type TransitStopDetail = { 
+/**
+ * The current situations naming this stop.
+ */
+notices: Array<TransitSituation>, firstLast: Array<TransitStopFirstLast>, platforms: Array<TransitPlatform>, id: string, name: string, lat: number | null, lon: number | null, 
+/**
+ * Public line ids, in line order.
+ */
+lines: Array<string>, railLinks: Array<TransitRailLink>, };
+
+/**
+ * A stop's first and last departure of the day on one line, one way
+ * (the `TfL` design §8.4).
+ */
+export type TransitStopFirstLast = { line: TransitLine, 
+/**
+ * `outbound` or `inbound`.
+ */
+direction: TransitDirection, 
+/**
+ * Where that direction goes: its headsign, else its last station.
+ */
+towards: string | null, 
+/**
+ * `HH:MM` London time.
+ */
+first: string, last: string, };
+
+/**
+ * `GET /public/transit/{network}/stops`'s body.
+ */
+export type TransitStopsResponse = { stops: Array<TransitStop>, };
+
+/**
+ * One trip of a line timetable: its time at each station (`None` where it
+ * does not call).
+ */
+export type TransitTimetableTrip = { tripId: string, headsign: string | null, 
+/**
+ * `HH:MM` London time, one per station.
+ */
+times: Array<string | null>, };
+
+/**
+ * An announced situation that has not started.
+ */
+export type TransitUpcomingEntry = { from: string, to: string | null, summary: string, situationId: string, };
 
 /**
  * On a rail-link walk (`kind: "transfer"`, `mode: "WALK"`): the tram stop
@@ -3887,6 +5088,23 @@ arriveBy: SegmentClock | null,
  * not.
  */
 noResultReason: NoResultReason | null, };
+
+/**
+ * The fields of an untracked leg, shared by `POST /Journeys` and `POST
+ * /Journeys/{id}/legs` (`mode: "untracked"`).
+ */
+export type UntrackedLegRequest = { transitMode: TransitMode, originName?: string | null, destinationName?: string | null, lineName?: string | null, plannedDeparture?: string | null, plannedArrival?: string | null, 
+/**
+ * The `TfL` stop each place was picked from (`GET /tfl/stops`), when it
+ * was (spec 2026-10-20-tfl-stop-lookup-design.md §4).
+ */
+originStopId?: string | null, destinationStopId?: string | null, 
+/**
+ * The network ride it is (DS-237, additive): a plan's transit leg's
+ * `network`, its line's local id and its headsign. Checked by
+ * `journeys::attach_leg_timetable`.
+ */
+transitNetwork?: string | null, transitLineId?: string | null, headsign?: string | null, };
 
 /**
  * An untracked leg's state, from the clock alone (spec §2.2).
