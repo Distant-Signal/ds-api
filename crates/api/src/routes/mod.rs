@@ -11,6 +11,7 @@ pub mod connected_apps;
 )]
 mod delegated_db_tests;
 pub mod departures;
+pub mod feeds;
 pub mod freshness;
 pub mod groups;
 pub mod health;
@@ -162,6 +163,7 @@ pub fn public_router() -> Router {
         .merge(groups::router())
         .merge(station_stats::router())
         .merge(departures::router())
+        .merge(feeds::router())
         .merge(stanox_crs::router())
         .merge(trains::router())
         .merge(transit::router())

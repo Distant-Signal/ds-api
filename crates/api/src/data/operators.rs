@@ -29,7 +29,7 @@ use crate::data::{queries, reference};
 /// "XR" on their own still means just that code). Necessarily a separate
 /// Rust-side copy of that frontend array -- see this plan's Judgment
 /// Call 2 for why no shared constant exists to pull this from instead.
-const TFL_ADJACENT_OPERATORS: [&str; 2] = ["LO", "XR"];
+pub(crate) const TFL_ADJACENT_OPERATORS: [&str; 2] = ["LO", "XR"];
 
 /// One operator's rolled-up current status across every public line it
 /// runs. `line_ids` is deliberately public on this type, not just an
@@ -168,7 +168,7 @@ pub async fn operator_rollup(
 /// on `/public/lines` for the identical reason. Private custom lines are
 /// never in this universe at all -- their ids are in neither input set, so
 /// this function never queries for them.
-async fn public_line_status_rows(
+pub(crate) async fn public_line_status_rows(
     pool: &PgPool,
     catalogue_lines: &[common::LineDefinition],
 ) -> Result<Vec<queries::LineStatusRow>> {

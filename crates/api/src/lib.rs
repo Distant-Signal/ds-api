@@ -33,6 +33,7 @@
 #[cfg(test)]
 mod api_types;
 pub mod app;
+pub mod atom;
 pub mod auth;
 pub mod data;
 pub mod edge;

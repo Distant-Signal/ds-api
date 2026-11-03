@@ -25,7 +25,8 @@
 //! - `/Trips/plan` (the most expensive anonymous read);
 //! - `/Train/by-uid/*` (anonymous, and a cache miss runs schedule matching),
 //!   and `/public/tfl/stops/{id}/arrivals` in the same budget (a cache miss
-//!   calls `TfL`);
+//!   calls `TfL`), and the Atom feeds (`/public/feeds/*`, DB reads a
+//!   feed reader polls; usually answered from the edge cache);
 //! - `POST /public/events` (opt-in usage analytics, DS-190), in a budget of
 //!   its own so a chatty page can't spend a visitor's public-write budget;
 //! - every other public write (non-GET/HEAD/OPTIONS), with a generous
@@ -221,7 +222,10 @@ pub fn classify(method: &Method, path: &str) -> Option<LimitClass> {
     if path == "/Trips/plan" || is_journey_replan(path) {
         return Some(LimitClass::TripPlan);
     }
-    if path.starts_with("/Train/by-uid/") || is_tfl_arrivals(path) {
+    if path.starts_with("/Train/by-uid/")
+        || is_tfl_arrivals(path)
+        || path.starts_with("/public/feeds/")
+    {
         return Some(LimitClass::TrainByUid);
     }
     if path == "/public/events" {
@@ -1403,6 +1407,14 @@ mod tests {
             Some(LimitClass::Events)
         );
         assert_eq!(classify(&Method::GET, "/public/lines"), None);
+        assert_eq!(
+            classify(&Method::GET, "/public/feeds/lines/swr-main"),
+            Some(LimitClass::TrainByUid)
+        );
+        assert_eq!(
+            classify(&Method::HEAD, "/public/feeds/network"),
+            Some(LimitClass::TrainByUid)
+        );
         assert_eq!(
             classify(&Method::GET, "/public/tfl/stops/940GZZLURSQ/arrivals"),
             Some(LimitClass::TrainByUid)
