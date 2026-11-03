@@ -3,6 +3,12 @@
 Changes to the Distant Signal (DS) HTTP API that a client such as DS-MCP
 needs to know about. Newest first. Field names are as served (camelCase).
 
+## 2026-11-03: usage events for the developer pages
+
+Additive. `POST /public/events` accepts two more page templates,
+`/developers` and `/developers/api`, the personal API's guide and
+reference on the website. DS-MCP: no change needed.
+
 ## 2026-11-03: the personal-token API's OpenAPI document
 
 New: `GET /v1/openapi.json` on the personal-token API hostname, no token

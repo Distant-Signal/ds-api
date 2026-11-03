@@ -95,6 +95,14 @@ Revoke and Revoke all, and a form to create one: a name, scopes and a
 lifetime of 7, 30, 90 (default) or 365 days. The token is shown once. At
 most 10 working tokens per user (`maxActivePerUser`).
 
+The website's `/developers` page explains tokens to users (what they are,
+how to create one, a `curl` example, the recipes) and `/developers/api` is
+the reference, rendered at build time from `frontend/lib/openapi-v1.json`,
+the frontend's copy of the OpenAPI document (`scripts/sync-api-types.py`).
+Both are linked from the token section and the footer. The rate limits on
+the reference are `RATE_LIMITS` in `frontend/lib/apiReference.ts`: keep them
+in step with the chart's `api.personalTokens.rateLimit` defaults.
+
 | Scope | Routes |
 |---|---|
 | `journeys:read` | `/v1/Journeys/mine`, `/v1/Journeys/{journeyId}` (the user's own journeys only) |
