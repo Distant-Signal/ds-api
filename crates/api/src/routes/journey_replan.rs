@@ -754,13 +754,15 @@ pub(crate) async fn plan_suggestions(
 // ---------------------------------------------------------------------------
 
 /// The open break as `GET /Journeys/{id}` serves it.
-#[derive(Debug, Clone, Serialize, ts_rs::TS)]
+#[derive(Debug, Clone, Serialize, ts_rs::TS, schemars::JsonSchema)]
 #[serde(rename_all = "camelCase")]
 pub(crate) struct OpenBreakSummary {
     pub id: i64,
     #[ts(as = "crate::ts_values::BreakCause")]
+    #[schemars(with = "crate::ts_values::BreakCause")]
     pub cause: String,
     #[ts(as = "crate::ts_values::BreakFault")]
+    #[schemars(with = "crate::ts_values::BreakFault")]
     pub fault: String,
     pub severity: i16,
     pub trigger_leg_id: Option<i64>,
@@ -803,7 +805,7 @@ impl OpenBreakSummary {
 }
 
 /// What `GET /Journeys/{id}` gains (flattened into its response).
-#[derive(Debug, Clone, Default, Serialize, ts_rs::TS)]
+#[derive(Debug, Clone, Default, Serialize, ts_rs::TS, schemars::JsonSchema)]
 #[serde(rename_all = "camelCase")]
 pub(crate) struct DetailExtras {
     /// The open break, `null` when the journey works.

@@ -83,7 +83,7 @@ fn provisional_from_with(today: NaiveDate, after_days: i64) -> NaiveDate {
 /// date is on or after `provisionalFrom`) and `provisionalFrom` (the first
 /// provisional date, `"YYYY-MM-DD"`, so a client can tell where the line
 /// falls without its own copy of the setting).
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, ts_rs::TS)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, ts_rs::TS, schemars::JsonSchema)]
 #[serde(rename_all = "camelCase")]
 pub(crate) struct TimetableCertainty {
     pub(crate) provisional: bool,

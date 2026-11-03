@@ -2196,7 +2196,7 @@ const SHARED_WITH_USER_SQL: &str = "SELECT sgj.journey_id FROM group_journeys sg
 /// One group a journey reached the caller through (`GET /Journeys/mine`'s
 /// `sharedVia`, DS-178): the same attribution a group's own shared row
 /// shows (`GroupJourney.addedByName`/`addedByTag`), and no more.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, ts_rs::TS)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, ts_rs::TS, schemars::JsonSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct SharedVia {
     pub group_id: String,

@@ -101,7 +101,9 @@ pub struct JourneyLegRow {
 /// that search's `origin`, renamed here because a leg's `origin` is where
 /// the traveller boards. The wire shape and the
 /// `journey_legs.search_filters` column's JSON are both this struct.
-#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, ts_rs::TS)]
+#[derive(
+    Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, ts_rs::TS, schemars::JsonSchema,
+)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct LegSearchFilters {
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -1718,7 +1720,7 @@ pub const TRANSIT_STOP_MODES: [&str; 2] = ["tram", "bus"];
 pub const TFL_STOP_MODES: [&str; 4] = ["tube", "dlr", "tram", "metro"];
 
 /// An untracked leg's state, from the clock alone (spec §2.2).
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, ts_rs::TS)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, ts_rs::TS, schemars::JsonSchema)]
 #[serde(rename_all = "camelCase")]
 pub enum UntrackedStatus {
     /// Before its planned departure.
@@ -2739,7 +2741,7 @@ pub(crate) async fn delete_journey_row_releasing_trains(
     clippy::struct_excessive_bools,
     reason = "a wire row: each flag is an independent API field, not a state machine"
 )]
-#[derive(Debug, Clone, sqlx::FromRow, Serialize, ts_rs::TS)]
+#[derive(Debug, Clone, sqlx::FromRow, Serialize, ts_rs::TS, schemars::JsonSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct JourneyListItem {
     pub id: i64,
@@ -2788,11 +2790,14 @@ pub struct JourneyListItem {
     /// How many legs the journey has.
     pub leg_count: i64,
     #[ts(as = "crate::ts_values::MatchMode")]
+    #[schemars(with = "crate::ts_values::MatchMode")]
     pub match_mode: String,
     pub train_subscription_id: Option<i64>,
     #[ts(as = "Option<crate::ts_values::ResolutionStatus>")]
+    #[schemars(with = "Option<crate::ts_values::ResolutionStatus>")]
     pub resolution_status: Option<String>,
     #[ts(as = "Option<crate::ts_values::JourneyStatus>")]
+    #[schemars(with = "Option<crate::ts_values::JourneyStatus>")]
     pub status: Option<String>,
     /// The delay at the passenger's own stop, against the PUBLIC timetable
     /// (`data::stop_delay`, design doc §9 decision 2): the current leg's destination. `None` until
@@ -2825,8 +2830,10 @@ pub struct JourneyListItem {
     /// §2.4). For an untracked leg `originName`/`destinationName` carry its
     /// place names, and the five fields below are set.
     #[ts(as = "crate::ts_values::JourneyLegKind")]
+    #[schemars(with = "crate::ts_values::JourneyLegKind")]
     pub kind: String,
     #[ts(as = "Option<crate::ts_values::TransitMode>")]
+    #[schemars(with = "Option<crate::ts_values::TransitMode>")]
     pub transit_mode: Option<String>,
     pub line_name: Option<String>,
     pub planned_departure: Option<DateTime<Utc>>,

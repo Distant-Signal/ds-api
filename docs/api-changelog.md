@@ -3,6 +3,16 @@
 Changes to the Distant Signal (DS) HTTP API that a client such as DS-MCP
 needs to know about. Newest first. Field names are as served (camelCase).
 
+## 2026-11-03: the personal-token API's OpenAPI document
+
+New: `GET /v1/openapi.json` on the personal-token API hostname, no token
+needed, is an OpenAPI 3.1 document of every `/v1` route: its scope
+(`x-ds-scope`), parameters, the `{data, attribution}` envelope, the error
+body and each typed response's JSON Schema. The repository keeps a copy at
+`api-types/openapi/v1.json`, and CI fails on a breaking change to it, so v1
+changes only additively; a breaking change means a `/v2`. The line status,
+disruption and departures routes are documented as TfL-shaped objects
+without their fields. DS-MCP: no change needed.
 ## 2026-11-03: `tokenNotice` on the connected-apps notice
 
 Additive. `GET /public/account/connected-apps-notice` gains `tokenNotice`:

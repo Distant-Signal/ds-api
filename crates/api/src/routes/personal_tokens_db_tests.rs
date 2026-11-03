@@ -788,3 +788,18 @@ async fn the_notice_names_a_new_token_for_seven_days() {
     assert_eq!(notice(h.main.clone(), raw.clone()).await, Value::Null);
     cleanup(&pool, "TEST-PTOK-F").await;
 }
+
+/// `GET /v1/openapi.json` needs no token and is served as is, not wrapped.
+#[tokio::test]
+#[ignore = "requires a live database; run with `DATABASE_URL=... cargo test -p api \
+            personal_tokens_db_tests -- --ignored --test-threads=1`"]
+async fn the_openapi_document_is_served_unwrapped() {
+    let pool = connect().await;
+    let h = harness(pool, settings());
+    let (status, headers, body) = send(&h.tokens, "GET", "/v1/openapi.json", &[], None).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body["openapi"], "3.1.0");
+    assert!(body.get("data").is_none());
+    assert_eq!(headers[header::CACHE_CONTROL], "public, max-age=3600");
+    assert_eq!(&body, crate::personal_tokens::openapi::document());
+}

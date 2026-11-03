@@ -801,7 +801,7 @@ pub use ds_store::tracking::{
 /// eventually got reconnected to it. Deleted outright rather than fixed,
 /// since dead code carrying a latent cross-user leak serves no purpose
 /// sitting around waiting to be reconnected.
-#[derive(Debug, Clone, sqlx::FromRow, Serialize, ts_rs::TS)]
+#[derive(Debug, Clone, sqlx::FromRow, Serialize, ts_rs::TS, schemars::JsonSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct TrackedTrainState {
     pub id: i64,
@@ -853,6 +853,7 @@ pub struct TrackedTrainState {
     pub pin_origin_name: Option<String>,
     pub pin_destination_name: Option<String>,
     #[ts(as = "crate::ts_values::ResolutionStatus")]
+    #[schemars(with = "crate::ts_values::ResolutionStatus")]
     pub resolution_status: String,
     pub train_uid: Option<String>,
     pub train_id: Option<String>,
@@ -890,6 +891,7 @@ pub struct TrackedTrainState {
     #[ts(skip)]
     pub schedule_planned_platform: Option<String>,
     #[ts(as = "Option<crate::ts_values::JourneyStatus>")]
+    #[schemars(with = "Option<crate::ts_values::JourneyStatus>")]
     pub status: Option<String>,
     pub last_reported_location: Option<String>,
     pub last_event_type: Option<String>,
@@ -915,6 +917,7 @@ pub struct TrackedTrainState {
     pub next_calling_point: Option<String>,
     pub eta_next: Option<DateTime<Utc>>,
     #[ts(as = "Option<crate::ts_values::EtaSource>")]
+    #[schemars(with = "Option<crate::ts_values::EtaSource>")]
     pub eta_source: Option<String>,
     pub custom_name: Option<String>,
     /// How many groups (`crate::data::groups`) this subscription is

@@ -1,14 +1,17 @@
 //! The value sets of string fields the api serves from `TEXT` columns or
 //! string constants, for the generated TypeScript only (`api_types`, repo-split
 //! spec §5.3). A field opts in with `#[ts(as = "...")]`; these enums are
-//! never built, and serde never sees them. Each names where its values are
+//! never built, and serde never sees them. The ones a personal-token `/v1`
+//! response reaches also derive `schemars::JsonSchema`, and their fields add
+//! `#[schemars(with = "...")]`, for the `OpenAPI` document. Each names where its values are
 //! enforced, so a new value is added here in the same change.
 
 use ts_rs::TS;
 
 /// `train_subscriptions.resolution_status` (its CHECK constraint).
-#[derive(TS)]
+#[derive(TS, schemars::JsonSchema)]
 #[ts(rename_all = "snake_case")]
+#[schemars(rename_all = "snake_case")]
 pub enum ResolutionStatus {
     Pending,
     ScheduleMatched,
@@ -18,8 +21,9 @@ pub enum ResolutionStatus {
 
 /// `train_current_state.status` (its CHECK constraint): a train's own
 /// status, served as `status` on train and journey responses.
-#[derive(TS)]
+#[derive(TS, schemars::JsonSchema)]
 #[ts(rename_all = "snake_case")]
+#[schemars(rename_all = "snake_case")]
 pub enum JourneyStatus {
     AwaitingActivation,
     EnRoute,
@@ -29,8 +33,9 @@ pub enum JourneyStatus {
 
 /// Where an estimate came from: `train_current_state.eta_source` (its
 /// CHECK constraint) and `ds_store::trains::predicted_start::BASIS`.
-#[derive(TS)]
+#[derive(TS, schemars::JsonSchema)]
 #[ts(rename_all = "kebab-case")]
+#[schemars(rename_all = "kebab-case")]
 pub enum EtaSource {
     TrustPropagated,
     DarwinEstimated,
@@ -38,16 +43,18 @@ pub enum EtaSource {
 }
 
 /// `journey_legs.kind` (its CHECK constraint).
-#[derive(TS)]
+#[derive(TS, schemars::JsonSchema)]
 #[ts(rename_all = "snake_case")]
+#[schemars(rename_all = "snake_case")]
 pub enum JourneyLegKind {
     Train,
     Untracked,
 }
 
 /// `journey_legs.match_mode` (its CHECK constraint).
-#[derive(TS)]
+#[derive(TS, schemars::JsonSchema)]
 #[ts(rename_all = "snake_case")]
+#[schemars(rename_all = "snake_case")]
 pub enum MatchMode {
     Unmatched,
     Manual,
@@ -56,8 +63,9 @@ pub enum MatchMode {
 
 /// An untracked leg's `transit_mode`: `data::journeys::TRANSIT_MODES`,
 /// checked on every write.
-#[derive(TS)]
+#[derive(TS, schemars::JsonSchema)]
 #[ts(rename_all = "snake_case")]
+#[schemars(rename_all = "snake_case")]
 pub enum TransitMode {
     Tube,
     Dlr,
@@ -74,8 +82,9 @@ pub enum TransitMode {
 }
 
 /// `journeys.operator_filter_mode` (its CHECK constraint).
-#[derive(TS)]
+#[derive(TS, schemars::JsonSchema)]
 #[ts(rename_all = "snake_case")]
+#[schemars(rename_all = "snake_case")]
 pub enum OperatorMode {
     Only,
     Avoid,
@@ -83,8 +92,9 @@ pub enum OperatorMode {
 }
 
 /// `journey_breaks.cause` (its CHECK constraint).
-#[derive(TS)]
+#[derive(TS, schemars::JsonSchema)]
 #[ts(rename_all = "snake_case")]
+#[schemars(rename_all = "snake_case")]
 pub enum BreakCause {
     Cancelled,
     PartCancelled,
@@ -94,8 +104,9 @@ pub enum BreakCause {
 }
 
 /// `journey_breaks.fault` (its CHECK constraint).
-#[derive(TS)]
+#[derive(TS, schemars::JsonSchema)]
 #[ts(rename_all = "snake_case")]
+#[schemars(rename_all = "snake_case")]
 pub enum BreakFault {
     Operator,
     User,
