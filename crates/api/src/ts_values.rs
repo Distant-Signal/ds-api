@@ -226,16 +226,6 @@ pub enum RevisionLegFate {
     NotUsed,
 }
 
-/// `tracked_train_tickets.source` (its CHECK constraint).
-#[derive(TS)]
-#[ts(rename_all = "kebab-case")]
-pub enum TicketSource {
-    Manual,
-    PkpassSemantics,
-    PkpassHeuristic,
-    PdfHeuristic,
-}
-
 /// A Delay Repay estimate's `scheme`: `delay_repay_rules::Scheme::as_str`
 /// of every scheme with bands (an own scheme has no estimate).
 #[derive(TS)]
@@ -391,4 +381,73 @@ pub enum LineSource {
     Catalogue,
     Custom,
     Tfl,
+}
+
+/// Where a transit network's line status comes from:
+/// `routes::transit::status_source`.
+#[derive(TS)]
+#[ts(rename_all = "snake_case")]
+pub enum TransitStatusSource {
+    Tfl,
+    Situations,
+}
+
+/// `delegated_deletions.summary`: the journey a connected app deleted, as
+/// `delegated::delete_journey_delegated` stores it. Rows written before a
+/// field existed lack it.
+#[derive(TS)]
+#[ts(rename_all = "camelCase", optional_fields = nullable)]
+pub struct DeletedJourneySummary {
+    pub custom_name: Option<String>,
+    pub legs: Option<Vec<DeletedJourneyLeg>>,
+}
+
+/// One leg of a [`DeletedJourneySummary`].
+#[derive(TS)]
+#[ts(rename_all = "camelCase", optional_fields = nullable)]
+pub struct DeletedJourneyLeg {
+    pub service_date: Option<String>,
+    pub origin_crs: Option<String>,
+    pub destination_crs: Option<String>,
+    pub train_uid: Option<String>,
+    pub kind: Option<JourneyLegKind>,
+    pub transit_mode: Option<TransitMode>,
+    pub origin_name: Option<String>,
+    pub destination_name: Option<String>,
+    pub line_name: Option<String>,
+    pub planned_departure: Option<String>,
+    pub origin_stop_id: Option<String>,
+    pub destination_stop_id: Option<String>,
+}
+
+/// A trip plan train leg's live `status`: `trip_plan_live`'s boarding-call
+/// status.
+#[derive(TS)]
+pub enum LegLiveStatus {
+    Cancelled,
+    Departed,
+    Delayed,
+    Late,
+    OnTime,
+    Scheduled,
+}
+
+/// Which constraint made a trip-plan segment infeasible:
+/// `trip_planning_itinerary::NoResultReason::constraint`.
+#[derive(TS)]
+#[ts(rename_all = "camelCase")]
+pub enum NoResultConstraint {
+    MaxChanges,
+    Avoid,
+    AvoidStop,
+    AvoidChange,
+    AvoidCombined,
+    Via,
+    DepartAfter,
+    ArriveBy,
+    NoRoute,
+    PreviousSegment,
+    NextSegment,
+    Operator,
+    AvoidOperator,
 }

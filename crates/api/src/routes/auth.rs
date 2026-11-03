@@ -638,9 +638,10 @@ async fn backchannel_logout(
     }
 }
 
-#[derive(Serialize)]
+#[derive(Serialize, ts_rs::TS)]
+#[ts(rename = "SessionInfo")]
 #[serde(rename_all = "camelCase")]
-struct SessionResponse {
+pub(crate) struct SessionResponse {
     authenticated: bool,
     id: Option<String>,
     name: Option<String>,

@@ -24,7 +24,8 @@ pub fn router() -> Router {
 }
 
 /// A National Rail station at the stop.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, ts_rs::TS)]
+#[ts(rename = "TflStopRailStation")]
 #[serde(rename_all = "camelCase")]
 pub struct RailStation {
     pub crs: String,
@@ -33,7 +34,7 @@ pub struct RailStation {
 }
 
 /// `GET /public/tfl/stops/{id}`.
-#[derive(Debug, Clone, PartialEq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, ts_rs::TS)]
 #[serde(rename_all = "camelCase")]
 pub struct TflStopDetail {
     pub id: String,

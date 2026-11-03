@@ -36,7 +36,7 @@ pub fn router() -> Router {
     )
 }
 
-#[derive(Debug, Serialize, PartialEq)]
+#[derive(Debug, Serialize, PartialEq, ts_rs::TS)]
 #[serde(rename_all = "camelCase")]
 pub struct HistoryRetention {
     pub history_retention_days: i64,

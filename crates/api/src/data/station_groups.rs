@@ -80,7 +80,8 @@ static MEMBER_NAMES: LazyLock<BTreeMap<String, String>> = LazyLock::new(|| {
 });
 
 /// One member of a [`GroupInfo`].
-#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, ts_rs::TS)]
+#[ts(rename = "StationGroupMember")]
 pub struct GroupMember {
     pub crs: String,
     /// The CSV's name for it; `null` when it gives none.
@@ -88,7 +89,8 @@ pub struct GroupMember {
 }
 
 /// One group as `GET /Trips/station-groups` serves it.
-#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, ts_rs::TS)]
+#[ts(rename = "StationGroup")]
 pub struct GroupInfo {
     /// The group's name in a request: `LON`.
     pub group: String,

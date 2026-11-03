@@ -59,7 +59,7 @@ pub struct PartialTicket {
     #[ts(optional)]
     pub current_departure_date: Option<DateTime<Utc>>,
     #[serde(deserialize_with = "deserialize_known_source")]
-    #[ts(as = "crate::ts_values::TicketSource")]
+    #[ts(as = "common::ts_values::TicketSource")]
     pub source: SourceTag,
 }
 

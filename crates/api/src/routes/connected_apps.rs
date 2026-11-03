@@ -61,11 +61,13 @@ pub fn router() -> Router {
 }
 
 /// A grant as the page shows it.
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, ts_rs::TS)]
+#[ts(rename = "ConnectedAppGrant")]
 #[serde(rename_all = "camelCase")]
-struct GrantView {
+pub(crate) struct GrantView {
     client: String,
     display_name: String,
+    #[ts(as = "Vec<Scope>")]
     scopes: Vec<String>,
     created_at: DateTime<Utc>,
     last_used_at: Option<DateTime<Utc>>,
@@ -75,25 +77,29 @@ struct GrantView {
 }
 
 /// A client the user could connect.
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, ts_rs::TS)]
+#[ts(rename = "ConnectableApp")]
 #[serde(rename_all = "camelCase")]
-struct ClientView {
+pub(crate) struct ClientView {
     name: String,
     display_name: String,
+    #[ts(as = "Vec<Scope>")]
     scopes: Vec<&'static str>,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, ts_rs::TS)]
+#[ts(rename = "ConnectedAppsData")]
 #[serde(rename_all = "camelCase")]
-struct ConnectedAppsResponse {
+pub(crate) struct ConnectedAppsResponse {
     grants: Vec<GrantView>,
     available: Vec<ClientView>,
     recent_deletions: Vec<data::DeletionRow>,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, ts_rs::TS)]
+#[ts(rename = "ConnectedAppNotice")]
 #[serde(rename_all = "camelCase")]
-struct NoticeResponse {
+pub(crate) struct NoticeResponse {
     notice: Option<GrantView>,
     /// The newest personal API token created in the last 7 days, while
     /// personal tokens are on (docs/specs/personal-api-tokens.md §15
@@ -101,9 +107,10 @@ struct NoticeResponse {
     token_notice: Option<crate::data::personal_tokens::TokenRow>,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, ts_rs::TS)]
+#[ts(rename = "ConnectAppConsent")]
 #[serde(rename_all = "camelCase")]
-struct ConsentResponse {
+pub(crate) struct ConsentResponse {
     client: ClientView,
     /// Who is signed in, so the page can say whose account this is.
     username: Option<String>,
@@ -113,9 +120,10 @@ struct ConsentResponse {
     existing_grant: Option<GrantView>,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, ts_rs::TS)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
-struct CreateGrantRequest {
+pub(crate) struct CreateGrantRequest {
+    #[ts(as = "Vec<Scope>")]
     scopes: Vec<String>,
     confirmation_token: String,
 }

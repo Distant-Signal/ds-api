@@ -94,24 +94,61 @@ pub fn names() -> &'static BTreeMap<String, String> {
     &NAMES
 }
 
+/// One named operator group: its members as API codes.
+#[derive(Debug, Clone, serde::Serialize, ts_rs::TS)]
+#[ts(rename = "PlannerOperatorGroup")]
+pub struct OperatorGroupJson {
+    pub code: String,
+    pub name: String,
+    pub members: Vec<String>,
+}
+
+/// An operator by code and name.
+#[derive(Debug, Clone, serde::Serialize, ts_rs::TS)]
+#[ts(rename = "PlannerOperator")]
+pub struct OperatorRef<N> {
+    pub code: String,
+    pub name: N,
+}
+
+/// `GET /Trips/operator-groups`'s body.
+#[derive(Debug, Clone, serde::Serialize, ts_rs::TS)]
+#[serde(rename_all = "camelCase")]
+pub struct OperatorGroupsCatalogue {
+    pub groups: Vec<OperatorGroupJson>,
+    pub ds_operators: Vec<OperatorRef<String>>,
+    pub names: BTreeMap<String, String>,
+}
+
+fn group_json() -> Vec<OperatorGroupJson> {
+    groups()
+        .iter()
+        .map(|(code, group)| OperatorGroupJson {
+            code: code.clone(),
+            name: group.name.clone(),
+            members: group.members.iter().filter_map(|id| id.code()).collect(),
+        })
+        .collect()
+}
+
+fn ds_operators_json() -> Vec<OperatorRef<String>> {
+    DsOperator::ALL
+        .iter()
+        .map(|op| OperatorRef {
+            code: op.code().to_string(),
+            name: op.name().to_string(),
+        })
+        .collect()
+}
+
 /// `GET /Trips/operator-groups`'s body: the groups (members as API codes),
 /// the DS operators and the extra names.
-pub fn catalogue() -> serde_json::Value {
-    serde_json::json!({
-        "groups": groups()
-            .iter()
-            .map(|(code, group)| serde_json::json!({
-                "code": code,
-                "name": group.name,
-                "members": group.members.iter().filter_map(|id| id.code()).collect::<Vec<_>>(),
-            }))
-            .collect::<Vec<_>>(),
-        "dsOperators": DsOperator::ALL
-            .iter()
-            .map(|op| serde_json::json!({ "code": op.code(), "name": op.name() }))
-            .collect::<Vec<_>>(),
-        "names": names(),
-    })
+pub fn catalogue() -> OperatorGroupsCatalogue {
+    OperatorGroupsCatalogue {
+        groups: group_json(),
+        ds_operators: ds_operators_json(),
+        names: names().clone(),
+    }
 }
 
 /// Every ATOC code the published timetable runs from today on, with its
@@ -140,18 +177,30 @@ pub async fn running_operators(
         .collect())
 }
 
+/// `GET /Trips/operators`'s body.
+#[derive(Debug, Clone, serde::Serialize, ts_rs::TS)]
+#[serde(rename_all = "camelCase")]
+pub struct PlannerOperatorCatalogue {
+    pub groups: Vec<OperatorGroupJson>,
+    pub ds_operators: Vec<OperatorRef<String>>,
+    /// The timetable's operators, `name` `null` when none is known.
+    pub operators: Vec<OperatorRef<Option<String>>>,
+}
+
 /// `GET /Trips/operators`'s body: [`running_operators`] as `operators`,
 /// with [`catalogue`]'s groups and `ds:` operators.
-pub fn planner_catalogue(running: &[(String, Option<String>)]) -> serde_json::Value {
-    let mut body = catalogue();
-    body["operators"] = running
-        .iter()
-        .map(|(code, name)| serde_json::json!({ "code": code, "name": name }))
-        .collect();
-    if let Some(object) = body.as_object_mut() {
-        object.remove("names");
+pub fn planner_catalogue(running: &[(String, Option<String>)]) -> PlannerOperatorCatalogue {
+    PlannerOperatorCatalogue {
+        groups: group_json(),
+        ds_operators: ds_operators_json(),
+        operators: running
+            .iter()
+            .map(|(code, name)| OperatorRef {
+                code: code.clone(),
+                name: name.clone(),
+            })
+            .collect(),
     }
-    body
 }
 
 /// A request's operator list, parsed: the entries as given (normalised),
@@ -252,6 +301,54 @@ pub fn parse_operator_list(name: &str, raw: Option<&str>) -> Result<Option<Opera
 mod tests {
     use super::*;
 
+    /// The `json!` bodies before they were typed, verbatim.
+    fn legacy_catalogue() -> serde_json::Value {
+        serde_json::json!({
+            "groups": groups()
+                .iter()
+                .map(|(code, group)| serde_json::json!({
+                    "code": code,
+                    "name": group.name,
+                    "members": group.members.iter().filter_map(|id| id.code()).collect::<Vec<_>>(),
+                }))
+                .collect::<Vec<_>>(),
+            "dsOperators": DsOperator::ALL
+                .iter()
+                .map(|op| serde_json::json!({ "code": op.code(), "name": op.name() }))
+                .collect::<Vec<_>>(),
+            "names": names(),
+        })
+    }
+
+    fn legacy_planner_catalogue(running: &[(String, Option<String>)]) -> serde_json::Value {
+        let mut body = legacy_catalogue();
+        body["operators"] = running
+            .iter()
+            .map(|(code, name)| serde_json::json!({ "code": code, "name": name }))
+            .collect();
+        if let Some(object) = body.as_object_mut() {
+            object.remove("names");
+        }
+        body
+    }
+
+    /// Both catalogues serve what their `json!` bodies did.
+    #[test]
+    fn typed_catalogues_match_the_json_bodies() {
+        assert_eq!(
+            serde_json::to_value(catalogue()).unwrap(),
+            legacy_catalogue()
+        );
+        let running = vec![
+            ("GW".to_string(), Some("Great Western Railway".to_string())),
+            ("ZZ".to_string(), None),
+        ];
+        assert_eq!(
+            serde_json::to_value(planner_catalogue(&running)).unwrap(),
+            legacy_planner_catalogue(&running)
+        );
+    }
+
     fn data_rows(csv: &str, header: &str) -> usize {
         data_lines(csv, header).count()
     }
@@ -313,10 +410,11 @@ mod tests {
 
     #[test]
     fn the_planner_catalogue_adds_the_running_operators() {
-        let body = planner_catalogue(&[
+        let body = serde_json::to_value(planner_catalogue(&[
             ("TW".to_owned(), Some("Tyne and Wear Metro".to_owned())),
             ("VT".to_owned(), Some("Avanti West Coast".to_owned())),
-        ]);
+        ]))
+        .unwrap();
         assert_eq!(body["operators"][0]["code"], "TW");
         assert_eq!(body["operators"][1]["name"], "Avanti West Coast");
         assert_eq!(body["groups"][0]["code"], "GTR");
@@ -326,7 +424,7 @@ mod tests {
 
     #[test]
     fn the_catalogue_lists_groups_ds_operators_and_names() {
-        let body = catalogue();
+        let body = serde_json::to_value(catalogue()).unwrap();
         assert_eq!(body["groups"][0]["code"], "GTR");
         assert_eq!(body["dsOperators"][0]["code"], "ds:DLR");
         assert_eq!(body["names"]["QC"], "CalMac ferries");

@@ -35,6 +35,7 @@ const HEADER: &str = "\
 /// Every type the frontend names directly: response bodies, request
 /// bodies and the fields it reads on its own. Their dependencies are found
 /// by walking, so they need no line here.
+#[expect(clippy::too_many_lines, reason = "one line per root type")]
 fn visit_roots(v: &mut Collector) {
     // Trains.
     v.visit::<crate::data::train_tracking::TrackedTrainState>();
@@ -117,6 +118,56 @@ fn visit_roots(v: &mut Collector) {
     v.visit::<crate::routes::trains::TrainSearchDates>();
     v.visit::<crate::routes::trains::TrainSearchOperators>();
     v.visit::<crate::routes::trains::TrainResolveResult>();
+    // Transit networks.
+    v.visit::<crate::routes::transit::TransitNetworksResponse>();
+    v.visit::<crate::routes::transit::TransitRailLinksResponse>();
+    v.visit::<crate::routes::transit::TransitNetworkDetailResponse>();
+    v.visit::<crate::routes::transit::TransitLineDetailResponse>();
+    v.visit::<ds_store::transit::disruptions::SituationsView>();
+    v.visit::<crate::routes::transit::TransitSituationDetailResponse>();
+    v.visit::<crate::routes::transit::TransitLineTimetableResponse>();
+    v.visit::<crate::routes::transit::TransitStopsResponse>();
+    v.visit::<crate::routes::transit::TransitStopDetailResponse>();
+    v.visit::<crate::routes::transit::TransitBoardResponse>();
+    // TfL stops.
+    v.visit::<crate::routes::tfl_stops::TflStopIds>();
+    v.visit::<crate::routes::tfl_stop_page::TflStopDetail>();
+    v.visit::<crate::data::tfl_arrivals::StopArrivals>();
+    // Account, preferences and notifications.
+    v.visit::<crate::routes::auth::SessionResponse>();
+    v.visit::<crate::routes::preferences::PreferencesResponse>();
+    v.visit::<crate::routes::preferences::NotificationPreferences>();
+    v.visit::<crate::routes::preferences::NotificationPreferencesUpdate>();
+    v.visit::<crate::routes::preferences::PinnedLineAlerts>();
+    v.visit::<crate::data::notifications::PushDevice>();
+    v.visit::<crate::routes::freshness::DataFreshness>();
+    v.visit::<crate::routes::history_retention::HistoryRetention>();
+    // Connected apps.
+    v.visit::<crate::routes::connected_apps::ConnectedAppsResponse>();
+    v.visit::<crate::routes::connected_apps::NoticeResponse>();
+    v.visit::<crate::routes::connected_apps::ConsentResponse>();
+    v.visit::<crate::routes::connected_apps::CreateGrantRequest>();
+    // The trip planner's catalogues.
+    v.visit::<crate::data::operator_groups::PlannerOperatorCatalogue>();
+    v.visit::<crate::data::operator_groups::OperatorGroupsCatalogue>();
+    v.visit::<crate::routes::trips::StationGroupsResponse>();
+    // Journey writes.
+    v.visit::<crate::routes::journeys::CreateJourneyRequest>();
+    v.visit::<crate::routes::journeys::CreateJourneyResponse>();
+    v.visit::<crate::routes::journeys::AddJourneyLegRequest>();
+    v.visit::<crate::routes::journeys::AddLegResponse>();
+    v.visit::<crate::routes::journeys::LegCandidatesResponse>();
+    v.visit::<crate::routes::journey_itinerary::ItineraryRequest>();
+    v.visit::<crate::routes::journey_itinerary::ItineraryResponse>();
+    v.visit::<crate::routes::journey_templates::CreateJourneyTemplateRequest>();
+    v.visit::<crate::routes::journey_templates::PutJourneyTemplateRequest>();
+    v.visit::<crate::routes::journey_templates::MaterializeTemplateRequest>();
+    // Train and ticket writes.
+    v.visit::<common::TrackPinRequest>();
+    v.visit::<crate::routes::train::TrackPinResponse>();
+    v.visit::<common::TicketEntryRequest>();
+    v.visit::<crate::routes::train::AttachTicketRequest>();
+    v.visit::<crate::routes::train::RenameRequest>();
     // Personal API tokens (Connected apps).
     v.visit::<crate::routes::personal_tokens::PersonalTokensResponse>();
     v.visit::<crate::routes::personal_tokens::CreatePersonalTokenRequest>();

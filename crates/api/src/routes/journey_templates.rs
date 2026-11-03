@@ -48,14 +48,16 @@ pub fn router() -> Router {
 /// minus `service_date` (a template leg is date-less) and minus `mode`
 /// itself (there's only one leg shape here, no pin/knownTrain equivalent
 /// for a template -- see this plan's Judgment Call 2 for why that's fine).
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, ts_rs::TS)]
 #[serde(rename_all = "camelCase")]
-struct TemplateLegRequest {
+pub(crate) struct TemplateLegRequest {
     origin_crs: String,
     destination_crs: String,
     #[serde(default)]
+    #[ts(optional = nullable)]
     depart_window: TimeWindow,
     #[serde(default)]
+    #[ts(optional = nullable)]
     arrive_window: TimeWindow,
 }
 
@@ -63,13 +65,14 @@ struct TemplateLegRequest {
 /// mirrors `journeys::CreateJourneyLegRequest`'s own tagged-enum shape and
 /// serde attributes exactly (same `rename_all_fields` requirement, same
 /// reasoning).
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, ts_rs::TS)]
 #[serde(
     tag = "mode",
     rename_all = "camelCase",
     rename_all_fields = "camelCase"
 )]
-enum CreateJourneyTemplateRequest {
+#[ts(optional_fields = nullable)]
+pub(crate) enum CreateJourneyTemplateRequest {
     /// Build a new template directly from caller-supplied legs. See this
     /// plan's Judgment Call 5: the frontend built in this plan never
     /// actually sends this variant (no "start from nothing" UI ships in
@@ -106,23 +109,26 @@ enum CreateJourneyTemplateRequest {
 /// by omitting them from a plain name/leg edit. The frontend always
 /// populates every field from the currently-loaded template before
 /// submitting.
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, ts_rs::TS)]
 #[serde(rename_all = "camelCase")]
-struct PutJourneyTemplateRequest {
+pub(crate) struct PutJourneyTemplateRequest {
     #[serde(default)]
+    #[ts(optional = nullable)]
     custom_name: Option<String>,
     legs: Vec<TemplateLegRequest>,
     days_of_week: Option<i16>,
     active: bool,
     starts_on: Option<NaiveDate>,
     ends_on: Option<NaiveDate>,
+    #[ts(as = "crate::ts_values::TemplateMatchMode")]
     default_match_mode: String,
+    #[ts(as = "Option<crate::ts_values::AutoCommitRule>")]
     auto_commit_rule: Option<String>,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, ts_rs::TS)]
 #[serde(rename_all = "camelCase")]
-struct MaterializeTemplateRequest {
+pub(crate) struct MaterializeTemplateRequest {
     /// Required, no server-side default -- matches
     /// `journeys::CreateJourneyLegRequest`'s own convention that every
     /// leg-creation wire type takes an explicit `serviceDate`, never an

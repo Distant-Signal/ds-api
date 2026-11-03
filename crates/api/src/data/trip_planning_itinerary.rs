@@ -1217,6 +1217,7 @@ fn alternative_crs<J>(
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, ts_rs::TS)]
 #[serde(rename_all = "camelCase")]
 pub struct NoResultReason {
+    #[ts(as = "crate::ts_values::NoResultConstraint")]
     pub constraint: &'static str,
     pub values: Vec<String>,
     pub message: String,

@@ -1897,7 +1897,7 @@ pub struct TrackedTrainTicket {
     /// struct (`TicketPanel.tsx`'s rendering, the Delay Repay route) simply
     /// ignores it, same as any other field it doesn't need.
     pub current_departure_date: Option<DateTime<Utc>>,
-    #[ts(as = "crate::ts_values::TicketSource")]
+    #[ts(as = "common::ts_values::TicketSource")]
     pub source: String,
     pub created_at: DateTime<Utc>,
     pub custom_name: Option<String>,
@@ -2139,7 +2139,7 @@ pub struct TicketListItem {
     /// See `TicketListRow::origin_name`'s doc comment.
     pub origin_name: Option<String>,
     pub destination_name: Option<String>,
-    #[ts(as = "crate::ts_values::TicketSource")]
+    #[ts(as = "common::ts_values::TicketSource")]
     pub source: String,
     pub created_at: DateTime<Utc>,
     pub service_date: Option<chrono::NaiveDate>,

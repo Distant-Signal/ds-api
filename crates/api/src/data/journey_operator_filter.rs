@@ -17,9 +17,10 @@ use crate::data::operator_groups;
 
 /// The request shape (`POST /Journeys/itinerary`'s `operatorFilter`, and
 /// the `PUT` body's): a mode and the entries as `/Trips/plan` takes them.
-#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize, ts_rs::TS)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct OperatorFilterRequest {
+    #[ts(as = "crate::ts_values::OperatorMode")]
     pub mode: String,
     pub entries: Vec<String>,
 }
