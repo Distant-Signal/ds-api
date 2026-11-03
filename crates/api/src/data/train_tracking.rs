@@ -650,7 +650,7 @@ mod custom_name_tests {
         // RenameTicketButton's error text.
         let name = "a".repeat(CUSTOM_NAME_MAX_LENGTH + 1);
         let message = validate_custom_name(Some(&name)).unwrap_err();
-        assert!(!message.is_empty());
+        assert_ne!(message, "");
         assert!(
             !message.contains('_'),
             "user-facing copy leaked an identifier: {message}"
@@ -4999,8 +4999,8 @@ mod journey_leg_list_tests {
         for tracking in &template_tracking {
             assert_eq!(journey_ids_of(&rows, *tracking), vec![journey_c]);
         }
-        assert!(journey_ids_of(&rows, standalone_known).is_empty());
-        assert!(journey_ids_of(&rows, standalone_pin).is_empty());
+        assert_eq!(journey_ids_of(&rows, standalone_known), [] as [i64; 0]);
+        assert_eq!(journey_ids_of(&rows, standalone_pin), [] as [i64; 0]);
         let standalone: Vec<i64> = rows
             .iter()
             .filter(|row| row.journey_ids.is_empty())
@@ -5075,7 +5075,7 @@ mod journey_leg_list_tests {
         assert_eq!(journey_ids_of(&rows, leg_tracking), vec![journey]);
         assert_eq!(journey_ids_of(&rows, leg_2_tracking), vec![journey]);
         assert_eq!(journey_ids_of(&rows, pin), vec![journey]);
-        assert!(journey_ids_of(&rows, mine).is_empty());
+        assert_eq!(journey_ids_of(&rows, mine), [] as [i64; 0]);
 
         cleanup(&pool, user_id).await;
         cleanup(&pool, other_user).await;

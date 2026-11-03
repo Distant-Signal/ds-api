@@ -384,7 +384,7 @@ async fn the_writer_derives_replaces_per_date_and_skips_identical_publishes(pool
         .push(changed[0].clone());
     let outcome = upsert(&pool, &line, date(), &twice).await;
     assert_eq!(outcome.summaries_written, Some(0));
-    assert!(table_rows(&pool, date()).await.is_empty());
+    assert_eq!(table_rows(&pool, date()).await, []);
     let stored = queries::get_schedule_line_population(&pool, LINE, date())
         .await
         .expect("read")
@@ -401,7 +401,7 @@ async fn the_writer_derives_replaces_per_date_and_skips_identical_publishes(pool
     queries::upsert_schedule_line_population(&pool, LINE, date(), &population.to_string())
         .await
         .expect("plain upsert");
-    assert!(table_rows(&pool, date()).await.is_empty());
+    assert_eq!(table_rows(&pool, date()).await, []);
     assert_eq!(
         lts::rebuild_summaries(&pool, Some(&line), LINE, date(), false)
             .await

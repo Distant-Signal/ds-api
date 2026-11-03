@@ -1029,8 +1029,8 @@ mod tests {
 
     #[test]
     fn empty_is_inert() {
-        assert!(parse_clients("").unwrap().is_empty());
-        assert!(parse_clients("[]").unwrap().is_empty());
+        assert_eq!(parse_clients("").unwrap(), []);
+        assert_eq!(parse_clients("[]").unwrap(), []);
         assert!(DelegatedAuth::default().is_inert());
         assert_eq!(DelegatedAuth::default().listen_addr(), None);
     }
@@ -1136,7 +1136,7 @@ mod tests {
             vec![Scope::JourneysRead]
         );
         // An empty token scope (spike S4) grants nothing.
-        assert!(effective_scopes(&[], &grant, &max).is_empty());
+        assert_eq!(effective_scopes(&[], &grant, &max), []);
     }
 
     #[test]

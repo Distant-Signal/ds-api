@@ -572,7 +572,7 @@ mod wire_format_tests {
         else {
             panic!("expected a Pin-mode leg, got {leg:?}");
         };
-        assert!(skipped_stations.is_empty());
+        assert_eq!(skipped_stations, [] as [String; 0]);
     }
 
     #[test]
@@ -2638,8 +2638,12 @@ fn leg_candidate_json(
     leg_destination_crs: &str,
     destination_names: &std::collections::HashMap<String, String>,
 ) -> serde_json::Value {
-    let mut json =
-        crate::render::calling_point_departure_json(row, leg_origin_crs, destination_names);
+    let mut json = serde_json::to_value(crate::render::calling_point_departure_json(
+        row,
+        leg_origin_crs,
+        destination_names,
+    ))
+    .unwrap_or_default();
     // The public arrival at the leg's destination, else the working one,
     // trimmed "HH:MM:SS" -> "HH:MM" exactly as the shared renderer serves
     // `scheduled` and `destinationArrival`, so the times on one row are
@@ -6294,7 +6298,7 @@ mod db_tests {
         .await;
         assert_eq!(status, StatusCode::OK, "create share link: {body:?}");
         let token = body["token"].as_str().expect("token present").to_string();
-        assert!(!token.is_empty());
+        assert_ne!(token, "");
         // L17: every journey share link now carries a 30-day expiry.
         let expires_at: chrono::DateTime<chrono::Utc> = body["expiresAt"]
             .as_str()

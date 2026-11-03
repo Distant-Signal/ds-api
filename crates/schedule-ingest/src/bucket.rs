@@ -1043,7 +1043,7 @@ pub(crate) mod tests {
         assert_eq!(f.bucket.names(), ["timetable_full.zip"]);
         f.advance(Duration::from_secs(3600));
         restarted.poll_once().await;
-        assert!(f.bucket.names().is_empty());
+        assert_eq!(f.bucket.names(), [] as [String; 0]);
         assert_eq!(f.gets().await, 1);
         let archive = BucketDirs::new(f.storage.path()).archive;
         assert_eq!(std::fs::read_dir(archive).unwrap().count(), 1);
@@ -1113,7 +1113,7 @@ pub(crate) mod tests {
         assert_eq!(delay, Duration::from_secs(600), "backs off");
         assert!(!f.incoming().join("timetable_full.zip").exists());
         assert_eq!(f.bucket.names(), ["timetable_full.zip"], "not deleted");
-        assert!(source.seen.is_empty());
+        assert_eq!(source.seen, []);
     }
 
     /// A loop (an object that is always a new generation) downloads at

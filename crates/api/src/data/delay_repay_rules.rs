@@ -1133,6 +1133,6 @@ mod tests {
         // Two different strings by design -- see ROUTE_DISCLAIMER's own doc
         // comment and components/DelayRepayEstimate.tsx's doc comment.
         assert_ne!(ROUTE_DISCLAIMER, DISCLAIMER);
-        assert!(!ROUTE_DISCLAIMER.is_empty());
+        assert_ne!(ROUTE_DISCLAIMER, "");
     }
 }

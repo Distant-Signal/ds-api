@@ -18,8 +18,8 @@ use axum::extract::{Path, Query, State};
 use axum::http::{StatusCode, header};
 use base64::Engine;
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
-use serde::Deserialize;
-use serde_json::{Value, json};
+use serde::{Deserialize, Serialize};
+use serde_json::Value;
 
 use crate::app::{App, Router};
 use crate::auth::OptionalAuthenticatedUser;
@@ -27,6 +27,7 @@ use crate::data::config::LineCatalogue;
 use crate::data::custom_lines;
 use crate::data::queries;
 use crate::data::recently_cleared::{self, ExpectedEnd, Placement};
+use crate::render::ValidityPeriodJson;
 
 pub fn router() -> Router {
     Router::new()
@@ -246,95 +247,89 @@ fn decode_cursor(raw: &str) -> Result<queries::IncidentSearchCursor, (StatusCode
 /// `state`, `startsAt` and `validityEndedAt` (2026-10-20), shared by a list
 /// row and the detail so the two can't disagree. See
 /// `queries::IncidentState` for the rule.
-fn timing_json(timing: &queries::IncidentTiming) -> [(&'static str, Value); 3] {
-    [
-        ("state", Value::from(timing.state.as_str())),
-        (
-            "startsAt",
-            timing
-                .starts_at
-                .map_or(Value::Null, |t| Value::from(t.to_rfc3339())),
-        ),
-        (
-            "validityEndedAt",
-            timing
-                .validity_ended_at
-                .map_or(Value::Null, |t| Value::from(t.to_rfc3339())),
-        ),
-    ]
+/// Where an incident stands (2026-10-20, `queries::IncidentState`): its
+/// `state`, when its next validity window starts (for `upcoming`), and when
+/// its last one finished (once every one has). Times RFC 3339 (`+00:00`).
+#[derive(Debug, Clone, Serialize, ts_rs::TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(rename = "IncidentTiming")]
+pub(crate) struct IncidentTimingJson {
+    #[ts(as = "crate::ts_values::IncidentState")]
+    state: &'static str,
+    starts_at: Option<String>,
+    validity_ended_at: Option<String>,
 }
 
-/// Adds [`timing_json`]'s fields to a rendered incident object.
-fn with_timing(mut object: Value, timing: &queries::IncidentTiming) -> Value {
-    if let Value::Object(map) = &mut object {
-        for (key, value) in timing_json(timing) {
-            map.insert(key.to_string(), value);
-        }
+fn timing_json(timing: &queries::IncidentTiming) -> IncidentTimingJson {
+    IncidentTimingJson {
+        state: timing.state.as_str(),
+        starts_at: timing.starts_at.map(|t| t.to_rfc3339()),
+        validity_ended_at: timing.validity_ended_at.map(|t| t.to_rfc3339()),
     }
-    object
 }
 
-/// Renders one `IncidentSummaryRow` as camelCase JSON -- the `IncidentSummary`
-/// shape `frontend/lib/types.ts` declares. Its state is judged at `now`,
-/// the instant the search filtered at.
+/// One row of `GET /public/incidents`: lighter than [`IncidentDetailJson`]
+/// (no description, validity periods, history or current lines).
+#[derive(Debug, Clone, Serialize, ts_rs::TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(rename = "IncidentSummary")]
+pub(crate) struct IncidentSummaryJson {
+    incident_id: String,
+    summary: String,
+    operators: Vec<String>,
+    affected_stations: Vec<String>,
+    affected_lines: Vec<String>,
+    priority: i32,
+    is_planned: bool,
+    is_cleared: bool,
+    first_seen_at: String,
+    fetched_at: String,
+    source_removed_at: Option<String>,
+    #[serde(flatten)]
+    timing: IncidentTimingJson,
+}
+
 fn incident_summary_json(
     row: &queries::IncidentSummaryRow,
     now: chrono::DateTime<chrono::Utc>,
-) -> Value {
+) -> IncidentSummaryJson {
     let timing = queries::IncidentTiming::derive(
         row.is_cleared,
         row.source_removed_at,
         &queries::parse_validity_periods(&row.validity_periods),
         now,
     );
-    with_timing(
-        json!({
-            "incidentId": row.incident_id,
-            "summary": row.summary,
-            "operators": row.operators,
-            "affectedStations": row.affected_stations,
-            "affectedLines": row.affected_lines,
-            "priority": row.priority,
-            "isPlanned": row.is_planned,
-            "isCleared": row.is_cleared,
-            "firstSeenAt": row.first_seen_at.to_rfc3339(),
-            "fetchedAt": row.fetched_at.to_rfc3339(),
-            "sourceRemovedAt": row.source_removed_at.map(|t| t.to_rfc3339()),
-        }),
-        &timing,
-    )
+    IncidentSummaryJson {
+        incident_id: row.incident_id.clone(),
+        summary: row.summary.clone(),
+        operators: row.operators.clone(),
+        affected_stations: row.affected_stations.clone(),
+        affected_lines: row.affected_lines.clone(),
+        priority: row.priority,
+        is_planned: row.is_planned,
+        is_cleared: row.is_cleared,
+        first_seen_at: row.first_seen_at.to_rfc3339(),
+        fetched_at: row.fetched_at.to_rfc3339(),
+        source_removed_at: row.source_removed_at.map(|t| t.to_rfc3339()),
+        timing: timing_json(&timing),
+    }
 }
 
-/// `GET /public/incidents` -- see
-/// docs/superpowers/specs/2026-09-12-incident-archive-design.md Decisions
-/// 1-5. Unauthenticated, per this file's own established public-read
-/// convention.
-///
-/// The `line` filter matches `incidents.affected_lines`, which
-/// `queries::upsert_incidents` fills by running `common::matcher` -- the
-/// aggregator's own matcher -- over the incident at ingest. So the archive
-/// and the live status pages agree by construction about which lines an
-/// incident affects, including the `KeywordOnly`/`OperatorOnly` tiers.
-///
-/// It used to resolve the line to its CRS list and apply a station-overlap
-/// filter instead (the design spec's Decision 2 / Correction 1
-/// approximation). That returned zero rows for every line in production,
-/// because `incidents.affected_stations` is never written by anything:
-/// RDM's Incidents XML has no CRS field. See
-/// docs/superpowers/specs/2026-09-16-tfl-incident-archive-design.md 1c.
-/// The one caveat that remains is scope, not emptiness: rows ingested
-/// before `20260917090000_incidents_affected_lines.sql` match no line until
-/// `writer-maintenance backfill-incident-lines` has been run (see
-/// docs/incident-affected-lines-backfill.md).
-///
-/// `total` (added 2026-10-14) is how many incidents match in all, for "Show
-/// 12 incidents" on /incidents. It is on the first page only and `null` on
-/// a page fetched with `after`, which belongs to a search whose total the
-/// caller already has.
+/// `GET /public/incidents`: a page of matches, newest first.
+#[derive(Debug, Clone, Serialize, ts_rs::TS)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct IncidentSearchResponse {
+    results: Vec<IncidentSummaryJson>,
+    /// Pass back as `after` for the next page; `null` on the last.
+    next_cursor: Option<String>,
+    /// Every match across all pages; first page only, `null` with `after`.
+    total: Option<i64>,
+}
+
 async fn search_incidents(
     State(app): State<App>,
     Query(params): Query<IncidentSearchParams>,
-) -> Result<Json<Value>, (StatusCode, String)> {
+) -> Result<Json<IncidentSearchResponse>, (StatusCode, String)> {
     let operators: Option<Vec<String>> = params.operator.as_deref().and_then(|raw| {
         let list: Vec<String> = raw
             .split(',')
@@ -427,11 +422,15 @@ async fn search_incidents(
     .await
     .map_err(internal_error)?;
 
-    Ok(Json(json!({
-        "results": page.results.iter().map(|row| incident_summary_json(row, now)).collect::<Vec<Value>>(),
-        "nextCursor": page.next_cursor.as_ref().map(encode_cursor),
-        "total": page.total,
-    })))
+    Ok(Json(IncidentSearchResponse {
+        results: page
+            .results
+            .iter()
+            .map(|row| incident_summary_json(row, now))
+            .collect(),
+        next_cursor: page.next_cursor.as_ref().map(encode_cursor),
+        total: page.total,
+    }))
 }
 
 /// `GET /public/incidents/recently-cleared` query: at most one of a
@@ -500,10 +499,37 @@ fn recently_cleared_placement(
 /// docs/api-changelog.md (2026-10-12) for the shape. `affectedLines` names
 /// catalogue lines only (all `affected_lines` can hold), so no private
 /// custom line can appear.
+/// A line an incident affects, by catalogue id and name.
+#[derive(Debug, Clone, Serialize, ts_rs::TS)]
+#[ts(rename = "IncidentLineRef")]
+pub(crate) struct IncidentLineRefJson {
+    id: String,
+    name: String,
+}
+
+/// One item of `GET /public/incidents/recently-cleared` (2026-10-12): an
+/// incident National Rail has cleared but still lists.
+#[derive(Debug, Clone, Serialize, ts_rs::TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(rename = "RecentlyClearedIncident")]
+pub(crate) struct RecentlyClearedIncidentJson {
+    incident_id: String,
+    summary: String,
+    description: String,
+    operators: Vec<String>,
+    affected_lines: Vec<IncidentLineRefJson>,
+    cleared_at: String,
+    last_listed_at: String,
+    /// The end time the last live text stated, if any.
+    expected_until: Option<String>,
+    /// The last live text said "expected until the end of the day".
+    expected_until_end_of_day: bool,
+}
+
 fn recently_cleared_json(
     row: &recently_cleared::RecentlyClearedRow,
     lines: &LineCatalogue,
-) -> Value {
+) -> RecentlyClearedIncidentJson {
     let expected = match (
         row.prior_summary.as_deref(),
         row.prior_description.as_deref(),
@@ -514,45 +540,50 @@ fn recently_cleared_json(
         }
         _ => None,
     };
-    json!({
-        "incidentId": row.incident_id,
-        "summary": row.summary,
-        "description": row.description,
-        "operators": row.operators,
-        "affectedLines": row
+    RecentlyClearedIncidentJson {
+        incident_id: row.incident_id.clone(),
+        summary: row.summary.clone(),
+        description: row.description.clone(),
+        operators: row.operators.clone(),
+        affected_lines: row
             .affected_lines
             .iter()
             .filter_map(|id| lines.iter().find(|line| &line.id == id))
-            .map(|line| json!({ "id": line.id, "name": line.name }))
-            .collect::<Vec<_>>(),
-        "clearedAt": row.cleared_at.to_rfc3339(),
-        "lastListedAt": row.fetched_at.to_rfc3339(),
-        "expectedUntil": match expected {
+            .map(|line| IncidentLineRefJson {
+                id: line.id.clone(),
+                name: line.name.clone(),
+            })
+            .collect(),
+        cleared_at: row.cleared_at.to_rfc3339(),
+        last_listed_at: row.fetched_at.to_rfc3339(),
+        expected_until: match expected {
             Some(ExpectedEnd::At(at)) => Some(at.to_rfc3339()),
             _ => None,
         },
-        "expectedUntilEndOfDay": expected == Some(ExpectedEnd::EndOfDay),
-    })
+        expected_until_end_of_day: expected == Some(ExpectedEnd::EndOfDay),
+    }
 }
 
-/// `GET /public/incidents/recently-cleared`: cleared incidents the feed
-/// still lists, cleared since today's 02:00, newest clear first
-/// (`data::recently_cleared`). Info only: nothing here changes a line's
-/// status. Unauthenticated and the same for every caller.
+/// `GET /public/incidents/recently-cleared`'s body.
+#[derive(Debug, Clone, Serialize, ts_rs::TS)]
+pub(crate) struct RecentlyClearedResponse {
+    results: Vec<RecentlyClearedIncidentJson>,
+}
+
 async fn get_recently_cleared(
     State(app): State<App>,
     Query(params): Query<RecentlyClearedParams>,
-) -> Result<Json<Value>, (StatusCode, String)> {
+) -> Result<Json<RecentlyClearedResponse>, (StatusCode, String)> {
     let placement = recently_cleared_placement(&params, &app.config.lines)?;
     let rows = recently_cleared::recently_cleared(&app.database, chrono::Utc::now(), &placement)
         .await
         .map_err(internal_error)?;
-    Ok(Json(json!({
-        "results": rows
+    Ok(Json(RecentlyClearedResponse {
+        results: rows
             .iter()
             .map(|row| recently_cleared_json(row, &app.config.lines))
-            .collect::<Vec<Value>>(),
-    })))
+            .collect(),
+    }))
 }
 
 /// Unauthenticated in the sense that it never *requires* a session, but
@@ -573,7 +604,13 @@ async fn get_incident(
     State(app): State<App>,
     Path(incident_id): Path<String>,
     OptionalAuthenticatedUser(user): OptionalAuthenticatedUser,
-) -> Result<([(header::HeaderName, &'static str); 2], Json<Value>), (StatusCode, String)> {
+) -> Result<
+    (
+        [(header::HeaderName, &'static str); 2],
+        Json<IncidentDetailJson>,
+    ),
+    (StatusCode, String),
+> {
     let Some(incident) = queries::incident_by_id(&app.database, &incident_id)
         .await
         .map_err(internal_error)?
@@ -639,6 +676,46 @@ async fn get_incident(
 /// (a response that's camelCase at the top level but `snake_case` inside
 /// every validity period). Pure function, no I/O -- unit-testable without
 /// a database, matching `to_tfl_shape`'s own testable shape in `render.rs`.
+/// `GET /public/incidents/{incidentId}`. `description` is raw HTML.
+/// `currentlyAffectsLines` is computed per request and may be empty.
+#[derive(Debug, Clone, Serialize, ts_rs::TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(rename = "IncidentDetail")]
+pub(crate) struct IncidentDetailJson {
+    incident_id: String,
+    summary: String,
+    description: String,
+    operators: Vec<String>,
+    affected_stations: Vec<String>,
+    priority: i32,
+    validity_periods: Vec<ValidityPeriodJson>,
+    is_planned: bool,
+    is_cleared: bool,
+    first_seen_at: String,
+    fetched_at: String,
+    source_removed_at: Option<String>,
+    currently_affects_lines: Vec<IncidentLineRefJson>,
+    history: Vec<IncidentHistoryEntryJson>,
+    #[serde(flatten)]
+    timing: IncidentTimingJson,
+}
+
+/// One earlier version of an incident, as the feed published it.
+#[derive(Debug, Clone, Serialize, ts_rs::TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(rename = "IncidentHistoryEntry")]
+pub(crate) struct IncidentHistoryEntryJson {
+    summary: String,
+    description: String,
+    operators: Vec<String>,
+    affected_stations: Vec<String>,
+    priority: i32,
+    validity_periods: Vec<ValidityPeriodJson>,
+    is_planned: bool,
+    is_cleared: bool,
+    recorded_at: String,
+}
+
 #[expect(
     clippy::needless_pass_by_value,
     reason = "callers hand over values they no longer need"
@@ -648,68 +725,60 @@ fn to_incident_detail_json(
     history: Vec<queries::IncidentHistoryRow>,
     lines: Vec<queries::IncidentLineRefRow>,
     now: chrono::DateTime<chrono::Utc>,
-) -> Value {
+) -> IncidentDetailJson {
     let timing = queries::IncidentTiming::derive(
         incident.is_cleared,
         incident.source_removed_at,
         &queries::parse_validity_periods(&incident.validity_periods),
         now,
     );
-    with_timing(
-        json!({
-            "incidentId": incident.incident_id,
-            "summary": incident.summary,
-            "description": incident.description,
-            "operators": incident.operators,
-            "affectedStations": incident.affected_stations,
-            "priority": incident.priority,
-            "validityPeriods": render_validity_periods(&incident.validity_periods),
-            "isPlanned": incident.is_planned,
-            "isCleared": incident.is_cleared,
-            "firstSeenAt": incident.first_seen_at.to_rfc3339(),
-            "fetchedAt": incident.fetched_at.to_rfc3339(),
-            "sourceRemovedAt": incident.source_removed_at.map(|t| t.to_rfc3339()),
-            "currentlyAffectsLines": lines.iter().map(|l| json!({
-                "id": l.line_id,
-                "name": l.name,
-            })).collect::<Vec<_>>(),
-            "history": history.iter().map(|h| json!({
-                "summary": h.summary,
-                "description": h.description,
-                "operators": h.operators,
-                "affectedStations": h.affected_stations,
-                "priority": h.priority,
-                "validityPeriods": render_validity_periods(&h.validity_periods),
-                "isPlanned": h.is_planned,
-                "isCleared": h.is_cleared,
-                "recordedAt": h.recorded_at.to_rfc3339(),
-            })).collect::<Vec<_>>(),
-        }),
-        &timing,
-    )
-}
-
-/// `validity_periods` comes back from `queries::incident_by_id`/
-/// `incident_history_for_id` as raw `serde_json::Value` (the column's own
-/// stored JSONB, snake-case field names -- `from_date`/`to_date`/`is_now`,
-/// since `common::ValidityPeriod` has no `rename_all`). Deserializes into
-/// the real Rust type first, rather than this function re-implementing
-/// JSONB field access by hand. A malformed row does NOT fail loudly: it
-/// degrades silently to an empty validity-periods array, with a
-/// `tracing::warn!` as the only signal.
-fn render_validity_periods(raw: &Value) -> Value {
-    Value::Array(
-        queries::parse_validity_periods(raw)
-            .into_iter()
-            .map(|p| {
-                json!({
-                    "fromDate": p.from_date.to_rfc3339(),
-                    "toDate": p.to_date.map(|d| d.to_rfc3339()),
-                    "isNow": p.is_now,
-                })
+    IncidentDetailJson {
+        incident_id: incident.incident_id.clone(),
+        summary: incident.summary.clone(),
+        description: incident.description.clone(),
+        operators: incident.operators.clone(),
+        affected_stations: incident.affected_stations.clone(),
+        priority: incident.priority,
+        validity_periods: render_validity_periods(&incident.validity_periods),
+        is_planned: incident.is_planned,
+        is_cleared: incident.is_cleared,
+        first_seen_at: incident.first_seen_at.to_rfc3339(),
+        fetched_at: incident.fetched_at.to_rfc3339(),
+        source_removed_at: incident.source_removed_at.map(|t| t.to_rfc3339()),
+        currently_affects_lines: lines
+            .iter()
+            .map(|l| IncidentLineRefJson {
+                id: l.line_id.clone(),
+                name: l.name.clone(),
             })
             .collect(),
-    )
+        history: history
+            .iter()
+            .map(|h| IncidentHistoryEntryJson {
+                summary: h.summary.clone(),
+                description: h.description.clone(),
+                operators: h.operators.clone(),
+                affected_stations: h.affected_stations.clone(),
+                priority: h.priority,
+                validity_periods: render_validity_periods(&h.validity_periods),
+                is_planned: h.is_planned,
+                is_cleared: h.is_cleared,
+                recorded_at: h.recorded_at.to_rfc3339(),
+            })
+            .collect(),
+        timing: timing_json(&timing),
+    }
+}
+
+fn render_validity_periods(raw: &Value) -> Vec<ValidityPeriodJson> {
+    queries::parse_validity_periods(raw)
+        .into_iter()
+        .map(|p| ValidityPeriodJson {
+            from_date: p.from_date.to_rfc3339(),
+            to_date: p.to_date.map(|d| d.to_rfc3339()),
+            is_now: p.is_now,
+        })
+        .collect()
 }
 
 #[expect(
@@ -731,6 +800,294 @@ fn internal_error(err: anyhow::Error) -> (StatusCode, String) {
 mod tests {
     use super::*;
     use chrono::{TimeZone, Utc};
+
+    fn v<T: Serialize>(body: T) -> Value {
+        serde_json::to_value(body).unwrap()
+    }
+
+    /// The `json!` renderers these routes used before their bodies were
+    /// typed, verbatim, so the typed bodies are checked against them.
+    mod legacy {
+        use serde_json::{Value, json};
+
+        use crate::data::config::LineCatalogue;
+        use crate::data::queries;
+        use crate::data::recently_cleared::{self, ExpectedEnd};
+
+        pub(super) fn timing_json(timing: &queries::IncidentTiming) -> [(&'static str, Value); 3] {
+            [
+                ("state", Value::from(timing.state.as_str())),
+                (
+                    "startsAt",
+                    timing
+                        .starts_at
+                        .map_or(Value::Null, |t| Value::from(t.to_rfc3339())),
+                ),
+                (
+                    "validityEndedAt",
+                    timing
+                        .validity_ended_at
+                        .map_or(Value::Null, |t| Value::from(t.to_rfc3339())),
+                ),
+            ]
+        }
+
+        /// Adds [`timing_json`]'s fields to a rendered incident object.
+        pub(super) fn with_timing(mut object: Value, timing: &queries::IncidentTiming) -> Value {
+            if let Value::Object(map) = &mut object {
+                for (key, value) in timing_json(timing) {
+                    map.insert(key.to_string(), value);
+                }
+            }
+            object
+        }
+
+        /// Renders one `IncidentSummaryRow` as camelCase JSON -- the `IncidentSummary`
+        /// shape `frontend/lib/types.ts` declares. Its state is judged at `now`,
+        /// the instant the search filtered at.
+        pub(super) fn incident_summary_json(
+            row: &queries::IncidentSummaryRow,
+            now: chrono::DateTime<chrono::Utc>,
+        ) -> Value {
+            let timing = queries::IncidentTiming::derive(
+                row.is_cleared,
+                row.source_removed_at,
+                &queries::parse_validity_periods(&row.validity_periods),
+                now,
+            );
+            with_timing(
+                json!({
+                    "incidentId": row.incident_id,
+                    "summary": row.summary,
+                    "operators": row.operators,
+                    "affectedStations": row.affected_stations,
+                    "affectedLines": row.affected_lines,
+                    "priority": row.priority,
+                    "isPlanned": row.is_planned,
+                    "isCleared": row.is_cleared,
+                    "firstSeenAt": row.first_seen_at.to_rfc3339(),
+                    "fetchedAt": row.fetched_at.to_rfc3339(),
+                    "sourceRemovedAt": row.source_removed_at.map(|t| t.to_rfc3339()),
+                }),
+                &timing,
+            )
+        }
+
+        /// `GET /public/incidents` -- see
+        /// docs/superpowers/specs/2026-09-12-incident-archive-design.md Decisions
+        /// 1-5. Unauthenticated, per this file's own established public-read
+        /// convention.
+        ///
+        /// The `line` filter matches `incidents.affected_lines`, which
+        /// `queries::upsert_incidents` fills by running `common::matcher` -- the
+        /// aggregator's own matcher -- over the incident at ingest. So the archive
+        /// and the live status pages agree by construction about which lines an
+        /// incident affects, including the `KeywordOnly`/`OperatorOnly` tiers.
+        ///
+        /// It used to resolve the line to its CRS list and apply a station-overlap
+        /// filter instead (the design spec's Decision 2 / Correction 1
+        /// approximation). That returned zero rows for every line in production,
+        /// because `incidents.affected_stations` is never written by anything:
+        /// RDM's Incidents XML has no CRS field. See
+        /// docs/superpowers/specs/2026-09-16-tfl-incident-archive-design.md 1c.
+        /// The one caveat that remains is scope, not emptiness: rows ingested
+        /// before `20260917090000_incidents_affected_lines.sql` match no line until
+        /// `writer-maintenance backfill-incident-lines` has been run (see
+        /// docs/incident-affected-lines-backfill.md).
+        ///
+        /// `total` (added 2026-10-14) is how many incidents match in all, for "Show
+        /// 12 incidents" on /incidents. It is on the first page only and `null` on
+        /// a page fetched with `after`, which belongs to a search whose total the
+        /// caller already has.
+        pub(super) fn recently_cleared_json(
+            row: &recently_cleared::RecentlyClearedRow,
+            lines: &LineCatalogue,
+        ) -> Value {
+            let expected = match (
+                row.prior_summary.as_deref(),
+                row.prior_description.as_deref(),
+                row.prior_recorded_at,
+            ) {
+                (Some(summary), Some(description), Some(published_at)) => {
+                    recently_cleared::expected_end(
+                        summary,
+                        description,
+                        published_at,
+                        row.cleared_at,
+                    )
+                }
+                _ => None,
+            };
+            json!({
+                "incidentId": row.incident_id,
+                "summary": row.summary,
+                "description": row.description,
+                "operators": row.operators,
+                "affectedLines": row
+                    .affected_lines
+                    .iter()
+                    .filter_map(|id| lines.iter().find(|line| &line.id == id))
+                    .map(|line| json!({ "id": line.id, "name": line.name }))
+                    .collect::<Vec<_>>(),
+                "clearedAt": row.cleared_at.to_rfc3339(),
+                "lastListedAt": row.fetched_at.to_rfc3339(),
+                "expectedUntil": match expected {
+                    Some(ExpectedEnd::At(at)) => Some(at.to_rfc3339()),
+                    _ => None,
+                },
+                "expectedUntilEndOfDay": expected == Some(ExpectedEnd::EndOfDay),
+            })
+        }
+
+        /// `GET /public/incidents/recently-cleared`: cleared incidents the feed
+        /// still lists, cleared since today's 02:00, newest clear first
+        /// (`data::recently_cleared`). Info only: nothing here changes a line's
+        /// status. Unauthenticated and the same for every caller.
+        #[expect(
+            clippy::needless_pass_by_value,
+            reason = "callers hand over values they no longer need"
+        )]
+        pub(super) fn to_incident_detail_json(
+            incident: queries::IncidentRow,
+            history: Vec<queries::IncidentHistoryRow>,
+            lines: Vec<queries::IncidentLineRefRow>,
+            now: chrono::DateTime<chrono::Utc>,
+        ) -> Value {
+            let timing = queries::IncidentTiming::derive(
+                incident.is_cleared,
+                incident.source_removed_at,
+                &queries::parse_validity_periods(&incident.validity_periods),
+                now,
+            );
+            with_timing(
+                json!({
+                    "incidentId": incident.incident_id,
+                    "summary": incident.summary,
+                    "description": incident.description,
+                    "operators": incident.operators,
+                    "affectedStations": incident.affected_stations,
+                    "priority": incident.priority,
+                    "validityPeriods": render_validity_periods(&incident.validity_periods),
+                    "isPlanned": incident.is_planned,
+                    "isCleared": incident.is_cleared,
+                    "firstSeenAt": incident.first_seen_at.to_rfc3339(),
+                    "fetchedAt": incident.fetched_at.to_rfc3339(),
+                    "sourceRemovedAt": incident.source_removed_at.map(|t| t.to_rfc3339()),
+                    "currentlyAffectsLines": lines.iter().map(|l| json!({
+                        "id": l.line_id,
+                        "name": l.name,
+                    })).collect::<Vec<_>>(),
+                    "history": history.iter().map(|h| json!({
+                        "summary": h.summary,
+                        "description": h.description,
+                        "operators": h.operators,
+                        "affectedStations": h.affected_stations,
+                        "priority": h.priority,
+                        "validityPeriods": render_validity_periods(&h.validity_periods),
+                        "isPlanned": h.is_planned,
+                        "isCleared": h.is_cleared,
+                        "recordedAt": h.recorded_at.to_rfc3339(),
+                    })).collect::<Vec<_>>(),
+                }),
+                &timing,
+            )
+        }
+
+        /// `validity_periods` comes back from `queries::incident_by_id`/
+        /// `incident_history_for_id` as raw `serde_json::Value` (the column's own
+        /// stored JSONB, snake-case field names -- `from_date`/`to_date`/`is_now`,
+        /// since `common::ValidityPeriod` has no `rename_all`). Deserializes into
+        /// the real Rust type first, rather than this function re-implementing
+        /// JSONB field access by hand. A malformed row does NOT fail loudly: it
+        /// degrades silently to an empty validity-periods array, with a
+        /// `tracing::warn!` as the only signal.
+        pub(super) fn render_validity_periods(raw: &Value) -> Value {
+            Value::Array(
+                queries::parse_validity_periods(raw)
+                    .into_iter()
+                    .map(|p| {
+                        json!({
+                            "fromDate": p.from_date.to_rfc3339(),
+                            "toDate": p.to_date.map(|d| d.to_rfc3339()),
+                            "isNow": p.is_now,
+                        })
+                    })
+                    .collect(),
+            )
+        }
+    }
+
+    /// Every incident body serves the JSON its `json!` renderer did.
+    #[test]
+    fn typed_incident_bodies_match_the_json_renderers() {
+        let now = Utc.with_ymd_and_hms(2026, 10, 25, 12, 0, 0).unwrap();
+        let mut planned = sample_incident();
+        planned.is_planned = true;
+        planned.source_removed_at = Some(Utc.with_ymd_and_hms(2026, 10, 26, 0, 0, 0).unwrap());
+        planned.validity_periods = serde_json::json!([
+            {"from_date": "2026-10-24T23:00:00Z", "to_date": "2026-10-25T23:59:00Z", "is_now": true},
+            {"from_date": "2026-10-31T23:00:00Z", "to_date": null, "is_now": false}
+        ]);
+        let history = vec![queries::IncidentHistoryRow {
+            summary: "v1".to_string(),
+            description: "<p>d</p>".to_string(),
+            operators: vec!["SW".to_string()],
+            affected_stations: vec!["WOK".to_string()],
+            priority: 2,
+            validity_periods: serde_json::json!([
+                {"from_date": "2026-10-24T23:00:00Z", "to_date": null, "is_now": false}
+            ]),
+            is_planned: true,
+            is_cleared: false,
+            recorded_at: Utc.with_ymd_and_hms(2026, 10, 20, 9, 0, 0).unwrap(),
+        }];
+        let lines = vec![queries::IncidentLineRefRow {
+            line_id: "south-western".to_string(),
+            name: "South Western Main Line".to_string(),
+        }];
+        for incident in [sample_incident(), planned] {
+            assert_eq!(
+                v(to_incident_detail_json(
+                    incident.clone(),
+                    history.clone(),
+                    lines.clone(),
+                    now
+                )),
+                legacy::to_incident_detail_json(incident, history.clone(), lines.clone(), now),
+            );
+        }
+
+        let summary = queries::IncidentSummaryRow {
+            incident_id: "12345".to_string(),
+            summary: "Signal failure at Woking".to_string(),
+            operators: vec!["SW".to_string()],
+            affected_stations: vec![],
+            affected_lines: vec!["south-western".to_string()],
+            priority: 3,
+            is_planned: false,
+            is_cleared: true,
+            first_seen_at: Utc.with_ymd_and_hms(2026, 10, 24, 9, 0, 0).unwrap(),
+            fetched_at: Utc.with_ymd_and_hms(2026, 10, 24, 10, 0, 0).unwrap(),
+            source_removed_at: None,
+            validity_periods: serde_json::json!([]),
+        };
+        assert_eq!(
+            v(incident_summary_json(&summary, now)),
+            legacy::incident_summary_json(&summary, now),
+        );
+
+        let catalogue = catalogue();
+        for row in [
+            cleared_row(None),
+            cleared_row(Some("Residual disruption expected until 22:30")),
+            cleared_row(Some("Disruption expected until the end of the day")),
+        ] {
+            assert_eq!(
+                v(recently_cleared_json(&row, &catalogue)),
+                legacy::recently_cleared_json(&row, &catalogue),
+            );
+        }
+    }
 
     fn sample_incident() -> queries::IncidentRow {
         queries::IncidentRow {
@@ -761,29 +1118,49 @@ mod tests {
             {"from_date": "2026-10-24T23:00:00Z", "to_date": "2026-10-25T23:59:00Z", "is_now": false}
         ]);
         let before = Utc.with_ymd_and_hms(2026, 10, 20, 12, 0, 0).unwrap();
-        let json = to_incident_detail_json(incident.clone(), vec![], vec![], before);
+        let json = v(to_incident_detail_json(
+            incident.clone(),
+            vec![],
+            vec![],
+            before,
+        ));
         assert_eq!(json["state"], "upcoming");
         assert_eq!(json["startsAt"], "2026-10-24T23:00:00+00:00");
         assert!(json["validityEndedAt"].is_null());
 
         let during = Utc.with_ymd_and_hms(2026, 10, 25, 1, 30, 0).unwrap();
-        let json = to_incident_detail_json(incident.clone(), vec![], vec![], during);
+        let json = v(to_incident_detail_json(
+            incident.clone(),
+            vec![],
+            vec![],
+            during,
+        ));
         assert_eq!(json["state"], "active");
         assert!(json["startsAt"].is_null());
 
         let after = Utc.with_ymd_and_hms(2026, 10, 26, 9, 0, 0).unwrap();
-        let json = to_incident_detail_json(incident.clone(), vec![], vec![], after);
+        let json = v(to_incident_detail_json(
+            incident.clone(),
+            vec![],
+            vec![],
+            after,
+        ));
         assert_eq!(json["state"], "ended");
         assert_eq!(json["validityEndedAt"], "2026-10-25T23:59:00+00:00");
 
         incident.is_cleared = true;
-        let json = to_incident_detail_json(incident, vec![], vec![], before);
+        let json = v(to_incident_detail_json(incident, vec![], vec![], before));
         assert_eq!(json["state"], "cleared", "cleared beats the windows");
     }
 
     #[test]
     fn renders_top_level_fields_as_camel_case() {
-        let json = to_incident_detail_json(sample_incident(), vec![], vec![], Utc::now());
+        let json = v(to_incident_detail_json(
+            sample_incident(),
+            vec![],
+            vec![],
+            Utc::now(),
+        ));
         assert_eq!(json["incidentId"], "12345");
         assert_eq!(json["summary"], "Signal failure at Woking");
         assert_eq!(json["affectedStations"][0], "WOK");
@@ -799,7 +1176,12 @@ mod tests {
     fn an_ended_incident_renders_when_the_feed_last_listed_it() {
         let mut incident = sample_incident();
         incident.source_removed_at = Some(Utc.with_ymd_and_hms(2026, 10, 5, 22, 55, 0).unwrap());
-        let json = to_incident_detail_json(incident, vec![], vec![], Utc::now());
+        let json = v(to_incident_detail_json(
+            incident,
+            vec![],
+            vec![],
+            Utc::now(),
+        ));
         assert_eq!(json["sourceRemovedAt"], "2026-10-05T22:55:00+00:00");
         assert_eq!(json["isCleared"], false, "ended is not cleared");
     }
@@ -845,7 +1227,12 @@ mod tests {
         // The direct regression test for Correction A -- proves this
         // function does not fall back to a derived Serialize impl that
         // would leak `from_date`/`to_date`/`is_now` through unrenamed.
-        let json = to_incident_detail_json(sample_incident(), vec![], vec![], Utc::now());
+        let json = v(to_incident_detail_json(
+            sample_incident(),
+            vec![],
+            vec![],
+            Utc::now(),
+        ));
         let period = &json["validityPeriods"][0];
         assert_eq!(period["fromDate"], "2026-08-30T09:00:00+00:00");
         assert!(period["toDate"].is_null());
@@ -858,7 +1245,12 @@ mod tests {
 
     #[test]
     fn currently_affects_lines_is_empty_array_not_null_when_no_lines_match() {
-        let json = to_incident_detail_json(sample_incident(), vec![], vec![], Utc::now());
+        let json = v(to_incident_detail_json(
+            sample_incident(),
+            vec![],
+            vec![],
+            Utc::now(),
+        ));
         assert!(json["currentlyAffectsLines"].is_array());
         assert_eq!(json["currentlyAffectsLines"].as_array().unwrap().len(), 0);
     }
@@ -889,7 +1281,12 @@ mod tests {
                 recorded_at: Utc.with_ymd_and_hms(2026, 8, 30, 9, 0, 0).unwrap(),
             },
         ];
-        let json = to_incident_detail_json(sample_incident(), history, vec![], Utc::now());
+        let json = v(to_incident_detail_json(
+            sample_incident(),
+            history,
+            vec![],
+            Utc::now(),
+        ));
         assert_eq!(json["history"][0]["summary"], "v2");
         assert_eq!(json["history"][1]["summary"], "v1");
     }
@@ -900,7 +1297,12 @@ mod tests {
             line_id: "south-western".to_string(),
             name: "South Western Main Line".to_string(),
         }];
-        let json = to_incident_detail_json(sample_incident(), vec![], lines, Utc::now());
+        let json = v(to_incident_detail_json(
+            sample_incident(),
+            vec![],
+            lines,
+            Utc::now(),
+        ));
         assert_eq!(json["currentlyAffectsLines"][0]["id"], "south-western");
         assert_eq!(
             json["currentlyAffectsLines"][0]["name"],
@@ -1016,10 +1418,10 @@ mod tests {
     #[test]
     fn recently_cleared_renders_the_clear_and_the_stated_end() {
         let lines = catalogue();
-        let json = recently_cleared_json(
+        let json = v(recently_cleared_json(
             &cleared_row(Some("Residual disruption expected until 22:30")),
             &lines,
-        );
+        ));
         assert_eq!(json["incidentId"], "0071A58B");
         assert_eq!(json["description"], "<p>Disruption has now ended.</p>");
         assert_eq!(json["clearedAt"], "2026-10-02T20:26:00+00:00");
@@ -1035,10 +1437,10 @@ mod tests {
             "catalogue lines only, by name"
         );
 
-        let json = recently_cleared_json(
+        let json = v(recently_cleared_json(
             &cleared_row(Some("Disruption expected until the end of the day")),
             &lines,
-        );
+        ));
         assert!(json["expectedUntil"].is_null());
         assert_eq!(json["expectedUntilEndOfDay"], true);
 
@@ -1046,7 +1448,7 @@ mod tests {
             cleared_row(None),
             cleared_row(Some("Signal failure at Woking")),
         ] {
-            let json = recently_cleared_json(&row, &lines);
+            let json = v(recently_cleared_json(&row, &lines));
             assert!(json["expectedUntil"].is_null(), "an explicit null");
             assert_eq!(json["expectedUntilEndOfDay"], false);
         }
@@ -1495,7 +1897,7 @@ mod db_tests {
 
         let (status, body) = get(&pool, vec![], "/incidents").await;
         assert_eq!(status, StatusCode::OK);
-        assert!(!results(&body).is_empty());
+        assert_ne!(results(&body), [] as [Value; 0]);
         delete_fixtures(&pool).await;
     }
 
@@ -1955,7 +2357,7 @@ mod db_tests {
             "an unmatched filter is a 200 with an empty results array, never a 404 -- there is \
              no 'unpublished' concept for this table"
         );
-        assert!(results(&body).is_empty());
+        assert_eq!(results(&body), [] as [Value; 0]);
         assert!(next_cursor(&body).is_none());
     }
 

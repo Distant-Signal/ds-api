@@ -972,7 +972,7 @@ mod tests {
             date: date(),
             max_rounds: 4,
         });
-        assert!(results.is_empty());
+        assert_eq!(results, []);
     }
 
     #[test]

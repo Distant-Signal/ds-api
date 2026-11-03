@@ -747,7 +747,7 @@ mod tests {
     fn the_ledger_round_trips_skips_corrupt_lines_and_is_compacted() {
         let dir = tempfile::tempdir().unwrap();
         let multi = MultiSource::new(dir.path(), Precedence::default(), 120);
-        assert!(multi.entries().is_empty());
+        assert_eq!(multi.entries(), []);
         multi.record(&arrival(SourceId::Sftp, "aa", 0), Settled::Accepted);
         std::fs::OpenOptions::new()
             .append(true)

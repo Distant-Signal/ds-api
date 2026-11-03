@@ -12,7 +12,8 @@ use std::collections::HashMap;
 use chrono::{DateTime, Utc};
 use common::transit::TransitAttribution;
 use common::{LineStatus, LineStatusReport, Severity};
-use serde_json::{Value, json};
+use serde::Serialize;
+use serde_json::Value;
 
 use crate::data::queries;
 
@@ -70,35 +71,174 @@ pub fn line_attribution(line_id: &str, scope: AttributionScope) -> Vec<TransitAt
     credits
 }
 
-/// `attribution` on each element of the TfL-shaped routes' bare-array
-/// responses (a top-level field would break `TfL` clients): an array of
-/// `{licence, text}`, the transit networks' `TransitAttribution` shape.
-pub fn attribution_json(credits: &[TransitAttribution]) -> Value {
-    Value::Array(
-        credits
-            .iter()
-            .map(|c| json!({ "licence": c.licence, "text": c.text }))
-            .collect(),
-    )
-}
-
 /// Adds `attribution` for `line_id` to one stats row.
-pub fn with_stats_attribution(mut row: Value, line_id: &str) -> Value {
-    row["attribution"] = attribution_json(&line_attribution(line_id, AttributionScope::Stats));
+pub(crate) fn with_stats_attribution<T: HasAttribution>(mut row: T, line_id: &str) -> T {
+    row.set_attribution(line_attribution(line_id, AttributionScope::Stats));
     row
 }
 
-pub fn to_tfl_shape(report: &LineStatusReport, computed_at: DateTime<Utc>, detail: bool) -> Value {
-    json!({
-        "$type": "DistantSignal.LineStatusReport",
-        "id": report.id,
-        "name": report.name,
-        "modeName": report.mode_name,
-        "operators": report.operators,
-        "computedAt": computed_at.to_rfc3339(),
-        "lineStatuses": report.statuses.iter().map(|s| status_to_json(s, detail)).collect::<Vec<_>>(),
-        "attribution": attribution_json(&line_attribution(&report.id, AttributionScope::Status)),
-    })
+/// A stats row that carries `attribution` on the line routes.
+pub(crate) trait HasAttribution {
+    fn set_attribution(&mut self, credits: Vec<TransitAttribution>);
+}
+
+/// A line's status report, TfL-shaped: `GET /Line/Mode/{mode}/Status`,
+/// `GET /Line/{ids}/Status`, `GET /StopPoint/{crs}/Disruption` and the
+/// status history.
+#[derive(Debug, Clone, Serialize, ts_rs::TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(rename = "LineStatusReport")]
+pub struct LineStatusReportJson {
+    #[serde(rename = "$type")]
+    #[ts(type = "\"DistantSignal.LineStatusReport\"")]
+    pub type_: &'static str,
+    pub id: String,
+    pub name: String,
+    pub mode_name: String,
+    pub operators: Vec<String>,
+    /// RFC 3339, `+00:00`.
+    pub computed_at: String,
+    pub line_statuses: Vec<LineStatusJson>,
+    /// A line with a `TfL` counterpart merged away from `/public/lines`:
+    /// the counterpart's current statuses (see
+    /// [`to_tfl_shape_with_overlay`]). Absent otherwise.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub tfl_status: Option<Vec<LineStatusJson>>,
+    /// The current-status routes' disruptions announced for the line that
+    /// have not started yet ([`upcoming_json`]). Absent from the history
+    /// and `StopPoint` routes.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub upcoming: Option<Vec<UpcomingDisruptionJson>>,
+    /// The credits the line's data needs ([`line_attribution`]), plus
+    /// `TfL`'s with a `tflStatus` overlay.
+    pub attribution: Vec<TransitAttribution>,
+}
+
+/// One status of a [`LineStatusReportJson`].
+#[derive(Debug, Clone, Serialize, ts_rs::TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(rename = "LineStatus")]
+pub struct LineStatusJson {
+    pub status_severity: i32,
+    pub status_severity_description: &'static str,
+    pub reason: String,
+    pub data_quality: common::DataQuality,
+    pub validity_periods: Vec<ValidityPeriodJson>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub sample_stats: Option<SampleStatsJson>,
+    pub sample_availability: SampleAvailabilityJson,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub full_coverage_stats: Option<SampleStatsJson>,
+    pub full_coverage_availability: FullCoverageAvailabilityJson,
+    /// Only with `?detail=true` (and always on `StopPoint`).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub disruption: Option<DisruptionJson>,
+}
+
+/// A status's validity window, times RFC 3339 (`+00:00`).
+#[derive(Debug, Clone, Serialize, ts_rs::TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(rename = "ValidityPeriod")]
+pub struct ValidityPeriodJson {
+    pub from_date: String,
+    pub to_date: Option<String>,
+    pub is_now: bool,
+}
+
+/// A status's disruption detail.
+#[derive(Debug, Clone, Serialize, ts_rs::TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(rename = "Disruption")]
+pub struct DisruptionJson {
+    pub category: String,
+    pub description: String,
+    pub affected_stops: Vec<String>,
+    pub affected_routes: Vec<AffectedRouteJson>,
+    pub source: Option<String>,
+    pub impact_type: Option<String>,
+}
+
+/// One affected route of a [`DisruptionJson`], by CRS.
+#[derive(Debug, Clone, Serialize, ts_rs::TS)]
+#[ts(rename = "AffectedRoute")]
+pub struct AffectedRouteJson {
+    pub from: String,
+    pub to: String,
+}
+
+/// One of a line's `upcoming` notes (2026-10-06): a disruption announced
+/// for the line that has not started yet. `to` is exclusive and may be
+/// `null` (no stated end); both RFC 3339 (`+00:00`).
+#[derive(Debug, Clone, Serialize, ts_rs::TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(rename = "UpcomingDisruption")]
+pub struct UpcomingDisruptionJson {
+    pub from: String,
+    pub to: Option<String>,
+    pub summary: String,
+    pub incident_id: String,
+}
+
+/// A status's sample: `common::SampleStats` on the wire.
+#[derive(Debug, Clone, Serialize, ts_rs::TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(rename = "SampleStats")]
+pub struct SampleStatsJson {
+    pub total: usize,
+    pub delayed: usize,
+    pub cancelled: usize,
+    pub skipped: usize,
+    pub avg_delay_minutes: f64,
+}
+
+/// Why `sampleStats` is (or isn't) there: `common::SampleAvailability`
+/// without its stats, which `sampleStats` already carries.
+#[derive(Debug, Clone, Serialize, ts_rs::TS)]
+#[serde(tag = "state", rename_all = "kebab-case")]
+#[ts(rename = "SampleAvailability")]
+pub enum SampleAvailabilityJson {
+    NoCoverage,
+    BelowThreshold { observed: usize, required: i64 },
+    Available,
+}
+
+/// Why `fullCoverageStats` is (or isn't) there:
+/// `common::FullCoverageAvailability` without its stats.
+#[derive(Debug, Clone, Serialize, ts_rs::TS)]
+#[serde(tag = "state", rename_all = "kebab-case")]
+#[ts(rename = "FullCoverageAvailability")]
+pub enum FullCoverageAvailabilityJson {
+    NotEnabled,
+    Pending,
+    Available,
+}
+
+pub fn to_tfl_shape(
+    report: &LineStatusReport,
+    computed_at: DateTime<Utc>,
+    detail: bool,
+) -> LineStatusReportJson {
+    LineStatusReportJson {
+        type_: "DistantSignal.LineStatusReport",
+        id: report.id.clone(),
+        name: report.name.clone(),
+        mode_name: report.mode_name.clone(),
+        operators: report.operators.clone(),
+        computed_at: computed_at.to_rfc3339(),
+        line_statuses: report
+            .statuses
+            .iter()
+            .map(|s| status_to_json(s, detail))
+            .collect(),
+        tfl_status: None,
+        upcoming: None,
+        attribution: line_attribution(&report.id, AttributionScope::Status),
+    }
 }
 
 /// Like `to_tfl_shape`, but attaches a second line's current statuses under
@@ -114,15 +254,12 @@ pub fn to_tfl_shape_with_overlay(
     computed_at: DateTime<Utc>,
     detail: bool,
     tfl_overlay: Option<&[LineStatus]>,
-) -> Value {
+) -> LineStatusReportJson {
     let mut out = to_tfl_shape(report, computed_at, detail);
     if let Some(statuses) = tfl_overlay {
-        out["tflStatus"] =
-            Value::Array(statuses.iter().map(|s| status_to_json(s, detail)).collect());
-        let mut credits = line_attribution(&report.id, AttributionScope::Status);
+        out.tfl_status = Some(statuses.iter().map(|s| status_to_json(s, detail)).collect());
         // The overlay is the `TfL` counterpart's own status.
-        credits.push(credit(TFL_LICENCE, TFL_CREDIT));
-        out["attribution"] = attribution_json(&credits);
+        out.attribution.push(credit(TFL_LICENCE, TFL_CREDIT));
     }
     out
 }
@@ -131,88 +268,83 @@ pub fn to_tfl_shape_with_overlay(
 /// for the line that have not started yet, soonest first. A note beside
 /// `lineStatuses`, never part of a severity. `to` is exclusive and may be
 /// `null` (no stated end).
-pub fn upcoming_json(upcoming: &[common::UpcomingDisruption]) -> Value {
-    Value::Array(
-        upcoming
-            .iter()
-            .map(|note| {
-                json!({
-                    "from": note.from.to_rfc3339(),
-                    "to": note.to.map(|to| to.to_rfc3339()),
-                    "summary": note.summary,
-                    "incidentId": note.incident_id,
-                })
-            })
-            .collect(),
-    )
+pub fn upcoming_json(upcoming: &[common::UpcomingDisruption]) -> Vec<UpcomingDisruptionJson> {
+    upcoming
+        .iter()
+        .map(|note| UpcomingDisruptionJson {
+            from: note.from.to_rfc3339(),
+            to: note.to.map(|to| to.to_rfc3339()),
+            summary: note.summary.clone(),
+            incident_id: note.incident_id.clone(),
+        })
+        .collect()
 }
 
-fn status_to_json(status: &LineStatus, detail: bool) -> Value {
-    let mut out = json!({
-        "statusSeverity": status.severity as i32,
-        "statusSeverityDescription": severity_description(status.severity),
-        "reason": status.reason,
-        "dataQuality": status.data_quality,
-        "validityPeriods": [
-            {
-                "fromDate": status.validity.from_date.to_rfc3339(),
-                "toDate": status.validity.to_date.map(|d| d.to_rfc3339()),
-                "isNow": status.validity.is_now,
-            }
-        ],
-    });
-
-    if let Some(stats) = &status.sample_stats {
-        out["sampleStats"] = sample_stats_json(stats);
+fn status_to_json(status: &LineStatus, detail: bool) -> LineStatusJson {
+    LineStatusJson {
+        status_severity: status.severity as i32,
+        status_severity_description: severity_description(status.severity),
+        reason: status.reason.clone(),
+        data_quality: status.data_quality.clone(),
+        validity_periods: vec![ValidityPeriodJson {
+            from_date: status.validity.from_date.to_rfc3339(),
+            to_date: status.validity.to_date.map(|d| d.to_rfc3339()),
+            is_now: status.validity.is_now,
+        }],
+        sample_stats: status.sample_stats.as_ref().map(sample_stats_json),
+        sample_availability: sample_availability_json(&status.sample_availability),
+        full_coverage_stats: status.full_coverage_stats.as_ref().map(sample_stats_json),
+        full_coverage_availability: full_coverage_availability_json(
+            &status.full_coverage_availability,
+        ),
+        disruption: status
+            .disruption
+            .as_ref()
+            .filter(|_| detail)
+            .map(|disruption| DisruptionJson {
+                category: disruption.category.clone(),
+                description: disruption.description.clone(),
+                affected_stops: disruption.affected_stops.clone(),
+                affected_routes: disruption
+                    .affected_routes
+                    .iter()
+                    .map(|r| AffectedRouteJson {
+                        from: r.from_crs.clone(),
+                        to: r.to_crs.clone(),
+                    })
+                    .collect(),
+                source: disruption.source.clone(),
+                impact_type: disruption.impact_type.clone(),
+            }),
     }
-
-    out["sampleAvailability"] = sample_availability_json(&status.sample_availability);
-
-    if let Some(stats) = &status.full_coverage_stats {
-        out["fullCoverageStats"] = sample_stats_json(stats);
-    }
-
-    out["fullCoverageAvailability"] =
-        full_coverage_availability_json(&status.full_coverage_availability);
-
-    if detail && let Some(disruption) = &status.disruption {
-        out["disruption"] = json!({
-            "category": disruption.category,
-            "description": disruption.description,
-            "affectedStops": disruption.affected_stops,
-            "affectedRoutes": disruption.affected_routes.iter().map(|r| json!({
-                "from": r.from_crs,
-                "to": r.to_crs,
-            })).collect::<Vec<_>>(),
-            "source": disruption.source,
-            "impactType": disruption.impact_type,
-        });
-    }
-
-    out
 }
 
 fn severity_description(severity: Severity) -> &'static str {
     severity.description()
 }
 
-pub(crate) fn sample_stats_json(stats: &common::SampleStats) -> Value {
-    json!({
-        "total": stats.total,
-        "delayed": stats.delayed,
-        "cancelled": stats.cancelled,
-        "skipped": stats.skipped,
-        "avgDelayMinutes": stats.avg_delay_minutes,
-    })
+pub(crate) fn sample_stats_json(stats: &common::SampleStats) -> SampleStatsJson {
+    SampleStatsJson {
+        total: stats.total,
+        delayed: stats.delayed,
+        cancelled: stats.cancelled,
+        skipped: stats.skipped,
+        avg_delay_minutes: stats.avg_delay_minutes,
+    }
 }
 
-pub(crate) fn sample_availability_json(availability: &common::SampleAvailability) -> Value {
+pub(crate) fn sample_availability_json(
+    availability: &common::SampleAvailability,
+) -> SampleAvailabilityJson {
     match availability {
-        common::SampleAvailability::NoCoverage => json!({ "state": "no-coverage" }),
+        common::SampleAvailability::NoCoverage => SampleAvailabilityJson::NoCoverage,
         common::SampleAvailability::BelowThreshold { observed, required } => {
-            json!({ "state": "below-threshold", "observed": observed, "required": required })
+            SampleAvailabilityJson::BelowThreshold {
+                observed: *observed,
+                required: *required,
+            }
         }
-        common::SampleAvailability::Available(_) => json!({ "state": "available" }),
+        common::SampleAvailability::Available(_) => SampleAvailabilityJson::Available,
     }
 }
 
@@ -221,11 +353,11 @@ pub(crate) fn sample_availability_json(availability: &common::SampleAvailability
 /// (`full_coverage_stats` above already carries it when present).
 pub(crate) fn full_coverage_availability_json(
     availability: &common::FullCoverageAvailability,
-) -> Value {
+) -> FullCoverageAvailabilityJson {
     match availability {
-        common::FullCoverageAvailability::NotEnabled => json!({ "state": "not-enabled" }),
-        common::FullCoverageAvailability::Pending => json!({ "state": "pending" }),
-        common::FullCoverageAvailability::Available(_) => json!({ "state": "available" }),
+        common::FullCoverageAvailability::NotEnabled => FullCoverageAvailabilityJson::NotEnabled,
+        common::FullCoverageAvailability::Pending => FullCoverageAvailabilityJson::Pending,
+        common::FullCoverageAvailability::Available(_) => FullCoverageAvailabilityJson::Available,
     }
 }
 
@@ -254,7 +386,7 @@ pub(crate) fn full_coverage_availability_json(
 pub(crate) fn station_departure_json(
     d: &common::StationDeparture,
     destination_names: &HashMap<String, String>,
-) -> Value {
+) -> StationDepartureJson {
     // `true` only when BOTH a planned and a current platform are known AND
     // they differ -- a platform seen for the first time (`planned_platform:
     // None`, see `common::StationDeparture`'s own doc comment) is not a
@@ -264,40 +396,85 @@ pub(crate) fn station_departure_json(
     // drifting out of sync with them.
     let platform_changed =
         d.platform.is_some() && d.planned_platform.is_some() && d.platform != d.planned_platform;
-    json!({
-        "serviceId": d.service_id,
-        "operator": d.operator,
-        "destinationCrs": d.destination_crs,
-        "destinationName": destination_names.get(&d.destination_crs.to_uppercase()),
-        "scheduled": d.scheduled,
-        "estimated": d.estimated,
-        "isCancelled": d.is_cancelled,
-        "delayMinutes": d.delay_minutes,
-        "cancelReason": d.cancel_reason,
-        "delayReason": d.delay_reason,
-        "skippedStations": d.skipped_stations,
-        "platform": d.platform,
-        "plannedPlatform": d.planned_platform,
-        "platformChanged": platform_changed,
-        "rsid": d.rsid,
-        "callingPoints": d.calling_points.iter().map(board_calling_point_json).collect::<Vec<_>>(),
-    })
+    StationDepartureJson {
+        service_id: d.service_id.clone(),
+        operator: d.operator.clone(),
+        destination_crs: d.destination_crs.clone(),
+        destination_name: destination_names
+            .get(&d.destination_crs.to_uppercase())
+            .cloned(),
+        scheduled: d.scheduled.clone(),
+        estimated: d.estimated.clone(),
+        is_cancelled: d.is_cancelled,
+        delay_minutes: d.delay_minutes,
+        cancel_reason: d.cancel_reason.clone(),
+        delay_reason: d.delay_reason.clone(),
+        skipped_stations: d.skipped_stations.clone(),
+        platform: d.platform.clone(),
+        planned_platform: d.planned_platform.clone(),
+        platform_changed,
+        rsid: d.rsid.clone(),
+        calling_points: d
+            .calling_points
+            .iter()
+            .map(board_calling_point_json)
+            .collect(),
+    }
+}
+
+/// One row of `GET /public/stations/{crs}/departures`: a live board row,
+/// every absent value a present `null`. `scheduled`/`estimated` are LDBWS's
+/// own strings.
+#[derive(Debug, Clone, Serialize, ts_rs::TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(rename = "StationDeparture")]
+pub(crate) struct StationDepartureJson {
+    service_id: String,
+    operator: String,
+    destination_crs: String,
+    destination_name: Option<String>,
+    scheduled: String,
+    estimated: String,
+    is_cancelled: bool,
+    delay_minutes: i32,
+    cancel_reason: Option<String>,
+    delay_reason: Option<String>,
+    skipped_stations: Vec<String>,
+    platform: Option<String>,
+    planned_platform: Option<String>,
+    platform_changed: bool,
+    rsid: Option<String>,
+    calling_points: Vec<BoardCallingPointJson>,
+}
+
+/// One `callingPoints` entry of [`StationDepartureJson`]. `st`/`et`/`at`
+/// are LDBWS's own strings: `"HH:MM"` London local time, or for `et` a
+/// status word ("On time", "Delayed", "Cancelled").
+#[derive(Debug, Clone, Serialize, ts_rs::TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(rename = "BoardCallingPoint")]
+pub(crate) struct BoardCallingPointJson {
+    crs: String,
+    location_name: Option<String>,
+    st: Option<String>,
+    et: Option<String>,
+    at: Option<String>,
+    is_cancelled: bool,
 }
 
 /// One `callingPoints` entry of [`station_departure_json`]: the compact
 /// stored `common::BoardCallingPoint` re-expanded to explicit camelCase
 /// keys, every absent value a present `null` (same "never omitted" rule as
-/// the row itself). `st`/`et`/`at` are LDBWS's own strings, verbatim:
-/// `"HH:MM"` London local time, or a status word for `et`.
-fn board_calling_point_json(cp: &common::BoardCallingPoint) -> Value {
-    json!({
-        "crs": cp.crs,
-        "locationName": cp.location_name,
-        "st": cp.st,
-        "et": cp.et,
-        "at": cp.at,
-        "isCancelled": cp.is_cancelled,
-    })
+/// the row itself).
+fn board_calling_point_json(cp: &common::BoardCallingPoint) -> BoardCallingPointJson {
+    BoardCallingPointJson {
+        crs: cp.crs.clone(),
+        location_name: cp.location_name.clone(),
+        st: cp.st.clone(),
+        et: cp.et.clone(),
+        at: cp.at.clone(),
+        is_cancelled: cp.is_cancelled,
+    }
 }
 
 /// Hand-built camelCase JSON for one CIF-derived schedule departure entry,
@@ -396,7 +573,7 @@ pub(crate) fn public_else_working(
 pub(crate) fn schedule_departure_json(
     d: &Value,
     destination_names: &HashMap<String, String>,
-) -> Value {
+) -> ScheduleDepartureJson {
     let working_day_offset = d.get("day_offset").and_then(Value::as_u64).unwrap_or(0);
     let (scheduled, day_offset) =
         public_else_working(d, "public_departure", "scheduled", working_day_offset);
@@ -418,17 +595,55 @@ pub(crate) fn schedule_departure_json(
         .filter(|crs| queries::is_bookable_crs(crs));
     let destination_name = destination_crs
         .as_deref()
-        .and_then(|crs| destination_names.get(&crs.to_uppercase()));
-    json!({
-        "uid": d.get("uid").cloned().unwrap_or(Value::Null),
-        "scheduled": scheduled,
-        "publicDeparture": hh_mm(d, "public_departure"),
-        "workingDeparture": hh_mm(d, "scheduled"),
-        "workingDayOffset": working_day_offset,
-        "dayOffset": day_offset,
-        "destinationCrs": destination_crs,
-        "destinationName": destination_name,
-    })
+        .and_then(|crs| destination_names.get(&crs.to_uppercase()))
+        .cloned();
+    ScheduleDepartureJson {
+        uid: row_uid(d),
+        scheduled,
+        public_departure: hh_mm(d, "public_departure"),
+        working_departure: hh_mm(d, "scheduled"),
+        working_day_offset,
+        day_offset,
+        destination_crs,
+        destination_name,
+        origin_crs: None,
+        origin_name: None,
+        live: None,
+        service: crate::data::schedule_services::ServiceModeFields::default(),
+    }
+}
+
+/// A stored row's `uid`.
+fn row_uid(d: &Value) -> Option<String> {
+    d.get("uid").and_then(Value::as_str).map(str::to_string)
+}
+
+/// One row of `GET /public/stations/{crs}/schedule-departures`
+/// ([`schedule_departure_json`]): the timetabled departure, the train's true
+/// origin and its live state and service mode, which the route fills in.
+#[derive(Debug, Clone, Serialize, ts_rs::TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(rename = "ScheduleDepartureRow")]
+pub(crate) struct ScheduleDepartureJson {
+    /// `null` only for a stored row without one, which `schedule-reference`
+    /// never writes: typed as always set.
+    #[ts(type = "string")]
+    pub uid: Option<String>,
+    /// `null` only for a stored row with no departure time, which a
+    /// departure row always has: typed as always set.
+    #[ts(type = "string")]
+    pub scheduled: Option<String>,
+    pub public_departure: Option<String>,
+    pub working_departure: Option<String>,
+    pub working_day_offset: u64,
+    pub day_offset: u64,
+    pub destination_crs: Option<String>,
+    pub destination_name: Option<String>,
+    pub origin_crs: Option<String>,
+    pub origin_name: Option<String>,
+    pub live: Option<crate::routes::line_trains_summary::LiveSummary>,
+    #[serde(flatten)]
+    pub service: crate::data::schedule_services::ServiceModeFields,
 }
 
 /// One `GET /public/trains/search` result row. Sibling of
@@ -510,7 +725,7 @@ pub(crate) fn calling_point_departure_json(
     d: &Value,
     station_crs: &str,
     destination_names: &HashMap<String, String>,
-) -> Value {
+) -> CallingPointDepartureJson {
     let (scheduled, _) = public_else_working(d, "public_departure", "scheduled", 0);
     let origin_crs = d
         .get("true_origin_crs")
@@ -540,24 +755,56 @@ pub(crate) fn calling_point_departure_json(
         "destination_arrival",
         working_destination_arrival_day_offset,
     );
-    json!({
-        "uid": d.get("uid").cloned().unwrap_or(Value::Null),
-        "scheduled": scheduled,
-        "stationCrs": station_crs,
-        "originCrs": origin_crs,
-        "destinationCrs": destination_crs,
-        "destinationName": destination_name,
-        "destinationArrival": destination_arrival,
-        "destinationArrivalDayOffset": destination_arrival_day_offset,
+    CallingPointDepartureJson {
+        uid: row_uid(d),
+        scheduled,
+        station_crs: station_crs.to_string(),
+        origin_crs,
+        destination_crs,
+        destination_name: destination_name.cloned(),
+        destination_arrival,
+        destination_arrival_day_offset,
         // The public (GBTT) and working (WTT) times alone; `scheduled`/
         // `destinationArrival` are the public ones, else the working ones.
-        "publicDeparture": hh_mm(d, "public_departure"),
-        "publicDestinationArrival": hh_mm(d, "public_destination_arrival"),
-        "workingDeparture": hh_mm(d, "scheduled"),
-        "workingDestinationArrival": hh_mm(d, "destination_arrival"),
-        "operator": d.get("operator_atoc").cloned().unwrap_or(Value::Null),
-        "identity": d.get("headcode").filter(|v| v.is_string()).cloned().unwrap_or(Value::Null),
-    })
+        public_departure: hh_mm(d, "public_departure"),
+        public_destination_arrival: hh_mm(d, "public_destination_arrival"),
+        working_departure: hh_mm(d, "scheduled"),
+        working_destination_arrival: hh_mm(d, "destination_arrival"),
+        operator: d
+            .get("operator_atoc")
+            .and_then(Value::as_str)
+            .map(str::to_string),
+        identity: d
+            .get("headcode")
+            .and_then(Value::as_str)
+            .map(str::to_string),
+    }
+}
+
+/// One calling-point departure ([`calling_point_departure_json`]): the
+/// fields every train-search row starts from.
+#[derive(Debug, Clone, Serialize, ts_rs::TS)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct CallingPointDepartureJson {
+    /// `null` only for a stored row without one, which `schedule-reference`
+    /// never writes: typed as always set.
+    #[ts(type = "string")]
+    pub uid: Option<String>,
+    pub scheduled: Option<String>,
+    pub station_crs: String,
+    pub origin_crs: Option<String>,
+    pub destination_crs: Option<String>,
+    pub destination_name: Option<String>,
+    pub destination_arrival: Option<String>,
+    pub destination_arrival_day_offset: u64,
+    pub public_departure: Option<String>,
+    pub public_destination_arrival: Option<String>,
+    pub working_departure: Option<String>,
+    pub working_destination_arrival: Option<String>,
+    /// The operator's ATOC code.
+    pub operator: Option<String>,
+    /// The CIF Train Identity (headcode, e.g. `1S00`).
+    pub identity: Option<String>,
 }
 
 /// One `GET /public/lines/{id}/trains?date=` result entry -- an
@@ -630,32 +877,30 @@ pub(crate) fn line_train_json(
         schedule_origin_name: schedule_route.origin_name.clone(),
         schedule_destination_crs: schedule_route.destination_crs.clone(),
         schedule_destination_name: schedule_route.destination_name.clone(),
-        live_status: live.map(|s| {
-            json!({
-                "trainsId": s.trains_id,
-                "trainId": s.train_id,
-                "originCrs": s.origin_crs,
-                "originName": s.origin_name,
-                "destinationCrs": s.destination_crs,
-                "destinationName": s.destination_name,
-                "scheduledDeparture": s.scheduled_departure,
-                "status": s.status,
-                "lastReportedLocation": s.last_reported_location,
-                "lastEventType": s.last_event_type,
-                "delayMinutes": s.delay_minutes,
-                "delayBasis": s.delay_basis,
-                "delayProvisional": s.delay_provisional,
-                "nextCallingPoint": s.next_calling_point,
-                "etaNext": s.eta_next,
-                "etaSource": s.eta_source,
-                "operatorCode": s.operator_code,
-                "operatorName": s.operator_name,
-                "cancelled": s.cancelled,
-                "cancelReasonCode": s.cancel_reason_code,
-                "cancelReason": s.cancel_reason,
-                "changeOfOriginReasonCode": s.change_of_origin_reason_code,
-                "changeOfOriginReason": s.change_of_origin_reason,
-            })
+        live_status: live.map(|s| LineTrainLiveStatusJson {
+            trains_id: s.trains_id,
+            train_id: s.train_id.clone(),
+            origin_crs: s.origin_crs.clone(),
+            origin_name: s.origin_name.clone(),
+            destination_crs: s.destination_crs.clone(),
+            destination_name: s.destination_name.clone(),
+            scheduled_departure: s.scheduled_departure,
+            status: s.status.clone(),
+            last_reported_location: s.last_reported_location.clone(),
+            last_event_type: s.last_event_type.clone(),
+            delay_minutes: s.delay_minutes,
+            delay_basis: s.delay_basis,
+            delay_provisional: s.delay_provisional,
+            next_calling_point: s.next_calling_point.clone(),
+            eta_next: s.eta_next,
+            eta_source: s.eta_source.clone(),
+            operator_code: s.operator_code.clone(),
+            operator_name: s.operator_name.clone(),
+            cancelled: s.cancelled,
+            cancel_reason_code: s.cancel_reason_code.clone(),
+            cancel_reason: s.cancel_reason.clone(),
+            change_of_origin_reason_code: s.change_of_origin_reason_code.clone(),
+            change_of_origin_reason: s.change_of_origin_reason.clone(),
         }),
     }
 }
@@ -663,16 +908,20 @@ pub(crate) fn line_train_json(
 /// One `GET /public/lines/{id}/trains` result entry, as built by
 /// [`line_train_json`]. Same wire shape the route has always had (it used
 /// to be a `json!` object with exactly these keys).
-#[derive(Debug, serde::Serialize)]
+#[derive(Debug, serde::Serialize, ts_rs::TS)]
 #[serde(rename_all = "camelCase")]
+#[ts(rename = "LineTrainEntry")]
 pub(crate) struct LineTrainJson {
+    #[ts(type = "string")]
     uid: Box<serde_json::value::RawValue>,
+    /// The population entry's own calling points, verbatim.
+    #[ts(as = "Option<Vec<crate::ts_values::LineTrainCallingPoint>>")]
     calling_points: Box<serde_json::value::RawValue>,
     schedule_origin_crs: Option<String>,
     schedule_origin_name: Option<String>,
     schedule_destination_crs: Option<String>,
     schedule_destination_name: Option<String>,
-    live_status: Option<Value>,
+    live_status: Option<LineTrainLiveStatusJson>,
     #[serde(flatten)]
     membership: LineMembershipJson,
     /// `serviceMode`/`liveTracking` for the entry itself, so a bus with no
@@ -689,35 +938,587 @@ pub(crate) struct LineTrainJson {
 /// the line. Each field is omitted when absent -- every one of them on a
 /// population published before membership existed, and the run fields
 /// for a `touch` train -- so an old response is byte-for-byte unchanged.
-#[derive(Debug, Default, serde::Serialize)]
+#[derive(Debug, Default, serde::Serialize, ts_rs::TS)]
 #[serde(rename_all = "camelCase")]
 pub(crate) struct LineMembershipJson {
     #[serde(skip_serializing_if = "Option::is_none")]
+    #[ts(optional, as = "Option<crate::ts_values::LineTrainScope>")]
     pub scope: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
+    #[ts(optional, as = "Option<crate::ts_values::LineDirection>")]
     pub direction: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
     pub run_first_crs: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
     pub run_last_crs: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
     pub line_due: Option<LineDueJson>,
 }
 
 /// `lineDue`: Europe/London local `HH:MM:SS`, `dayOffset` days after the
 /// service date.
-#[derive(Debug, serde::Serialize)]
+#[derive(Debug, serde::Serialize, ts_rs::TS)]
 #[serde(rename_all = "camelCase")]
+#[ts(rename = "LineDue")]
 pub(crate) struct LineDueJson {
     pub time: String,
     pub day_offset: i32,
 }
 
+/// A line train's live state, when a `trains` row exists for it: a
+/// hand-picked subset of `PublicTrainState` (no calling points or journey
+/// stops).
+#[derive(Debug, Clone, Serialize, ts_rs::TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(rename = "LineTrainLiveStatus")]
+pub(crate) struct LineTrainLiveStatusJson {
+    trains_id: i64,
+    train_id: Option<String>,
+    origin_crs: Option<String>,
+    origin_name: Option<String>,
+    destination_crs: Option<String>,
+    destination_name: Option<String>,
+    scheduled_departure: Option<DateTime<Utc>>,
+    #[ts(as = "Option<crate::ts_values::JourneyStatus>")]
+    status: Option<String>,
+    last_reported_location: Option<String>,
+    last_event_type: Option<String>,
+    delay_minutes: Option<i32>,
+    delay_basis: Option<crate::data::stop_delay::DelayBasis>,
+    delay_provisional: bool,
+    next_calling_point: Option<String>,
+    eta_next: Option<DateTime<Utc>>,
+    #[ts(as = "Option<crate::ts_values::EtaSource>")]
+    eta_source: Option<String>,
+    operator_code: Option<String>,
+    operator_name: Option<String>,
+    cancelled: bool,
+    cancel_reason_code: Option<String>,
+    cancel_reason: Option<String>,
+    change_of_origin_reason_code: Option<String>,
+    change_of_origin_reason: Option<String>,
+}
+
+/// The `json!` renderers before these bodies were typed, verbatim, so
+/// the typed bodies are checked against them.
+#[cfg(test)]
+pub(crate) mod legacy {
+    use std::collections::HashMap;
+
+    use chrono::{DateTime, Utc};
+    use common::{LineStatus, LineStatusReport, Severity};
+    use serde_json::{Value, json};
+
+    use crate::data::queries;
+
+    pub(crate) fn attribution_json(credits: &[crate::render::TransitAttribution]) -> Value {
+        Value::Array(
+            credits
+                .iter()
+                .map(|c| json!({ "licence": c.licence, "text": c.text }))
+                .collect(),
+        )
+    }
+
+    pub(crate) fn to_tfl_shape(
+        report: &LineStatusReport,
+        computed_at: DateTime<Utc>,
+        detail: bool,
+    ) -> Value {
+        json!({
+            "$type": "DistantSignal.LineStatusReport",
+            "id": report.id,
+            "name": report.name,
+            "modeName": report.mode_name,
+            "operators": report.operators,
+            "computedAt": computed_at.to_rfc3339(),
+            "lineStatuses": report.statuses.iter().map(|s| status_to_json(s, detail)).collect::<Vec<_>>(),
+            "attribution": attribution_json(&crate::render::line_attribution(&report.id, crate::render::AttributionScope::Status)),
+        })
+    }
+
+    pub(crate) fn to_tfl_shape_with_overlay(
+        report: &LineStatusReport,
+        computed_at: DateTime<Utc>,
+        detail: bool,
+        tfl_overlay: Option<&[LineStatus]>,
+    ) -> Value {
+        let mut out = to_tfl_shape(report, computed_at, detail);
+        if let Some(statuses) = tfl_overlay {
+            out["tflStatus"] =
+                Value::Array(statuses.iter().map(|s| status_to_json(s, detail)).collect());
+            let mut credits = crate::render::line_attribution(
+                &report.id,
+                crate::render::AttributionScope::Status,
+            );
+            // The overlay is the `TfL` counterpart's own status.
+            credits.push(crate::render::TransitAttribution {
+                licence: crate::render::TFL_LICENCE.to_string(),
+                text: crate::render::TFL_CREDIT.to_string(),
+            });
+            out["attribution"] = attribution_json(&credits);
+        }
+        out
+    }
+
+    pub(crate) fn upcoming_json(upcoming: &[common::UpcomingDisruption]) -> Value {
+        Value::Array(
+            upcoming
+                .iter()
+                .map(|note| {
+                    json!({
+                        "from": note.from.to_rfc3339(),
+                        "to": note.to.map(|to| to.to_rfc3339()),
+                        "summary": note.summary,
+                        "incidentId": note.incident_id,
+                    })
+                })
+                .collect(),
+        )
+    }
+
+    pub(crate) fn status_to_json(status: &LineStatus, detail: bool) -> Value {
+        let mut out = json!({
+            "statusSeverity": status.severity as i32,
+            "statusSeverityDescription": severity_description(status.severity),
+            "reason": status.reason,
+            "dataQuality": status.data_quality,
+            "validityPeriods": [
+                {
+                    "fromDate": status.validity.from_date.to_rfc3339(),
+                    "toDate": status.validity.to_date.map(|d| d.to_rfc3339()),
+                    "isNow": status.validity.is_now,
+                }
+            ],
+        });
+
+        if let Some(stats) = &status.sample_stats {
+            out["sampleStats"] = sample_stats_json(stats);
+        }
+
+        out["sampleAvailability"] = sample_availability_json(&status.sample_availability);
+
+        if let Some(stats) = &status.full_coverage_stats {
+            out["fullCoverageStats"] = sample_stats_json(stats);
+        }
+
+        out["fullCoverageAvailability"] =
+            full_coverage_availability_json(&status.full_coverage_availability);
+
+        if detail && let Some(disruption) = &status.disruption {
+            out["disruption"] = json!({
+                "category": disruption.category,
+                "description": disruption.description,
+                "affectedStops": disruption.affected_stops,
+                "affectedRoutes": disruption.affected_routes.iter().map(|r| json!({
+                    "from": r.from_crs,
+                    "to": r.to_crs,
+                })).collect::<Vec<_>>(),
+                "source": disruption.source,
+                "impactType": disruption.impact_type,
+            });
+        }
+
+        out
+    }
+
+    pub(crate) fn severity_description(severity: Severity) -> &'static str {
+        severity.description()
+    }
+
+    pub(crate) fn sample_stats_json(stats: &common::SampleStats) -> Value {
+        json!({
+            "total": stats.total,
+            "delayed": stats.delayed,
+            "cancelled": stats.cancelled,
+            "skipped": stats.skipped,
+            "avgDelayMinutes": stats.avg_delay_minutes,
+        })
+    }
+
+    pub(crate) fn sample_availability_json(availability: &common::SampleAvailability) -> Value {
+        match availability {
+            common::SampleAvailability::NoCoverage => json!({ "state": "no-coverage" }),
+            common::SampleAvailability::BelowThreshold { observed, required } => {
+                json!({ "state": "below-threshold", "observed": observed, "required": required })
+            }
+            common::SampleAvailability::Available(_) => json!({ "state": "available" }),
+        }
+    }
+
+    pub(crate) fn full_coverage_availability_json(
+        availability: &common::FullCoverageAvailability,
+    ) -> Value {
+        match availability {
+            common::FullCoverageAvailability::NotEnabled => json!({ "state": "not-enabled" }),
+            common::FullCoverageAvailability::Pending => json!({ "state": "pending" }),
+            common::FullCoverageAvailability::Available(_) => json!({ "state": "available" }),
+        }
+    }
+
+    pub(crate) fn station_departure_json(
+        d: &common::StationDeparture,
+        destination_names: &HashMap<String, String>,
+    ) -> Value {
+        // `true` only when BOTH a planned and a current platform are known AND
+        // they differ -- a platform seen for the first time (`planned_platform:
+        // None`, see `common::StationDeparture`'s own doc comment) is not a
+        // "change", it's simply the first fact we have. Computed here, at
+        // serialization time, rather than stored: it's a pure function of the
+        // two persisted fields, so storing a third redundant value risks it
+        // drifting out of sync with them.
+        let platform_changed = d.platform.is_some()
+            && d.planned_platform.is_some()
+            && d.platform != d.planned_platform;
+        json!({
+            "serviceId": d.service_id,
+            "operator": d.operator,
+            "destinationCrs": d.destination_crs,
+            "destinationName": destination_names.get(&d.destination_crs.to_uppercase()),
+            "scheduled": d.scheduled,
+            "estimated": d.estimated,
+            "isCancelled": d.is_cancelled,
+            "delayMinutes": d.delay_minutes,
+            "cancelReason": d.cancel_reason,
+            "delayReason": d.delay_reason,
+            "skippedStations": d.skipped_stations,
+            "platform": d.platform,
+            "plannedPlatform": d.planned_platform,
+            "platformChanged": platform_changed,
+            "rsid": d.rsid,
+            "callingPoints": d.calling_points.iter().map(board_calling_point_json).collect::<Vec<_>>(),
+        })
+    }
+
+    pub(crate) fn board_calling_point_json(cp: &common::BoardCallingPoint) -> Value {
+        json!({
+            "crs": cp.crs,
+            "locationName": cp.location_name,
+            "st": cp.st,
+            "et": cp.et,
+            "at": cp.at,
+            "isCancelled": cp.is_cancelled,
+        })
+    }
+
+    pub(crate) fn hh_mm(d: &Value, key: &str) -> Option<String> {
+        d.get(key)
+            .and_then(Value::as_str)
+            .map(|s| s.chars().take(5).collect::<String>())
+    }
+
+    pub(crate) fn schedule_departure_json(
+        d: &Value,
+        destination_names: &HashMap<String, String>,
+    ) -> Value {
+        let working_day_offset = d.get("day_offset").and_then(Value::as_u64).unwrap_or(0);
+        let (scheduled, day_offset) = crate::render::public_else_working(
+            d,
+            "public_departure",
+            "scheduled",
+            working_day_offset,
+        );
+        // `.filter(...)`: `schedule_network_departures` is published by
+        // `schedule-reference` (`crates/schedule-query::resolve`'s
+        // `departures_by_crs`), which resolves a destination TIPLOC to
+        // whatever CRS it has -- X-prefixed Network Rail pseudo-codes for a
+        // junction/depot included, see `queries::is_bookable_crs`'s own doc
+        // comment. `api` never re-checks that at write time (this table is
+        // stored opaquely, see this function's own doc comment), so this read
+        // site is where it must be filtered before it reaches the wire --
+        // otherwise a service whose true destination is really a non-station
+        // pseudo-CRS (e.g. `VICTRCR` -> `XVR`) would render `destinationCrs`
+        // as if it were a real station.
+        let destination_crs = d
+            .get("destination_crs")
+            .and_then(Value::as_str)
+            .map(str::to_string)
+            .filter(|crs| queries::is_bookable_crs(crs));
+        let destination_name = destination_crs
+            .as_deref()
+            .and_then(|crs| destination_names.get(&crs.to_uppercase()));
+        json!({
+            "uid": d.get("uid").cloned().unwrap_or(Value::Null),
+            "scheduled": scheduled,
+            "publicDeparture": hh_mm(d, "public_departure"),
+            "workingDeparture": hh_mm(d, "scheduled"),
+            "workingDayOffset": working_day_offset,
+            "dayOffset": day_offset,
+            "destinationCrs": destination_crs,
+            "destinationName": destination_name,
+        })
+    }
+
+    pub(crate) fn calling_point_departure_json(
+        d: &Value,
+        station_crs: &str,
+        destination_names: &HashMap<String, String>,
+    ) -> Value {
+        let (scheduled, _) =
+            crate::render::public_else_working(d, "public_departure", "scheduled", 0);
+        let origin_crs = d
+            .get("true_origin_crs")
+            .and_then(Value::as_str)
+            .map(str::to_string)
+            .filter(|crs| queries::is_bookable_crs(crs));
+        let destination_crs = d
+            .get("destination_crs")
+            .and_then(Value::as_str)
+            .map(str::to_string)
+            .filter(|crs| queries::is_bookable_crs(crs));
+        let destination_name = destination_crs
+            .as_deref()
+            .and_then(|crs| destination_names.get(&crs.to_uppercase()));
+        // `destination_arrival` is absent from `d` both when the key is
+        // missing and when it is JSON `null` -- either way this ends up
+        // `None` (unless there is a public one), and `json!`'s `None::<String>`
+        // still serializes as an explicit `null` below, matching `originCrs`'s
+        // own null handling.
+        let working_destination_arrival_day_offset = d
+            .get("destination_arrival_day_offset")
+            .and_then(Value::as_u64)
+            .unwrap_or(0);
+        let (destination_arrival, destination_arrival_day_offset) =
+            crate::render::public_else_working(
+                d,
+                "public_destination_arrival",
+                "destination_arrival",
+                working_destination_arrival_day_offset,
+            );
+        json!({
+            "uid": d.get("uid").cloned().unwrap_or(Value::Null),
+            "scheduled": scheduled,
+            "stationCrs": station_crs,
+            "originCrs": origin_crs,
+            "destinationCrs": destination_crs,
+            "destinationName": destination_name,
+            "destinationArrival": destination_arrival,
+            "destinationArrivalDayOffset": destination_arrival_day_offset,
+            // The public (GBTT) and working (WTT) times alone; `scheduled`/
+            // `destinationArrival` are the public ones, else the working ones.
+            "publicDeparture": hh_mm(d, "public_departure"),
+            "publicDestinationArrival": hh_mm(d, "public_destination_arrival"),
+            "workingDeparture": hh_mm(d, "scheduled"),
+            "workingDestinationArrival": hh_mm(d, "destination_arrival"),
+            "operator": d.get("operator_atoc").cloned().unwrap_or(Value::Null),
+            "identity": d.get("headcode").filter(|v| v.is_string()).cloned().unwrap_or(Value::Null),
+        })
+    }
+
+    pub(crate) fn live_status(s: &crate::data::trains::PublicTrainState) -> Value {
+        json!({
+            "trainsId": s.trains_id,
+            "trainId": s.train_id,
+            "originCrs": s.origin_crs,
+            "originName": s.origin_name,
+            "destinationCrs": s.destination_crs,
+            "destinationName": s.destination_name,
+            "scheduledDeparture": s.scheduled_departure,
+            "status": s.status,
+            "lastReportedLocation": s.last_reported_location,
+            "lastEventType": s.last_event_type,
+            "delayMinutes": s.delay_minutes,
+            "delayBasis": s.delay_basis,
+            "delayProvisional": s.delay_provisional,
+            "nextCallingPoint": s.next_calling_point,
+            "etaNext": s.eta_next,
+            "etaSource": s.eta_source,
+            "operatorCode": s.operator_code,
+            "operatorName": s.operator_name,
+            "cancelled": s.cancelled,
+            "cancelReasonCode": s.cancel_reason_code,
+            "cancelReason": s.cancel_reason,
+            "changeOfOriginReasonCode": s.change_of_origin_reason_code,
+            "changeOfOriginReason": s.change_of_origin_reason,
+        })
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn v<T: Serialize>(body: T) -> Value {
+        serde_json::to_value(body).unwrap()
+    }
     use chrono::{DateTime, TimeZone, Utc};
     use common::{DataQuality, Disruption, SampleAvailability, SampleStats, ValidityPeriod};
+
+    /// Every line-status shape serves what its `json!` renderer did:
+    /// detail on and off, an overlay, stats, both availabilities and
+    /// upcoming notes.
+    #[test]
+    fn typed_line_status_matches_the_json_renderer() {
+        let disruption = Disruption {
+            category: "Signalling".to_string(),
+            description: "<p>Signal failure</p>".to_string(),
+            affected_stops: vec!["WOK".to_string()],
+            affected_routes: vec![common::AffectedRoute {
+                from_crs: "WOK".to_string(),
+                to_crs: "WAT".to_string(),
+            }],
+            source: Some("knowledgebase-incident-1".to_string()),
+            impact_type: None,
+        };
+        let mut report = sample_report(Some(disruption));
+        let stats = SampleStats {
+            total: 10,
+            delayed: 4,
+            cancelled: 1,
+            skipped: 2,
+            avg_delay_minutes: 6.5,
+        };
+        report.statuses.push(LineStatus {
+            sample_stats: Some(stats.clone()),
+            sample_availability: SampleAvailability::Available(stats.clone()),
+            full_coverage_stats: Some(stats.clone()),
+            full_coverage_availability: common::FullCoverageAvailability::Available(stats),
+            ..overlay_status("Trains are running")
+        });
+        report.statuses.push(LineStatus {
+            sample_availability: SampleAvailability::BelowThreshold {
+                observed: 1,
+                required: 3,
+            },
+            full_coverage_availability: common::FullCoverageAvailability::Pending,
+            validity: ValidityPeriod {
+                from_date: sample_computed_at(),
+                to_date: Some(sample_computed_at()),
+                is_now: false,
+            },
+            ..overlay_status("Later")
+        });
+        let overlay = vec![overlay_status("TfL says")];
+        for detail in [false, true] {
+            assert_eq!(
+                v(to_tfl_shape(&report, sample_computed_at(), detail)),
+                legacy::to_tfl_shape(&report, sample_computed_at(), detail),
+            );
+            for overlay in [None, Some(overlay.as_slice())] {
+                assert_eq!(
+                    v(to_tfl_shape_with_overlay(
+                        &report,
+                        sample_computed_at(),
+                        detail,
+                        overlay
+                    )),
+                    legacy::to_tfl_shape_with_overlay(
+                        &report,
+                        sample_computed_at(),
+                        detail,
+                        overlay
+                    ),
+                );
+            }
+        }
+        let upcoming = vec![
+            common::UpcomingDisruption {
+                from: sample_computed_at(),
+                to: None,
+                summary: "Engineering works".to_string(),
+                incident_id: "1".to_string(),
+            },
+            common::UpcomingDisruption {
+                from: sample_computed_at(),
+                to: Some(sample_computed_at()),
+                summary: "More works".to_string(),
+                incident_id: "2".to_string(),
+            },
+        ];
+        assert_eq!(
+            v(upcoming_json(&upcoming)),
+            legacy::upcoming_json(&upcoming)
+        );
+    }
+
+    /// The board and search rows serve what their `json!` renderers did,
+    /// across the shapes the stored rows take: public times or none, a
+    /// pseudo-CRS, names known or not, a missing day offset, an
+    /// across-midnight public time.
+    #[test]
+    fn typed_departure_rows_match_the_json_renderers() {
+        let names = HashMap::from([
+            ("CRE".to_string(), "Crewe".to_string()),
+            ("EUS".to_string(), "London Euston".to_string()),
+        ]);
+        let rows = [
+            serde_json::json!({"uid": "C1", "scheduled": "08:22:00", "day_offset": 0, "destination_crs": "CRE"}),
+            serde_json::json!({
+                "uid": "C2", "scheduled": "23:59:30", "public_departure": "00:00:00", "day_offset": 1,
+                "destination_crs": "eus", "true_origin_crs": "XVR",
+                "destination_arrival": "02:10:00", "destination_arrival_day_offset": 2,
+                "public_destination_arrival": "02:10:00", "operator_atoc": "LM", "headcode": "1A11",
+            }),
+            serde_json::json!({
+                "uid": "C3", "scheduled": "10:00:00", "destination_crs": "XVR",
+                "true_origin_crs": "CRE", "destination_arrival": null, "operator_atoc": null,
+                "headcode": null,
+            }),
+            serde_json::json!({}),
+        ];
+        for row in &rows {
+            for names in [&names, &HashMap::new()] {
+                let new = v(schedule_departure_json(row, names));
+                let mut old = legacy::schedule_departure_json(row, names);
+                // The fields the schedule-departures route adds after it.
+                for key in [
+                    "originCrs",
+                    "originName",
+                    "live",
+                    "serviceMode",
+                    "liveTracking",
+                ] {
+                    old[key] = new[key].clone();
+                }
+                assert_eq!(new, old);
+                assert_eq!(
+                    v(calling_point_departure_json(row, "RDG", names)),
+                    legacy::calling_point_departure_json(row, "RDG", names),
+                );
+            }
+        }
+
+        let departure = common::StationDeparture {
+            service_id: "svc-1".to_string(),
+            operator: "SW".to_string(),
+            destination_crs: "cre".to_string(),
+            scheduled: "14:40".to_string(),
+            estimated: "Delayed".to_string(),
+            is_cancelled: true,
+            delay_minutes: 7,
+            cancel_reason: Some("a fault".to_string()),
+            delay_reason: None,
+            headcode: Some("1A11".to_string()),
+            skipped_stations: vec!["ZQT".to_string()],
+            platform: Some("6".to_string()),
+            planned_platform: Some("5".to_string()),
+            rsid: None,
+            calling_points: vec![common::BoardCallingPoint {
+                crs: "WIM".to_string(),
+                location_name: None,
+                st: Some("14:48".to_string()),
+                et: Some("Cancelled".to_string()),
+                at: None,
+                is_cancelled: true,
+            }],
+        };
+        assert_eq!(
+            v(station_departure_json(&departure, &names)),
+            legacy::station_departure_json(&departure, &names),
+        );
+    }
+
+    /// A line train's live status serves what its `json!` block did.
+    #[test]
+    fn typed_line_train_live_status_matches_the_json_renderer() {
+        let live = sample_live_state();
+        let entry = serde_json::json!({"uid": "C10002", "calling_points": []});
+        let json = render_line_train(&entry, Some(&live), &ScheduleRouteEndpoints::default());
+        assert_eq!(json["liveStatus"], legacy::live_status(&live));
+    }
 
     fn sample_report(disruption: Option<Disruption>) -> LineStatusReport {
         LineStatusReport {
@@ -750,14 +1551,14 @@ mod tests {
     #[test]
     fn renders_computed_at() {
         let report = sample_report(None);
-        let json = to_tfl_shape(&report, sample_computed_at(), false);
+        let json = v(to_tfl_shape(&report, sample_computed_at(), false));
         assert_eq!(json["computedAt"], "2026-07-15T09:00:00+00:00");
     }
 
     #[test]
     fn renders_top_level_fields() {
         let report = sample_report(None);
-        let json = to_tfl_shape(&report, sample_computed_at(), false);
+        let json = v(to_tfl_shape(&report, sample_computed_at(), false));
         assert_eq!(json["$type"], "DistantSignal.LineStatusReport");
         assert_eq!(json["id"], "wcml");
         assert_eq!(json["name"], "West Coast Main Line");
@@ -768,7 +1569,7 @@ mod tests {
     #[test]
     fn renders_status_fields() {
         let report = sample_report(None);
-        let json = to_tfl_shape(&report, sample_computed_at(), false);
+        let json = v(to_tfl_shape(&report, sample_computed_at(), false));
         let status = &json["lineStatuses"][0];
         assert_eq!(status["statusSeverity"], 9);
         assert_eq!(status["statusSeverityDescription"], "Minor Delays");
@@ -789,7 +1590,7 @@ mod tests {
             impact_type: None,
         };
         let report = sample_report(Some(disruption));
-        let json = to_tfl_shape(&report, sample_computed_at(), false);
+        let json = v(to_tfl_shape(&report, sample_computed_at(), false));
         assert!(json["lineStatuses"][0].get("disruption").is_none());
     }
 
@@ -807,7 +1608,7 @@ mod tests {
             impact_type: Some("rail_replacement_bus".to_string()),
         };
         let report = sample_report(Some(disruption));
-        let json = to_tfl_shape(&report, sample_computed_at(), true);
+        let json = v(to_tfl_shape(&report, sample_computed_at(), true));
         let d = &json["lineStatuses"][0]["disruption"];
         assert_eq!(d["category"], "RealTime");
         assert_eq!(d["description"], "Signal failure at Woking");
@@ -829,14 +1630,14 @@ mod tests {
             impact_type: None,
         };
         let report = sample_report(Some(disruption));
-        let json = to_tfl_shape(&report, sample_computed_at(), true);
+        let json = v(to_tfl_shape(&report, sample_computed_at(), true));
         assert!(json["lineStatuses"][0]["disruption"]["impactType"].is_null());
     }
 
     #[test]
     fn no_disruption_present_even_with_detail_flag() {
         let report = sample_report(None);
-        let json = to_tfl_shape(&report, sample_computed_at(), true);
+        let json = v(to_tfl_shape(&report, sample_computed_at(), true));
         assert!(json["lineStatuses"][0].get("disruption").is_none());
     }
 
@@ -850,7 +1651,7 @@ mod tests {
             skipped: 2,
             avg_delay_minutes: 6.5,
         });
-        let json = to_tfl_shape(&report, sample_computed_at(), false);
+        let json = v(to_tfl_shape(&report, sample_computed_at(), false));
         let stats = &json["lineStatuses"][0]["sampleStats"];
         assert_eq!(stats["total"], 10);
         assert_eq!(stats["delayed"], 4);
@@ -862,14 +1663,14 @@ mod tests {
     #[test]
     fn sample_stats_omitted_when_absent() {
         let report = sample_report(None);
-        let json = to_tfl_shape(&report, sample_computed_at(), false);
+        let json = v(to_tfl_shape(&report, sample_computed_at(), false));
         assert!(json["lineStatuses"][0].get("sampleStats").is_none());
     }
 
     #[test]
     fn sample_availability_is_always_present_unlike_sample_stats() {
         let report = sample_report(None); // sample_stats is None
-        let json = to_tfl_shape(&report, sample_computed_at(), false);
+        let json = v(to_tfl_shape(&report, sample_computed_at(), false));
         assert_eq!(
             json["lineStatuses"][0]["sampleAvailability"],
             serde_json::json!({"state": "no-coverage"})
@@ -883,7 +1684,7 @@ mod tests {
             observed: 2,
             required: 3,
         };
-        let json = to_tfl_shape(&report, sample_computed_at(), false);
+        let json = v(to_tfl_shape(&report, sample_computed_at(), false));
         assert_eq!(
             json["lineStatuses"][0]["sampleAvailability"],
             serde_json::json!({"state": "below-threshold", "observed": 2, "required": 3})
@@ -902,7 +1703,7 @@ mod tests {
         };
         report.statuses[0].sample_stats = Some(stats.clone());
         report.statuses[0].sample_availability = SampleAvailability::Available(stats);
-        let json = to_tfl_shape(&report, sample_computed_at(), false);
+        let json = v(to_tfl_shape(&report, sample_computed_at(), false));
         assert_eq!(
             json["lineStatuses"][0]["sampleAvailability"],
             serde_json::json!({"state": "available"})
@@ -925,7 +1726,7 @@ mod tests {
             skipped: 1,
             avg_delay_minutes: 2.5,
         });
-        let json = to_tfl_shape(&report, sample_computed_at(), false);
+        let json = v(to_tfl_shape(&report, sample_computed_at(), false));
         let stats = &json["lineStatuses"][0]["fullCoverageStats"];
         assert_eq!(stats["total"], 20);
         assert_eq!(stats["delayed"], 3);
@@ -937,14 +1738,14 @@ mod tests {
     #[test]
     fn full_coverage_stats_omitted_when_absent() {
         let report = sample_report(None);
-        let json = to_tfl_shape(&report, sample_computed_at(), false);
+        let json = v(to_tfl_shape(&report, sample_computed_at(), false));
         assert!(json["lineStatuses"][0].get("fullCoverageStats").is_none());
     }
 
     #[test]
     fn full_coverage_availability_is_always_present_unlike_full_coverage_stats() {
         let report = sample_report(None); // full_coverage_stats is None
-        let json = to_tfl_shape(&report, sample_computed_at(), false);
+        let json = v(to_tfl_shape(&report, sample_computed_at(), false));
         assert_eq!(
             json["lineStatuses"][0]["fullCoverageAvailability"],
             serde_json::json!({"state": "not-enabled"})
@@ -955,7 +1756,7 @@ mod tests {
     fn full_coverage_availability_pending_shape() {
         let mut report = sample_report(None);
         report.statuses[0].full_coverage_availability = common::FullCoverageAvailability::Pending;
-        let json = to_tfl_shape(&report, sample_computed_at(), false);
+        let json = v(to_tfl_shape(&report, sample_computed_at(), false));
         assert_eq!(
             json["lineStatuses"][0]["fullCoverageAvailability"],
             serde_json::json!({"state": "pending"})
@@ -975,7 +1776,7 @@ mod tests {
         report.statuses[0].full_coverage_stats = Some(stats.clone());
         report.statuses[0].full_coverage_availability =
             common::FullCoverageAvailability::Available(stats);
-        let json = to_tfl_shape(&report, sample_computed_at(), false);
+        let json = v(to_tfl_shape(&report, sample_computed_at(), false));
         assert_eq!(
             json["lineStatuses"][0]["fullCoverageAvailability"],
             serde_json::json!({"state": "available"})
@@ -1010,7 +1811,12 @@ mod tests {
     fn tfl_status_included_when_overlay_present() {
         let report = sample_report(None);
         let overlay = vec![overlay_status("Minor delays due to signalling")];
-        let json = to_tfl_shape_with_overlay(&report, sample_computed_at(), false, Some(&overlay));
+        let json = v(to_tfl_shape_with_overlay(
+            &report,
+            sample_computed_at(),
+            false,
+            Some(&overlay),
+        ));
         assert_eq!(
             json["tflStatus"][0]["reason"],
             "Minor delays due to signalling"
@@ -1021,7 +1827,12 @@ mod tests {
     #[test]
     fn tfl_status_omitted_when_overlay_absent() {
         let report = sample_report(None);
-        let json = to_tfl_shape_with_overlay(&report, sample_computed_at(), false, None);
+        let json = v(to_tfl_shape_with_overlay(
+            &report,
+            sample_computed_at(),
+            false,
+            None,
+        ));
         assert!(json.get("tflStatus").is_none());
     }
 
@@ -1031,9 +1842,14 @@ mod tests {
         // overlay present -- the overlay is additive, never a merge into the
         // primary field.
         let report = sample_report(None);
-        let without = to_tfl_shape(&report, sample_computed_at(), false);
+        let without = v(to_tfl_shape(&report, sample_computed_at(), false));
         let overlay = vec![overlay_status("Some TfL text")];
-        let with = to_tfl_shape_with_overlay(&report, sample_computed_at(), false, Some(&overlay));
+        let with = v(to_tfl_shape_with_overlay(
+            &report,
+            sample_computed_at(),
+            false,
+            Some(&overlay),
+        ));
         assert_eq!(without["lineStatuses"], with["lineStatuses"]);
     }
 
@@ -1052,7 +1868,11 @@ mod tests {
 
     #[test]
     fn national_rail_status_credits_darwin_and_knowledgebase() {
-        let json = to_tfl_shape(&sample_report(None), sample_computed_at(), false);
+        let json = v(to_tfl_shape(
+            &sample_report(None),
+            sample_computed_at(),
+            false,
+        ));
         assert_eq!(
             credit_texts(&json["attribution"]),
             vec![
@@ -1076,7 +1896,7 @@ mod tests {
         let mut report = sample_report(None);
         report.id = "tfl-victoria".to_string();
         report.mode_name = "tube".to_string();
-        let json = to_tfl_shape(&report, sample_computed_at(), false);
+        let json = v(to_tfl_shape(&report, sample_computed_at(), false));
         assert_eq!(
             credit_texts(&json["attribution"]),
             vec![(
@@ -1090,7 +1910,12 @@ mod tests {
     fn overlay_adds_the_tfl_credit() {
         let report = sample_report(None);
         let overlay = vec![overlay_status("Some TfL text")];
-        let json = to_tfl_shape_with_overlay(&report, sample_computed_at(), false, Some(&overlay));
+        let json = v(to_tfl_shape_with_overlay(
+            &report,
+            sample_computed_at(),
+            false,
+            Some(&overlay),
+        ));
         let credits = credit_texts(&json["attribution"]);
         assert_eq!(credits.len(), 3);
         assert_eq!(credits[0].1, NATIONAL_RAIL_CREDIT);
@@ -1098,19 +1923,38 @@ mod tests {
             credits[2],
             (TFL_LICENCE.to_string(), TFL_CREDIT.to_string())
         );
-        let without = to_tfl_shape_with_overlay(&report, sample_computed_at(), false, None);
+        let without = v(to_tfl_shape_with_overlay(
+            &report,
+            sample_computed_at(),
+            false,
+            None,
+        ));
         assert_eq!(credit_texts(&without["attribution"]).len(), 2);
     }
 
     #[test]
     fn stats_rows_credit_darwin_only_for_national_rail() {
-        let row = with_stats_attribution(json!({ "day": "2026-07-15" }), "wcml");
-        assert_eq!(row["day"], "2026-07-15");
+        #[derive(Serialize)]
+        struct Row {
+            day: &'static str,
+            attribution: Option<Vec<TransitAttribution>>,
+        }
+        impl HasAttribution for Row {
+            fn set_attribution(&mut self, credits: Vec<TransitAttribution>) {
+                self.attribution = Some(credits);
+            }
+        }
+        let row = || Row {
+            day: "2026-07-15",
+            attribution: None,
+        };
+        let national_rail = v(with_stats_attribution(row(), "wcml"));
+        assert_eq!(national_rail["day"], "2026-07-15");
         assert_eq!(
-            credit_texts(&row["attribution"]),
+            credit_texts(&national_rail["attribution"]),
             vec![(RDM_LICENCE.to_string(), NATIONAL_RAIL_CREDIT.to_string())]
         );
-        let tfl = with_stats_attribution(json!({}), "tfl-elizabeth");
+        let tfl = v(with_stats_attribution(row(), "tfl-elizabeth"));
         assert_eq!(
             credit_texts(&tfl["attribution"]),
             vec![(TFL_LICENCE.to_string(), TFL_CREDIT.to_string())]
@@ -1130,9 +1974,18 @@ mod tests {
         let overlay = vec![overlay_status(
             "Severe delays between Paddington and Heathrow",
         )];
-        let first = to_tfl_shape_with_overlay(&report, sample_computed_at(), false, Some(&overlay));
-        let second =
-            to_tfl_shape_with_overlay(&report, sample_computed_at(), false, Some(&overlay));
+        let first = v(to_tfl_shape_with_overlay(
+            &report,
+            sample_computed_at(),
+            false,
+            Some(&overlay),
+        ));
+        let second = v(to_tfl_shape_with_overlay(
+            &report,
+            sample_computed_at(),
+            false,
+            Some(&overlay),
+        ));
         assert_eq!(first["tflStatus"], second["tflStatus"]);
         assert_eq!(
             first["tflStatus"][0]["reason"],
@@ -1176,7 +2029,7 @@ mod tests {
                 },
             ],
         };
-        let json = station_departure_json(&departure, &HashMap::new());
+        let json = v(station_departure_json(&departure, &HashMap::new()));
         assert_eq!(
             json,
             serde_json::json!({
@@ -1235,7 +2088,7 @@ mod tests {
             rsid: None,
             calling_points: Vec::new(),
         };
-        let json = station_departure_json(&departure, &HashMap::new());
+        let json = v(station_departure_json(&departure, &HashMap::new()));
         assert_eq!(json["cancelReason"], "fleet issue");
         // `delay_reason: None` must serialize as JSON `null` -- a present
         // key with a null value, not an omitted key -- because this is a
@@ -1281,7 +2134,7 @@ mod tests {
             rsid: None,
             calling_points: Vec::new(),
         };
-        let json = station_departure_json(&departure, &HashMap::new());
+        let json = v(station_departure_json(&departure, &HashMap::new()));
         assert_eq!(json["platform"], "9");
         assert_eq!(json["plannedPlatform"], "6");
         assert_eq!(json["platformChanged"], true);
@@ -1310,7 +2163,7 @@ mod tests {
             rsid: None,
             calling_points: Vec::new(),
         };
-        let json = station_departure_json(&departure, &HashMap::new());
+        let json = v(station_departure_json(&departure, &HashMap::new()));
         assert_eq!(json["platform"], "6");
         assert!(json["plannedPlatform"].is_null());
         assert_eq!(json["platformChanged"], false);
@@ -1324,7 +2177,7 @@ mod tests {
             "day_offset": 0,
             "destination_crs": "CRE",
         });
-        let json = schedule_departure_json(&raw, &HashMap::new());
+        let json = v(schedule_departure_json(&raw, &HashMap::new()));
         assert!(json["publicDeparture"].is_null(), "absent on an older row");
         assert_eq!(
             json,
@@ -1337,6 +2190,12 @@ mod tests {
                 "dayOffset": 0,
                 "destinationCrs": "CRE",
                 "destinationName": null,
+                // The route fills these in (origin, live state, mode).
+                "originCrs": null,
+                "originName": null,
+                "live": null,
+                "serviceMode": "train",
+                "liveTracking": true,
             })
         );
         assert!(
@@ -1370,7 +2229,7 @@ mod tests {
         // match on the SAME normalized case regardless of what case the
         // source row happened to carry.
         let names = HashMap::from([("BSK".to_string(), "Basingstoke".to_string())]);
-        let json = station_departure_json(&departure, &names);
+        let json = v(station_departure_json(&departure, &names));
         assert_eq!(json["destinationName"], "Basingstoke");
     }
 
@@ -1393,7 +2252,7 @@ mod tests {
             rsid: None,
             calling_points: Vec::new(),
         };
-        let json = station_departure_json(&departure, &HashMap::new());
+        let json = v(station_departure_json(&departure, &HashMap::new()));
         assert!(json["destinationName"].is_null());
     }
 
@@ -1406,7 +2265,7 @@ mod tests {
             "destination_crs": "cre",
         });
         let names = HashMap::from([("CRE".to_string(), "Crewe".to_string())]);
-        let json = schedule_departure_json(&raw, &names);
+        let json = v(schedule_departure_json(&raw, &names));
         assert_eq!(json["destinationName"], "Crewe");
     }
 
@@ -1424,7 +2283,7 @@ mod tests {
             "day_offset": 1,
             "destination_crs": "SNF",
         });
-        let json = schedule_departure_json(&raw, &HashMap::new());
+        let json = v(schedule_departure_json(&raw, &HashMap::new()));
         assert_eq!(json["dayOffset"], 1);
     }
 
@@ -1440,7 +2299,7 @@ mod tests {
             "scheduled": "08:22:00",
             "destination_crs": "CRE",
         });
-        let json = schedule_departure_json(&raw, &HashMap::new());
+        let json = v(schedule_departure_json(&raw, &HashMap::new()));
         assert_eq!(json["dayOffset"], 0);
     }
 
@@ -1452,7 +2311,7 @@ mod tests {
             "true_origin_crs": "PAD",
             "scheduled": "08:22:00",
         });
-        let json = calling_point_departure_json(&row, "RDG", &HashMap::new());
+        let json = v(calling_point_departure_json(&row, "RDG", &HashMap::new()));
         assert_eq!(json["uid"], "C10001");
         assert_eq!(json["scheduled"], "08:22");
         assert_eq!(json["stationCrs"], "RDG");
@@ -1476,7 +2335,7 @@ mod tests {
             "public_departure": "20:16:00",
             "public_destination_arrival": "22:13:00",
         });
-        let json = calling_point_departure_json(&row, "EUS", &HashMap::new());
+        let json = v(calling_point_departure_json(&row, "EUS", &HashMap::new()));
         assert_eq!(json["scheduled"], "20:16");
         assert_eq!(json["publicDeparture"], "20:16");
         assert_eq!(json["workingDeparture"], "20:16");
@@ -1484,10 +2343,10 @@ mod tests {
         assert_eq!(json["publicDestinationArrival"], "22:13");
         assert_eq!(json["workingDestinationArrival"], "22:11");
 
-        let board = schedule_departure_json(
+        let board = v(schedule_departure_json(
             &serde_json::json!({"uid": "C01355", "scheduled": "18:18:00", "public_departure": "18:15:00"}),
             &HashMap::new(),
-        );
+        ));
         assert_eq!(board["scheduled"], "18:15");
         assert_eq!(board["publicDeparture"], "18:15");
         assert_eq!(board["workingDeparture"], "18:18");
@@ -1505,7 +2364,7 @@ mod tests {
             "public_departure": null,
             "public_destination_arrival": null,
         });
-        let json = calling_point_departure_json(&row, "CAR", &HashMap::new());
+        let json = v(calling_point_departure_json(&row, "CAR", &HashMap::new()));
         assert_eq!(json["scheduled"], "16:02");
         assert!(json["publicDeparture"].is_null());
         assert_eq!(json["destinationArrival"], "17:30");
@@ -1525,15 +2384,15 @@ mod tests {
             "destination_arrival_day_offset": 0,
             "public_destination_arrival": "00:00:00",
         });
-        let json = calling_point_departure_json(&row, "KGX", &HashMap::new());
+        let json = v(calling_point_departure_json(&row, "KGX", &HashMap::new()));
         assert_eq!(json["destinationArrival"], "00:00");
         assert_eq!(json["destinationArrivalDayOffset"], 1);
         assert_eq!(json["workingDestinationArrival"], "23:59");
 
-        let board = schedule_departure_json(
+        let board = v(schedule_departure_json(
             &serde_json::json!({"uid": "C00002", "scheduled": "00:01:00", "day_offset": 1, "public_departure": "23:59:00"}),
             &HashMap::new(),
-        );
+        ));
         assert_eq!(board["scheduled"], "23:59");
         assert_eq!(board["dayOffset"], 0);
         assert_eq!(board["workingDeparture"], "00:01");
@@ -1548,7 +2407,7 @@ mod tests {
             "true_origin_crs": null,
             "scheduled": "10:05:00",
         });
-        let json = calling_point_departure_json(&row, "RDG", &HashMap::new());
+        let json = v(calling_point_departure_json(&row, "RDG", &HashMap::new()));
         assert!(json["originCrs"].is_null());
         assert!(
             json.get("originCrs").is_some(),
@@ -1565,7 +2424,7 @@ mod tests {
             "scheduled": "08:22:00",
             "destination_arrival": "11:30:00",
         });
-        let json = calling_point_departure_json(&row, "RDG", &HashMap::new());
+        let json = v(calling_point_departure_json(&row, "RDG", &HashMap::new()));
         assert_eq!(json["destinationArrival"], "11:30");
     }
 
@@ -1584,7 +2443,7 @@ mod tests {
             "destination_arrival": "01:01:00",
             "destination_arrival_day_offset": 1,
         });
-        let json = calling_point_departure_json(&row, "LST", &HashMap::new());
+        let json = v(calling_point_departure_json(&row, "LST", &HashMap::new()));
         assert_eq!(json["destinationArrivalDayOffset"], 1);
     }
 
@@ -1603,7 +2462,7 @@ mod tests {
             "scheduled": "08:22:00",
             "destination_arrival": "11:30:00",
         });
-        let json = calling_point_departure_json(&row, "RDG", &HashMap::new());
+        let json = v(calling_point_departure_json(&row, "RDG", &HashMap::new()));
         assert_eq!(json["destinationArrivalDayOffset"], 0);
     }
 
@@ -1617,7 +2476,7 @@ mod tests {
             "scheduled": "10:05:00",
             "destination_arrival": null,
         });
-        let json = calling_point_departure_json(&row, "RDG", &HashMap::new());
+        let json = v(calling_point_departure_json(&row, "RDG", &HashMap::new()));
         assert!(json["destinationArrival"].is_null());
         assert!(
             json.get("destinationArrival").is_some(),
@@ -1634,7 +2493,7 @@ mod tests {
             "scheduled": "08:22:00",
             "operator_atoc": "SW",
         });
-        let json = calling_point_departure_json(&row, "RDG", &HashMap::new());
+        let json = v(calling_point_departure_json(&row, "RDG", &HashMap::new()));
         assert_eq!(json["operator"], "SW");
     }
 
@@ -1647,7 +2506,7 @@ mod tests {
             "scheduled": "08:22:00",
             "headcode": "1S00",
         });
-        let json = calling_point_departure_json(&row, "RDG", &HashMap::new());
+        let json = v(calling_point_departure_json(&row, "RDG", &HashMap::new()));
         assert_eq!(json["identity"], "1S00");
     }
 
@@ -1657,7 +2516,7 @@ mod tests {
             serde_json::json!({"uid": "C10002", "scheduled": "10:05:00", "headcode": null}),
             serde_json::json!({"uid": "C10002", "scheduled": "10:05:00"}),
         ] {
-            let json = calling_point_departure_json(&row, "RDG", &HashMap::new());
+            let json = v(calling_point_departure_json(&row, "RDG", &HashMap::new()));
             assert!(json["identity"].is_null(), "{json:?}");
             assert!(
                 json.get("identity").is_some(),
@@ -1675,7 +2534,7 @@ mod tests {
             "scheduled": "10:05:00",
             "operator_atoc": null,
         });
-        let json = calling_point_departure_json(&row, "RDG", &HashMap::new());
+        let json = v(calling_point_departure_json(&row, "RDG", &HashMap::new()));
         assert!(json["operator"].is_null());
         assert!(
             json.get("operator").is_some(),
@@ -1690,7 +2549,7 @@ mod tests {
             "scheduled": "14:05:00",
             "destination_crs": null,
         });
-        let json = schedule_departure_json(&raw, &HashMap::new());
+        let json = v(schedule_departure_json(&raw, &HashMap::new()));
         assert!(json["destinationCrs"].is_null());
     }
 
@@ -1715,7 +2574,7 @@ mod tests {
             "destination_crs": "XHN",
         });
         let names = HashMap::from([("XHN".to_string(), "Hanslope Junction".to_string())]);
-        let json = schedule_departure_json(&raw, &names);
+        let json = v(schedule_departure_json(&raw, &names));
         assert!(
             json["destinationCrs"].is_null(),
             "an X-prefixed pseudo-CRS is not a real, displayable station identity: {json:?}"
@@ -1739,7 +2598,7 @@ mod tests {
             "destination_crs": "WOL",
         });
         let names = HashMap::from([("WOL".to_string(), "Wolverhampton".to_string())]);
-        let json = schedule_departure_json(&raw, &names);
+        let json = v(schedule_departure_json(&raw, &names));
         assert_eq!(json["destinationCrs"], "WOL");
         assert_eq!(json["destinationName"], "Wolverhampton");
     }
@@ -1759,7 +2618,7 @@ mod tests {
             "scheduled": "14:05:00",
         });
         let names = HashMap::from([("XHN".to_string(), "Hanslope Junction".to_string())]);
-        let json = calling_point_departure_json(&row, "RDG", &names);
+        let json = v(calling_point_departure_json(&row, "RDG", &names));
         assert!(
             json["destinationCrs"].is_null(),
             "an X-prefixed pseudo-CRS is not a real, displayable station identity: {json:?}"
@@ -1788,7 +2647,7 @@ mod tests {
             "destination_crs": "WAT",
             "scheduled": "14:05:00",
         });
-        let json = calling_point_departure_json(&row, "RDG", &HashMap::new());
+        let json = v(calling_point_departure_json(&row, "RDG", &HashMap::new()));
         assert!(
             json["originCrs"].is_null(),
             "an X-prefixed pseudo-CRS is not a real, displayable station identity: {json:?}"
@@ -1811,7 +2670,7 @@ mod tests {
             "destination_crs": "WAT",
             "scheduled": "08:22:00",
         });
-        let json = calling_point_departure_json(&row, "RDG", &HashMap::new());
+        let json = v(calling_point_departure_json(&row, "RDG", &HashMap::new()));
         assert_eq!(json["originCrs"], "PAD");
         assert_eq!(json["destinationCrs"], "WAT");
     }
@@ -1829,7 +2688,7 @@ mod tests {
             "scheduled": "08:22:00",
         });
         let names = HashMap::from([("WAT".to_string(), "London Waterloo".to_string())]);
-        let json = calling_point_departure_json(&row, "RDG", &names);
+        let json = v(calling_point_departure_json(&row, "RDG", &names));
         assert_eq!(json["destinationCrs"], "WAT");
         assert_eq!(json["destinationName"], "London Waterloo");
     }
@@ -1845,7 +2704,7 @@ mod tests {
             "destination_crs": "WAT",
             "scheduled": "08:22:00",
         });
-        let json = calling_point_departure_json(&row, "RDG", &HashMap::new());
+        let json = v(calling_point_departure_json(&row, "RDG", &HashMap::new()));
         assert!(json["destinationName"].is_null());
         assert!(
             json.get("destinationName").is_some(),
@@ -1864,7 +2723,7 @@ mod tests {
             "destination_crs": null,
             "scheduled": "10:05:00",
         });
-        let json = calling_point_departure_json(&row, "RDG", &HashMap::new());
+        let json = v(calling_point_departure_json(&row, "RDG", &HashMap::new()));
         assert!(json["destinationCrs"].is_null());
         assert!(json["destinationName"].is_null());
     }
@@ -1991,12 +2850,8 @@ mod tests {
         assert_eq!(json["scheduleDestinationName"], "Birmingham New Street");
     }
 
-    #[test]
-    fn line_train_json_with_a_live_row_attaches_live_status_in_camel_case() {
-        use crate::data::trains::PublicTrainState;
-
-        let entry = serde_json::json!({"uid": "C10002", "calling_points": []});
-        let live = PublicTrainState {
+    fn sample_live_state() -> crate::data::trains::PublicTrainState {
+        crate::data::trains::PublicTrainState {
             service: crate::data::schedule_services::ServiceModeFields::default(),
             trains_id: 42,
             train_uid: "C10002".to_string(),
@@ -2033,7 +2888,13 @@ mod tests {
             change_of_origin_reason_code: None,
             change_of_origin_reason: None,
             cancellation: None,
-        };
+        }
+    }
+
+    #[test]
+    fn line_train_json_with_a_live_row_attaches_live_status_in_camel_case() {
+        let entry = serde_json::json!({"uid": "C10002", "calling_points": []});
+        let live = sample_live_state();
 
         let json = render_line_train(&entry, Some(&live), &ScheduleRouteEndpoints::default());
         assert_eq!(json["uid"], "C10002");

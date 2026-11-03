@@ -815,7 +815,10 @@ mod db_tests {
         assert_eq!(body["statusSource"], "tfl");
         assert_eq!(body["branches"][0]["id"], "outbound-1");
         assert_eq!(body["status"]["statuses"][0]["reason"], "Signal failure");
-        assert!(body["situations"]["current"].as_array().unwrap().is_empty());
+        assert_eq!(
+            body["situations"]["current"].as_array().unwrap().as_slice(),
+            [] as [Value; 0]
+        );
 
         sqlx::query("DELETE FROM line_status WHERE line_id = 'tfl-blue'")
             .execute(&owner)
@@ -941,7 +944,10 @@ mod db_tests {
         let (_, _, body) = get(&lit, &format!("/transit/{NETWORK}/stops/{B}")).await;
         assert_eq!(ids(&body["notices"]), ["S1"]);
         let (_, _, body) = get(&lit, &format!("/transit/{NETWORK}/stops/{A}")).await;
-        assert!(body["notices"].as_array().unwrap().is_empty());
+        assert_eq!(
+            body["notices"].as_array().unwrap().as_slice(),
+            [] as [Value; 0]
+        );
 
         // Stale: "unavailable" with its as-of time, and nothing listed.
         let stale = now - chrono::TimeDelta::minutes(45);
@@ -951,12 +957,21 @@ mod db_tests {
         let line_status = &body["lines"][0]["status"];
         assert_eq!(line_status["state"], "unavailable");
         assert!(line_status["asOf"].is_string());
-        assert!(line_status["statuses"].as_array().unwrap().is_empty());
+        assert_eq!(
+            line_status["statuses"].as_array().unwrap().as_slice(),
+            [] as [Value; 0]
+        );
         let (_, _, body) = get(&lit, &format!("/transit/{NETWORK}/situations")).await;
         assert_eq!(body["state"], "unavailable");
-        assert!(body["current"].as_array().unwrap().is_empty());
+        assert_eq!(
+            body["current"].as_array().unwrap().as_slice(),
+            [] as [Value; 0]
+        );
         let (_, _, body) = get(&lit, &format!("/transit/{NETWORK}/stops/{B}")).await;
-        assert!(body["notices"].as_array().unwrap().is_empty());
+        assert_eq!(
+            body["notices"].as_array().unwrap().as_slice(),
+            [] as [Value; 0]
+        );
 
         set_situations_as_of(&pool, NETWORK, None).await;
         let (_, _, body) = get(&lit, &format!("/transit/{NETWORK}/lines/blue")).await;

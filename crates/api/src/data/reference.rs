@@ -15,7 +15,7 @@ use serde::Serialize;
 use sqlx::PgPool;
 use tokio::sync::Mutex;
 
-#[derive(Debug, Clone, Serialize, sqlx::FromRow)]
+#[derive(Debug, Clone, Serialize, sqlx::FromRow, ts_rs::TS)]
 #[serde(rename_all = "camelCase")]
 pub struct Suggestion {
     pub code: String,
@@ -24,11 +24,13 @@ pub struct Suggestion {
     /// terminals: `bus` or `ferry`. Absent for a station or operator.
     #[sqlx(default)]
     #[serde(skip_serializing_if = "Option::is_none")]
+    #[ts(optional, as = "Option<crate::ts_values::LocationSuggestionKind>")]
     pub kind: Option<String>,
     /// The stop's parent station, when it has one (same rule as
     /// `JourneyStop.parentCrs`).
     #[sqlx(default)]
     #[serde(skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
     pub parent_crs: Option<String>,
 }
 
@@ -59,7 +61,7 @@ impl Suggestion {
 /// ireland-friction-research.md`, both of which quote UK/Ireland network
 /// distances in km -- so km is the default for a UK-facing app rather than
 /// miles).
-#[derive(Debug, Clone, Serialize, sqlx::FromRow)]
+#[derive(Debug, Clone, Serialize, sqlx::FromRow, ts_rs::TS)]
 #[serde(rename_all = "camelCase")]
 pub struct NearbyStation {
     pub code: String,

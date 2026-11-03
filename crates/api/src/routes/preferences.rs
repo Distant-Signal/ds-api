@@ -662,7 +662,7 @@ mod tests {
         // (`queries::upsert_tfl_line_status`).
         let pinned = vec!["long-gone-line".to_string()];
         let result = filter_known_pinned_lines(pinned, vec![], vec![], vec![]);
-        assert!(result.is_empty());
+        assert_eq!(result, [] as [String; 0]);
     }
 
     #[test]
@@ -684,7 +684,7 @@ mod tests {
     fn a_pinned_code_unknown_to_every_source_is_dropped() {
         let pinned = vec!["ZZ".to_string()];
         let result = filter_known_pinned_operators(pinned, vec!["SW".to_string()]);
-        assert!(result.is_empty());
+        assert_eq!(result, [] as [String; 0]);
     }
 
     /// The regression case for the review finding: an array at exactly the

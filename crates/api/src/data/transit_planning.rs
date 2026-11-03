@@ -2447,7 +2447,7 @@ mod tests {
         assert_eq!(walk.walk_minutes, 2);
         assert_eq!(walk.stop.name, "Piccadilly");
         // No `TfL` modes for a Metrolink stop: left out of the response.
-        assert!(walk.stop.modes.is_empty());
+        assert_eq!(walk.stop.modes, [] as [String; 0]);
         assert!(
             serde_json::to_value(&walk).unwrap()["stop"]
                 .get("modes")

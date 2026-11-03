@@ -766,7 +766,7 @@ mod validate_template_leg_tests {
         };
         let err = validate_template_leg("WAT", "RDG", &backwards, &TimeWindow::default())
             .expect_err("after later than before must be rejected");
-        assert!(!err.is_empty());
+        assert_ne!(err, "");
     }
 
     #[test]
@@ -777,7 +777,7 @@ mod validate_template_leg_tests {
         };
         let err = validate_template_leg("WAT", "RDG", &TimeWindow::default(), &backwards)
             .expect_err("after later than before must be rejected");
-        assert!(!err.is_empty());
+        assert_ne!(err, "");
     }
 
     #[test]
@@ -794,7 +794,7 @@ mod validate_template_leg_tests {
         let message =
             validate_template_leg("W", "RDG", &TimeWindow::default(), &TimeWindow::default())
                 .unwrap_err();
-        assert!(!message.is_empty());
+        assert_ne!(message, "");
         assert!(
             !message.contains('_'),
             "user-facing copy leaked an identifier: {message}"

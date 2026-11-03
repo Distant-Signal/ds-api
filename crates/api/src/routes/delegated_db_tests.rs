@@ -446,7 +446,10 @@ async fn the_consent_flow_needs_a_fresh_single_use_confirmation_token() {
         &[],
     )
     .await;
-    assert!(list.json()["grants"].as_array().unwrap().is_empty());
+    assert_eq!(
+        list.json()["grants"].as_array().unwrap().as_slice(),
+        [] as [Value; 0]
+    );
     // Idempotent.
     let reply = send(&h, "DELETE", uri, &Auth::Cookie(&cookie), None, &[]).await;
     assert_eq!(reply.status, StatusCode::NO_CONTENT);

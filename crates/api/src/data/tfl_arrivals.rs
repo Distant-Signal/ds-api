@@ -1536,7 +1536,7 @@ pub(crate) mod tests {
                 .await;
             let source =
                 HttpArrivalsSource::new(&server.uri(), Some("  "), Duration::from_secs(2)).unwrap();
-            assert!(source.fetch("940GZZLURSQ").await.unwrap().is_empty());
+            assert_eq!(source.fetch("940GZZLURSQ").await.unwrap(), []);
             let request = &server.received_requests().await.unwrap()[0];
             assert!(!request.headers.contains_key(TFL_AUTH_HEADER_NAME));
         }

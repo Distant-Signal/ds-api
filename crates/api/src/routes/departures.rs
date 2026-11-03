@@ -15,7 +15,9 @@ use serde_json::Value;
 
 use crate::app::{App, Router};
 use crate::data::queries;
-use crate::render::{schedule_departure_json, station_departure_json};
+use crate::render::{
+    ScheduleDepartureJson, StationDepartureJson, schedule_departure_json, station_departure_json,
+};
 use crate::routes::schedule_rows;
 
 pub fn router() -> Router {
@@ -92,7 +94,7 @@ pub(crate) async fn get_station_departures(
     State(app): State<App>,
     Path(crs): Path<String>,
     Query(params): Query<StationDeparturesParams>,
-) -> Result<(HeaderMap, Json<Vec<Value>>), (StatusCode, String)> {
+) -> Result<(HeaderMap, Json<Vec<StationDepartureJson>>), (StatusCode, String)> {
     let calling_at = match params.calling_at.as_deref().map(str::trim) {
         None => None,
         Some(code) if super::is_crs_code(code) => Some(code.to_ascii_uppercase()),
@@ -196,7 +198,7 @@ async fn get_station_schedule_departures(
     State(app): State<App>,
     Path(crs): Path<String>,
     Query(params): Query<ScheduleDeparturesParams>,
-) -> Result<Json<Vec<Value>>, (StatusCode, String)> {
+) -> Result<Json<Vec<ScheduleDepartureJson>>, (StatusCode, String)> {
     // `today` is London-local, not UTC -- see `routes::trains`'s
     // `london_now`/`today` split (a628841) for the original incident this
     // mirrors: during the 00:00-01:00 BST window, `Utc::now().date_naive()`
@@ -237,28 +239,24 @@ async fn get_station_schedule_departures(
     let destination_names = queries::station_names_for_crs_batch(&app.database, &destination_crs)
         .await
         .map_err(internal_error)?;
-    let mut rendered: Vec<Value> = rows
+    let mut rendered: Vec<ScheduleDepartureJson> = rows
         .iter()
         .map(|d| {
             let mut row = schedule_departure_json(d, &destination_names);
             // Blanked like `/trains/search`'s `originCrs`: an X-prefixed
             // pseudo-code is not a station.
-            let origin_crs = d
+            row.origin_crs = d
                 .get("uid")
                 .and_then(Value::as_str)
                 .and_then(|uid| origins.get(uid))
                 .filter(|crs| queries::is_bookable_crs(crs))
-                .map_or(Value::Null, |crs| Value::String(crs.clone()));
-            if let Some(object) = row.as_object_mut() {
-                object.insert("originCrs".to_string(), origin_crs);
-            }
+                .cloned();
             row
         })
         .collect();
     schedule_rows::attach_origin_names(&mut rendered, &destination_names);
     schedule_rows::attach_live(&app.database, service_date, &mut rendered).await;
-    crate::data::schedule_services::annotate_uid_rows(&app.database, service_date, &mut rendered)
-        .await;
+    schedule_rows::annotate_service_modes(&app.database, service_date, &mut rendered).await;
     Ok(Json(rendered))
 }
 
