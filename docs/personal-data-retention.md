@@ -84,6 +84,7 @@ The inactive-account sweep (below) uses the same function.
 | `delegated_grant_confirmations` | One-time consent tokens (hashed), bound to a session | Cascade, and with the session | Deleted when used, replaced, or 10 minutes after issue (hourly sweep) | `connectedAppConfirmations` (without token or session) |
 | `delegated_deletions` | What a connected app deleted: journey id, custom name, dates, stations, train UIDs | Cascade | Deleted after 30 days | `connectedAppDeletions` |
 | `journey_idempotency_keys` | `Idempotency-Key`s of itinerary saves, with the saved response | Cascade | Deleted after 24 hours | `journeySaveKeys` |
+| `personal_api_tokens` | Personal API tokens the user created: name, scopes, a hint (the token's last 4 characters), the hashed token, and created, expiry, last-used and revoked times ([personal-api-tokens.md](personal-api-tokens.md)) | Cascade | Revoked after 90 days unused (`PERSONAL_TOKENS_IDLE_DAYS`) and at expiry (at most 365 days); ended rows are deleted 365 days later (`PERSONAL_TOKENS_REVOKED_RETENTION_DAYS`). The sweep runs only while the feature is on | `personalApiTokens` (without the hash) |
 
 Ticket uploads (PDF, pkpass, zip) are parsed in memory and never stored.
 
