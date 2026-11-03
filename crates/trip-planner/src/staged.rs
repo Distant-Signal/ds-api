@@ -1206,7 +1206,7 @@ mod tests {
             date: date(),
         };
         assert_eq!(scan_staged(&options, 0, None, None).unwrap().changes, 3);
-        assert!(raptor_staged(&options, 0, 3, None, None).is_empty());
+        assert_eq!(raptor_staged(&options, 0, 3, None, None), []);
         let four = raptor_staged(&options, 0, 4, None, None);
         assert_eq!(four.len(), 1);
         assert_eq!(four[0].changes, 3);
@@ -2023,7 +2023,7 @@ mod tests {
             date: date(),
         };
         assert!(scan_staged(&options, 0, None, None).is_none());
-        assert!(raptor_staged(&options, 0, 4, None, None).is_empty());
+        assert_eq!(raptor_staged(&options, 0, 4, None, None), []);
         let arrive = ArriveByOptions {
             connections: &connections,
             interchange: &ic,
@@ -2181,7 +2181,7 @@ mod tests {
             date: date(),
         };
         assert!(scan_staged(&options, 0, None, None).is_none());
-        assert!(raptor_staged(&options, 0, 4, None, None).is_empty());
+        assert_eq!(raptor_staged(&options, 0, 4, None, None), []);
         let arrive = ArriveByOptions {
             connections: &connections,
             interchange: &ic,
@@ -3114,7 +3114,7 @@ mod tests {
             date: date(),
         };
         assert!(scan_staged(&options, 0, None, None).is_none());
-        assert!(raptor_staged(&options, 0, 4, None, None).is_empty());
+        assert_eq!(raptor_staged(&options, 0, 4, None, None), []);
         let arrive = ArriveByOptions {
             connections: &connections,
             interchange: &ic,

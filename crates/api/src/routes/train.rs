@@ -2696,7 +2696,7 @@ mod tests {
             response.delay_repay.claim_url,
             delay_repay_rules::GENERIC_CLAIM_URL
         );
-        assert!(!response.delay_repay.disclaimer.is_empty());
+        assert_ne!(response.delay_repay.disclaimer, "");
     }
 
     /// A bus or ferry leg is never measured: no delay, no estimate, a
@@ -2721,7 +2721,7 @@ mod tests {
                 response.unmeasurable_reason,
                 Some(TIMETABLE_ONLY_DELAY_REPAY_REASON)
             );
-            assert!(!response.delay_repay.claim_url.is_empty());
+            assert_ne!(response.delay_repay.claim_url, "");
             let json = serde_json::to_value(&response).unwrap();
             assert_eq!(json["liveTracking"], false);
             assert!(json["unmeasurableReason"].is_string());
@@ -2948,7 +2948,7 @@ mod tests {
             response.delay_repay.claim_url,
             "https://delayrepay.lner.co.uk/delayrepayV2/"
         );
-        assert!(!response.delay_repay.disclaimer.is_empty());
+        assert_ne!(response.delay_repay.disclaimer, "");
     }
 }
 

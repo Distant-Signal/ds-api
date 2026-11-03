@@ -525,7 +525,7 @@ mod tests {
     fn normalize_crs_list_trims_uppercases_and_keeps_first_occurrence_order() {
         let input = [" wok", "CLJ", "WOK", "clj ", "wat"].map(String::from);
         assert_eq!(normalize_crs_list(&input), vec!["WOK", "CLJ", "WAT"]);
-        assert!(normalize_crs_list(&[]).is_empty());
+        assert_eq!(normalize_crs_list(&[]), [] as [String; 0]);
     }
 }
 

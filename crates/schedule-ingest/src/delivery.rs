@@ -1095,7 +1095,7 @@ mod tests {
         )
         .unwrap_err();
         assert!(is_rejected(&err));
-        assert!(names_in(storage.path()).is_empty());
+        assert_eq!(names_in(storage.path()), [] as [String; 0]);
     }
 
     /// The content check sees the extracted files before the marker, and a
@@ -1120,7 +1120,7 @@ mod tests {
         .unwrap_err();
         assert!(is_rejected(&err));
         assert_eq!(err.to_string(), "zip delivery rejected: not CIF");
-        assert!(names_in(storage.path()).is_empty());
+        assert_eq!(names_in(storage.path()), [] as [String; 0]);
 
         let (_, how) = ensure_extracted(
             &zip_path,

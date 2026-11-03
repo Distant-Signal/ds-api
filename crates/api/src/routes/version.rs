@@ -103,7 +103,7 @@ mod tests {
         assert_eq!(parsed.len(), 2);
         assert_eq!(parsed[0].revision.as_deref(), Some("abc"));
         assert_eq!(parsed[1].revision, None);
-        assert!(parse_source_images("[]").unwrap().is_empty());
+        assert_eq!(parse_source_images("[]").unwrap(), []);
     }
 
     #[test]

@@ -439,7 +439,9 @@ pub async fn find_pass_events_for_line_best_effort(
 }
 
 #[cfg(test)]
-#[expect(
+// `allow`, not `expect`: clippy 1.99's `float_cmp` no longer fires
+// here, but older toolchains' does (workspace Cargo.toml).
+#[allow(
     clippy::float_cmp,
     reason = "test code: exact expected values are the point"
 )]
@@ -593,7 +595,9 @@ mod tests {
 }
 
 #[cfg(test)]
-#[expect(
+// `allow`, not `expect`: clippy 1.99's `float_cmp` no longer fires
+// here, but older toolchains' does (workspace Cargo.toml).
+#[allow(
     clippy::float_cmp,
     reason = "test code: exact expected values are the point"
 )]
@@ -689,6 +693,6 @@ mod db_tests {
         let found = find_pass_events_for_line_best_effort(&pool, "TEST-NO-SUCH-LINE")
             .await
             .expect("query should succeed even with no matching rows");
-        assert!(found.is_empty());
+        assert_eq!(found, []);
     }
 }

@@ -1495,7 +1495,7 @@ mod db_tests {
 
         let (status, body) = get(&pool, vec![], "/incidents").await;
         assert_eq!(status, StatusCode::OK);
-        assert!(!results(&body).is_empty());
+        assert_ne!(results(&body), [] as [Value; 0]);
         delete_fixtures(&pool).await;
     }
 
@@ -1955,7 +1955,7 @@ mod db_tests {
             "an unmatched filter is a 200 with an empty results array, never a 404 -- there is \
              no 'unpublished' concept for this table"
         );
-        assert!(results(&body).is_empty());
+        assert_eq!(results(&body), [] as [Value; 0]);
         assert!(next_cursor(&body).is_none());
     }
 

@@ -486,8 +486,8 @@ mod stored_group_allowlist_tests {
 
     #[test]
     fn an_empty_admin_group_and_extra_list_allow_nothing() {
-        assert!(stored_group_allowlist("", "").is_empty());
-        assert!(stored_group_allowlist("  ", " , ").is_empty());
+        assert_eq!(stored_group_allowlist("", ""), [] as [String; 0]);
+        assert_eq!(stored_group_allowlist("  ", " , "), [] as [String; 0]);
         assert_eq!(stored_group_allowlist("", "x"), ["x"]);
     }
 

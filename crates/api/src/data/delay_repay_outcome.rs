@@ -411,7 +411,7 @@ mod tests {
         for ((name, .., expected), got) in cases.iter().zip(&got) {
             assert_eq!(got, expected, "{name}");
         }
-        assert!(outcomes(&pool, &[]).await.unwrap().is_empty());
+        assert_eq!(outcomes(&pool, &[]).await.unwrap(), []);
 
         for target in &targets {
             sqlx::query("DELETE FROM trains WHERE id = $1")

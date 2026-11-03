@@ -1202,13 +1202,8 @@ mod db_tests {
             .unwrap();
         assert_eq!(ids(&found), ["940GZZTESTB"]);
         // LIKE wildcards are literal.
-        assert!(search(&pool, "%", &all, 20).await.unwrap().is_empty());
-        assert!(
-            search(&pool, "zzz_testbury", &all, 20)
-                .await
-                .unwrap()
-                .is_empty()
-        );
+        assert_eq!(search(&pool, "%", &all, 20).await.unwrap(), []);
+        assert_eq!(search(&pool, "zzz_testbury", &all, 20).await.unwrap(), []);
 
         let by_id = stops_by_id(&pool, &["940GZZTESTA".to_owned(), "940GZZNOPE".to_owned()])
             .await

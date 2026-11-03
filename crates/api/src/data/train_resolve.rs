@@ -316,7 +316,10 @@ mod tests {
             candidate_service_dates(d("2026-09-27"), d("2026-09-27")),
             vec![d("2026-09-27")]
         );
-        assert!(candidate_service_dates(d("2026-09-28"), d("2026-09-27")).is_empty());
+        assert_eq!(
+            candidate_service_dates(d("2026-09-28"), d("2026-09-27")),
+            []
+        );
     }
 
     fn at(date: &str, time: &str) -> NaiveDateTime {

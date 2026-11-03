@@ -1069,10 +1069,9 @@ mod tests {
         );
         assert_eq!(ranking.order[0].fit, Some(Fit::LikelyNewTicket));
         assert!(ranking.hint.unwrap().contains("likely need a new one"));
-        assert!(
-            rank(&[], &context(advance(), Entitlement::Choice))
-                .order
-                .is_empty()
+        assert_eq!(
+            rank(&[], &context(advance(), Entitlement::Choice)).order,
+            []
         );
     }
 }

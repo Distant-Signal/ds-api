@@ -4143,10 +4143,10 @@ mod tests {
 
     #[test]
     fn assign_events_to_stops_handles_empty_inputs() {
-        assert!(assign_events_to_stops(&[], &[]).is_empty());
-        assert!(
-            assign_events_to_stops(&[], &[event("RDG", "ARRIVAL", "2026-09-14T09:00:00Z")])
-                .is_empty()
+        assert_eq!(assign_events_to_stops(&[], &[]), []);
+        assert_eq!(
+            assign_events_to_stops(&[], &[event("RDG", "ARRIVAL", "2026-09-14T09:00:00Z")]),
+            []
         );
         assert_eq!(
             assign_events_to_stops(&kingston_loop_stops(), &[]),

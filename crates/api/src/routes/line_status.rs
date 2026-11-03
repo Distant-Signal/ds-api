@@ -901,7 +901,9 @@ fn internal_error(err: anyhow::Error) -> (StatusCode, String) {
 }
 
 #[cfg(test)]
-#[expect(
+// `allow`, not `expect`: clippy 1.99's `float_cmp` no longer fires
+// here, but older toolchains' does (workspace Cargo.toml).
+#[allow(
     clippy::float_cmp,
     reason = "test code: exact expected values are the point"
 )]
@@ -1254,7 +1256,9 @@ mod tests {
     }
 
     #[test]
-    #[expect(
+    // `allow`, not `expect`: clippy 1.99's `float_cmp` no longer fires
+    // here, but older toolchains' does (workspace Cargo.toml).
+    #[allow(
         clippy::float_cmp,
         reason = "a zero denominator must yield exactly 0.0"
     )]
@@ -1668,7 +1672,9 @@ mod tests {
     }
 
     #[test]
-    #[expect(
+    // `allow`, not `expect`: clippy 1.99's `float_cmp` no longer fires
+    // here, but older toolchains' does (workspace Cargo.toml).
+    #[allow(
         clippy::float_cmp,
         reason = "a zero denominator must yield exactly 0.0"
     )]
