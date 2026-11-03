@@ -103,6 +103,17 @@ most 10 working tokens per user (`maxActivePerUser`).
 | `preferences:read` | `/v1/preferences`, `/v1/preferences/notifications` |
 | any | `/v1/me` |
 
+## OpenAPI document
+
+`GET /v1/openapi.json` (no token) serves an OpenAPI 3.1 document of the
+`/v1` routes, generated from the code (`personal_tokens::openapi`: the
+paths from `TOKEN_ROUTES`, the response schemas derived by `schemars` from
+the handlers' own types). The committed copy is `api-types/openapi/v1.json`;
+regenerate it with `UPDATE_OPENAPI=1 cargo test -p api
+openapi_document_is_current`. CI's repo-checks job runs Distant-Signal/ci's
+`openapi-breaking` action (oasdiff) against the base commit and fails on a
+breaking change: v1 only grows. A breaking change needs a `/v2` document.
+
 ## Recipes
 
 Step-by-step guides for using a token from things people already run:

@@ -1382,7 +1382,7 @@ pub(crate) async fn get_my_journeys(
     }
 }
 
-#[derive(Debug, Serialize, ts_rs::TS)]
+#[derive(Debug, Serialize, ts_rs::TS, schemars::JsonSchema)]
 #[serde(rename_all = "camelCase")]
 pub(crate) struct JourneyDetailResponse {
     id: i64,
@@ -1434,7 +1434,7 @@ pub(crate) struct JourneyDetailResponse {
 /// wire -- deliberately its own type rather than reusing `UnlistedLink`
 /// directly, so this route's response shape doesn't change if that
 /// module's internal shape ever does.
-#[derive(Debug, Serialize, ts_rs::TS)]
+#[derive(Debug, Serialize, ts_rs::TS, schemars::JsonSchema)]
 #[serde(rename_all = "camelCase")]
 pub(crate) struct ShareLinkResponse {
     /// `Some` ONLY in the response to the `POST .../share-link` that just
@@ -1446,7 +1446,7 @@ pub(crate) struct ShareLinkResponse {
     expires_at: Option<DateTime<Utc>>,
 }
 
-#[derive(Debug, Serialize, ts_rs::TS)]
+#[derive(Debug, Serialize, ts_rs::TS, schemars::JsonSchema)]
 #[serde(rename_all = "camelCase")]
 pub(crate) struct JourneyLegDetailResponse {
     id: i64,
@@ -1465,6 +1465,7 @@ pub(crate) struct JourneyLegDetailResponse {
     arrive_after: Option<NaiveTime>,
     arrive_before: Option<NaiveTime>,
     #[ts(as = "crate::ts_values::MatchMode")]
+    #[schemars(with = "crate::ts_values::MatchMode")]
     match_mode: String,
     /// Whether this leg was ever created via a window search -- `true` for
     /// a `window`-mode leg (even one with all four `depart_*`/`arrive_*`
@@ -1493,8 +1494,10 @@ pub(crate) struct JourneyLegDetailResponse {
     /// `destinationName` are its place names and the fields below are set;
     /// for a train leg they are `null`.
     #[ts(as = "crate::ts_values::JourneyLegKind")]
+    #[schemars(with = "crate::ts_values::JourneyLegKind")]
     kind: String,
     #[ts(as = "Option<crate::ts_values::TransitMode>")]
+    #[schemars(with = "Option<crate::ts_values::TransitMode>")]
     transit_mode: Option<String>,
     line_name: Option<String>,
     planned_departure: Option<DateTime<Utc>>,
@@ -1541,7 +1544,7 @@ pub(crate) struct JourneyLegDetailResponse {
     timetable: Option<crate::data::timetabled_legs::LegTimetable>,
 }
 
-#[derive(Debug, Serialize, ts_rs::TS)]
+#[derive(Debug, Serialize, ts_rs::TS, schemars::JsonSchema)]
 #[serde(rename_all = "camelCase")]
 pub(crate) struct LegSkipResponse {
     origin_skipped: bool,

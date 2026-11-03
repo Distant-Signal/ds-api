@@ -27,6 +27,7 @@
 //! looks at it ([`refuse_on_main_listener`]).
 
 pub mod gate;
+pub mod openapi;
 pub mod token;
 
 use std::net::IpAddr;
@@ -170,6 +171,13 @@ pub const TOKEN_ROUTES: &[TokenRoute] = &[
         scope: None,
         class: RouteClass::Open,
         max_age_secs: 60,
+        sources: &[],
+    },
+    TokenRoute {
+        path: openapi::OPENAPI_PATH,
+        scope: None,
+        class: RouteClass::Open,
+        max_age_secs: 3600,
         sources: &[],
     },
     TokenRoute {
@@ -509,9 +517,9 @@ async fn status() -> axum::Json<serde_json::Value> {
 }
 
 /// `GET /v1/me`: the token itself, so a client can check what it holds.
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, schemars::JsonSchema)]
 #[serde(rename_all = "camelCase")]
-struct MeResponse {
+pub(crate) struct MeResponse {
     name: String,
     scopes: Vec<&'static str>,
     created_at: chrono::DateTime<chrono::Utc>,
@@ -536,6 +544,7 @@ pub fn router(app: &App, edge: &crate::edge::EdgeSettings) -> Router {
     use crate::routes::{departures, journeys, line_status, preferences, train};
     let v1 = Router::new()
         .route("/status", get(status))
+        .route("/openapi.json", get(openapi::serve))
         .route("/me", get(me))
         .route("/Journeys/mine", get(journeys::get_my_journeys))
         .route("/Journeys/{journey_id}", get(journeys::get_journey))
@@ -612,17 +621,19 @@ mod tests {
         assert_eq!(PersonalScope::parse("journeys:write"), None);
     }
 
-    /// Every user-data route needs a scope, and only `/v1/status` is open.
+    /// Every user-data route needs a scope, and only `/v1/status` and the
+    /// `OpenAPI` document are open.
     #[test]
-    fn only_the_status_route_is_open() {
+    fn only_the_status_and_document_routes_are_open() {
+        let open = ["/v1/status", openapi::OPENAPI_PATH];
         for route in TOKEN_ROUTES {
             assert_eq!(
                 route.class == RouteClass::Open,
-                route.path == "/v1/status",
+                open.contains(&route.path),
                 "{}",
                 route.path
             );
-            if route.path != "/v1/status" && route.path != "/v1/me" {
+            if !open.contains(&route.path) && route.path != "/v1/me" {
                 assert!(route.scope.is_some(), "{} has no scope", route.path);
             }
         }

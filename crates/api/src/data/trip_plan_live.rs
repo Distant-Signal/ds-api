@@ -1225,7 +1225,9 @@ pub fn interchange_feasible(departure_min: i64, ready_min: i64, change_minutes: 
 /// The live overlay keeps a late train late (no recovery is modelled), so
 /// such a change is offered, but the train could make up time and leave
 /// nearer its booked time, before the traveller can reach it.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, serde::Deserialize, ts_rs::TS)]
+#[derive(
+    Debug, Clone, PartialEq, Eq, Serialize, serde::Deserialize, ts_rs::TS, schemars::JsonSchema,
+)]
 #[serde(rename_all = "camelCase")]
 pub struct LateDepartureReliance<T> {
     /// The onward train's timetabled (public, else working) departure.

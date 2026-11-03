@@ -52,7 +52,7 @@ pub fn router() -> Router {
 /// timezone}`, `HH:MM` local times and an IANA zone, or `null` for none);
 /// `snoozedUntil` (pushes held until then as in quiet hours, at most a
 /// week ahead; `null` when not snoozed).
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, schemars::JsonSchema)]
 #[serde(rename_all = "camelCase")]
 #[expect(
     clippy::struct_excessive_bools,
@@ -71,7 +71,7 @@ pub(crate) struct NotificationPreferences {
     snoozed_until: Option<chrono::DateTime<chrono::Utc>>,
 }
 
-#[derive(Debug, Clone, serde::Deserialize, Serialize)]
+#[derive(Debug, Clone, serde::Deserialize, Serialize, schemars::JsonSchema)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 struct QuietHoursBody {
     start: String,
@@ -224,7 +224,7 @@ async fn put_notification_preferences(
     Ok(Json(settings.into()))
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, schemars::JsonSchema)]
 #[serde(rename_all = "camelCase")]
 pub(crate) struct PreferencesResponse {
     pinned_lines: Vec<String>,

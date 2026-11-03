@@ -48,7 +48,7 @@ pub async fn shared_train_enrichment_state(
 /// that helper operates on `TrackedTrainState`'s own pin-shaped input;
 /// wiring it into this new public shape is left as a fast-follow, not
 /// part of this task's own scope (only the ownership-check removal).
-#[derive(Debug, Clone, sqlx::FromRow, Serialize, ts_rs::TS)]
+#[derive(Debug, Clone, sqlx::FromRow, Serialize, ts_rs::TS, schemars::JsonSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct PublicTrainState {
     /// The SHARED `trains` row's own surrogate key, serialized as
@@ -83,6 +83,7 @@ pub struct PublicTrainState {
     /// when no row carries one or the rows disagree.
     pub headcode: Option<String>,
     #[ts(as = "Option<crate::ts_values::JourneyStatus>")]
+    #[schemars(with = "Option<crate::ts_values::JourneyStatus>")]
     pub status: Option<String>,
     pub last_reported_location: Option<String>,
     pub last_event_type: Option<String>,
@@ -108,6 +109,7 @@ pub struct PublicTrainState {
     pub next_calling_point: Option<String>,
     pub eta_next: Option<DateTime<Utc>>,
     #[ts(as = "Option<crate::ts_values::EtaSource>")]
+    #[schemars(with = "Option<crate::ts_values::EtaSource>")]
     pub eta_source: Option<String>,
     /// The shared row's own captured Darwin skip snapshot
     /// (`trains.skipped_stations`) -- internal plumbing for

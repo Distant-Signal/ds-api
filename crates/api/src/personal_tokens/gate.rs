@@ -418,7 +418,8 @@ pub async fn envelope_and_cache(request: Request, next: Next) -> Response {
         }
         return response;
     }
-    if !is_json(&parts.headers) {
+    // The `OpenAPI` document is served as is, never wrapped.
+    if !is_json(&parts.headers) || route.path == super::openapi::OPENAPI_PATH {
         return Response::from_parts(parts, Body::from(bytes));
     }
     let attribution = serde_json::json!({

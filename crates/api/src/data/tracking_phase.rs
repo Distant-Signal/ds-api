@@ -36,7 +36,7 @@ pub const ACTIVATION_DUE_BEFORE_ORIGIN: Duration = Duration::minutes(45);
 
 /// The traveller-facing phase of a tracked train (spec §4.3), evaluated in
 /// declaration order.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, ts_rs::TS)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, ts_rs::TS, schemars::JsonSchema)]
 #[serde(rename_all = "camelCase")]
 pub enum TrackingPhase {
     /// A bus or ferry: TRUST never reports it.
