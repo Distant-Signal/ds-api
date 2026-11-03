@@ -67,6 +67,12 @@ reqwest = { version = "0.12", default-features = false, features = ["json", "nat
 schedule-query = { path = "../schedule-query" }
 serde = { version = "1.0.228", features = ["derive"] }
 serde-inline-default = "1.0.1"
+# The OpenAPI document of the personal-token `/v1` routes
+# (`personal_tokens::openapi`): JSON Schema 2020-12 from the response types,
+# derived next to their `ts_rs::TS`. Never its `preserve_order` feature: it
+# turns on serde_json's for the whole workspace, which reorders every
+# `serde_json::Map` the api serves (a station's facilities, for one).
+schemars = { version = "1.2.3", default-features = false, features = ["derive", "std", "chrono04"] }
 # `raw_value`: `GET /public/lines/{id}/trains` carries multi-MB population JSON through
 # `serde_json::value::RawValue` instead of building a `Value` tree -- see
 # `data::queries::upsert_schedule_line_population`'s doc comment.

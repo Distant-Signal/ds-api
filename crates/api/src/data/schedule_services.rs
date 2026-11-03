@@ -25,7 +25,19 @@ use sqlx::PgPool;
 /// What kind of vehicle a schedule is. The stored spelling is
 /// [`Self::as_db_str`] (`replacement_bus`), the wire spelling camelCase
 /// (`replacementBus`).
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default, Serialize, Deserialize, ts_rs::TS)]
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    PartialEq,
+    Eq,
+    Hash,
+    Default,
+    Serialize,
+    Deserialize,
+    ts_rs::TS,
+    schemars::JsonSchema,
+)]
 #[serde(rename_all = "camelCase")]
 pub enum ServiceMode {
     #[default]
@@ -96,8 +108,9 @@ pub struct ServiceModeFields(pub ServiceMode);
 
 /// [`ServiceModeFields`]'s wire shape, for its generated TypeScript only
 /// (`api_types`): the `Serialize` impl below writes these two entries.
-#[derive(ts_rs::TS)]
+#[derive(ts_rs::TS, schemars::JsonSchema)]
 #[ts(rename = "ServiceModeFields", rename_all = "camelCase")]
+#[schemars(rename = "ServiceModeFields", rename_all = "camelCase")]
 pub struct ServiceModeFieldsWire {
     pub service_mode: ServiceMode,
     pub live_tracking: bool,
@@ -105,6 +118,17 @@ pub struct ServiceModeFieldsWire {
 
 /// `ts_rs::TS` by way of [`ServiceModeFieldsWire`], written out because `#[ts(as)]` cannot
 /// be flattened, and this type is `#[serde(flatten)]`ed into response types.
+/// `schemars::JsonSchema` by way of [`ServiceModeFieldsWire`], for the same
+/// reason as its `ts_rs::TS` below (the `OpenAPI` document).
+impl schemars::JsonSchema for ServiceModeFields {
+    fn schema_name() -> std::borrow::Cow<'static, str> {
+        <ServiceModeFieldsWire as schemars::JsonSchema>::schema_name()
+    }
+    fn json_schema(generator: &mut schemars::SchemaGenerator) -> schemars::Schema {
+        <ServiceModeFieldsWire as schemars::JsonSchema>::json_schema(generator)
+    }
+}
+
 impl ts_rs::TS for ServiceModeFields {
     type WithoutGenerics = <ServiceModeFieldsWire as ts_rs::TS>::WithoutGenerics;
     type OptionInnerType = Self;

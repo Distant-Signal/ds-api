@@ -35,7 +35,7 @@ use crate::data::trip_planning::{self, GraphCache};
 pub const AT_RISK_SLACK_MINUTES: i64 = 3;
 
 /// How one change between two consecutive legs stands.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, ts_rs::TS)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, ts_rs::TS, schemars::JsonSchema)]
 #[serde(rename_all = "camelCase")]
 pub enum ConnectionState {
     /// Enough time to change, with room to spare (or none was needed).
@@ -53,7 +53,7 @@ pub enum ConnectionState {
 
 /// The change onto a leg from the one before it (`connection` on every
 /// leg of `GET /Journeys/{id}` after the first).
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, ts_rs::TS)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, ts_rs::TS, schemars::JsonSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct LegConnection {
     /// Minutes from the previous leg's expected arrival (reported, else
@@ -85,7 +85,7 @@ pub struct LegConnection {
 }
 
 /// A ride of a timetabled leg, by its scheduled times.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, ts_rs::TS)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, ts_rs::TS, schemars::JsonSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct TimetabledRide {
     pub departure: DateTime<Utc>,

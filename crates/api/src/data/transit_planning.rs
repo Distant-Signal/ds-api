@@ -1504,7 +1504,7 @@ pub struct TransitLegStop {
 }
 
 /// A notice on a transit leg (spec §7.3): a current disruption on its line.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, ts_rs::TS)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, ts_rs::TS, schemars::JsonSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct TransitLegNotice {
     /// `disruption`.
