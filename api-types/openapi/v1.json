@@ -1,0 +1,4309 @@
+{
+  "components": {
+    "schemas": {
+      "Attribution": {
+        "description": "The credits the data needs. Show them wherever you show the data.",
+        "properties": {
+          "sources": {
+            "items": {
+              "properties": {
+                "name": {
+                  "type": "string"
+                },
+                "notice": {
+                  "description": "The wording to show, unchanged.",
+                  "type": "string"
+                },
+                "url": {
+                  "format": "uri",
+                  "type": "string"
+                }
+              },
+              "required": [
+                "name",
+                "notice"
+              ],
+              "type": "object"
+            },
+            "type": "array"
+          },
+          "statement": {
+            "description": "Distant Signal's non-affiliation statement.",
+            "type": "string"
+          }
+        },
+        "required": [
+          "sources",
+          "statement"
+        ],
+        "type": "object"
+      },
+      "BreakCause": {
+        "description": "`journey_breaks.cause` (its CHECK constraint).",
+        "enum": [
+          "cancelled",
+          "part_cancelled",
+          "connection_missed",
+          "user_missed",
+          "skipped_stop"
+        ],
+        "type": "string"
+      },
+      "BreakFault": {
+        "description": "`journey_breaks.fault` (its CHECK constraint).",
+        "enum": [
+          "operator",
+          "user",
+          "unknown"
+        ],
+        "type": "string"
+      },
+      "CallingPointKind": {
+        "description": "`schedule_query::CallingPointKind`'s values, for [`JourneyStop`]'s\nJSON Schema only (that crate has no `schemars`). Never built.",
+        "enum": [
+          "Origin",
+          "Intermediate",
+          "Terminate"
+        ],
+        "type": "string"
+      },
+      "Cancellation": {
+        "properties": {
+          "at": {
+            "description": "When the cancellation (else the change of origin) was made.",
+            "format": "date-time",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "from": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/CancellationStop"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "The only section's `from`, or `null` with several."
+          },
+          "kind": {
+            "$ref": "#/components/schemas/CancellationKind"
+          },
+          "reason": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/CancellationReason"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "sections": {
+            "description": "In route order; empty when the train has no calling points.",
+            "items": {
+              "$ref": "#/components/schemas/CancelledSection"
+            },
+            "type": "array"
+          },
+          "startsFrom": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/CancellationStop"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "The first call still served, when the train starts short of its\nbooked origin (a change of origin, or cancelled at the start)."
+          },
+          "terminatesAt": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/CancellationStop"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "The last call still served, when the train terminates short of its\nbooked destination."
+          },
+          "to": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/CancellationStop"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "The only section's `to`, or `null` with several."
+          }
+        },
+        "required": [
+          "kind",
+          "sections"
+        ],
+        "type": "object"
+      },
+      "CancellationKind": {
+        "description": "Whether every public call is cancelled.",
+        "enum": [
+          "full",
+          "partial"
+        ],
+        "type": "string"
+      },
+      "CancellationPlace": {
+        "description": "A place a [`CancellationSummary`] names. No `stopIndex`: a list row\ncarries no stops to index.",
+        "properties": {
+          "crs": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "name": {
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        },
+        "type": "object"
+      },
+      "CancellationReason": {
+        "properties": {
+          "code": {
+            "description": "The source's own code: a TRUST delay attribution code (`\"JP\"`), or\n`null` for LDBWS, which serves text only.",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "source": {
+            "$ref": "#/components/schemas/ReasonSource"
+          },
+          "text": {
+            "description": "Passenger-readable text: Darwin's own sentence for `ldbws`, the\nglossary description for `trust`. `null` for a TRUST code with no\ntext (`PD`, `ZW`, or one missing from the 2021 glossary).",
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        },
+        "required": [
+          "source"
+        ],
+        "type": "object"
+      },
+      "CancellationStop": {
+        "description": "A call named by a cancellation.",
+        "properties": {
+          "crs": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "name": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "stopIndex": {
+            "description": "Index into the response's `journeyStops`.",
+            "format": "uint",
+            "minimum": 0,
+            "type": "integer"
+          }
+        },
+        "required": [
+          "stopIndex"
+        ],
+        "type": "object"
+      },
+      "CancellationSummary": {
+        "description": "The compact form of a [`Cancellation`] for rows that carry no stops\n(`GET /Journeys/mine`, `GET /Train/mine`) and for push copy: enough to\nsay \"Terminates at York\" or \"Starts from York\" rather than plain\n\"Cancelled\", and why.",
+        "properties": {
+          "kind": {
+            "$ref": "#/components/schemas/CancellationKind"
+          },
+          "reason": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/CancellationReason"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "startsFrom": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/CancellationPlace"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "terminatesAt": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/CancellationPlace"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          }
+        },
+        "required": [
+          "kind"
+        ],
+        "type": "object"
+      },
+      "CancelledSection": {
+        "description": "A part of the route the train does not run: the calls strictly between\n`from` and `to` are cancelled, and so is `from` at the origin end or `to`\nat the destination end.",
+        "properties": {
+          "from": {
+            "$ref": "#/components/schemas/CancellationStop"
+          },
+          "to": {
+            "$ref": "#/components/schemas/CancellationStop"
+          }
+        },
+        "required": [
+          "from",
+          "to"
+        ],
+        "type": "object"
+      },
+      "Confidence": {
+        "description": "How sure the prediction is. Ordered: `Low < Medium < High`.",
+        "enum": [
+          "low",
+          "medium",
+          "high"
+        ],
+        "type": "string"
+      },
+      "ConnectionState": {
+        "description": "How one change between two consecutive legs stands.",
+        "oneOf": [
+          {
+            "const": "ok",
+            "description": "Enough time to change, with room to spare (or none was needed).",
+            "type": "string"
+          },
+          {
+            "const": "atRisk",
+            "description": "Delays leave less than [`AT_RISK_SLACK_MINUTES`] to spare, or the\nchange was booked below the minimum change time and is no worse.",
+            "type": "string"
+          },
+          {
+            "const": "missed",
+            "description": "The next leg leaves before the traveller can get to it.",
+            "type": "string"
+          },
+          {
+            "const": "unknown",
+            "description": "Not judged: a time is unknown, a train is cancelled at either end of\nthe change, the station allows no interchange (MSN 98 or 99), or no\nfixed link joins two different stations.",
+            "type": "string"
+          }
+        ]
+      },
+      "DelayBasis": {
+        "description": "Which baseline a delay was measured against. See the module doc.",
+        "oneOf": [
+          {
+            "const": "public",
+            "description": "TRUST's own public-timetable time (`gbtt_timestamp`).",
+            "type": "string"
+          },
+          {
+            "const": "publicSchedule",
+            "description": "The public time from the CIF schedule at that call.",
+            "type": "string"
+          },
+          {
+            "const": "working",
+            "description": "The working timetable: no public time was known.",
+            "type": "string"
+          }
+        ]
+      },
+      "ErrorBody": {
+        "properties": {
+          "error": {
+            "description": "A stable code, e.g. invalid_token.",
+            "type": "string"
+          },
+          "message": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "error",
+          "message"
+        ],
+        "type": "object"
+      },
+      "EtaSource": {
+        "description": "Where an estimate came from: `train_current_state.eta_source` (its\nCHECK constraint) and `ds_store::trains::predicted_start::BASIS`.",
+        "enum": [
+          "trust-propagated",
+          "darwin-estimated",
+          "previous-working"
+        ],
+        "type": "string"
+      },
+      "FollowVia": {
+        "description": "How a follow reached the journey.",
+        "enum": [
+          "group",
+          "link"
+        ],
+        "type": "string"
+      },
+      "FollowedFrom": {
+        "description": "Who shared a followed journey and how, for the \"Shared by ...\" label.\nOnly what the share already shows: a group member sees the sharer's\nname in the group, so a group follow carries it (by the same rule as\nevery other member label, `users::MemberDisplay`) and the group's name;\na share link shows nothing about its owner, so a link follow carries\nneither.",
+        "properties": {
+          "followedAt": {
+            "format": "date-time",
+            "type": "string"
+          },
+          "groupId": {
+            "description": "The group the journey was followed through; `None` for a link.",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "groupName": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "ownerName": {
+            "description": "The owner's display name; `None` for a link, or when no name is on\nfile (then `owner_tag` is set, as `GroupJourney.addedByTag`).",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "ownerTag": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "via": {
+            "$ref": "#/components/schemas/FollowVia"
+          }
+        },
+        "required": [
+          "via",
+          "followedAt"
+        ],
+        "type": "object"
+      },
+      "JourneyDetailResponse": {
+        "description": "What `GET /Journeys/{id}` gains (flattened into its response).",
+        "properties": {
+          "canFollow": {
+            "description": "Whether the caller could follow this journey through a group it is\nshared into (DS-146), i.e. `POST /Journeys/{id}/follow` with no body\nwould succeed. Session callers who don't own or already follow it;\nabsent (false) otherwise. A share-link visitor follows with the\nlink's token instead.",
+            "type": "boolean"
+          },
+          "createdAt": {
+            "format": "date-time",
+            "type": "string"
+          },
+          "createdVia": {
+            "description": "`'web'`, or the delegated client that saved it (spec 2026-10-14\n§5.8). Only for the journey's owner: absent from the public\nshare-link route and from a group member's view, which have no use\nfor how the owner saved it.",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "customName": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "followedFrom": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/FollowedFrom"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Set when the caller follows this journey (DS-146): who shared it and\nhow. Session callers only; absent otherwise."
+          },
+          "id": {
+            "format": "int64",
+            "type": "integer"
+          },
+          "isOwner": {
+            "description": "Whether the CALLER owns this journey, as opposed to reading it via a\ngroup it's been shared into (`journey_readable_by`). The frontend\ngates every owner-only action (share-to-group button, unmatched-leg\ncandidate picker, matched-leg \"Change train\") on this flag -- the\nbackend still refuses all three regardless for a non-owner, but\nshowing them at all to a fellow group member who can only ever get a\n404 is its own bug. See this plan's final-review findings (I1).",
+            "type": "boolean"
+          },
+          "legs": {
+            "items": {
+              "$ref": "#/components/schemas/JourneyLegDetailResponse"
+            },
+            "type": "array"
+          },
+          "openBreak": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/OpenBreakSummary"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "The open break, `null` when the journey works."
+          },
+          "operatorFilter": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/JourneyOperatorFilter"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "The `/plan` operator filter the journey keeps (owner only; additive,\n2026-10-31). Absent when it has none."
+          },
+          "revisionCount": {
+            "description": "How many plans the journey has had (1: only the booked one).",
+            "format": "int64",
+            "type": "integer"
+          },
+          "shareLink": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/ShareLinkResponse"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "The journey's currently-active unlisted share link, if any --\n`Some` only when `is_owner` is `true` (see `build_journey_detail_response`).\nA non-owner (a fellow group member, or a visitor who reached this\njourney via the share link itself) never sees a live, usable token\nthis way -- design doc §4."
+          },
+          "suggestionsMuted": {
+            "description": "Suggestion pushes muted for this journey (owner only).",
+            "type": [
+              "boolean",
+              "null"
+            ]
+          }
+        },
+        "required": [
+          "id",
+          "createdAt",
+          "legs",
+          "isOwner",
+          "revisionCount",
+          "canFollow"
+        ],
+        "type": "object"
+      },
+      "JourneyLegDetailResponse": {
+        "properties": {
+          "arriveAfter": {
+            "format": "partial-time",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "arriveBefore": {
+            "format": "partial-time",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "connection": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/LegConnection"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "The change onto this leg from the one before, judged server-side on\nlive times with the station's minimum change time (spec 2026-10-22\n§5.1, `data::journey_feasibility`). `null` on the first leg; absent\naltogether when it couldn't be worked out (the frontend then falls\nback to its own gap check). Additive, 2026-10-22."
+          },
+          "departAfter": {
+            "format": "partial-time",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "departBefore": {
+            "format": "partial-time",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "destinationCrs": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "destinationName": {
+            "description": "See `origin_name`'s doc comment -- same mechanism, joined on\n`destination_crs`.",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "destinationStopId": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "headsign": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "id": {
+            "format": "int64",
+            "type": "integer"
+          },
+          "kind": {
+            "$ref": "#/components/schemas/JourneyLegKind",
+            "description": "`train` or `untracked` (spec 2026-10-20 §2.4). Read this before\ntreating `trackedTrainState: null` as \"needs a train\": an untracked\nleg never has one. For an untracked leg, `originName`/\n`destinationName` are its place names and the fields below are set;\nfor a train leg they are `null`."
+          },
+          "legSkip": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/LegSkipResponse"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "`null` when the leg has no matched train yet, or no known\norigin/destination to check against (nothing to report -- not\n\"checked and clean\"). See `station_skip.rs` and this plan's §5.2."
+          },
+          "lineName": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "matchMode": {
+            "$ref": "#/components/schemas/MatchMode"
+          },
+          "originCrs": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "originName": {
+            "description": "`None` whenever `origin_crs` is `None`, or there is no `stations`\nreference row for the code (a real, if rare, gap) -- see\n`data::journeys::JourneyLegWithNamesRow`'s own doc comment.",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "originStopId": {
+            "description": "The `TfL` stop ids of an untracked leg's places, when they were\npicked from `GET /tfl/stops` (additive, 2026-10-20); `null` for free\ntext and on a train leg.",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "plannedArrival": {
+            "format": "date-time",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "plannedDeparture": {
+            "format": "date-time",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "replacesLegIds": {
+            "description": "The legs of the plan before the latest change that this leg\nreplaced (additive, 2026-10-23); empty for a leg the latest change\nkept or for a journey never changed.",
+            "items": {
+              "format": "int64",
+              "type": "integer"
+            },
+            "type": "array"
+          },
+          "searchFilters": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/LegSearchFilters"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "A window leg's search filters (DS-215, additive 2026-10-31): the\nBetween stations filters its candidates apply,\n`journeys::LegSearchFilters`'s camelCase keys, unset ones absent;\n`null` when it has none."
+          },
+          "serviceDate": {
+            "format": "date",
+            "type": "string"
+          },
+          "timetable": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/LegTimetable"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "What the network's active timetable says about that ride now\n(`data::timetabled_legs::LegTimetable`): scheduled times only,\nnever live. Absent on other legs, and when it couldn't be read."
+          },
+          "trackedTrainState": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/TrackedTrainState"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "`Some` once a train is bound -- the EXACT same shape\n`GET /Train/{trackingId}` returns\n(`train_tracking::TRACKED_TRAIN_STATE_SELECT`, `attach_journey_stops`,\n`blend_darwin_eta`, all reused unchanged; design doc §4). `None`\nfor an unmatched (`train_subscription_id IS NULL`) leg."
+          },
+          "transitLineId": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "transitMode": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/TransitMode"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "transitNetwork": {
+            "description": "A timetabled untracked leg's network ride, as saved (DS-237,\nadditive): its network (`tfl`), its line's local id (`victoria`)\nand its headsign; `null` on every other leg.",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "untrackedStatus": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/UntrackedStatus"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "The untracked leg's clock-only state at read time."
+          },
+          "windowSearched": {
+            "description": "Whether this leg was ever created via a window search -- `true` for\na `window`-mode leg (even one with all four `depart_*`/`arrive_*`\nbounds left unset, a deliberate \"any train, any time\" search) or a\ntemplate-materialized leg (always a search); `false` for a\n`pin`/`knownTrain`-mode leg, which never had a window to search.\nBacks `JourneyLegCard.tsx`'s `hasWindow`/\"Change train\" gate --\n19-pass security/bug review, journeys area, Medium finding 1. See\n`data::journeys::JourneyLegRow::window_searched`'s own doc comment\nfor the full \"why a fourth NULL-checkable field isn't enough\"\nreasoning.",
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "id",
+          "serviceDate",
+          "matchMode",
+          "windowSearched",
+          "kind",
+          "replacesLegIds"
+        ],
+        "type": "object"
+      },
+      "JourneyLegKind": {
+        "description": "`journey_legs.kind` (its CHECK constraint).",
+        "enum": [
+          "train",
+          "untracked"
+        ],
+        "type": "string"
+      },
+      "JourneyListItem": {
+        "description": "One row of `GET /Journeys/mine` -- deliberately lighter than the full\n`GET /Journeys/{id}` detail (`routes::journeys::JourneyDetailResponse`),\nmirroring `TrackedTrainListItem`'s own \"list is lighter than detail\"\nsplit. This surfaces a single leg's fields directly, not a nested array\n-- the \"current leg\" (the earliest leg that isn't already `completed`,\nor the journey's LAST leg if every leg is `completed`). A genuine\nmulti-leg rollup (design doc §3's \"worst status across legs\" idiom) is a\nlater phase's job.",
+        "properties": {
+          "cancellation": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/CancellationSummary"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "The current leg's train's compact cancellation\n(`data::cancellation`'s list form): full or partial, where it now\nstarts or terminates, and why. `null` when no part of its run is\ncancelled, and for an open or untracked leg. Additive (2026-10-27)."
+          },
+          "cancelledLegCount": {
+            "format": "int64",
+            "type": "integer"
+          },
+          "createdAt": {
+            "format": "date-time",
+            "type": "string"
+          },
+          "createdVia": {
+            "description": "`'web'`, or the delegated client that saved the journey (spec\n2026-10-14 §5.8). A delegated client may delete only its own\n(§5.5a), so its list needs this. Absent on a followed journey's row:\nhow its owner saved it is not the follower's business.",
+            "type": "string"
+          },
+          "customName": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "delayBasis": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/DelayBasis"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "What `delay_minutes` was measured against (`public`, `publicSchedule`\nor `working`, see `common::public_delay::DelayBasis`); `None` exactly\nwhen `delay_minutes` is."
+          },
+          "delayMinutes": {
+            "description": "The delay at the passenger's own stop, against the PUBLIC timetable\n(`data::stop_delay`, design doc §9 decision 2): the current leg's destination. `None` until\nknown.",
+            "format": "int32",
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "delayProvisional": {
+            "description": "`true` while `delay_minutes` is a forecast (the train has not reported\nat that stop yet).",
+            "type": "boolean"
+          },
+          "departsAt": {
+            "description": "The list's sort key (DS-178): when the journey sets off, its first\nleg's departure (see [`list_journeys_for_user`] for the fallbacks),\nso a client merging rows from another list (a train tracked on its\nown) can place them without re-deriving it. Additive, 2026-10-26.",
+            "format": "date-time",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "destinationCrs": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "destinationName": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "finalArrivalDelayMinutes": {
+            "description": "The delay at the journey's final arrival: the last train leg's\npublic delay at its own destination. A journey is on time or late\nby this, not by an earlier leg. `None` when not known, when the\njourney has no train leg, or when that train is cancelled.",
+            "format": "int32",
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "finalArrivalDelayProvisional": {
+            "type": "boolean"
+          },
+          "finalDestinationCrs": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "writeOnly": true
+          },
+          "finalServiceDate": {
+            "format": "date",
+            "type": [
+              "string",
+              "null"
+            ],
+            "writeOnly": true
+          },
+          "finalStatus": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "writeOnly": true
+          },
+          "finalTrainUid": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "writeOnly": true
+          },
+          "finalTrainsId": {
+            "description": "The last train leg's train, date, destination, running delay and\nstatus, internal: what `final_arrival_delay_minutes` is read for.",
+            "format": "int64",
+            "type": [
+              "integer",
+              "null"
+            ],
+            "writeOnly": true
+          },
+          "finalWorkingDelayMinutes": {
+            "format": "int32",
+            "type": [
+              "integer",
+              "null"
+            ],
+            "writeOnly": true
+          },
+          "finishedLegCount": {
+            "format": "int64",
+            "type": "integer"
+          },
+          "firstOriginCrs": {
+            "description": "The whole journey's ends, for naming it: the FIRST leg's origin and\nthe LAST leg's destination (by `leg_order`), whatever the current\nleg is. `origin_crs`/`destination_crs` above are the current leg's\nown ends, which for a journey not yet under way are the first\nleg's -- naming a planned three-leg journey from them showed it\nending at its first change. Names resolve as above. Additive\n(2026-10-20).",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "firstOriginName": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "firstReportExpectedAt": {
+            "format": "date-time",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "firstServiceDate": {
+            "description": "The first leg's `service_date`: the day the journey starts, which\nis what names it. `service_date` above is the current leg's.",
+            "format": "date",
+            "type": "string"
+          },
+          "followedFrom": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/FollowedFrom"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Set on a journey the caller follows rather than owns (DS-146,\n`include=followed` only): who shared it and how. Such a row is\nread-only. Absent on the caller's own journeys."
+          },
+          "id": {
+            "format": "int64",
+            "type": "integer"
+          },
+          "kind": {
+            "$ref": "#/components/schemas/JourneyLegKind",
+            "description": "The current leg's kind: `train` or `untracked` (spec 2026-10-20\n§2.4). For an untracked leg `originName`/`destinationName` carry its\nplace names, and the five fields below are set."
+          },
+          "lastDestinationCrs": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "lastDestinationName": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "legCount": {
+            "description": "How many legs the journey has.",
+            "format": "int64",
+            "type": "integer"
+          },
+          "legId": {
+            "format": "int64",
+            "type": "integer"
+          },
+          "lineName": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "matchMode": {
+            "$ref": "#/components/schemas/MatchMode"
+          },
+          "openBreakId": {
+            "description": "The journey's open break (mid-journey changes spec 2026-10-22 §7),\n`None` when it works. Additive, 2026-10-23.",
+            "format": "int64",
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "originCrs": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "originName": {
+            "description": "Resolved display names for `origin_crs`/`destination_crs`, via the\nsame `LEFT JOIN stations ... ON s.crs = UPPER(...)` mechanism\n`train_tracking::list_tracked_trains_for_user` already uses (see\nits comment for why `UPPER` is mandatory). `None` when the code is\nitself `None`, or when no reference row exists for it --\n`lib/stationLabel.ts`'s `routeLabel` degrades both ends to bare\ncodes together in that case, rather than mixing one resolved name\nwith one bare code.",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "plannedArrival": {
+            "format": "date-time",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "plannedDeparture": {
+            "format": "date-time",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "resolutionStatus": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/ResolutionStatus"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "serviceDate": {
+            "description": "The current leg's own `journey_legs.service_date` -- the date the\ntraveller is travelling, NOT `created_at` (the date they set the\njourney up, which can be weeks earlier). A list row cannot name\nwhich journey it is without it; `/track/mine`'s tracked-train rows\nbeside it have printed a real service date since they shipped.",
+            "format": "date",
+            "type": "string"
+          },
+          "sharedVia": {
+            "description": "Set on a journey another member shared into one or more of the\ncaller's groups (DS-178, `include=shared` only): one entry per such\ngroup, newest share first. Such a row is read-only. Absent on the\ncaller's own journeys; a followed journey that is also shared into\none of their groups carries both.",
+            "items": {
+              "$ref": "#/components/schemas/SharedVia"
+            },
+            "type": "array"
+          },
+          "startedLegCount": {
+            "format": "int64",
+            "type": "integer"
+          },
+          "status": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/JourneyStatus"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "timetableOnRow": {
+            "description": "Whether the leg's `trains` row carries timetable data, internal: an\ninput to `tracking_phase`.",
+            "type": "boolean",
+            "writeOnly": true
+          },
+          "trackingPhase": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/TrackingPhase"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "The current train leg's `trackingPhase` (see\n`train_tracking::TrackedTrainState::tracking_phase`); `None` for an\nopen or untracked leg."
+          },
+          "trainLegCount": {
+            "description": "The whole journey, not just the current leg (additive, 2026-10-21):\nhow many legs are train legs, have a cancelled train, are train legs\nwith no train picked, are over and have started. A train leg is over\nonce its train is `completed` or has reached the leg's destination\nper `travel_order::train_arrived_sql`; an untracked leg once its\nplanned arrival has passed.",
+            "format": "int64",
+            "type": "integer"
+          },
+          "trainSubscriptionId": {
+            "format": "int64",
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "trainUid": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "writeOnly": true
+          },
+          "trainsId": {
+            "description": "The leg's shared `trains` row and its UID, internal: what the delay\nis read for.",
+            "format": "int64",
+            "type": [
+              "integer",
+              "null"
+            ],
+            "writeOnly": true
+          },
+          "transitMode": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/TransitMode"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "travelled": {
+            "description": "Whether the journey is over, by the same rule that splits the\nlist's travel order (`travel_order`): the last leg has actually\narrived (a cancelled last train once its departure has passed), or\nevery leg is finished. Rows come still-to-come first, so the first\n`true` is where past journeys begin.",
+            "type": "boolean"
+          },
+          "unmatchedLegCount": {
+            "format": "int64",
+            "type": "integer"
+          },
+          "untrackedStatus": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/UntrackedStatus"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "The untracked leg's clock-only state; `None` for a train leg."
+          },
+          "workingDelayMinutes": {
+            "description": "TRUST's running delay against the working timetable\n(`train_current_state.delay_minutes`), internal: the input to the\nper-stop estimates and to the forecast above. Never serialized.",
+            "format": "int32",
+            "type": [
+              "integer",
+              "null"
+            ],
+            "writeOnly": true
+          }
+        },
+        "required": [
+          "id",
+          "createdAt",
+          "createdVia",
+          "legId",
+          "serviceDate",
+          "firstServiceDate",
+          "legCount",
+          "matchMode",
+          "delayProvisional",
+          "kind",
+          "timetableOnRow",
+          "trainLegCount",
+          "travelled",
+          "cancelledLegCount",
+          "unmatchedLegCount",
+          "finishedLegCount",
+          "startedLegCount",
+          "finalArrivalDelayProvisional",
+          "sharedVia"
+        ],
+        "type": "object"
+      },
+      "JourneyOperatorFilter": {
+        "description": "A stored filter, as `GET /Journeys/{id}` serves it.",
+        "properties": {
+          "codes": {
+            "description": "The operators as applied, groups expanded.",
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "entries": {
+            "description": "As chosen (`group:GTR`).",
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "mode": {
+            "$ref": "#/components/schemas/OperatorMode",
+            "description": "`only`, `avoid` or `prefer`."
+          }
+        },
+        "required": [
+          "mode",
+          "codes",
+          "entries"
+        ],
+        "type": "object"
+      },
+      "JourneyStatus": {
+        "description": "`train_current_state.status` (its CHECK constraint): a train's own\nstatus, served as `status` on train and journey responses.",
+        "enum": [
+          "awaiting_activation",
+          "en_route",
+          "cancelled",
+          "completed"
+        ],
+        "type": "string"
+      },
+      "JourneyStop": {
+        "description": "One calling point of a train's journey, booked schedule merged with the\nlatest reported live data for that location -- see this module's own\ndoc comment and the design doc §2/§3.",
+        "properties": {
+          "actualArrival": {
+            "format": "date-time",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "actualDeparture": {
+            "format": "date-time",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "board": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/StopBoard"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "This train's row on the stop's current LDBWS departure board\n(Darwin's `delayReason`/`cancelReason`/`isCancelled`/`etd`), or\n`None` when there is no unique fresh match. Set by\n`stop_board::apply_station_sample_board`; see that module's doc for\nthe matching rules and when it is null. Serialized as `null`, never\nomitted."
+          },
+          "bookedPlatform": {
+            "description": "The TIMETABLED platform from the CIF schedule itself\n(`schedule_query::CallingPoint::platform`: `LO`/`LT` `19..22`, `LI`\n`33..36`), independent of any Darwin data -- known for every calling\npoint whose CIF record carries one, including stops at stations\n`poller-ldbws` never samples and the terminating stop. Deliberately a\nSEPARATE field from `planned_platform` (Darwin's earliest-observed\nreconstruction) and never folded into `platform_changed`: the two\n\"planned\" notions come from different systems, and a CIF platform\ncan legitimately differ in form from Darwin's (e.g. a sub-platform\nsuffix), so comparing them would risk a false \"platform changed\".\n`None` when the CIF field is blank, or the schedule row predates this\nfield -- \"not known\", never guessed. Since DS-127 it is what\n`platform_changed` compares against when both are known.",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "canAlight": {
+            "type": "boolean"
+          },
+          "canBoard": {
+            "type": "boolean"
+          },
+          "cancelled": {
+            "description": "Whether this call is in a cancelled part of the train's run (DS-181):\nthe train is cancelled, terminated short before it, starts after it,\nor is cancelled between two stations around it. Set with\n`live_status` by the train-detail routes from the train's\n`cancellation` (`api::data::cancellation`); `false` on a freshly built\nstop. A skipped call (`stop_status` `Skipped`) is not counted here.",
+            "type": "boolean"
+          },
+          "crs": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "delayBasis": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/DelayBasis"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "The baseline `delay_minutes` was measured against: `public` (TRUST's\nown public time), `publicSchedule` (the CIF public time, when TRUST\nsent none, e.g. a movement matched from the backlog) or `working`\n(no public time in that direction: a pass, or the departure of a\nset-down-only stop). `None` exactly when `delay_minutes` is."
+          },
+          "delayMinutes": {
+            "description": "How late the train was at this stop, in whole minutes (negative is\nearly), measured against the PUBLIC timetable on the side the stop's\nlatest TRUST report was for (an arrival against the public arrival,\na departure against the public departure). `delay_basis` says which\npublic time was used, or that none was known and the working\ntimetable was used instead; see `common::public_delay` (design doc\n§9 decision 2, §11). `None` until the train reports here.\n\nSee `apply_stop_status`'s own doc comment for the one exception:\ncleared to `None` for a [`StopStatus::Skipped`] stop even when a\nTRUST `PASS` event supplied a value here first.",
+            "format": "int32",
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "displayPlatform": {
+            "description": "The platform to show (DS-127): the live `platform` when known, else\n`booked_platform`. A server-side convenience so every client applies\nthe same precedence; `platform` and `booked_platform` keep their\nmeanings.",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "estimateSource": {
+            "description": "Where `estimated_arrival`/`estimated_departure` came from when it is\nnot the train's own TRUST delay: `\"previous-working\"` when they are a\npredicted late start from the incoming train (DS-127). `None` for\nthe existing estimate (and for a stop with none).",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "estimatedArrival": {
+            "description": "The working time to the minute (`timetable.working_minute_arrival`)\nplus the train's current overall delay, filled in by\n`apply_delay_estimates` (below) ONLY while `actual_arrival` is still\n`None` -- i.e. only for a stop live movement data hasn't reported an\nactual arrival for yet. Always `None` on a freshly-built stop, same\nas `actual_arrival`/`actual_departure` above, until that pass runs.",
+            "format": "date-time",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "estimatedDeparture": {
+            "description": "See `estimated_arrival`'s own doc comment -- same contract, gated on\n`actual_departure` instead.",
+            "format": "date-time",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "kind": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/CallingPointKind"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "lastEventType": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "lateMinutes": {
+            "description": "How many minutes late this stop is expected to be; `Some` only when\n`live_status` is `Late`.",
+            "format": "int32",
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "locationType": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/LocationType"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "What kind of place this is (`station`, `bus_stop`, `ferry_terminal`,\n`junction`, `siding`, `passing_point`, `other`); `station` whenever\n`crs` is set, `None` when nothing is known."
+          },
+          "name": {
+            "description": "The stop's display name: the station's name for a station, else the\n`tiploc_locations` (or CORPUS) name -- `Heathrow Terminal 3 (bus\nstop)`, `Marylebone 10 Signal`. `None` only for a TIPLOC no source\nknows.",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "parentCrs": {
+            "description": "For a bus stop or ferry terminal, the station it belongs to (a\n`stations` CRS), to link to instead of a page of its own.",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "passingPoint": {
+            "type": "boolean"
+          },
+          "plannedPlatform": {
+            "description": "The EARLIEST Darwin platform observed for this stop, reconstructing\n\"planned\" the same way `common::StationDeparture.planned_platform`\ndoes -- see that field's own doc comment. NOT the CIF timetable's\nbooked platform. `None` under the same conditions as `platform`\nabove.",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "platform": {
+            "description": "The CURRENT (live/expected) Darwin platform for this stop, from two\nsources: the origin's pin-time snapshot (`apply_origin_platform`)\nand, for ANY departing calling point whose station `poller-ldbws`\nsamples, this train's row on that station's current departure board\n(`stop_board::apply_station_sample_board`, the same unique match as\n`board`, which wins when its row has a platform; a cancelled row's\nplatform is served with `platform_status` `Cancelled`).\nDarwin/LDBWS's board only ever reports a station's OWN platform\nfor a service departing FROM it\n(`poller-ldbws/src/schema.rs`'s `RdmCallingPoint` carries no\nplatform field at all), so a terminating stop, a stop at an\nunsampled station, a stop whose board row is ambiguous or more than\n10 minutes old, or a service that has already left a station's\nboard is `None` -- exactly \"not known\", never a fabricated value and\nnever another train's platform.",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "platformBasis": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/PlatformBasis"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "What `display_platform` rests on (DS-127): `confirmed` when\n`platform_evidence` is set (DS-180, or Darwin's confirmation, DS-152; `platform` is then that\nplatform), else `board` when a live board shows `platform`, `booked`\nwhen only `booked_platform` is known (show it as provisional),\n`None` when none is. Set by\n`api::data::journey::apply_platform_basis`."
+          },
+          "platformChanged": {
+            "description": "Whether the live `platform` differs from the one the stop was meant\nto use. Since DS-127 the comparison is against the timetable's\n`booked_platform` whenever both are known (catching a change made\nbefore the poller first saw the row, and surviving poller\nrestarts), ignoring case, spaces and a sub-platform letter on one\nside only (\"4\" against \"4A\"). Without a booked platform it falls\nback to `platform` against `planned_platform` (the first platform\nthe poller saw). Always `false` for a stop with no live platform.",
+            "type": "boolean"
+          },
+          "platformStatus": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/PlatformStatus"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Whether the train still calls at `platform`: `Some` exactly when\n`platform` is, `None` otherwise. See [`PlatformStatus`]."
+          },
+          "platformSuppressed": {
+            "description": "Darwin's Push Port has a platform for this stop but suppresses it\nfrom public display (`platsup`, or a station CIS's `cisPlatsup`;\nDS-152). That platform is not served: `platform` stays as any board\nshows it (boards hide it too), and `displayPlatform` falls back to\nthe booked one. So \"hidden\" and \"not allocated\" differ: `true` here\nmeans a platform exists but is not yet public.",
+            "type": "boolean"
+          },
+          "publicArrival": {
+            "format": "date-time",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "publicDeparture": {
+            "format": "date-time",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "requestStop": {
+            "type": "boolean"
+          },
+          "scheduledArrival": {
+            "format": "date-time",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "scheduledDeparture": {
+            "format": "date-time",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "skipSource": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/SkipSource"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "`Some` only when `stop_status` is [`StopStatus::Skipped`] -- see\n[`SkipSource`]'s own doc comment for why this lives here rather than\nnested inside `stop_status` itself."
+          },
+          "status": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/LiveStopStatus"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "LDBWS-style live status of this stop (`OnTime`, `Late`, `Cancelled`,\n`NoReport`, `Arrived`, `Departed`, `Scheduled`), served as `status`.\nSee `data::stop_live_status` for the mapping. Computed last, by the\ntrain-detail routes once the train's own status is known, so it is\n`None` on a freshly built stop."
+          },
+          "stopStatus": {
+            "$ref": "#/components/schemas/StopStatus",
+            "description": "See [`StopStatus`]'s own doc comment. Computed by `apply_stop_status`,\nafter the live movement overlay -- always `StopStatus::Unknown` on a\nfreshly-built stop, same \"None/default until the relevant pass runs\"\ncontract every other computed field on this struct already has."
+          },
+          "tiploc": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "variationStatus": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "workingArrival": {
+            "format": "date-time",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "workingDeparture": {
+            "format": "date-time",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "workingPass": {
+            "format": "date-time",
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        },
+        "required": [
+          "stopStatus",
+          "platformChanged",
+          "platformSuppressed",
+          "cancelled",
+          "canBoard",
+          "canAlight",
+          "requestStop",
+          "passingPoint"
+        ],
+        "type": "object"
+      },
+      "LateDepartureReliance": {
+        "description": "A change that works only because the train it changes onto is running\nlate (DS-141): served as a train leg's `live.reliesOnLateDeparture` on\n`/Trips/plan` (`T` a local clock time), and as a saved journey's\n`connection.reliesOnLateDeparture` and an alternative's train leg's\n(`T` an instant). Absent otherwise.\n\nThe live overlay keeps a late train late (no recovery is modelled), so\nsuch a change is offered, but the train could make up time and leave\nnearer its booked time, before the traveller can reach it.",
+        "properties": {
+          "delayMinutes": {
+            "description": "`expected_departure` less `scheduled_departure`, in minutes.",
+            "format": "int64",
+            "type": "integer"
+          },
+          "expectedDeparture": {
+            "description": "Its expected (live) departure, which the change was judged on.",
+            "format": "date-time",
+            "type": "string"
+          },
+          "scheduledDeparture": {
+            "description": "The onward train's timetabled (public, else working) departure.",
+            "format": "date-time",
+            "type": "string"
+          },
+          "slackIfOnTimeMinutes": {
+            "description": "The spare minutes the change would have, after its minimum change\ntime, were the train to leave on time: always negative (that many\nminutes short).",
+            "format": "int64",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "scheduledDeparture",
+          "expectedDeparture",
+          "delayMinutes",
+          "slackIfOnTimeMinutes"
+        ],
+        "type": "object"
+      },
+      "LegConnection": {
+        "description": "The change onto a leg from the one before it (`connection` on every\nleg of `GET /Journeys/{id}` after the first).",
+        "properties": {
+          "gapMinutes": {
+            "description": "Minutes from the previous leg's expected arrival (reported, else\nestimated, else timetabled) to this leg's expected departure.\nNegative when this leg leaves first. `null` when either is unknown.",
+            "format": "int64",
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "minimumChangeMinutes": {
+            "description": "The time the change needs: the boarding station's minimum change\ntime, a fixed link's minutes plus that, or 0 staying on one train.\n`null` when not known (see [`ConnectionState::Unknown`]) or when the\nnext leg is untracked (a walk or a Tube ride starts when you do).",
+            "format": "uint32",
+            "minimum": 0,
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "nextTimetabled": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/TimetabledRide"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Onto a timetabled leg (DS-237, additive; absent otherwise): the\nride its timetable has first from when the traveller gets there,\nwhen that is not the planned one (the traveller arrives late, or\nthe timetable has moved it). The changes after it are judged from\nits arrival. Scheduled times, never live."
+          },
+          "reliesOnLateDeparture": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/LateDepartureReliance"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Set when the change works only because the next train is running\nlate (additive, DS-141; absent otherwise): it would not, on the\nnext train's timetabled departure. The state is judged as before\n(usually `ok`); this says the train could leave earlier than\nexpected. See [`trip_plan_live::LateDepartureReliance`]."
+          },
+          "state": {
+            "$ref": "#/components/schemas/ConnectionState"
+          }
+        },
+        "required": [
+          "state"
+        ],
+        "type": "object"
+      },
+      "LegSearchFilters": {
+        "additionalProperties": false,
+        "description": "A window leg's search filters (DS-215): the Trains section's Between\nstations filters, saved with the leg's window so its candidates list\nonly the trains they allow. Each value is the text\n`GET /public/trains/search` takes for the same filter (`operator`,\n`origin` as `startsAt`, `terminates_at`, `previously_calls_at`,\n`previously_stops_at`, `calls_at`, `via`, `avoid`, `avoid_stop`), so the\nsame parsers check it (`routes::trains::leg_filters`). `startsAt` is\nthat search's `origin`, renamed here because a leg's `origin` is where\nthe traveller boards. The wire shape and the\n`journey_legs.search_filters` column's JSON are both this struct.",
+        "properties": {
+          "avoid": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "avoidStop": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "callsAt": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "operator": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "previouslyCallsAt": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "previouslyStopsAt": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "startsAt": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "terminatesAt": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "via": {
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        },
+        "type": "object"
+      },
+      "LegSkipResponse": {
+        "properties": {
+          "destinationSkipped": {
+            "type": "boolean"
+          },
+          "originSkipped": {
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "originSkipped",
+          "destinationSkipped"
+        ],
+        "type": "object"
+      },
+      "LegTimetable": {
+        "description": "A leg's `timetable` on `GET /Journeys/{id}`: what the network's active\ntimetable says about it now. Scheduled times only.",
+        "properties": {
+          "calls": {
+            "description": "Boarding to alighting; empty without a ride.",
+            "items": {
+              "$ref": "#/components/schemas/TimetabledCall"
+            },
+            "type": "array"
+          },
+          "headsign": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "headwayMinutes": {
+            "description": "How often the line runs between the two stations around the\nplanned time; absent with too few rides to say.",
+            "format": "uint32",
+            "minimum": 0,
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "line": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/LineView"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "`null` when the active feed no longer has the line."
+          },
+          "liveArrivals": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/LiveArrivalsFilter"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "On a network whose stations are `TfL`'s stops (`tfl`, phase C), so\nwith `TfL`'s live arrivals: which of\nthe boarding stop's predictions are for this ride's line and reach\nthe alighting stop. Absent elsewhere, and when no pattern of the\nline serves the two stops."
+          },
+          "network": {
+            "type": "string"
+          },
+          "notices": {
+            "description": "Current disruption on the line (the plan's transit leg notices).",
+            "items": {
+              "$ref": "#/components/schemas/TransitLegNotice"
+            },
+            "type": "array"
+          },
+          "scheduledArrival": {
+            "format": "date-time",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "scheduledDeparture": {
+            "description": "The ride found (`matched` or `retimed`); else `null`.",
+            "format": "date-time",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "state": {
+            "$ref": "#/components/schemas/MatchState"
+          }
+        },
+        "required": [
+          "network",
+          "state",
+          "calls",
+          "notices"
+        ],
+        "type": "object"
+      },
+      "LineView": {
+        "description": "A ride's line, as a plan's transit leg shows it.",
+        "properties": {
+          "colour": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "id": {
+            "description": "The public id, `tfl:victoria`, `metrolink:blue`.",
+            "type": "string"
+          },
+          "mode": {
+            "description": "`tube`, `dlr`, `tram` (a line's own, else the network's).",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "name": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "id",
+          "name"
+        ],
+        "type": "object"
+      },
+      "LiveArrivalsFilter": {
+        "description": "What a client picks from `GET /public/tfl/stops/{stopId}/arrivals` for\na timetabled leg (DS-237, phase C): the groups of `lineId`, and in them\nthe trains whose destination is one of `destinations`, the last stations\nof the line's timetabled patterns from the boarding stop through the\nalighting one. Indicative: a prediction is not the leg's ride.",
+        "properties": {
+          "destinations": {
+            "description": "Station names, as the timetable names them, sorted.",
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "lineId": {
+            "description": "`TfL`'s line id (`victoria`; the network's local ids are `TfL`'s).",
+            "type": "string"
+          },
+          "stopId": {
+            "description": "The boarding stop, `TfL`'s spelling (`940GZZLUEUS`).",
+            "type": "string"
+          }
+        },
+        "required": [
+          "stopId",
+          "lineId",
+          "destinations"
+        ],
+        "type": "object"
+      },
+      "LiveStopStatus": {
+        "description": "See the module doc for each value's meaning. `PascalCase` on the wire,\nlike `StopStatus` beside it.",
+        "enum": [
+          "OnTime",
+          "Late",
+          "Cancelled",
+          "NoReport",
+          "Arrived",
+          "Departed",
+          "Scheduled"
+        ],
+        "type": "string"
+      },
+      "LocationType": {
+        "description": "What kind of place a TIPLOC is, as far as a passenger cares.\n\nDerived by `schedule-reference` from, in order: whether the TIPLOC is a\nstation (a STANOX and a bookable CRS), which kinds of service call there\n(CIF train status: bus or ship services only), then name heuristics\n([`classify_name`]), then whether rail services only ever pass it.",
+        "enum": [
+          "station",
+          "bus_stop",
+          "ferry_terminal",
+          "junction",
+          "siding",
+          "passing_point",
+          "other"
+        ],
+        "type": "string"
+      },
+      "MatchMode": {
+        "description": "`journey_legs.match_mode` (its CHECK constraint).",
+        "enum": [
+          "unmatched",
+          "manual",
+          "auto"
+        ],
+        "type": "string"
+      },
+      "MatchState": {
+        "description": "How the leg's ride stands in today's timetable.",
+        "oneOf": [
+          {
+            "const": "matched",
+            "description": "The timetable has the ride at the planned times.",
+            "type": "string"
+          },
+          {
+            "const": "retimed",
+            "description": "The nearest ride departs at another time (within\n[`RETIME_WINDOW_MINUTES`]); `scheduledDeparture` and\n`scheduledArrival` are its.",
+            "type": "string"
+          },
+          {
+            "const": "notInTimetable",
+            "description": "No ride near the planned time, but the line still runs between the\ntwo stations that day.",
+            "type": "string"
+          },
+          {
+            "const": "noService",
+            "description": "Nothing on the line between the two stations that day.",
+            "type": "string"
+          },
+          {
+            "const": "noTimetable",
+            "description": "No timetable for that date (outside the feed's horizon, or no feed).",
+            "type": "string"
+          }
+        ]
+      },
+      "MeResponse": {
+        "description": "`GET /v1/me`: the token itself, so a client can check what it holds.",
+        "properties": {
+          "createdAt": {
+            "format": "date-time",
+            "type": "string"
+          },
+          "expiresAt": {
+            "format": "date-time",
+            "type": "string"
+          },
+          "name": {
+            "type": "string"
+          },
+          "scopes": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          }
+        },
+        "required": [
+          "name",
+          "scopes",
+          "createdAt",
+          "expiresAt"
+        ],
+        "type": "object"
+      },
+      "NotificationPreferences": {
+        "description": "`GET`/`PUT /public/preferences/notifications`: the user's push\nsettings beyond the browser's own permission (mid-journey changes spec\n2026-10-22 §6.5; DS-153). A switch per kind of push, each on unless\nturned off: `journeySuggestions` (suggested trains when a journey\nbreaks), `lineStatus`, `trainDelay`, `trainCancel`, `predictedStart`,\n`stationSkip` and `templateAttention`; `delayThresholdMinutes` (5, 10,\n15 or 30; `null` for the default, 15); `quietHours` (`{start, end,\ntimezone}`, `HH:MM` local times and an IANA zone, or `null` for none);\n`snoozedUntil` (pushes held until then as in quiet hours, at most a\nweek ahead; `null` when not snoozed).",
+        "properties": {
+          "delayThresholdMinutes": {
+            "format": "int16",
+            "maximum": 32767,
+            "minimum": -32768,
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "journeySuggestions": {
+            "type": "boolean"
+          },
+          "lineStatus": {
+            "type": "boolean"
+          },
+          "predictedStart": {
+            "type": "boolean"
+          },
+          "quietHours": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/QuietHoursBody"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "snoozedUntil": {
+            "format": "date-time",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "stationSkip": {
+            "type": "boolean"
+          },
+          "templateAttention": {
+            "type": "boolean"
+          },
+          "trainCancel": {
+            "type": "boolean"
+          },
+          "trainDelay": {
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "journeySuggestions",
+          "lineStatus",
+          "trainDelay",
+          "trainCancel",
+          "predictedStart",
+          "stationSkip",
+          "templateAttention"
+        ],
+        "type": "object"
+      },
+      "OpenBreakSummary": {
+        "description": "The open break as `GET /Journeys/{id}` serves it.",
+        "properties": {
+          "cause": {
+            "$ref": "#/components/schemas/BreakCause"
+          },
+          "destinationName": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "detectedAt": {
+            "format": "date-time",
+            "type": "string"
+          },
+          "fault": {
+            "$ref": "#/components/schemas/BreakFault"
+          },
+          "firstArrival": {
+            "format": "date-time",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "id": {
+            "format": "int64",
+            "type": "integer"
+          },
+          "severity": {
+            "format": "int16",
+            "maximum": 32767,
+            "minimum": -32768,
+            "type": "integer"
+          },
+          "stale": {
+            "type": "boolean"
+          },
+          "stationName": {
+            "description": "The sheet's headline facts, when suggestions are stored: where, to\nwhere, and the best option's arrival.",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "suggestionCount": {
+            "format": "uint",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "suggestionsReady": {
+            "type": "boolean"
+          },
+          "triggerLegId": {
+            "format": "int64",
+            "type": [
+              "integer",
+              "null"
+            ]
+          }
+        },
+        "required": [
+          "id",
+          "cause",
+          "fault",
+          "severity",
+          "detectedAt",
+          "suggestionsReady",
+          "stale",
+          "suggestionCount"
+        ],
+        "type": "object"
+      },
+      "OperatorMode": {
+        "description": "`journeys.operator_filter_mode` (its CHECK constraint).",
+        "enum": [
+          "only",
+          "avoid",
+          "prefer"
+        ],
+        "type": "string"
+      },
+      "PlatformBasis": {
+        "description": "`JourneyStop.platformBasis` (DS-127): what the stop's `displayPlatform`\nrests on. Serialized lowercase; `null` when there is no platform at\nall. Clients must treat an unknown value as `board`.",
+        "oneOf": [
+          {
+            "const": "booked",
+            "description": "The timetable's (CIF) booked platform only: nothing live has shown\nit yet, so it is provisional (\"booked, not confirmed\").",
+            "type": "string"
+          },
+          {
+            "const": "board",
+            "description": "A live departure board shows it (`platform`). Boards show the\nbooked platform until it changes, so this is not a confirmation.",
+            "type": "string"
+          },
+          {
+            "const": "confirmed",
+            "description": "Tracking data ties the train (or the unit that will form it) to\nthis platform (DS-180): see [`PlatformEvidence`] for what counts.\nThe Darwin Push Port's `conf` flag is one such source (DS-152).",
+            "type": "string"
+          }
+        ]
+      },
+      "PlatformStatus": {
+        "description": "`JourneyStop.platformStatus`: what the stop's `platform` means for a\npassenger. Serialized lowercase (`\"active\"`, `\"cancelled\"`); `null` when\nthere is no platform.\n\nA string enum rather than a `platformCancelled` boolean so that further\nstates (e.g. \"provisional\" before Darwin confirms an allocation) can be\nadded without another field; clients should render an unknown value as\n`active`. \"Changed\" is deliberately not a state: `platformChanged` is\northogonal (a cancelled call can also have changed platform) and is\nalready served.",
+        "oneOf": [
+          {
+            "const": "active",
+            "description": "The train is expected to call at this platform.",
+            "type": "string"
+          },
+          {
+            "const": "cancelled",
+            "description": "Darwin's board lists this train as cancelled at this stop: this is\nthe platform it was allocated, but it is no longer calling there.\nServed (and shown struck through) rather than hidden, so a passenger\nwaiting on that platform can see that it is their train that is gone.",
+            "type": "string"
+          }
+        ]
+      },
+      "PredictedStart": {
+        "description": "A train's `predictedStart` (spec section 7). Additive and nullable on\nthe wire: absent knowledge is `null`, never a guess of \"on time\".",
+        "properties": {
+          "basis": {
+            "description": "Always [`BASIS`].",
+            "type": "string"
+          },
+          "computedAt": {
+            "format": "date-time",
+            "type": "string"
+          },
+          "confidence": {
+            "$ref": "#/components/schemas/Confidence"
+          },
+          "lateMinutes": {
+            "description": "Minutes late T is expected to start; `None` at low confidence.",
+            "format": "int32",
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "previousWorking": {
+            "$ref": "#/components/schemas/PreviousWorking"
+          }
+        },
+        "required": [
+          "confidence",
+          "basis",
+          "computedAt",
+          "previousWorking"
+        ],
+        "type": "object"
+      },
+      "PreferencesResponse": {
+        "properties": {
+          "pinnedLines": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "pinnedOperators": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "pinnedStations": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "silentPinnedLines": {
+            "description": "Of `pinned_lines`, the ones whose status pushes are off\n(`PUT /preferences/pinned-lines/{lineId}/alerts`, DS-153). Additive.",
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          }
+        },
+        "required": [
+          "pinnedLines",
+          "pinnedStations",
+          "pinnedOperators",
+          "silentPinnedLines"
+        ],
+        "type": "object"
+      },
+      "PreviousWorking": {
+        "description": "`predictedStart.previousWorking`: the incoming train the prediction\nrests on.",
+        "properties": {
+          "bookedTurnaroundMinutes": {
+            "format": "int32",
+            "type": "integer"
+          },
+          "delayMinutes": {
+            "description": "P's current TRUST delay, against the working timetable.",
+            "format": "int32",
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "link": {
+            "description": "[`LINK_INFERRED`] (the platform sequence) or [`LINK_ASSOCIATION`]\n(Darwin's live next-working link).",
+            "type": "string"
+          },
+          "observedAt": {
+            "description": "When P's state was last reported.",
+            "format": "date-time",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "serviceDate": {
+            "format": "date",
+            "type": "string"
+          },
+          "status": {
+            "description": "P's `train_current_state.status` (`en_route`, `completed`,\n`awaiting_activation`), `None` without a state row.",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "trainUid": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "trainUid",
+          "serviceDate",
+          "link",
+          "bookedTurnaroundMinutes"
+        ],
+        "type": "object"
+      },
+      "PublicTrainResponse": {
+        "description": "`GET /Train/by-uid/{uid}/{date}`'s body: the [`PublicTrainState`]\nfields, plus `provisional`/`provisionalFrom` for the service date\n(2026-10-08, see `routes::provisional`). Flattened, so the existing\nfields keep their names and place.\n\n[`PublicTrainState`]: crate::data::trains::PublicTrainState",
+        "properties": {
+          "callingPoints": true,
+          "cancelReason": {
+            "description": "`cancel_reason_code`'s delay attribution glossary text (e.g.\n`\"Driver\"`). `None` for a code the glossary lacks or a system code\n(`PD`, `ZW`). There is no delay-reason equivalent: TRUST carries none.",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "cancelReasonCode": {
+            "description": "The TRUST cancellation reason code (e.g. `\"TG\"`), only while\n`cancelled` is true.",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "cancellation": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/Cancellation"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "What part of the run is cancelled and why (DS-181): full or partial,\nthe cancelled sections, terminated short or started short, and the\nbest reason with its source. `null` when nothing is cancelled,\nincluding after a reinstatement. Filled with the fields above; see\n`data::cancellation`. The older `cancelled`/`cancelReason*` fields\nstay for compatibility."
+          },
+          "cancelled": {
+            "description": "Whether the train is cancelled: `status == \"cancelled\"`. Filled\nafter the read by `data::train_reasons`, like every field below.",
+            "type": "boolean"
+          },
+          "changeOfOriginReason": {
+            "description": "Its glossary text, under the same rules as `cancel_reason`.",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "changeOfOriginReasonCode": {
+            "description": "The TRUST change-of-origin reason code, when the train's origin was\nchanged.",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "delayBasis": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/DelayBasis"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "What `delay_minutes` was measured against (`public`, `publicSchedule`\nor `working`, see `common::public_delay::DelayBasis`); `None` exactly\nwhen `delay_minutes` is."
+          },
+          "delayMinutes": {
+            "description": "The delay at the passenger's own stop, against the PUBLIC timetable\n(`data::stop_delay`, design doc §9 decision 2): a public train page has no stop of the passenger's own, so this is the delay at the latest call the train reported at, else (nothing reported at a call yet) TRUST's running delay with `delay_basis: working`. `None` until\nknown.",
+            "format": "int32",
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "delayProvisional": {
+            "description": "`true` while `delay_minutes` is a forecast (the train has not reported\nat that stop yet).",
+            "type": "boolean"
+          },
+          "destinationCrs": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "destinationName": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "etaNext": {
+            "format": "date-time",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "etaSource": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/EtaSource"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "firstReportExpectedAt": {
+            "format": "date-time",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "headcode": {
+            "description": "The CIF `BS` Train Identity -- the 4-character signalling headcode\n(e.g. `\"1S00\"`) -- read from the published schedule\n(`schedule_destination_departures.headcode`), not from TRUST. `None`\nwhen no row carries one or the rows disagree.",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "journeyStops": {
+            "description": "See `train_tracking::TrackedTrainState::journey_stops`'s doc\ncomment -- same contract, populated the same \"read row, then\noverlay\" way by `routes::train::get_by_uid_and_date`. This struct\nalready carries `trains_id` on the wire (unlike `TrackedTrainState`,\nwhere it's an internal-only addition), so no extra field is needed\nto know which `trains_id` to key the overlay query on. `#[sqlx(skip)]`,\nnot `#[sqlx(default)]` -- see\n`train_tracking::TrackedTrainState::journey_stops`'s doc comment for\nwhy: `JourneyStop` doesn't implement `sqlx::Type`/`Decode`, and\n`#[sqlx(default)]`'s generated code still needs that bound even\nthough this column is never selected.",
+            "items": {
+              "$ref": "#/components/schemas/JourneyStop"
+            },
+            "type": [
+              "array",
+              "null"
+            ]
+          },
+          "lastEventType": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "lastReportedLocation": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "liveTracking": {
+            "type": "boolean"
+          },
+          "mayHaveArrived": {
+            "description": "See `train_tracking::TrackedTrainState::may_have_arrived`'s own doc\ncomment -- same contract, populated the same \"read row, then\noverlay\" way by `routes::train::attach_journey_stops_public`.",
+            "type": "boolean"
+          },
+          "nextCallingPoint": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "operatorCode": {
+            "description": "The operating company's ATOC code (for example `\"SW\"`), from the CIF\nschedule. Serialized as `operatorCode`. Filled after the read by\n`data::train_operator`, hence `#[sqlx(skip)]`. `None` when no single\ncode is known; see that module's doc for when that happens.",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "operatorName": {
+            "description": "The `tocs` display name for `operator_code` (for example\n`\"South Western Railway\"`). Serialized as `operatorName`. `None` when\n`operator_code` is `None` or the code has no `tocs` row.",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "originCrs": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "originName": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "plannedPlatform": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "writeOnly": true
+          },
+          "platform": {
+            "description": "The shared row's own captured origin-platform snapshot\n(`trains.platform`/`planned_platform`) -- same internal-plumbing\nposture as `skipped_stations` immediately above.",
+            "type": [
+              "string",
+              "null"
+            ],
+            "writeOnly": true
+          },
+          "predictedStart": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/PredictedStart"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "A predicted late start from the incoming train (DS-127,\n`ds_store::trains::predicted_start`), served as `predictedStart`:\n`null` unless the train has no TRUST report yet, is within 3 hours\nof departure, has a previous working whose delay the booked\nturnaround cannot absorb, and the origin's board shows no time of\nits own. Filled by `routes::train::attach_journey_stops(_public)`."
+          },
+          "provisional": {
+            "type": "boolean"
+          },
+          "provisionalFrom": {
+            "format": "date",
+            "type": "string"
+          },
+          "scheduledDeparture": {
+            "format": "date-time",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "serviceDate": {
+            "format": "date",
+            "type": "string"
+          },
+          "serviceMode": {
+            "$ref": "#/components/schemas/ServiceMode"
+          },
+          "skippedStations": {
+            "description": "The shared row's own captured Darwin skip snapshot\n(`trains.skipped_stations`) -- internal plumbing for\n`routes::train::attach_journey_stops_public`'s\n`journey::build_journey_stops` call, never sent to the frontend\n(which already gets this signal per-stop, on each `JourneyStop`'s\nown `skipSource`, rather than as a second copy of the raw CRS list\nhere). `#[serde(skip_serializing)]`, same posture as\n`TrackedTrainState::trains_id`'s own doc comment for why an\ninternal-only field on an otherwise-public struct stays off the\nwire.",
+            "items": {
+              "type": "string"
+            },
+            "type": "array",
+            "writeOnly": true
+          },
+          "status": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/JourneyStatus"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "trackingPhase": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/TrackingPhase"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "trainId": {
+            "description": "TRUST's 10-character movement-feed train id (`trains.train_id`, e.g.\n`\"721S00MF25\"`) -- set on TRUST activation. NOT the headcode, even\nthough it embeds one; see `headcode` below for that.",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "trainUid": {
+            "type": "string"
+          },
+          "trainsId": {
+            "description": "The SHARED `trains` row's own surrogate key, serialized as\n`trainsId`. Deliberately NOT named `id`, which is what this struct\nused to call it: every `/Train/{trackingId}` route in this app\ninterprets its path id as a `train_subscriptions.id`, a completely\ndifferent `BIGSERIAL` space that also starts at 1 -- and the\nfrontend page for this route was feeding this field straight into\n`RenameTrainButton`/`DeleteTrainButton`/`TicketPanel` as a\n`trackingId`, so a logged-in visitor could rename or delete an\nunrelated subscription of their OWN that happened to share the\nnumber. Ownership scoping made cross-user damage impossible, but not\nsame-user damage. The name is the fix on this side; the frontend no\nlonger renders those controls on this page at all (see\n`frontend/app/train/[uid]/[date]/page.tsx`).",
+            "format": "int64",
+            "type": "integer"
+          },
+          "workingDelayMinutes": {
+            "description": "TRUST's running delay against the working timetable\n(`train_current_state.delay_minutes`), internal: the input to the\nper-stop estimates and to the forecast above. Never serialized.",
+            "format": "int32",
+            "type": [
+              "integer",
+              "null"
+            ],
+            "writeOnly": true
+          }
+        },
+        "required": [
+          "trainsId",
+          "trainUid",
+          "serviceDate",
+          "delayProvisional",
+          "skippedStations",
+          "mayHaveArrived",
+          "cancelled",
+          "serviceMode",
+          "liveTracking",
+          "provisional",
+          "provisionalFrom"
+        ],
+        "type": "object"
+      },
+      "QuietHoursBody": {
+        "additionalProperties": false,
+        "properties": {
+          "end": {
+            "type": "string"
+          },
+          "start": {
+            "type": "string"
+          },
+          "timezone": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "start",
+          "end",
+          "timezone"
+        ],
+        "type": "object"
+      },
+      "ReasonSource": {
+        "description": "Where a cancellation's reason came from; see the module doc for the\nprecedence.",
+        "oneOf": [
+          {
+            "enum": [
+              "ldbws",
+              "trust"
+            ],
+            "type": "string"
+          },
+          {
+            "const": "darwin",
+            "description": "Darwin Push Port (DS-152). Not produced yet.",
+            "type": "string"
+          }
+        ]
+      },
+      "ResolutionStatus": {
+        "description": "`train_subscriptions.resolution_status` (its CHECK constraint).",
+        "enum": [
+          "pending",
+          "schedule_matched",
+          "resolved",
+          "unresolved"
+        ],
+        "type": "string"
+      },
+      "ServiceMode": {
+        "description": "What kind of vehicle a schedule is. The stored spelling is\n[`Self::as_db_str`] (`replacement_bus`), the wire spelling camelCase\n(`replacementBus`).",
+        "enum": [
+          "train",
+          "replacementBus",
+          "bus",
+          "ferry"
+        ],
+        "type": "string"
+      },
+      "ShareLinkResponse": {
+        "description": "The unlisted share link `unlisted_links::UnlistedLink` mapped onto the\nwire -- deliberately its own type rather than reusing `UnlistedLink`\ndirectly, so this route's response shape doesn't change if that\nmodule's internal shape ever does.",
+        "properties": {
+          "expiresAt": {
+            "format": "date-time",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "token": {
+            "description": "`Some` ONLY in the response to the `POST .../share-link` that just\nminted it. Tokens are stored hashed (2026-09-26 review, L14,\n`unlisted_links::hash_link_token`), so `GET /Journeys/{id}` can say\nthat an active link exists and when it expires, but can never show\nits URL again -- the owner regenerates to get a fresh copyable one.",
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        },
+        "type": "object"
+      },
+      "SharedVia": {
+        "description": "One group a journey reached the caller through (`GET /Journeys/mine`'s\n`sharedVia`, DS-178): the same attribution a group's own shared row\nshows (`GroupJourney.addedByName`/`addedByTag`), and no more.",
+        "properties": {
+          "addedAt": {
+            "format": "date-time",
+            "type": "string"
+          },
+          "addedByName": {
+            "description": "The sharer's display name (`users::MemberDisplay`); `None` when no\nname is on file, then `added_by_tag` is set.",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "addedByTag": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "groupId": {
+            "type": "string"
+          },
+          "groupName": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "groupId",
+          "groupName",
+          "addedAt"
+        ],
+        "type": "object"
+      },
+      "SkipSource": {
+        "description": "Which signal(s) support a [`StopStatus::Skipped`] verdict -- carried as\na SIBLING field on [`JourneyStop`] (`skip_source`), never nested inside\n`StopStatus` itself. That mirrors this app's existing \"surface\nprovenance as its own field, never collapse it into the primary value\"\nconvention -- `EtaBadge.tsx`'s `etaSource` badge, shown alongside (never\ninstead of) the ETA it qualifies, is the precedent this follows -- so a\n`Skipped` stop's `stop_status` always serializes as the same flat\nstring regardless of source, and a consumer that only cares \"was this\nstop skipped\" never has to pattern-match a nested value to find out.\n\nThe two sources are not equally trustworthy, and this type exists so\nthat difference is never silently flattened away:\n\n- `Darwin` is Darwin/LDBWS's own explicit per-calling-point\n  `isCancelled` flag for this specific service\n  (`common::StationDeparture.skipped_stations`) -- the operator's own\n  timetable system stating outright that this call will not happen\n  today. Treated as authoritative.\n- `Trust` is inferred purely from a reported TRUST `PASS` event at a\n  booked stop -- real running data, but an INFERENCE about what a\n  `PASS` message means for a public calling point, not a first-party\n  \"this call was withdrawn\" signal (see\n  docs/superpowers/specs/2026-09-04-option-b-live-consumer-design.md's\n  still-open PASS-mapping caveat). A consumer must word this more\n  softly than the `Darwin` case.\n- `Both` is the two signals independently agreeing -- as confident as\n  `Darwin` alone, just worth surfacing that TRUST's own running data\n  corroborates it.",
+        "enum": [
+          "Darwin",
+          "Trust",
+          "Both"
+        ],
+        "type": "string"
+      },
+      "StopBoard": {
+        "description": "`journeyStops[].board`. See the module doc.",
+        "properties": {
+          "cancelReason": {
+            "description": "Darwin's passenger cancellation text, verbatim.",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "delayMinutes": {
+            "description": "`etd - std` in minutes (0 for early), when `etd` is a time or\n\"On time\"; `null` when it is a status word (\"Delayed\",\n\"Cancelled\"), so an unknown delay never reads as on time.",
+            "format": "int32",
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "delayReason": {
+            "description": "Darwin's passenger delay text, verbatim.",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "estimated": {
+            "description": "LDBWS `etd`, verbatim: `\"HH:MM\"` (London local), `\"On time\"`,\n`\"Delayed\"` or `\"Cancelled\"`.",
+            "type": "string"
+          },
+          "isCancelled": {
+            "description": "The whole service is cancelled at this station.",
+            "type": "boolean"
+          },
+          "observedAt": {
+            "description": "When the board was polled (`station_samples.polled_at`).",
+            "format": "date-time",
+            "type": "string"
+          }
+        },
+        "required": [
+          "isCancelled",
+          "estimated",
+          "observedAt"
+        ],
+        "type": "object"
+      },
+      "StopStatus": {
+        "description": "Whether -- and to what degree of confidence -- a stop was actually\ncalled at, independent of (but computed from) `actual_arrival`/\n`actual_departure`/`last_event_type` on [`JourneyStop`]. Exists because\nthose fields alone can no longer safely distinguish, for a genuine\nbooked calling point, \"not yet reached\" from \"the train ran through\nwithout calling\" -- both now leave `actual_arrival`/`actual_departure`\n`None` (see `overlay_movement_events`'s own doc comment on its `\"PASS\"`\narm, the fix this type is the planned follow-up to). `apply_stop_status`\n(below) is the only place this is computed.\n\n`Unknown` covers every stop this whole distinction does not apply to at\nall: an `Origin`/`Terminate` call (no two-sided booked stop to begin\nwith) or an `Intermediate` entry missing a scheduled arrival or\ndeparture (a CIF timing point with a blank public time, never a real\ncalling point) -- the exact same `booked_calling_point` gate\n`overlay_movement_events`'s `\"PASS\"` arm already uses, so the two can\nnever disagree about which stops this applies to. Whether such a stop\nwas \"reached\" is still answered by `actual_arrival`/`actual_departure`\nalone, exactly as before this type existed.\n\nPlain `PascalCase` variant names on the wire, no `rename_all` override --\nmatching `schedule_query::CallingPointKind`'s own convention, the field\nthis one sits right next to on every `JourneyStop`\n(`frontend/lib/types.ts`'s `JourneyStopKind` mirrors it the same way).",
+        "oneOf": [
+          {
+            "const": "Unknown",
+            "description": "Not a genuine booked calling point -- see this type's own doc\ncomment.",
+            "type": "string"
+          },
+          {
+            "const": "Scheduled",
+            "description": "A booked calling point, not yet reached, with no signal saying it\nwill be skipped -- the ordinary state of every future booked stop.",
+            "type": "string"
+          },
+          {
+            "const": "Called",
+            "description": "A booked calling point the train genuinely called at (a real\nARRIVAL and/or DEPARTURE was reported here).",
+            "type": "string"
+          },
+          {
+            "const": "Skipped",
+            "description": "A booked calling point the train did NOT call at today. See\n`JourneyStop::skip_source` for which signal(s) say so.",
+            "type": "string"
+          }
+        ]
+      },
+      "TimetabledCall": {
+        "description": "One timetabled call of the ride, from boarding to alighting.",
+        "properties": {
+          "name": {
+            "type": "string"
+          },
+          "platform": {
+            "description": "The platform's indicator (`To Bury`), when known.",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "scheduledArrival": {
+            "description": "`null` at the boarding call.",
+            "format": "date-time",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "scheduledDeparture": {
+            "description": "`null` at the alighting call.",
+            "format": "date-time",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "stopId": {
+            "description": "The station, in the network's public spelling.",
+            "type": "string"
+          }
+        },
+        "required": [
+          "stopId",
+          "name"
+        ],
+        "type": "object"
+      },
+      "TimetabledRide": {
+        "description": "A ride of a timetabled leg, by its scheduled times.",
+        "properties": {
+          "arrival": {
+            "format": "date-time",
+            "type": "string"
+          },
+          "departure": {
+            "format": "date-time",
+            "type": "string"
+          }
+        },
+        "required": [
+          "departure",
+          "arrival"
+        ],
+        "type": "object"
+      },
+      "TrackedTrainState": {
+        "description": "The public read-model for a tracked train, returned directly as JSON by\n`crates/api/src/routes/train.rs`'s `GET /Train/{trackingId}` (via\n`get_by_tracking_id` below). Unlike `TrackedTrainRow`/`TrackedTrainRef`\nabove (poller-facing, private), this never leaks the raw `user_id`\ncolumn -- see Task 5's brief for why that read deliberately stays\npublic/unscoped despite `tracked_trains` having a real owner.\n\nThis module used to have a second `TRACKED_TRAIN_STATE_SELECT` reader,\n`get_by_uid_and_date`, keyed only on `(train_uid, service_date)` with no\n`user_id` filter at all. `GET /Train/by-uid/{uid}/{date}` stopped calling\nit as of Task 19 (it reads `trains::get_public_train_state` instead),\nwhich left it with zero callers anywhere in the workspace -- confirmed\nagain by the 19-pass Signal Box Audit's trains-area Low finding. Unlike\n`get_by_tracking_id`, that query could match more than one\n`train_subscriptions` row (multiple users can each pin the same\n`train_uid`/`service_date`), so `fetch_optional` would return whichever\none row Postgres happened to pick -- silently handing back that OTHER\nuser's `custom_name`/`shared_group_count` (both genuinely per-user,\ndespite this struct never exposing `user_id` itself) to whatever caller\neventually got reconnected to it. Deleted outright rather than fixed,\nsince dead code carrying a latent cross-user leak serves no purpose\nsitting around waiting to be reconnected.",
+        "properties": {
+          "cancelReason": {
+            "description": "`cancel_reason_code`'s delay attribution glossary text (e.g.\n`\"Driver\"`). `None` for a code the glossary lacks or a system code\n(`PD`, `ZW`). There is no delay-reason equivalent: TRUST carries none.",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "cancelReasonCode": {
+            "description": "The TRUST cancellation reason code (e.g. `\"TG\"`), only while\n`cancelled` is true.",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "cancellation": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/Cancellation"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "What part of the run is cancelled and why (DS-181): full or partial,\nthe cancelled sections, terminated short or started short, and the\nbest reason with its source. `null` when nothing is cancelled,\nincluding after a reinstatement. Filled with the fields above; see\n`data::cancellation`. The older `cancelled`/`cancelReason*` fields\nstay for compatibility."
+          },
+          "cancelled": {
+            "description": "Whether the train is cancelled: `status == \"cancelled\"`. Filled\nafter the read by `data::train_reasons`, like every field below.",
+            "type": "boolean"
+          },
+          "changeOfOriginReason": {
+            "description": "Its glossary text, under the same rules as `cancel_reason`.",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "changeOfOriginReasonCode": {
+            "description": "The TRUST change-of-origin reason code, when the train's origin was\nchanged.",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "customName": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "delayBasis": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/DelayBasis"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "What `delay_minutes` was measured against (`public`, `publicSchedule`\nor `working`, see `common::public_delay::DelayBasis`); `None` exactly\nwhen `delay_minutes` is."
+          },
+          "delayMinutes": {
+            "description": "The delay at the passenger's own stop, against the PUBLIC timetable\n(`data::stop_delay`, design doc §9 decision 2): the pin destination, measured once the train has reported there and forecast before then. `None` until\nknown.",
+            "format": "int32",
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "delayProvisional": {
+            "description": "`true` while `delay_minutes` is a forecast (the train has not reported\nat that stop yet).",
+            "type": "boolean"
+          },
+          "etaNext": {
+            "format": "date-time",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "etaSource": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/EtaSource"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "firstReportExpectedAt": {
+            "description": "When Network Rail's first report is (or was) expected: the\nActivation before it is activated, the origin departure after.\n`None` once live, or when the origin departure is unknown.",
+            "format": "date-time",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "id": {
+            "format": "int64",
+            "type": "integer"
+          },
+          "journeyIds": {
+            "description": "The caller's journeys this train belongs to (any leg), and of\nthose, the train's own: one-leg journeys whose leg is bound to this\nsubscription, which \"Stop tracking\" deletes (DS-124). Filled only by\nthe owner's `GET /Train/{trackingId}` (`attach_journey_ids`), never\non a journey's or a group's view of the train, which must not show\nthe owner's other journeys; absent from the JSON otherwise.\nAdditive (2026-10-22).",
+            "items": {
+              "format": "int64",
+              "type": "integer"
+            },
+            "type": [
+              "array",
+              "null"
+            ]
+          },
+          "journeyStops": {
+            "description": "The merged scheduled-timetable + live-overlay stop list -- `None`\nuntil `train_uid` is known, or if neither backing source has\nanything for this train (see\ndocs/superpowers/specs/2026-09-08-journey-timetable-overlay-design.md\n§1). Populated by `routes::train`'s handlers AFTER this struct is\nread from the DB (same \"read row, then overlay a computed field\"\npattern `blend_darwin_eta` already uses for `eta_next`/`eta_source`\non this same struct) -- never selected directly by\n`TRACKED_TRAIN_STATE_SELECT`, hence `#[sqlx(skip)]`. NOT\n`#[sqlx(default)]`: the derived `FromRow` impl still emits a\n`try_get::<#ty, _>(..)` call for a `#[sqlx(default)]` field and only\nswallows the resulting `ColumnNotFound` error at runtime, so it\nstill requires `JourneyStop: sqlx::Type<Postgres> +\nsqlx::Decode<Postgres>` at compile time -- a bound this\nnever-decoded, pure computed/serialization type deliberately\ndoesn't satisfy. `#[sqlx(skip)]` instead emits a bare\n`Default::default()` with no such bound, which is what \"this column\nis never in the SELECT\" actually needs.",
+            "items": {
+              "$ref": "#/components/schemas/JourneyStop"
+            },
+            "type": [
+              "array",
+              "null"
+            ]
+          },
+          "lastEventType": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "lastReportedLocation": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "liveTracking": {
+            "type": "boolean"
+          },
+          "mayHaveArrived": {
+            "description": "Server-side replacement for the frontend's old client-only \"may have\nfinished\" heuristic -- `true` once now is more than 15 minutes past\nthe ESTIMATED arrival at `journey_stops`'s final calling point (see\n`journey::may_have_arrived`). Populated the same \"read row, then\noverlay a computed field\" way as `journey_stops` itself, by\n`routes::train::attach_journey_stops`, hence `#[sqlx(skip)]` here\ntoo -- defaults to `false` (never a stale true) whenever there are\nno `journey_stops` to compute it from at all (pending/unresolved, or\nneither backing schedule source had anything).",
+            "type": "boolean"
+          },
+          "nextCallingPoint": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "notificationsEnabled": {
+            "description": "Whether this subscription's delay, cancellation and skipped-stop\npushes are on (`train_subscriptions.notifications_enabled`, set by\n`PATCH /Train/{trackingId}`). Owner's view only, like `journey_ids`;\nabsent from the JSON otherwise. Additive (2026-10-23).",
+            "type": [
+              "boolean",
+              "null"
+            ]
+          },
+          "operatorCode": {
+            "description": "The operating company's ATOC code (for example `\"SW\"`), from the CIF\nschedule. Serialized as `operatorCode`. Filled after the read by\n`data::train_operator`, hence `#[sqlx(skip)]`. `None` when no single\ncode is known; see that module's doc for when that happens.",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "operatorName": {
+            "description": "The `tocs` display name for `operator_code` (for example\n`\"South Western Railway\"`). Serialized as `operatorName`. `None` when\n`operator_code` is `None` or the code has no `tocs` row.",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "pinDestinationCrs": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "pinDestinationName": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "pinOriginCrs": {
+            "description": "`Option`, not `String`. `20260906130000_nullable_pin_columns.sql`\ndropped this column's `NOT NULL`, and\n`create_subscription_for_train` (the NR-primary path behind\n`POST /Train/by-uid/{uid}/{date}/track`) sources it via\n`INSERT ... SELECT` from the linked `trains` row -- which leaves it\n`NULL` whenever that row has no schedule data yet. That is the\nDEFAULT outcome of the new endpoint, not an edge case, so decoding\nthis as a bare `String` made `GET /Train/{trackingId}` fail outright\n(\"unexpected null; try decoding as an Option\") for exactly the\nsubscriptions this whole redesign exists to create. See\n`get_by_tracking_id_returns_a_row_with_null_pins_for_an_nr_primary_subscription`.\n\nRead as `COALESCE(pin, trains.origin_crs)` (likewise the destination\nand `pin_scheduled_departure`): the stored pin is a snapshot taken\nwhen the subscription was created, and nothing rewrites it once the\nshared `trains` row learns its timetable moments later. Without the\nfallback every train tracked by UID or picked for a journey leg kept\na `NULL` origin for good and the home page and journey view labelled\nit \"Unknown station\" (DS-111). A pin the user chose still wins.",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "pinOriginName": {
+            "description": "`None` whenever the `LEFT JOIN` below found no `stations` row for\n`pin_origin_crs` (an unrecognised code, or reference data that\nhasn't caught up) -- see Decision 3 of the plan this join\nimplements. Every frontend consumer must fall back to the bare CRS\ncode rather than assume this is always present.",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "pinScheduledDeparture": {
+            "description": "The pin's own scheduled departure, `None` for an NR-primary\nsubscription whose `trains` row had no schedule data to source it from\n(same reason as `pin_origin_crs` immediately above).\n\nInternal plumbing, never sent to the frontend -- hence\n`#[serde(skip_serializing)]`, the same posture\n`schedule_skipped_stations`/`schedule_platform` already take on this\nstruct. It exists solely so `routes::train::blend_darwin_eta` can hand\n`eta_blend::find_darwin_eta` the instant that identifies WHICH service\non the origin's departure board this pin actually is; without it that\noverlay could only match on destination, and published the next\nservice's estimate once the tracked train left the board (the\n2026-09-25 review's High 3 finding). The wire already carries this\nvalue on `TrackedTrainListItem` for `GET /Train/mine`, so nothing new\nis exposed by reading it here.",
+            "format": "date-time",
+            "type": [
+              "string",
+              "null"
+            ],
+            "writeOnly": true
+          },
+          "predictedStart": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/PredictedStart"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "A predicted late start from the incoming train (DS-127,\n`ds_store::trains::predicted_start`), served as `predictedStart`:\n`null` unless the train has no TRUST report yet, is within 3 hours\nof departure, has a previous working whose delay the booked\nturnaround cannot absorb, and the origin's board shows no time of\nits own. Filled by `routes::train::attach_journey_stops(_public)`."
+          },
+          "resolutionStatus": {
+            "$ref": "#/components/schemas/ResolutionStatus"
+          },
+          "scheduleCallingPoints": {
+            "description": "Opaque JSONB relay of the matched entry's calling points, already\ncamelCase-shaped at write time\n(`schedule_matching::ScheduleCallingPointDto`) -- this crate does\nnot deserialize it again on the way out."
+          },
+          "scheduleDestinationCrs": {
+            "description": "The matched schedule's own terminus CRS (Decision 3 step 4 of\ndocs/superpowers/specs/2026-09-05-schedule-first-train-tracking-design.md),\n`None` until schedule-matched (or if the terminus TIPLOC never\nresolved to a CRS -- see `schedule_matching::attempt_schedule_match`).",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "scheduleDestinationName": {
+            "description": "See `pin_origin_name`'s own doc comment -- same\n`LEFT JOIN stations` mechanism, joined on `schedule_destination_crs`.",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "schedulePlannedPlatform": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "writeOnly": true
+          },
+          "schedulePlatform": {
+            "description": "The shared row's own captured origin-platform snapshot\n(`trains.platform`/`planned_platform`) -- same internal-plumbing\nposture as `schedule_skipped_stations` immediately above, fed to\n`journey::build_journey_stops` and never sent to the frontend\ndirectly (the origin `JourneyStop` carries it instead).",
+            "type": [
+              "string",
+              "null"
+            ],
+            "writeOnly": true
+          },
+          "scheduleSkippedStations": {
+            "description": "The shared row's own captured Darwin skip snapshot\n(`trains.skipped_stations`) -- internal plumbing for\n`routes::train::attach_journey_stops`'s `journey::build_journey_stops`\ncall, same never-sent-to-the-frontend posture as `trains_id` just\nbelow (the frontend already gets this signal per-stop, on each\n`JourneyStop`'s own `skipSource`).",
+            "items": {
+              "type": "string"
+            },
+            "type": "array",
+            "writeOnly": true
+          },
+          "serviceDate": {
+            "format": "date",
+            "type": "string"
+          },
+          "serviceMode": {
+            "$ref": "#/components/schemas/ServiceMode"
+          },
+          "sharedGroupCount": {
+            "description": "How many groups (`crate::data::groups`) this subscription is\ncurrently shared into, via `group_trains.train_subscription_id` --\n`0` if it isn't shared anywhere. Read via a correlated `COUNT(*)`\nsubquery directly in `TRACKED_TRAIN_STATE_SELECT` below, the same\n\"attach a count to the row that owns it\" shape\n`groups::GroupSummary`/`groups::GroupDetail` already use for their\nown `member_count` (`SELECT ... (SELECT COUNT(*) FROM group_members\ngm2 WHERE gm2.group_id = g.id) AS member_count ...`) -- deliberately\nNOT a separate `count_groups_containing_train` query invoked per row\nfrom a route handler, which would turn `GET /Train/mine` (a\npotentially-many-row list) into an N+1. Exists so the frontend's\ndelete-confirmation modal (`DeleteTrainButton`) can warn \"this train\nis shared in N group(s)\" without a second round-trip.\n\nSince DS-124 a train is shared through its own journey\n(`group_journeys` on a one-leg journey bound to this subscription)\nas well as through a remaining `group_trains` row: this counts the\ndistinct groups across both ([`shared_group_count_sql!`]).",
+            "format": "int64",
+            "type": "integer"
+          },
+          "singleLegJourneyIds": {
+            "description": "See `journey_ids`.",
+            "items": {
+              "format": "int64",
+              "type": "integer"
+            },
+            "type": [
+              "array",
+              "null"
+            ]
+          },
+          "status": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/JourneyStatus"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "trackingPhase": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/TrackingPhase"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Planned, waiting for its first report, live, not in the timetable\nor timetable-only (`data::tracking_phase`, spec 2026-10-20 §4.3).\nFilled after the read by `tracking_phase::attach`; `None` (`null`)\nwhen that lookup did not run or failed, which reads as today's\ndisplay."
+          },
+          "trainId": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "trainUid": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "trainsId": {
+            "description": "The shared `trains` row's own surrogate key, needed to read\n`train_movement_events` for this train's live overlay -- internal\nplumbing for `routes::train`'s journey-stops attachment, never sent\nto the frontend (this struct already uses a *different* `id` for\nthe tracking id, so exposing a second, differently-scoped `id`-like\nfield on the wire would repeat exactly the confusion\n`PublicTrainState::trains_id`'s own doc comment describes).",
+            "format": "int64",
+            "type": [
+              "integer",
+              "null"
+            ],
+            "writeOnly": true
+          },
+          "workingDelayMinutes": {
+            "description": "TRUST's running delay against the working timetable\n(`train_current_state.delay_minutes`), internal: the input to the\nper-stop estimates and to the forecast above. Never serialized.",
+            "format": "int32",
+            "type": [
+              "integer",
+              "null"
+            ],
+            "writeOnly": true
+          }
+        },
+        "required": [
+          "id",
+          "serviceDate",
+          "resolutionStatus",
+          "scheduleSkippedStations",
+          "delayProvisional",
+          "sharedGroupCount",
+          "mayHaveArrived",
+          "serviceMode",
+          "liveTracking",
+          "cancelled"
+        ],
+        "type": "object"
+      },
+      "TrackingPhase": {
+        "description": "The traveller-facing phase of a tracked train (spec §4.3), evaluated in\ndeclaration order.",
+        "oneOf": [
+          {
+            "const": "timetableOnly",
+            "description": "A bus or ferry: TRUST never reports it.",
+            "type": "string"
+          },
+          {
+            "const": "live",
+            "description": "Network Rail has reported a movement, a cancellation or an arrival.",
+            "type": "string"
+          },
+          {
+            "const": "noTimetable",
+            "description": "No timetable for it and no Network Rail report: we can't track it.",
+            "type": "string"
+          },
+          {
+            "const": "planned",
+            "description": "Timetabled, and its first report is not due yet.",
+            "type": "string"
+          },
+          {
+            "const": "awaitingReport",
+            "description": "Its first report is due (or we can't tell when it is): the existing\nwaiting states.",
+            "type": "string"
+          }
+        ]
+      },
+      "TransitLegNotice": {
+        "description": "A notice on a transit leg (spec §7.3): a current disruption on its line.",
+        "properties": {
+          "description": {
+            "description": "The severity's name (`Minor Delays`).",
+            "type": "string"
+          },
+          "kind": {
+            "description": "`disruption`.",
+            "type": "string"
+          },
+          "lineId": {
+            "type": "string"
+          },
+          "message": {
+            "description": "\"Disruption reported on the Blue Line\".",
+            "type": "string"
+          },
+          "reason": {
+            "description": "The situation's text.",
+            "type": "string"
+          },
+          "severity": {
+            "description": "A `common::Severity` number.",
+            "format": "uint8",
+            "maximum": 255,
+            "minimum": 0,
+            "type": "integer"
+          },
+          "situationId": {
+            "description": "The situation behind it, for its page (`/transit/{network}/incidents/{id}`);\nabsent for a status from `TfL`, whose line page has the detail\n(additive, DS-237).",
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        },
+        "required": [
+          "kind",
+          "lineId",
+          "severity",
+          "description",
+          "message",
+          "reason"
+        ],
+        "type": "object"
+      },
+      "TransitMode": {
+        "description": "An untracked leg's `transit_mode`: `data::journeys::TRANSIT_MODES`,\nchecked on every write.",
+        "enum": [
+          "tube",
+          "dlr",
+          "bus",
+          "tram",
+          "metro",
+          "rail",
+          "walk",
+          "transfer",
+          "ferry",
+          "taxi",
+          "cycle",
+          "other"
+        ],
+        "type": "string"
+      },
+      "UntrackedStatus": {
+        "description": "An untracked leg's state, from the clock alone (spec §2.2).",
+        "oneOf": [
+          {
+            "const": "planned",
+            "description": "Before its planned departure.",
+            "type": "string"
+          },
+          {
+            "const": "inProgress",
+            "description": "Between its planned departure and arrival.",
+            "type": "string"
+          },
+          {
+            "const": "done",
+            "description": "At or after its planned arrival.",
+            "type": "string"
+          }
+        ]
+      }
+    },
+    "securitySchemes": {
+      "personalToken": {
+        "description": "A personal API token: dsp_ followed by 38 letters and digits.",
+        "scheme": "bearer",
+        "type": "http"
+      }
+    }
+  },
+  "info": {
+    "description": "Read-only access to your own Distant Signal data with a personal API token (`dsp_...`), created on the Connected apps page. Send it as `Authorization: Bearer <token>`. Each route needs one of the token's scopes (`journeys:read`, `lines:read`, `trains:read`, `preferences:read`), named in its `x-ds-scope`. Every 2xx body is `{data, attribution}`; show the attribution with the data. Poll no more often than `DS-Poll-Interval` (60 s).",
+    "license": {
+      "identifier": "AGPL-3.0-or-later",
+      "name": "AGPL-3.0-or-later"
+    },
+    "title": "Distant Signal personal API",
+    "version": "1"
+  },
+  "openapi": "3.1.0",
+  "paths": {
+    "/v1/Journeys/mine": {
+      "get": {
+        "operationId": "getV1JourneysMine",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "properties": {
+                    "attribution": {
+                      "$ref": "#/components/schemas/Attribution"
+                    },
+                    "data": {
+                      "items": {
+                        "$ref": "#/components/schemas/JourneyListItem"
+                      },
+                      "type": "array"
+                    }
+                  },
+                  "required": [
+                    "data",
+                    "attribution"
+                  ],
+                  "type": "object"
+                }
+              }
+            },
+            "description": "The data, with its attribution.",
+            "headers": {
+              "Cache-Control": {
+                "description": "private, max-age=30",
+                "schema": {
+                  "type": "string"
+                }
+              },
+              "DS-Poll-Interval": {
+                "description": "The shortest sensible poll interval, in seconds.",
+                "schema": {
+                  "type": "integer"
+                }
+              },
+              "ETag": {
+                "description": "Weak; send it back as If-None-Match for a 304.",
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "304": {
+            "description": "Not modified (If-None-Match matched the ETag)."
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "No token, or a malformed, unknown, revoked, expired or idle one."
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "The token lacks this route's scope (`insufficient_scope`)."
+          },
+          "429": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "Rate limited (`rate_limited`); wait Retry-After seconds.",
+            "headers": {
+              "Retry-After": {
+                "schema": {
+                  "type": "integer"
+                }
+              }
+            }
+          }
+        },
+        "summary": "Your journeys in travel order: what is still to come or under way first (soonest first), then what you have travelled (most recent first). Only your own: journeys you follow or that were shared with you are not included.",
+        "x-ds-scope": "journeys:read"
+      }
+    },
+    "/v1/Journeys/{journey_id}": {
+      "get": {
+        "operationId": "getV1JourneysJourneyId",
+        "parameters": [
+          {
+            "description": "The journey's id, from /v1/Journeys/mine.",
+            "in": "path",
+            "name": "journey_id",
+            "required": true,
+            "schema": {
+              "format": "int64",
+              "type": "integer"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "properties": {
+                    "attribution": {
+                      "$ref": "#/components/schemas/Attribution"
+                    },
+                    "data": {
+                      "$ref": "#/components/schemas/JourneyDetailResponse"
+                    }
+                  },
+                  "required": [
+                    "data",
+                    "attribution"
+                  ],
+                  "type": "object"
+                }
+              }
+            },
+            "description": "The data, with its attribution.",
+            "headers": {
+              "Cache-Control": {
+                "description": "private, max-age=30",
+                "schema": {
+                  "type": "string"
+                }
+              },
+              "DS-Poll-Interval": {
+                "description": "The shortest sensible poll interval, in seconds.",
+                "schema": {
+                  "type": "integer"
+                }
+              },
+              "ETag": {
+                "description": "Weak; send it back as If-None-Match for a 304.",
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "304": {
+            "description": "Not modified (If-None-Match matched the ETag)."
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "No token, or a malformed, unknown, revoked, expired or idle one."
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "The token lacks this route's scope (`insufficient_scope`)."
+          },
+          "429": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "Rate limited (`rate_limited`); wait Retry-After seconds.",
+            "headers": {
+              "Retry-After": {
+                "schema": {
+                  "type": "integer"
+                }
+              }
+            }
+          }
+        },
+        "summary": "One of your journeys, with its legs and their live state.",
+        "x-ds-scope": "journeys:read"
+      }
+    },
+    "/v1/Line/Mode/{mode}/Status": {
+      "get": {
+        "operationId": "getV1LineModeModeStatus",
+        "parameters": [
+          {
+            "description": "One or more modes, comma-separated, e.g. national-rail or tube,national-rail.",
+            "in": "path",
+            "name": "mode",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "description": "Include each status's disruption details.",
+            "in": "query",
+            "name": "detail",
+            "required": false,
+            "schema": {
+              "default": false,
+              "type": "boolean"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "properties": {
+                    "attribution": {
+                      "$ref": "#/components/schemas/Attribution"
+                    },
+                    "data": {
+                      "description": "TfL-shaped Line objects with their lineStatuses, in the TfL-shaped form the website's public routes serve (docs/public-api.md). Each item is an object; its fields are not described here.",
+                      "items": {
+                        "type": "object"
+                      },
+                      "type": "array"
+                    }
+                  },
+                  "required": [
+                    "data",
+                    "attribution"
+                  ],
+                  "type": "object"
+                }
+              }
+            },
+            "description": "The data, with its attribution.",
+            "headers": {
+              "Cache-Control": {
+                "description": "private, max-age=60",
+                "schema": {
+                  "type": "string"
+                }
+              },
+              "DS-Poll-Interval": {
+                "description": "The shortest sensible poll interval, in seconds.",
+                "schema": {
+                  "type": "integer"
+                }
+              },
+              "ETag": {
+                "description": "Weak; send it back as If-None-Match for a 304.",
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "304": {
+            "description": "Not modified (If-None-Match matched the ETag)."
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "No token, or a malformed, unknown, revoked, expired or idle one."
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "The token lacks this route's scope (`insufficient_scope`)."
+          },
+          "429": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "Rate limited (`rate_limited`); wait Retry-After seconds.",
+            "headers": {
+              "Retry-After": {
+                "schema": {
+                  "type": "integer"
+                }
+              }
+            }
+          }
+        },
+        "summary": "The status of every line of one or more modes.",
+        "x-ds-scope": "lines:read"
+      }
+    },
+    "/v1/Line/{ids}/Status": {
+      "get": {
+        "operationId": "getV1LineIdsStatus",
+        "parameters": [
+          {
+            "description": "One or more line ids, comma-separated.",
+            "in": "path",
+            "name": "ids",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "description": "Include each status's disruption details.",
+            "in": "query",
+            "name": "detail",
+            "required": false,
+            "schema": {
+              "default": false,
+              "type": "boolean"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "properties": {
+                    "attribution": {
+                      "$ref": "#/components/schemas/Attribution"
+                    },
+                    "data": {
+                      "description": "TfL-shaped Line objects with their lineStatuses, in the TfL-shaped form the website's public routes serve (docs/public-api.md). Each item is an object; its fields are not described here.",
+                      "items": {
+                        "type": "object"
+                      },
+                      "type": "array"
+                    }
+                  },
+                  "required": [
+                    "data",
+                    "attribution"
+                  ],
+                  "type": "object"
+                }
+              }
+            },
+            "description": "The data, with its attribution.",
+            "headers": {
+              "Cache-Control": {
+                "description": "private, max-age=60",
+                "schema": {
+                  "type": "string"
+                }
+              },
+              "DS-Poll-Interval": {
+                "description": "The shortest sensible poll interval, in seconds.",
+                "schema": {
+                  "type": "integer"
+                }
+              },
+              "ETag": {
+                "description": "Weak; send it back as If-None-Match for a 304.",
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "304": {
+            "description": "Not modified (If-None-Match matched the ETag)."
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "No token, or a malformed, unknown, revoked, expired or idle one."
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "The token lacks this route's scope (`insufficient_scope`)."
+          },
+          "429": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "Rate limited (`rate_limited`); wait Retry-After seconds.",
+            "headers": {
+              "Retry-After": {
+                "schema": {
+                  "type": "integer"
+                }
+              }
+            }
+          }
+        },
+        "summary": "The status of one or more lines.",
+        "x-ds-scope": "lines:read"
+      }
+    },
+    "/v1/StopPoint/{crs}/Disruption": {
+      "get": {
+        "operationId": "getV1StopPointCrsDisruption",
+        "parameters": [
+          {
+            "description": "The station's three-letter code.",
+            "in": "path",
+            "name": "crs",
+            "required": true,
+            "schema": {
+              "pattern": "^[A-Za-z]{3}$",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "properties": {
+                    "attribution": {
+                      "$ref": "#/components/schemas/Attribution"
+                    },
+                    "data": {
+                      "description": "TfL-shaped Disruption objects, in the TfL-shaped form the website's public routes serve (docs/public-api.md). Each item is an object; its fields are not described here.",
+                      "items": {
+                        "type": "object"
+                      },
+                      "type": "array"
+                    }
+                  },
+                  "required": [
+                    "data",
+                    "attribution"
+                  ],
+                  "type": "object"
+                }
+              }
+            },
+            "description": "The data, with its attribution.",
+            "headers": {
+              "Cache-Control": {
+                "description": "private, max-age=60",
+                "schema": {
+                  "type": "string"
+                }
+              },
+              "DS-Poll-Interval": {
+                "description": "The shortest sensible poll interval, in seconds.",
+                "schema": {
+                  "type": "integer"
+                }
+              },
+              "ETag": {
+                "description": "Weak; send it back as If-None-Match for a 304.",
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "304": {
+            "description": "Not modified (If-None-Match matched the ETag)."
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "No token, or a malformed, unknown, revoked, expired or idle one."
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "The token lacks this route's scope (`insufficient_scope`)."
+          },
+          "429": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "Rate limited (`rate_limited`); wait Retry-After seconds.",
+            "headers": {
+              "Retry-After": {
+                "schema": {
+                  "type": "integer"
+                }
+              }
+            }
+          }
+        },
+        "summary": "Disruption affecting the lines that serve a station.",
+        "x-ds-scope": "lines:read"
+      }
+    },
+    "/v1/Train/by-uid/{train_uid}/{date}": {
+      "get": {
+        "operationId": "getV1TrainByUidTrainUidDate",
+        "parameters": [
+          {
+            "description": "The timetable's train id, e.g. C11052.",
+            "in": "path",
+            "name": "train_uid",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "description": "The service date (YYYY-MM-DD).",
+            "in": "path",
+            "name": "date",
+            "required": true,
+            "schema": {
+              "format": "date",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "properties": {
+                    "attribution": {
+                      "$ref": "#/components/schemas/Attribution"
+                    },
+                    "data": {
+                      "$ref": "#/components/schemas/PublicTrainResponse"
+                    }
+                  },
+                  "required": [
+                    "data",
+                    "attribution"
+                  ],
+                  "type": "object"
+                }
+              }
+            },
+            "description": "The data, with its attribution.",
+            "headers": {
+              "Cache-Control": {
+                "description": "private, max-age=30",
+                "schema": {
+                  "type": "string"
+                }
+              },
+              "DS-Poll-Interval": {
+                "description": "The shortest sensible poll interval, in seconds.",
+                "schema": {
+                  "type": "integer"
+                }
+              },
+              "ETag": {
+                "description": "Weak; send it back as If-None-Match for a 304.",
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "304": {
+            "description": "Not modified (If-None-Match matched the ETag)."
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "No token, or a malformed, unknown, revoked, expired or idle one."
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "The token lacks this route's scope (`insufficient_scope`)."
+          },
+          "429": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "Rate limited (`rate_limited`); wait Retry-After seconds.",
+            "headers": {
+              "Retry-After": {
+                "schema": {
+                  "type": "integer"
+                }
+              }
+            }
+          }
+        },
+        "summary": "A train by its timetable id and date, with its calls and live state.",
+        "x-ds-scope": "trains:read"
+      }
+    },
+    "/v1/me": {
+      "get": {
+        "operationId": "getV1Me",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "properties": {
+                    "attribution": {
+                      "$ref": "#/components/schemas/Attribution"
+                    },
+                    "data": {
+                      "$ref": "#/components/schemas/MeResponse"
+                    }
+                  },
+                  "required": [
+                    "data",
+                    "attribution"
+                  ],
+                  "type": "object"
+                }
+              }
+            },
+            "description": "The data, with its attribution.",
+            "headers": {
+              "Cache-Control": {
+                "description": "no-store",
+                "schema": {
+                  "type": "string"
+                }
+              },
+              "DS-Poll-Interval": {
+                "description": "The shortest sensible poll interval, in seconds.",
+                "schema": {
+                  "type": "integer"
+                }
+              },
+              "ETag": {
+                "description": "Weak; send it back as If-None-Match for a 304.",
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "304": {
+            "description": "Not modified (If-None-Match matched the ETag)."
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "No token, or a malformed, unknown, revoked, expired or idle one."
+          },
+          "429": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "Rate limited (`rate_limited`); wait Retry-After seconds.",
+            "headers": {
+              "Retry-After": {
+                "schema": {
+                  "type": "integer"
+                }
+              }
+            }
+          }
+        },
+        "summary": "The token making the request: its name, scopes and lifetime."
+      }
+    },
+    "/v1/openapi.json": {
+      "get": {
+        "operationId": "getV1OpenapiJson",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object"
+                }
+              }
+            },
+            "description": "The `OpenAPI` document."
+          }
+        },
+        "security": [],
+        "summary": "This document. Needs no token."
+      }
+    },
+    "/v1/preferences": {
+      "get": {
+        "operationId": "getV1Preferences",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "properties": {
+                    "attribution": {
+                      "$ref": "#/components/schemas/Attribution"
+                    },
+                    "data": {
+                      "$ref": "#/components/schemas/PreferencesResponse"
+                    }
+                  },
+                  "required": [
+                    "data",
+                    "attribution"
+                  ],
+                  "type": "object"
+                }
+              }
+            },
+            "description": "The data, with its attribution.",
+            "headers": {
+              "Cache-Control": {
+                "description": "private, max-age=300",
+                "schema": {
+                  "type": "string"
+                }
+              },
+              "DS-Poll-Interval": {
+                "description": "The shortest sensible poll interval, in seconds.",
+                "schema": {
+                  "type": "integer"
+                }
+              },
+              "ETag": {
+                "description": "Weak; send it back as If-None-Match for a 304.",
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "304": {
+            "description": "Not modified (If-None-Match matched the ETag)."
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "No token, or a malformed, unknown, revoked, expired or idle one."
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "The token lacks this route's scope (`insufficient_scope`)."
+          },
+          "429": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "Rate limited (`rate_limited`); wait Retry-After seconds.",
+            "headers": {
+              "Retry-After": {
+                "schema": {
+                  "type": "integer"
+                }
+              }
+            }
+          }
+        },
+        "summary": "Your pinned lines, stations and operators.",
+        "x-ds-scope": "preferences:read"
+      }
+    },
+    "/v1/preferences/notifications": {
+      "get": {
+        "operationId": "getV1PreferencesNotifications",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "properties": {
+                    "attribution": {
+                      "$ref": "#/components/schemas/Attribution"
+                    },
+                    "data": {
+                      "$ref": "#/components/schemas/NotificationPreferences"
+                    }
+                  },
+                  "required": [
+                    "data",
+                    "attribution"
+                  ],
+                  "type": "object"
+                }
+              }
+            },
+            "description": "The data, with its attribution.",
+            "headers": {
+              "Cache-Control": {
+                "description": "private, max-age=300",
+                "schema": {
+                  "type": "string"
+                }
+              },
+              "DS-Poll-Interval": {
+                "description": "The shortest sensible poll interval, in seconds.",
+                "schema": {
+                  "type": "integer"
+                }
+              },
+              "ETag": {
+                "description": "Weak; send it back as If-None-Match for a 304.",
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "304": {
+            "description": "Not modified (If-None-Match matched the ETag)."
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "No token, or a malformed, unknown, revoked, expired or idle one."
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "The token lacks this route's scope (`insufficient_scope`)."
+          },
+          "429": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "Rate limited (`rate_limited`); wait Retry-After seconds.",
+            "headers": {
+              "Retry-After": {
+                "schema": {
+                  "type": "integer"
+                }
+              }
+            }
+          }
+        },
+        "summary": "Your notification settings.",
+        "x-ds-scope": "preferences:read"
+      }
+    },
+    "/v1/stations/{crs}/departures": {
+      "get": {
+        "operationId": "getV1StationsCrsDepartures",
+        "parameters": [
+          {
+            "description": "The station's three-letter code.",
+            "in": "path",
+            "name": "crs",
+            "required": true,
+            "schema": {
+              "pattern": "^[A-Za-z]{3}$",
+              "type": "string"
+            }
+          },
+          {
+            "description": "Only trains that call at this station later.",
+            "in": "query",
+            "name": "callingAt",
+            "required": false,
+            "schema": {
+              "pattern": "^[A-Za-z]{3}$",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "properties": {
+                    "attribution": {
+                      "$ref": "#/components/schemas/Attribution"
+                    },
+                    "data": {
+                      "description": "Departure objects, in the TfL-shaped form the website's public routes serve (docs/public-api.md). Each item is an object; its fields are not described here.",
+                      "items": {
+                        "type": "object"
+                      },
+                      "type": "array"
+                    }
+                  },
+                  "required": [
+                    "data",
+                    "attribution"
+                  ],
+                  "type": "object"
+                }
+              }
+            },
+            "description": "The data, with its attribution.",
+            "headers": {
+              "Cache-Control": {
+                "description": "private, max-age=30",
+                "schema": {
+                  "type": "string"
+                }
+              },
+              "DS-Poll-Interval": {
+                "description": "The shortest sensible poll interval, in seconds.",
+                "schema": {
+                  "type": "integer"
+                }
+              },
+              "ETag": {
+                "description": "Weak; send it back as If-None-Match for a 304.",
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "304": {
+            "description": "Not modified (If-None-Match matched the ETag)."
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "No token, or a malformed, unknown, revoked, expired or idle one."
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "The token lacks this route's scope (`insufficient_scope`)."
+          },
+          "429": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "Rate limited (`rate_limited`); wait Retry-After seconds.",
+            "headers": {
+              "Retry-After": {
+                "schema": {
+                  "type": "integer"
+                }
+              }
+            }
+          }
+        },
+        "summary": "Live departures from a station.",
+        "x-ds-scope": "trains:read"
+      }
+    },
+    "/v1/status": {
+      "get": {
+        "operationId": "getV1Status",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "properties": {
+                    "attribution": {
+                      "$ref": "#/components/schemas/Attribution"
+                    },
+                    "data": {
+                      "properties": {
+                        "ok": {
+                          "const": true,
+                          "type": "boolean"
+                        }
+                      },
+                      "required": [
+                        "ok"
+                      ],
+                      "type": "object"
+                    }
+                  },
+                  "required": [
+                    "data",
+                    "attribution"
+                  ],
+                  "type": "object"
+                }
+              }
+            },
+            "description": "The data, with its attribution.",
+            "headers": {
+              "Cache-Control": {
+                "description": "private, max-age=60",
+                "schema": {
+                  "type": "string"
+                }
+              },
+              "DS-Poll-Interval": {
+                "description": "The shortest sensible poll interval, in seconds.",
+                "schema": {
+                  "type": "integer"
+                }
+              },
+              "ETag": {
+                "description": "Weak; send it back as If-None-Match for a 304.",
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          }
+        },
+        "security": [],
+        "summary": "Whether the API is up. Needs no token."
+      }
+    }
+  },
+  "security": [
+    {
+      "personalToken": []
+    }
+  ],
+  "servers": [
+    {
+      "url": "https://ds-api.cursed.solutions"
+    }
+  ]
+}
