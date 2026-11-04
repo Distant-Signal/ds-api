@@ -907,4 +907,41 @@ pub(crate) mod db_tests {
         );
         cleanup(&pool, "acct-exp-").await;
     }
+
+    /// The privacy notice lists the Discord account id (account
+    /// continuity, docs/connected-apps.md): "Download my data" has to
+    /// return it, and "Delete my account" has to remove it.
+    #[tokio::test]
+    #[ignore = "requires a live database; run with `cargo test -p api -- --ignored --test-threads=1`"]
+    async fn export_and_delete_cover_the_discord_id() {
+        let pool = connect().await;
+        let user = "acct-discord-user";
+        cleanup(&pool, "acct-discord-").await;
+        seed_user(&pool, user).await;
+        exec(
+            &pool,
+            "UPDATE users SET discord_id = '100000000000000001' WHERE id = $1",
+            &[user],
+        )
+        .await;
+
+        let export = export_account(&pool, user)
+            .await
+            .expect("export succeeds")
+            .expect("user exists");
+        let json = serde_json::to_value(&export).unwrap();
+        assert_eq!(json["account"]["discord_id"], "100000000000000001");
+
+        assert!(delete_account(&pool, user).await.unwrap().is_some());
+        assert_eq!(
+            scalar_i64(
+                &pool,
+                "SELECT COUNT(*) FROM users WHERE discord_id = '100000000000000001'",
+                &[]
+            )
+            .await,
+            0
+        );
+        cleanup(&pool, "acct-discord-").await;
+    }
 }
