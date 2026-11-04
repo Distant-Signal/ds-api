@@ -471,7 +471,30 @@ schedule_feed: string | null,
  * `data::corpus::last_corpus_delivery`). `None` until the first load,
  * and for as long as `scheduleFeed.corpus.enabled` stays off.
  */
-corpus: string | null, };
+corpus: string | null, 
+/**
+ * When the Republic of Ireland timetable (Irish Rail's services from
+ * the National Transport Authority's GTFS, poller-irish-rail-gtfs,
+ * daily) last landed: the newer of its stations and lines
+ * `ingest_freshness` sources. `None` until its first delivery, and
+ * for as long as the feed is off on this install, so a client can
+ * leave it out.
+ */
+irish_rail_timetable: string | null, 
+/**
+ * When the Irish Rail live departure boards (poller-irish-rail-live,
+ * every 5 minutes) were last polled: the newest Republic of Ireland
+ * station sample's `polled_at`. `None` until the first poll, and while
+ * the feed is off.
+ */
+irish_rail_live: string | null, 
+/**
+ * When the Northern Ireland stations and lines (Translink's, from
+ * `OpenDataNI`, poller-nir-stations, daily) last landed, as
+ * `irish_rail_timetable`. `None` until the first delivery, and while
+ * the feed is off.
+ */
+northern_ireland_stations: string | null, };
 
 /**
  * How confident are we in this status?
