@@ -3,6 +3,14 @@
 Changes to the Distant Signal (DS) HTTP API that a client such as DS-MCP
 needs to know about. Newest first. Field names are as served (camelCase).
 
+## 2026-11-04: usage events for the island of Ireland pages
+
+Additive. `POST /public/events` accepts four more page templates,
+`/island-of-ireland`, `/island-of-ireland/[network]`,
+`/island-of-ireland/[network]/lines/[line]` and
+`/island-of-ireland/[network]/stations/[station]`, the website's
+Iarnród Éireann and NI Railways pages. DS-MCP: no change needed.
+
 ## 2026-11-04: `GET /public/freshness` reports the island-of-Ireland feeds
 
 Additive. Three new fields, each an ISO 8601 timestamp or `null`, in the
