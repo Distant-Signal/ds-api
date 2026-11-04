@@ -156,7 +156,7 @@ a compact `cancellation`, and the notifier words cancellation pushes from
 the same rules, without the LDBWS board overlay (so a push's reason is
 always the TRUST one). A push decided before TRUST's reason is stored gets
 one follow-up, replacing it on the device, if the reason arrives within 15
-minutes (`crates/notifier/src/cancel_reason.rs`).
+minutes (ds-workers' `crates/notifier/src/cancel_reason.rs`).
 
 ## Per-stop status
 
