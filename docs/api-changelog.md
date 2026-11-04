@@ -3,6 +3,16 @@
 Changes to the Distant Signal (DS) HTTP API that a client such as DS-MCP
 needs to know about. Newest first. Field names are as served (camelCase).
 
+## 2026-11-04: the OpenAPI document in the api image
+
+Additive, no HTTP change. The api image
+(`ghcr.io/distant-signal/images/api`) carries the personal-token API's
+OpenAPI document at `/usr/share/distant-signal/openapi-v1.json`, beside the
+TypeScript types at `/usr/share/distant-signal/api-types.ts`, in the
+image's top two layers. Once the api has its own repository, the website
+reads both from the image it pins, and a client can do the same for the
+build it runs against. DS-MCP: no change needed.
+
 ## 2026-11-03: usage events for the developer pages
 
 Additive. `POST /public/events` accepts two more page templates,

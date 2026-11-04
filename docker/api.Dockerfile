@@ -184,10 +184,14 @@ COPY --from=builder /usr/local/bin/corpus_compare /usr/local/bin/corpus_compare
 # command (crates/api/src/bin/maintenance.rs).
 COPY --from=builder /usr/local/bin/maintenance /usr/local/bin/maintenance
 # The TypeScript types generated from this api's request and response types
-# (crates/api/src/api_types.rs). The frontend takes its copy from here once
-# the api has its own repository (repo-split spec §5.3); this image's tag is
-# the types' version.
+# (crates/api/src/api_types.rs) and the personal-token API's OpenAPI
+# document (api-types/openapi/v1.json). The frontend takes its copies from
+# here once the api has its own repository (repo-split spec §5.3,
+# scripts/sync-api-types.py --from image); this image's tag is their
+# version. Last, in layers of their own, so reading them downloads only
+# these two small layers.
 COPY api-types/api.ts /usr/share/distant-signal/api-types.ts
+COPY api-types/openapi/v1.json /usr/share/distant-signal/openapi-v1.json
 
 # Numeric USER, not the `api` name useradd created above: Kubernetes'
 # runAsNonRoot admission check (this chart's podSecurityContext sets
