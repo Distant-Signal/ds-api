@@ -113,6 +113,10 @@ pub(crate) enum Outcome {
     RejectedByApi,
     /// A CORPUS file that failed its checks, moved to the rejected archive.
     CorpusRejected,
+    /// A CORPUS file archived unloaded because another file won: a newer
+    /// one, the preferred format, or a snapshot dated later that is
+    /// already loaded. Nothing is wrong with it.
+    CorpusSuperseded,
     /// The same content already came through the other delivery source
     /// (`sources.rs`): not extracted, checked or recorded again.
     Duplicate,
@@ -128,6 +132,7 @@ impl Outcome {
             Self::Quarantined => "quarantined",
             Self::RejectedByApi => "rejected_by_api",
             Self::CorpusRejected => "corpus_rejected",
+            Self::CorpusSuperseded => "corpus_superseded",
             Self::Duplicate => "duplicate",
             Self::Superseded => "superseded",
         }
@@ -363,6 +368,7 @@ pub(crate) mod tests {
                 Outcome::Quarantined,
                 Outcome::RejectedByApi,
                 Outcome::CorpusRejected,
+                Outcome::CorpusSuperseded,
                 Outcome::Duplicate,
                 Outcome::Superseded
             ]
@@ -372,6 +378,7 @@ pub(crate) mod tests {
                 "quarantined",
                 "rejected_by_api",
                 "corpus_rejected",
+                "corpus_superseded",
                 "duplicate",
                 "superseded"
             ]
