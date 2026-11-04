@@ -14,7 +14,8 @@ design.md section 10): the api's resident memory at most 25 MB more with the
 networks on, and each search at most 10% slower. Run it against a release
 build of the api on a COPY of production (never production itself), twice:
 once with API_TRIP_PLAN_TRANSIT_NETWORKS empty ("off") and once with it set
-("on", with --transit), each from a fresh start. docs/transit-networks.md,
+("on", with --transit), each from a fresh start. ds-pollers' docs/transit-networks.md
+(https://github.com/Distant-Signal/ds-pollers/blob/main/docs/transit-networks.md),
 "Trip planning", has the steps.
 
 `measure` warms the graph cache for the date and the next one (the two
