@@ -3,6 +3,23 @@
 Changes to the Distant Signal (DS) HTTP API that a client such as DS-MCP
 needs to know about. Newest first. Field names are as served (camelCase).
 
+## 2026-11-04: `GET /public/freshness` reports the island-of-Ireland feeds
+
+Additive. Three new fields, each an ISO 8601 timestamp or `null`, in the
+endpoint's existing snake_case:
+
+- `irish_rail_timetable`: when the Republic of Ireland timetable (Irish
+  Rail's services from the National Transport Authority, daily) last
+  landed;
+- `irish_rail_live`: when the Irish Rail live departure boards (every 5
+  minutes) were last polled;
+- `northern_ireland_stations`: when the Northern Ireland stations and
+  lines (Translink, via OpenDataNI, daily) last landed.
+
+Each is `null` until its feed first reports, which on an install that does
+not run that feed is always: treat `null` as "not offered here" and leave
+the source out, rather than showing it as stale. DS-MCP: no change needed.
+
 ## 2026-11-04: `GET /public/version` names each image's own repository
 
 No shape change. Each entry's `source` is now the repository that built

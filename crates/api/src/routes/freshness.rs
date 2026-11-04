@@ -1,15 +1,15 @@
-//! `/public/freshness`: how fresh the six data sources feeding the status
-//! API are (stations reference data, TOC reference data, the raw incidents
-//! feed, the `TfL` line-status feed, the CIF SCHEDULE feed pushed by
-//! `schedule-ingest`, and the Network Rail CORPUS extract that
-//! `schedule-ingest` loads through `/private/corpus-locations`). Unauthenticated, read-only — same `public_router()`
-//! pattern as `reference.rs`. Reads the same values as the `last_*_fetch`
-//! queries the private poller-startup endpoints call
-//! (`crates/api/src/routes/ingest.rs`), but in one query
-//! (`queries::data_freshness`) -- this is a public read of the same
-//! underlying data, just aimed at the frontend instead of poller backoff.
-//! Station-samples is deliberately omitted: it's per-station polling data,
-//! not one of the six sources this endpoint reports on.
+//! `/public/freshness`: how fresh the data sources feeding the status API
+//! are: stations reference data, TOC reference data, the raw incidents
+//! feed, the `TfL` line-status feed, the CIF SCHEDULE feed recorded by
+//! `schedule-ingest`, the Network Rail CORPUS extract `schedule-ingest`
+//! loads, and the three island-of-Ireland feeds (the Republic timetable
+//! and live boards, the Northern Ireland stations), which are `null` on an
+//! install that does not run them. Unauthenticated, read-only, same
+//! `public_router()` pattern as `reference.rs`. Two queries, run together:
+//! `queries::data_freshness` for the GB sources and
+//! `island_of_ireland_freshness` (below) for the Irish ones. GB
+//! station-samples is deliberately omitted: it's per-station polling data,
+//! not one of the sources this endpoint reports on.
 
 use axum::Json;
 use axum::extract::State;
@@ -44,15 +44,40 @@ pub struct DataFreshness {
     /// `data::corpus::last_corpus_delivery`). `None` until the first load,
     /// and for as long as `scheduleFeed.corpus.enabled` stays off.
     pub corpus: Option<DateTime<Utc>>,
+    /// When the Republic of Ireland timetable (Irish Rail's services from
+    /// the National Transport Authority's GTFS, poller-irish-rail-gtfs,
+    /// daily) last landed: the newer of its stations and lines
+    /// `ingest_freshness` sources. `None` until its first delivery, and
+    /// for as long as the feed is off on this install, so a client can
+    /// leave it out.
+    pub irish_rail_timetable: Option<DateTime<Utc>>,
+    /// When the Irish Rail live departure boards (poller-irish-rail-live,
+    /// every 5 minutes) were last polled: the newest Republic of Ireland
+    /// station sample's `polled_at`. `None` until the first poll, and while
+    /// the feed is off.
+    pub irish_rail_live: Option<DateTime<Utc>>,
+    /// When the Northern Ireland stations and lines (Translink's, from
+    /// `OpenDataNI`, poller-nir-stations, daily) last landed, as
+    /// `irish_rail_timetable`. `None` until the first delivery, and while
+    /// the feed is off.
+    pub northern_ireland_stations: Option<DateTime<Utc>>,
 }
 
 async fn get_freshness(
     State(app): State<App>,
 ) -> Result<Json<DataFreshness>, (StatusCode, String)> {
-    let [stations, tocs, incidents, tfl, schedule_feed, corpus] =
-        queries::data_freshness(&app.database)
-            .await
-            .map_err(internal_error)?;
+    let (
+        [stations, tocs, incidents, tfl, schedule_feed, corpus],
+        [
+            irish_rail_timetable,
+            irish_rail_live,
+            northern_ireland_stations,
+        ],
+    ) = tokio::try_join!(
+        queries::data_freshness(&app.database),
+        island_of_ireland_freshness(&app.database),
+    )
+    .map_err(internal_error)?;
     Ok(Json(DataFreshness {
         stations,
         tocs,
@@ -60,7 +85,46 @@ async fn get_freshness(
         tfl,
         schedule_feed,
         corpus,
+        irish_rail_timetable,
+        irish_rail_live,
+        northern_ireland_stations,
     }))
+}
+
+/// The island-of-Ireland feeds' timestamps in one query:
+/// `[irish_rail_timetable, irish_rail_live, northern_ireland_stations]`.
+///
+/// - The Republic timetable (poller-irish-rail-gtfs, daily) and the
+///   Northern Ireland stations (poller-nir-stations, daily) each record a
+///   stations and a lines `ingest_freshness` source per network
+///   (`ds_store::samples::island_of_ireland::sources`); a feed's time is
+///   the newer of its two.
+/// - The Republic live boards (poller-irish-rail-live, every 5 minutes)
+///   record no freshness source, but each poll moves every polled
+///   station's `polled_at`, so the newest Republic sample is the last
+///   poll. The table is one row per station (a few hundred at most).
+///
+/// Each is `None` until its feed first reports, which on an install that
+/// runs without it is always.
+async fn island_of_ireland_freshness(
+    pool: &sqlx::PgPool,
+) -> anyhow::Result<[Option<DateTime<Utc>>; 3]> {
+    use ds_store::samples::island_of_ireland::{network_wire, sources};
+    type Ts = Option<DateTime<Utc>>;
+    let row: (Ts, Ts, Ts) = sqlx::query_as(
+        "SELECT \
+            (SELECT MAX(fetched_at) FROM ingest_freshness WHERE source = ANY($1)), \
+            (SELECT MAX(polled_at) FROM island_of_ireland_station_samples WHERE network = $3), \
+            (SELECT MAX(fetched_at) FROM ingest_freshness WHERE source = ANY($2))",
+    )
+    .bind([sources::STATIONS_GTFS, sources::LINES_GTFS])
+    .bind([sources::STATIONS_NIR, sources::LINES_NIR])
+    .bind(network_wire(
+        common::island_of_ireland::IslandOfIrelandNetwork::RepublicOfIreland,
+    ))
+    .fetch_one(pool)
+    .await?;
+    Ok([row.0, row.1, row.2])
 }
 
 #[expect(
@@ -92,6 +156,9 @@ mod tests {
             tfl: None,
             schedule_feed: None,
             corpus: None,
+            irish_rail_timetable: None,
+            irish_rail_live: None,
+            northern_ireland_stations: None,
         };
         let json = serde_json::to_value(&freshness).unwrap();
         assert!(json["stations"].is_null());
@@ -100,6 +167,9 @@ mod tests {
         assert!(json["tfl"].is_null());
         assert!(json["schedule_feed"].is_null());
         assert!(json["corpus"].is_null());
+        assert!(json["irish_rail_timetable"].is_null());
+        assert!(json["irish_rail_live"].is_null());
+        assert!(json["northern_ireland_stations"].is_null());
     }
 
     #[test]
@@ -112,6 +182,9 @@ mod tests {
             tfl: None,
             schedule_feed: Some(ts),
             corpus: Some(ts),
+            irish_rail_timetable: None,
+            irish_rail_live: Some(ts),
+            northern_ireland_stations: None,
         };
         let json = serde_json::to_value(&freshness).unwrap();
         let roundtripped: DateTime<Utc> = json["stations"].as_str().unwrap().parse().unwrap();
@@ -121,6 +194,9 @@ mod tests {
         assert_eq!(schedule_feed_roundtripped, ts);
         let corpus_roundtripped: DateTime<Utc> = json["corpus"].as_str().unwrap().parse().unwrap();
         assert_eq!(corpus_roundtripped, ts);
+        let live_roundtripped: DateTime<Utc> =
+            json["irish_rail_live"].as_str().unwrap().parse().unwrap();
+        assert_eq!(live_roundtripped, ts);
     }
 }
 
@@ -279,5 +355,72 @@ mod db_tests {
                 .unwrap(),
             Some(newer)
         );
+    }
+
+    #[sqlx::test(migrator = "ds_store::migrate::MIGRATOR")]
+    #[ignore = "needs DATABASE_URL (a role that can create databases)"]
+    async fn island_of_ireland_sources_are_null_until_they_report(pool: PgPool) {
+        let json = get_freshness_json(&pool).await;
+        for key in [
+            "irish_rail_timetable",
+            "irish_rail_live",
+            "northern_ireland_stations",
+        ] {
+            assert!(
+                json.get(key).is_some(),
+                "{key} must always be present: {json}"
+            );
+            assert!(json[key].is_null(), "{key}: nothing reported yet: {json}");
+        }
+    }
+
+    #[sqlx::test(migrator = "ds_store::migrate::MIGRATOR")]
+    #[ignore = "needs DATABASE_URL (a role that can create databases)"]
+    async fn island_of_ireland_sources_report_their_newest_data(pool: PgPool) {
+        use ds_store::samples::island_of_ireland::sources;
+
+        let gtfs_stations = Utc.with_ymd_and_hms(2026, 11, 3, 4, 0, 0).unwrap();
+        let gtfs_lines = Utc.with_ymd_and_hms(2026, 11, 3, 4, 5, 0).unwrap();
+        let nir_stations = Utc.with_ymd_and_hms(2026, 11, 2, 5, 0, 0).unwrap();
+        for (source, at) in [
+            (sources::STATIONS_GTFS, gtfs_stations),
+            (sources::LINES_GTFS, gtfs_lines),
+            (sources::STATIONS_NIR, nir_stations),
+        ] {
+            sqlx::query("INSERT INTO ingest_freshness (source, fetched_at) VALUES ($1, $2)")
+                .bind(source)
+                .bind(at)
+                .execute(&pool)
+                .await
+                .unwrap();
+        }
+        let live_older = Utc.with_ymd_and_hms(2026, 11, 3, 9, 0, 0).unwrap();
+        let live_newer = Utc.with_ymd_and_hms(2026, 11, 3, 9, 5, 0).unwrap();
+        // A Northern Ireland sample (none today) is not the Republic's
+        // live feed, however new.
+        let other_network = Utc.with_ymd_and_hms(2026, 11, 3, 10, 0, 0).unwrap();
+        for (station, network, at) in [
+            ("ZLIVE1", "republic-of-ireland", live_older),
+            ("ZLIVE2", "republic-of-ireland", live_newer),
+            ("ZLIVE3", "northern-ireland", other_network),
+        ] {
+            sqlx::query(
+                "INSERT INTO island_of_ireland_station_samples (station_id, network, polled_at) \
+                 VALUES ($1, $2, $3)",
+            )
+            .bind(station)
+            .bind(network)
+            .bind(at)
+            .execute(&pool)
+            .await
+            .unwrap();
+        }
+
+        let json = get_freshness_json(&pool).await;
+        let field = |key: &str| -> DateTime<Utc> { json[key].as_str().unwrap().parse().unwrap() };
+        assert_eq!(field("irish_rail_timetable"), gtfs_lines);
+        assert_eq!(field("irish_rail_live"), live_newer);
+        assert_eq!(field("northern_ireland_stations"), nir_stations);
+        assert!(json["stations"].is_null(), "GB sources untouched: {json}");
     }
 }
