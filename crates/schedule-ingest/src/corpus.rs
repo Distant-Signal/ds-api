@@ -21,8 +21,12 @@
 //! 1. reports any `NLC*` file that is not `.xml.gz` as format drift (warn,
 //!    `schedule_feed_corpus_format_drift_*`, `DistantSignalCorpusFormatDrift`)
 //!    and never touches it;
-//! 2. waits until every CORPUS candidate is stable;
-//! 3. chooses the file to load (see "Choosing the file to load");
+//! 2. waits while a candidate that is not yet stable could be the one to
+//!    load (newer than every stable file of its format); an unstable file
+//!    that could not (an old snapshot of a backlog still being uploaded)
+//!    does not hold the decision up and is left untouched in `watch_dir`;
+//! 3. chooses among the stable files the one to load (see "Choosing the
+//!    file to load");
 //! 4. gunzips (capped) and parses it, normalising every value -- a file
 //!    that is not gzip, not its format, has a row with no NLC or fewer than
 //!    its format's minimum rows is REJECTED: counted, logged and moved to
@@ -38,20 +42,29 @@
 //!
 //! ## Choosing the file to load
 //!
-//! Files are ordered by their mtime as this process's scan records it
-//! (with the name as a tie-break), never by the date in an XML snapshot's
-//! name: that date is logged and exported
-//! (`schedule_feed_corpus_xml_file_date_seconds`), with a warning when it
-//! goes backwards, but drives nothing. `CORPUS_FORMAT_PRECEDENCE` then
-//! picks:
+//! Within a format, the newest file wins: an XML snapshot by the date in
+//! its name (`NLC20261030.xml.gz`), then by the mtime this process's scan
+//! records, then by name; the JSON extract (one fixed name) by mtime, then
+//! name. A first CORPUS API v2 delivery is the whole history, ~500 weekly
+//! snapshots back to 2017 in one push (2026-11-04), so receipt order alone
+//! could load an old one. The date is also exported
+//! (`schedule_feed_corpus_xml_file_date_seconds`). An XML snapshot dated
+//! earlier than the newest one in `storage_dir/corpus/` (the loaded
+//! archive) is never loaded: it and every older snapshot are archived to
+//! `superseded/`. `CORPUS_FORMAT_PRECEDENCE` then picks:
 //!
-//! - `newest`: the newest file of either format;
+//! - `newest`: the newest file of each format, then the later delivered
+//!   (by mtime) of the two;
 //! - `json` (the default) or `xml`: the newest file of the preferred
 //!   format. A file of the other format is loaded only while no file of the
 //!   preferred one has been loaded within `CORPUS_PREFERRED_GRACE_DAYS`
 //!   (judged from the newest file in `storage_dir/corpus/`, so it survives
 //!   restarts); otherwise it is still parsed (a broken one is rejected and
-//!   alerts), compared, and moved to `superseded/` unloaded.
+//!   alerts), compared, and moved to `superseded/` unloaded, with a warning
+//!   naming the precedence.
+//!
+//! Superseded files are audited as `corpus_superseded`, rejected ones as
+//! `corpus_rejected`.
 //!
 //! Both moves re-check the file's `(mtime, size)` first, so a re-upload
 //! that starts mid-cycle is never moved away half-written. A failed load
@@ -373,7 +386,7 @@ fn parse_file(format: CorpusFormat, bytes: &[u8], args: &CorpusArgs) -> Result<P
 }
 
 /// The date in an XML snapshot's name (`NLC20261009.xml.gz`), if it has
-/// one. Metadata only: it never orders or selects files.
+/// one: the first key snapshots are ranked by ([`Candidate::rank`]).
 pub(crate) fn nlc_file_date(name: &str) -> Option<NaiveDate> {
     let digits = name.get(NLC_PREFIX.len()..NLC_PREFIX.len() + 8)?;
     if !digits.bytes().all(|b| b.is_ascii_digit()) {
@@ -391,7 +404,35 @@ struct Candidate {
     format: CorpusFormat,
 }
 
-/// Every CORPUS candidate in `snapshot`, oldest first (by mtime, then name).
+impl Candidate {
+    /// The date in an XML snapshot's name; `None` for the JSON extract.
+    fn snapshot_date(&self) -> Option<NaiveDate> {
+        match self.format {
+            CorpusFormat::Xml => nlc_file_date(&self.name),
+            CorpusFormat::Json => None,
+        }
+    }
+
+    /// How a candidate ranks against others of its format: an XML
+    /// snapshot by the date in its name, then receipt (mtime), then name; a
+    /// JSON extract (one fixed name) by receipt, then name. A first CORPUS
+    /// API v2 delivery carries years of weekly snapshots at once, so
+    /// receipt order alone could pick an old one.
+    fn rank(&self) -> (Option<NaiveDate>, SystemTime, &str) {
+        (self.snapshot_date(), self.mtime, &self.name)
+    }
+}
+
+/// The newest of `files` of `format` (see [`Candidate::rank`]).
+fn newest_of(files: &[Candidate], format: CorpusFormat) -> Option<&Candidate> {
+    files
+        .iter()
+        .filter(|c| c.format == format)
+        .max_by(|a, b| a.rank().cmp(&b.rank()))
+}
+
+/// Every CORPUS candidate in `snapshot`, in receipt order (by mtime, then
+/// name).
 fn candidates(snapshot: &DirSnapshot, routing: &Routing) -> Vec<Candidate> {
     let mut found: Vec<Candidate> = snapshot
         .0
@@ -555,22 +596,33 @@ enum Choice {
     /// Load this file; every other candidate is superseded.
     Load(Candidate),
     /// Every candidate is of the non-preferred format and the preferred one
-    /// was loaded recently: check and compare the newest, load none.
-    NotPreferred(CorpusFormat),
+    /// was loaded recently: check and compare the newest (this one), load
+    /// none.
+    NotPreferred {
+        preferred: CorpusFormat,
+        newest: Candidate,
+    },
 }
 
-/// Applies `CORPUS_FORMAT_PRECEDENCE` to `stable` (oldest first, not empty).
+/// Applies `CORPUS_FORMAT_PRECEDENCE` to `stable` (not empty).
 fn choose(stable: &[Candidate], args: &CorpusArgs, dirs: &Dirs, now: SystemTime) -> Option<Choice> {
-    let newest_of = |format| stable.iter().rev().find(|c| c.format == format).cloned();
+    let newest = |format| newest_of(stable, format).cloned();
     let preferred = match args.corpus_format_precedence {
-        FormatPrecedence::Newest => return stable.last().cloned().map(Choice::Load),
+        // The newest of each format, then the later delivered of the two.
+        FormatPrecedence::Newest => {
+            return [newest(CorpusFormat::Json), newest(CorpusFormat::Xml)]
+                .into_iter()
+                .flatten()
+                .max_by(|a, b| a.mtime.cmp(&b.mtime).then_with(|| a.name.cmp(&b.name)))
+                .map(Choice::Load);
+        }
         FormatPrecedence::Json => CorpusFormat::Json,
         FormatPrecedence::Xml => CorpusFormat::Xml,
     };
-    if let Some(file) = newest_of(preferred) {
+    if let Some(file) = newest(preferred) {
         return Some(Choice::Load(file));
     }
-    let other = newest_of(preferred.other())?;
+    let other = newest(preferred.other())?;
     let grace = Duration::from_secs(u64::from(args.corpus_preferred_grace_days) * 86_400);
     let recently_loaded = newest_archived(&[&dirs.loaded], preferred).is_some_and(|(_, path)| {
         std::fs::metadata(&path)
@@ -579,7 +631,10 @@ fn choose(stable: &[Candidate], args: &CorpusArgs, dirs: &Dirs, now: SystemTime)
             .is_ok_and(|mtime| now.duration_since(mtime).map_or(true, |age| age < grace))
     });
     Some(if recently_loaded {
-        Choice::NotPreferred(preferred)
+        Choice::NotPreferred {
+            preferred,
+            newest: other,
+        }
     } else {
         Choice::Load(other)
     })
@@ -679,7 +734,7 @@ fn note_xml(file: &Candidate, parsed: &Parsed, dirs: &Dirs) {
             file_date = %date,
             previous_file = %&archived[17..],
             previous_file_date = %previous,
-            "the NLC CORPUS XML received last is dated earlier than the previous one; it is still processed in receipt order"
+            "the NLC CORPUS XML being processed is dated earlier than the newest archived one"
         );
     }
 }
@@ -696,10 +751,7 @@ fn compare_with_other(
     args: &CorpusArgs,
 ) {
     let other = file.format.other();
-    let source = all
-        .iter()
-        .rev()
-        .find(|c| c.format == other)
+    let source = newest_of(all, other)
         .map(|c| (c.name.clone(), watch_dir.join(&c.name)))
         .or_else(|| {
             newest_archived(&[&dirs.loaded, &dirs.superseded], other)
@@ -753,7 +805,7 @@ fn supersede(
             Ok(superseded) => lane.ctx.audit(
                 &superseded,
                 DateTime::<Utc>::from(old.mtime),
-                crate::audit::Outcome::CorpusRejected,
+                crate::audit::Outcome::CorpusSuperseded,
                 Some(reason),
             ),
             Err(err) => {
@@ -799,10 +851,25 @@ pub(crate) async fn run_corpus_cycle(
     if all.is_empty() {
         return Ok(());
     }
-    // Decide only once every candidate is stable, so a file still being
-    // uploaded can neither be chosen nor be passed over for an older one.
-    if let Some(unstable) = all.iter().find(|c| !state.known_stable.contains(&c.name)) {
-        tracing::info!(file = %unstable.name, "CORPUS file present but not yet stable");
+    let (stable, unstable): (Vec<Candidate>, Vec<Candidate>) = all
+        .iter()
+        .cloned()
+        .partition(|c| state.known_stable.contains(&c.name));
+    // A file still being uploaded must be neither chosen nor passed over
+    // for an older one, so wait while any unstable file would outrank
+    // every stable file of its format. One that cannot (an old snapshot of
+    // a backlog still trickling in) does not hold the decision up; it is
+    // left in watch_dir untouched and handled once it is stable.
+    if let Some(blocking) = unstable
+        .iter()
+        .find(|u| newest_of(&stable, u.format).is_none_or(|s| u.rank() > s.rank()))
+    {
+        tracing::info!(
+            file = %blocking.name,
+            unstable = unstable.len(),
+            stable = stable.len(),
+            "CORPUS file present but not yet stable"
+        );
         return Ok(());
     }
     let dirs = Dirs::new(storage_dir);
@@ -819,39 +886,81 @@ pub(crate) async fn run_corpus_cycle(
         return Ok(());
     }
 
-    let Some(choice) = choose(&all, args, &dirs, SystemTime::now()) else {
+    let Some(choice) = choose(&stable, args, &dirs, SystemTime::now()) else {
         return Ok(());
     };
     let winner = match choice {
         Choice::Load(winner) => winner,
-        Choice::NotPreferred(preferred) => {
+        Choice::NotPreferred { preferred, newest } => {
             // Never loaded, but still checked (a broken file of either
             // format alerts) and compared: the migration signal.
-            let Some(newest) = all.last() else {
-                return Ok(());
-            };
-            match read_and_parse(watch_dir, newest, args) {
+            match read_and_parse(watch_dir, &newest, args) {
                 ReadOutcome::Retry => return Ok(()),
                 ReadOutcome::Parsed(delivered, Err(rejected)) => {
-                    reject(lane, &dirs, keep, newest, &delivered, &rejected, state);
+                    reject(lane, &dirs, keep, &newest, &delivered, &rejected, state);
                     return Ok(());
                 }
                 ReadOutcome::Parsed(_, Ok(parsed)) => {
-                    note_xml(newest, &parsed, &dirs);
+                    note_xml(&newest, &parsed, &dirs);
                     if args.corpus_compare_formats {
-                        compare_with_other(newest, &parsed.locations, &all, watch_dir, &dirs, args);
+                        compare_with_other(
+                            &newest,
+                            &parsed.locations,
+                            &stable,
+                            watch_dir,
+                            &dirs,
+                            args,
+                        );
                     }
                 }
             }
+            tracing::warn!(
+                file = %newest.name,
+                format = newest.format.as_str(),
+                preferred = preferred.as_str(),
+                files = stable.len(),
+                grace_days = args.corpus_preferred_grace_days,
+                "CORPUS delivery archived unloaded: CORPUS_FORMAT_PRECEDENCE prefers the other format and it was loaded within the grace period; if that feed has stopped, set the precedence to this format"
+            );
             let reason = format!(
                 "not loaded: CORPUS_FORMAT_PRECEDENCE prefers {} and one was loaded within CORPUS_PREFERRED_GRACE_DAYS ({})",
                 preferred.as_str(),
                 args.corpus_preferred_grace_days
             );
-            supersede(lane, &all, None, &reason, &dirs, keep);
+            supersede(lane, &stable, None, &reason, &dirs, keep);
             return Ok(());
         }
     };
+
+    // Never load an XML snapshot dated earlier than the loaded one: a
+    // re-push of the history (or a late old file) would otherwise
+    // replace newer data with older.
+    if let Some(date) = winner.snapshot_date()
+        && let Some((loaded, _)) = newest_archived(&[&dirs.loaded], CorpusFormat::Xml)
+        && let Some(loaded_date) = nlc_file_date(&loaded[17..])
+        && date < loaded_date
+    {
+        tracing::warn!(
+            file = %winner.name,
+            file_date = %date,
+            loaded_file = %&loaded[17..],
+            loaded_file_date = %loaded_date,
+            "CORPUS XML snapshots older than the loaded one archived unloaded"
+        );
+        let reason = format!(
+            "not loaded: dated earlier than the loaded snapshot {}",
+            &loaded[17..]
+        );
+        // Only the snapshots: every one left is older still. A JSON
+        // extract is judged on its own next cycle.
+        let snapshots: Vec<Candidate> = stable
+            .iter()
+            .filter(|c| c.format == CorpusFormat::Xml)
+            .cloned()
+            .collect();
+        supersede(lane, &snapshots, None, &reason, &dirs, keep);
+        return Ok(());
+    }
 
     let delivered_at = DateTime::<Utc>::from(winner.mtime);
     let (delivered, parsed) = match read_and_parse(watch_dir, &winner, args) {
@@ -894,7 +1003,7 @@ pub(crate) async fn run_corpus_cycle(
                     "superseded by {} (settled by the other delivery source); not loaded",
                     winner.name
                 );
-                supersede(lane, &all, Some(&winner.name), &reason, &dirs, keep);
+                supersede(lane, &stable, Some(&winner.name), &reason, &dirs, keep);
                 return Ok(());
             }
         }
@@ -943,7 +1052,7 @@ pub(crate) async fn run_corpus_cycle(
     state.handled = Some((winner.name.clone(), winner.mtime, winner.len, Dest::Loaded));
 
     if args.corpus_compare_formats {
-        compare_with_other(&winner, &locations, &all, watch_dir, &dirs, args);
+        compare_with_other(&winner, &locations, &stable, watch_dir, &dirs, args);
     }
     archive(
         watch_dir,
@@ -957,7 +1066,7 @@ pub(crate) async fn run_corpus_cycle(
     // superseded by the one just loaded: archive them unloaded, so a later
     // cycle can never load older (or non-preferred) data over it.
     let reason = format!("superseded by {} (loaded); not loaded", winner.name);
-    supersede(lane, &all, Some(&winner.name), &reason, &dirs, keep);
+    supersede(lane, &stable, Some(&winner.name), &reason, &dirs, keep);
     Ok(())
 }
 
@@ -1671,10 +1780,10 @@ pub(crate) mod tests {
         assert_eq!(names(watch.path()), ["NLC20261009.xml.gz"]);
     }
 
-    /// Files are processed in receipt (mtime) order, never by the date in
-    /// their names; a date that goes backwards only warns.
+    /// Snapshots rank by the date in their names, not by receipt: the one
+    /// dated latest is loaded even though it arrived first.
     #[tokio::test]
-    async fn receipt_order_wins_over_the_date_in_the_name() {
+    async fn the_snapshot_dated_latest_wins_over_receipt_order() {
         let watch = tempfile::tempdir().unwrap();
         let storage = tempfile::tempdir().unwrap();
         let archive_dir = storage.path().join(ARCHIVE_DIR);
@@ -1702,16 +1811,257 @@ pub(crate) mod tests {
         run(watch.path(), storage.path(), &args(), &sink, &mut state, 3).await;
         drop(guard);
 
-        assert_eq!(loaded_files(&sink), ["NLC20261009.xml.gz"]);
+        assert_eq!(loaded_files(&sink), ["NLC20261020.xml.gz"]);
         let superseded = names(&archive_dir.join(SUPERSEDED_DIR));
         assert_eq!(superseded.len(), 1);
         assert!(
-            superseded[0].ends_with("-NLC20261020.xml.gz"),
+            superseded[0].ends_with("-NLC20261009.xml.gz"),
             "{superseded:?}"
         );
-        let warnings = logged(&logs, "dated earlier than the previous one");
-        assert_eq!(warnings.len(), 1, "{warnings:?}");
-        assert_eq!(warnings[0]["previous_file"], "NLC20261016.xml.gz");
+        let audit = logs.audit_lines();
+        assert_eq!(audit[1]["file"], "NLC20261009.xml.gz");
+        assert_eq!(audit[1]["outcome"], "corpus_superseded");
+    }
+
+    /// The first CORPUS API v2 delivery (2026-11-04) was the whole
+    /// history: hundreds of weekly snapshots since 2017 in one push, in no
+    /// useful mtime order. Only the one dated latest is loaded; the rest
+    /// are archived unloaded and audited as superseded, not rejected.
+    #[tokio::test]
+    async fn a_history_backlog_loads_only_the_latest_snapshot() {
+        let watch = tempfile::tempdir().unwrap();
+        let storage = tempfile::tempdir().unwrap();
+        // Oldest-dated received last, as when a push is retried.
+        let backlog = [
+            ("NLC20261030.xml.gz", 600),
+            ("NLC20261023.xml.gz", 500),
+            ("NLC20240106.xml.gz", 400),
+            ("NLC20210116.xml.gz", 300),
+            ("NLC20170211.xml.gz", 200),
+            ("NLC20170208.xml.gz", 100),
+        ];
+        for (name, age) in backlog {
+            put(watch.path(), name, &gzip(XML_FIXTURE.as_bytes()), age);
+        }
+        let args = CorpusArgs {
+            corpus_format_precedence: FormatPrecedence::Xml,
+            ..args()
+        };
+        let sink = FakeSink::new(Answer::Accept);
+        let mut state = CorpusState::new();
+        let (guard, logs) = crate::audit::tests::capture_default();
+        run(watch.path(), storage.path(), &args, &sink, &mut state, 3).await;
+        drop(guard);
+
+        assert_eq!(loaded_files(&sink), ["NLC20261030.xml.gz"]);
+        assert_eq!(names(watch.path()), [] as [String; 0]);
+        let audit = logs.audit_lines();
+        assert_eq!(audit.len(), backlog.len(), "{audit:?}");
+        assert_eq!(audit[0]["outcome"], "accepted");
+        assert!(
+            audit[1..]
+                .iter()
+                .all(|line| line["outcome"] == "corpus_superseded"),
+            "{audit:?}"
+        );
+        // Retention keeps the newest CORPUS_RETENTION_KEEP (3) superseded.
+        assert_eq!(
+            names(&storage.path().join(ARCHIVE_DIR).join(SUPERSEDED_DIR)).len(),
+            3
+        );
+        assert_eq!(logged(&logs, "rejecting CORPUS file").len(), 0);
+    }
+
+    /// A snapshot dated earlier than the loaded one (a re-push of the
+    /// history) is never loaded over it.
+    #[tokio::test]
+    async fn a_snapshot_older_than_the_loaded_one_is_not_loaded() {
+        let watch = tempfile::tempdir().unwrap();
+        let storage = tempfile::tempdir().unwrap();
+        let archive_dir = storage.path().join(ARCHIVE_DIR);
+        std::fs::create_dir_all(&archive_dir).unwrap();
+        std::fs::write(
+            archive_dir.join("20261104T190005Z-NLC20261030.xml.gz"),
+            gzip(XML_FIXTURE.as_bytes()),
+        )
+        .unwrap();
+        put(
+            watch.path(),
+            "NLC20210116.xml.gz",
+            &gzip(XML_FIXTURE.as_bytes()),
+            120,
+        );
+        put(
+            watch.path(),
+            "NLC20261023.xml.gz",
+            &gzip(XML_FIXTURE.as_bytes()),
+            60,
+        );
+        let args = CorpusArgs {
+            corpus_format_precedence: FormatPrecedence::Xml,
+            ..args()
+        };
+        let sink = FakeSink::new(Answer::Accept);
+        let mut state = CorpusState::new();
+        let (guard, logs) = crate::audit::tests::capture_default();
+        run(watch.path(), storage.path(), &args, &sink, &mut state, 3).await;
+        drop(guard);
+
+        assert_eq!(sink.corpus_loads(), [] as [serde_json::Value; 0]);
+        assert_eq!(names(watch.path()), [] as [String; 0]);
+        assert_eq!(
+            names(&archive_dir.join(SUPERSEDED_DIR)).len(),
+            2,
+            "both archived unloaded"
+        );
+        let audit = logs.audit_lines();
+        assert_eq!(audit.len(), 2, "{audit:?}");
+        assert!(
+            audit
+                .iter()
+                .all(|line| line["outcome"] == "corpus_superseded"
+                    && line["reason"].as_str().is_some_and(
+                        |r| r.contains("dated earlier than the loaded snapshot NLC20261030.xml.gz")
+                    ))
+        );
+
+        // A newer one still loads.
+        put(
+            watch.path(),
+            "NLC20261106.xml.gz",
+            &gzip(XML_FIXTURE.as_bytes()),
+            30,
+        );
+        run(watch.path(), storage.path(), &args, &sink, &mut state, 3).await;
+        assert_eq!(loaded_files(&sink), ["NLC20261106.xml.gz"]);
+    }
+
+    /// Writes `name` with new content (another size) each call, so it never
+    /// becomes stable.
+    fn churn(dir: &Path, name: &str, cycle: usize) {
+        let xml = format!("{XML_FIXTURE}{}", "\n".repeat(cycle + 1));
+        put(dir, name, &gzip(xml.as_bytes()), 0);
+    }
+
+    /// An old snapshot that never settles (a backlog still trickling in, or
+    /// a stuck upload) cannot hold the newest stable one back, and is left
+    /// where it is.
+    #[tokio::test]
+    async fn an_old_unstable_file_does_not_hold_up_the_newest() {
+        let watch = tempfile::tempdir().unwrap();
+        let storage = tempfile::tempdir().unwrap();
+        put(
+            watch.path(),
+            "NLC20261030.xml.gz",
+            &gzip(XML_FIXTURE.as_bytes()),
+            600,
+        );
+        let args = CorpusArgs {
+            corpus_format_precedence: FormatPrecedence::Xml,
+            ..args()
+        };
+        let sink = FakeSink::new(Answer::Accept);
+        let mut state = CorpusState::new();
+        for cycle in 0..3 {
+            churn(watch.path(), "NLC20170208.xml.gz", cycle);
+            run(watch.path(), storage.path(), &args, &sink, &mut state, 1).await;
+        }
+        assert_eq!(loaded_files(&sink), ["NLC20261030.xml.gz"]);
+        assert_eq!(names(watch.path()), ["NLC20170208.xml.gz"]);
+
+        // Once it settles it is archived unloaded: older than the loaded one.
+        run(watch.path(), storage.path(), &args, &sink, &mut state, 2).await;
+        assert_eq!(sink.corpus_loads().len(), 1);
+        assert_eq!(names(watch.path()), [] as [String; 0]);
+    }
+
+    /// A newer-dated snapshot still being uploaded does hold the decision,
+    /// so the older stable one is not loaded in its place.
+    #[tokio::test]
+    async fn a_newer_unstable_file_holds_the_decision() {
+        let watch = tempfile::tempdir().unwrap();
+        let storage = tempfile::tempdir().unwrap();
+        put(
+            watch.path(),
+            "NLC20261023.xml.gz",
+            &gzip(XML_FIXTURE.as_bytes()),
+            600,
+        );
+        let args = CorpusArgs {
+            corpus_format_precedence: FormatPrecedence::Xml,
+            ..args()
+        };
+        let sink = FakeSink::new(Answer::Accept);
+        let mut state = CorpusState::new();
+        let (guard, logs) = crate::audit::tests::capture_default();
+        for cycle in 0..3 {
+            churn(watch.path(), "NLC20261030.xml.gz", cycle);
+            run(watch.path(), storage.path(), &args, &sink, &mut state, 1).await;
+        }
+        drop(guard);
+        assert_eq!(sink.corpus_loads(), [] as [serde_json::Value; 0]);
+        let waiting = logged(&logs, "not yet stable");
+        assert_eq!(waiting.len(), 3, "{waiting:?}");
+        // The first cycle saw nothing stable yet; then only the newer file
+        // held the decision.
+        assert!(
+            waiting[1..]
+                .iter()
+                .all(|w| w["file"] == "NLC20261030.xml.gz"),
+            "{waiting:?}"
+        );
+
+        run(watch.path(), storage.path(), &args, &sink, &mut state, 2).await;
+        assert_eq!(loaded_files(&sink), ["NLC20261030.xml.gz"]);
+    }
+
+    /// Production on 2026-11-04: the JSON extract is preferred and was
+    /// loaded within the grace period, so a v2 delivery is archived
+    /// unloaded -- with a warning that names the precedence, and audited as
+    /// superseded rather than rejected.
+    #[tokio::test]
+    async fn an_xml_delivery_held_back_by_precedence_warns() {
+        let watch = tempfile::tempdir().unwrap();
+        let storage = tempfile::tempdir().unwrap();
+        let archive_dir = storage.path().join(ARCHIVE_DIR);
+        std::fs::create_dir_all(&archive_dir).unwrap();
+        let json = archive_dir.join("20261002T071858Z-CORPUSExtract.json.gz");
+        std::fs::write(&json, gzip(FIXTURE.as_bytes())).unwrap();
+        std::fs::File::options()
+            .write(true)
+            .open(&json)
+            .unwrap()
+            .set_modified(SystemTime::now() - Duration::from_secs(33 * 86_400))
+            .unwrap();
+        put(
+            watch.path(),
+            "NLC20261023.xml.gz",
+            &gzip(XML_FIXTURE.as_bytes()),
+            60,
+        );
+        put(
+            watch.path(),
+            "NLC20261030.xml.gz",
+            &gzip(XML_FIXTURE.as_bytes()),
+            120,
+        );
+        let sink = FakeSink::new(Answer::Accept);
+        let mut state = CorpusState::new();
+        let (guard, logs) = crate::audit::tests::capture_default();
+        run(watch.path(), storage.path(), &args(), &sink, &mut state, 3).await;
+        drop(guard);
+
+        assert_eq!(sink.corpus_loads(), [] as [serde_json::Value; 0]);
+        let warned = logged(&logs, "CORPUS_FORMAT_PRECEDENCE prefers the other format");
+        assert_eq!(warned.len(), 1, "{warned:?}");
+        assert_eq!(warned[0]["level"], "WARN");
+        assert_eq!(warned[0]["file"], "NLC20261030.xml.gz");
+        assert_eq!(warned[0]["preferred"], "json");
+        let compared = logged(&logs, "compared the CORPUS JSON extract");
+        assert_eq!(compared[0]["xml_file"], "NLC20261030.xml.gz");
+        let audit = logs.audit_lines();
+        assert_eq!(audit.len(), 2, "{audit:?}");
+        assert!(audit.iter().all(|l| l["outcome"] == "corpus_superseded"));
     }
 
     /// A broken XML snapshot is rejected like a broken extract.
