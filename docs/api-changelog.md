@@ -3,6 +3,15 @@
 Changes to the Distant Signal (DS) HTTP API that a client such as DS-MCP
 needs to know about. Newest first. Field names are as served (camelCase).
 
+## 2026-11-04: `GET /public/version` names each image's own repository
+
+No shape change. Each entry's `source` is now the repository that built
+that image (`ds-api`, `ds-pollers`, `ds-ingest`, `ds-workers`, `ds-core` or
+`distant-signal`), not `distant-signal` for every image, so `source` and
+`revision` together name the exact commit. The list can also include
+`ds-migrate`, whose `revision` is its ds-core release tag (`vX.Y.Z`), not a
+commit hash. DS-MCP: no change needed.
+
 ## 2026-11-04: account continuity across a change of login provider (off by default)
 
 No route or response changes. Behind `SSO_DISCORD_ID_CLAIM` and
