@@ -20,9 +20,9 @@ and every delegated bearer is refused.
 
 1. ds-mcp exchanges the user's Authentik token for a 5-minute token from the
    `distant-signal-api` provider (`iss`
-   `https://sso.cursed.solutions/application/o/distant-signal-api/`, `aud`
-   and `azp` `distant-signal-api`, RS256, a `scope` claim, no `act`, no
-   `sid`).
+   `https://sso.cursed.solutions/application/o/distant-signal-api/` until
+   the move to `ds-sso`: "Account continuity", "Cut-over"; `aud` and `azp`
+   `distant-signal-api`, RS256, a `scope` claim, no `act`, no `sid`).
 2. It calls the api's **delegated listener** (`api.delegated.port`, 8082) on
    the `<release>-api-delegated` ClusterIP Service. That listener marks every
    request it accepts; a delegated token arriving any other way (the
@@ -235,50 +235,206 @@ never logged. Metrics:
 
 ### Cut-over
 
-The order is the Ranma-Config spec's runbook:
+The order is the Ranma-Config spec's runbook (`docs/specs/ds-public-auth-idp.md`,
+"Cut-over runbook"). Where things live since the repository split:
 
-1. Deploy ds-core v0.1.1's migrations (additive) and its grants (the api
-   needs `SELECT` and `UPDATE` on `group_train_share_moves.added_by`: with
-   per-service roles on, re-run the role setup before an api built against
-   v0.1.1 starts, since its schema gate checks the grant).
-2. Hand Ranma the list of DS accounts (read-only):
+| What | Where |
+|---|---|
+| The api, this runbook | Distant-Signal/ds-api |
+| Migrations and `db-grants.yaml` | Distant-Signal/ds-core, `crates/ds-store` (tag v0.1.1 and later) |
+| The chart, its values reference, the role setup Job | Distant-Signal/ds-deploy, `charts/distant-signal` |
+| Production values | Ranma-Config: `clusters/mine-bringer/apps/distant-signal.yaml` (the `distant-signal-config` ConfigMap's `values.yaml`, and the `distant-signal-secret` SealedSecret), `clusters/mine-bringer/apps/ds-mcp/release.yaml` |
 
-   ```sql
-   SELECT id FROM users ORDER BY id;
+The commands use `<ns>` for the namespace and `<release>` for the Helm
+release (both `distant-signal` in production) and connect as the chart's
+`postgresql.auth.username` (`distant_signal`, a superuser) inside the
+Postgres pod:
+
+```sh
+PSQL="kubectl -n <ns> exec -i <release>-postgres-0 -- psql -U distant_signal -d distant_signal -X"
+```
+
+1. **Schema and grants.** ds-core v0.1.1's migrations
+   (`20261104090000_users_discord_id` to
+   `20261104090300_users_fk_on_update_cascade_validate`, all additive) run
+   in the chart's migrate hook Job once ds-deploy's `core-version` pins
+   v0.1.1. The role setup Job (`postgresql.roles.setupJob`, after the
+   migrate Job on every upgrade: ds-deploy `docs/postgres-app-role.md`)
+   gives the api `SELECT` and `UPDATE` on `group_train_share_moves.added_by`.
+   Deploy that chart before an api built against v0.1.1, whose schema gate
+   checks the grant. Check:
+
+   ```sh
+   $PSQL -At -c "SELECT count(*) FROM pg_indexes WHERE indexname = 'users_discord_id_key'"   # 1
    ```
 
-3. Load the export (`{legacy_sub, discord_id}` per account, from the
-   primary's Discord source connections) before step 4: an account that
-   logs in through `ds-sso` before its Discord id is loaded gets a second
-   account. The export holds personal identifiers: keep it out of the
-   repository and delete it after loading. With the export as a two-column
-   CSV (`legacy_sub,discord_id`, empty for none):
+2. **Hand Ranma the list of DS accounts** (read-only). The list is
+   personal data: pass it directly, never commit it, delete it afterwards.
+
+   ```sh
+   $PSQL -At -c 'SELECT id FROM users ORDER BY id' > ds-users.txt
+   ```
+
+3. **Load the export before step 4.** Ranma's export is one row per
+   account, `legacy_sub,discord_id` (the primary's `User.uid` and its
+   Discord source connection identifier, empty for none), as CSV with that
+   header. An account that logs in through `ds-sso` before its Discord id
+   is loaded gets a second account. Paste the CSV, header included, between
+   the `COPY` line and `\.` in this script, kept outside the repository:
 
    ```sql
+   \set ON_ERROR_STOP on
    BEGIN;
+   SET LOCAL lock_timeout = '5s';
    CREATE TEMP TABLE continuity_export (legacy_sub text PRIMARY KEY, discord_id text) ON COMMIT DROP;
-   \copy continuity_export FROM 'export.csv' WITH (FORMAT csv, HEADER true)
-   -- Review first: a Discord id on two accounts, or not all digits.
-   SELECT discord_id, array_agg(legacy_sub) FROM continuity_export
-   WHERE discord_id <> '' GROUP BY discord_id HAVING count(*) > 1 OR discord_id !~ '^[0-9]+$';
+   COPY continuity_export FROM STDIN WITH (FORMAT csv, HEADER true);
+   legacy_sub,discord_id
+   <the export's rows>
+   \.
+   UPDATE continuity_export SET discord_id = NULLIF(btrim(discord_id), '');
+   DO $$
+   BEGIN
+     IF EXISTS (SELECT 1 FROM continuity_export WHERE discord_id !~ '^[0-9]{1,20}$') THEN
+       RAISE EXCEPTION 'a discord_id is not a Discord id (digits only)';
+     END IF;
+     IF EXISTS (SELECT 1 FROM continuity_export WHERE discord_id IS NOT NULL
+                GROUP BY discord_id HAVING count(*) > 1) THEN
+       RAISE EXCEPTION 'a Discord id is on two legacy subs: merge those accounts by hand first';
+     END IF;
+     IF EXISTS (SELECT 1 FROM continuity_export e JOIN users u ON u.discord_id = e.discord_id
+                WHERE u.id <> e.legacy_sub) THEN
+       RAISE EXCEPTION 'a Discord id is already held by another account';
+     END IF;
+   END $$;
+   SELECT
+     (SELECT count(*) FROM continuity_export) AS export_rows,
+     (SELECT count(*) FROM continuity_export e
+       WHERE NOT EXISTS (SELECT 1 FROM users u WHERE u.id = e.legacy_sub)) AS not_a_ds_account,
+     (SELECT count(*) FROM continuity_export WHERE discord_id IS NULL) AS no_discord_id,
+     (SELECT count(*) FROM users u
+       WHERE NOT EXISTS (SELECT 1 FROM continuity_export e WHERE e.legacy_sub = u.id)) AS ds_accounts_not_in_export,
+     (SELECT count(*) FROM users u JOIN continuity_export e ON e.legacy_sub = u.id
+       WHERE u.discord_id IS NOT NULL AND u.discord_id <> e.discord_id) AS other_discord_id_already_stored;
    UPDATE users u SET discord_id = e.discord_id
    FROM continuity_export e
-   WHERE u.id = e.legacy_sub AND e.discord_id <> '' AND u.discord_id IS NULL;
-   COMMIT;
+   WHERE u.id = e.legacy_sub AND e.discord_id IS NOT NULL AND u.discord_id IS NULL;
+   SELECT count(*) AS accounts_with_discord_id FROM users WHERE discord_id IS NOT NULL;
+   :txn_end;
    ```
 
-4. Set `SSO_DISCORD_ID_CLAIM` and `SSO_PRIMARY_SUB_CLAIM` with the switch
-   of `SSO_ISSUER_URL` (and the delegated `issuerUrl`) to `ds-sso`. Each
-   account is re-keyed on its owner's first login. ds-mcp keys its own
-   grants by `sub`, so MCP users connect again; a user who reaches ds-mcp
-   before their first DS login gets `403 not_granted` until they log in to
-   DS once.
-5. Afterwards: review the conflicts (the metric and the audit lines) and
-   any account no claim matched (`SELECT id FROM users WHERE last_login_at
-   < <cut-over>`), and merge by hand.
+   Run it once as a dry run, read the counts, then for real. It stops
+   without changing anything on a malformed or duplicated Discord id, and
+   re-running it is harmless:
 
-Rolling back to the primary after a re-key would need the reverse
-mapping: the audit lines record each `from_user_id` and `to_user_id`.
+   ```sh
+   $PSQL -v txn_end=ROLLBACK -f - < continuity-load.sql   # dry run
+   $PSQL -v txn_end=COMMIT -f - < continuity-load.sql
+   ```
+
+   `ds_accounts_not_in_export` and `no_discord_id` are accounts no
+   Discord id will match: staff (matched by the primary sub instead) or a
+   manual merge after step 4. The export and the script hold personal
+   identifiers: delete both once the load is committed.
+
+4. **Switch the issuer, with continuity on, in one deploy.** In the
+   `distant-signal` values (ds-deploy chart keys):
+
+   | Value | Set to |
+   |---|---|
+   | `api.sso.issuerUrl` | the `ds-sso` web provider's issuer, trailing slash included |
+   | `api.sso.clientId`, and `sso-client-secret` in the `api.sso.existingSecret` Secret (or `api.sso.clientSecret`) | the `ds-sso` web provider's client, if they differ from today's |
+   | `api.sso.discordIdClaim` | the ID-token claim `ds-sso` puts the Discord id in (`SSO_DISCORD_ID_CLAIM`) |
+   | `api.sso.primarySubClaim` | the ID-token claim carrying the primary's `sub` (`SSO_PRIMARY_SUB_CLAIM`) |
+   | `api.delegated.clients[ds-mcp].issuerUrl` | the `ds-sso` `distant-signal-api` provider's issuer |
+   | `api.internalOauth.*` | unchanged: machine tokens stay on the primary |
+
+   ds-mcp moves in the same step: `authentik.issuer` (and its client id and
+   secret if they differ) and `dsDelegatedApi.issuer` point at `ds-sso`;
+   `dsInternalOAuth` stays on the primary. Each DS account is re-keyed on
+   its owner's first login. ds-mcp keys its own grants by `sub`, so MCP
+   users connect again; a user who reaches ds-mcp before their first DS
+   login gets `403 not_granted` until they log in to DS once. `ds-sso`'s
+   web provider needs the back-channel logout settings in
+   [session-revocation.md](session-revocation.md), "Authentik
+   configuration", and the api refuses to start unless the SSO, delegated
+   and internal issuers and client ids are all distinct
+   ("Turning it on" above).
+
+5. **Check.** The counters are registered at 0 when the api starts.
+   Per pod, from its metrics port (`metrics.port`, 9091):
+
+   ```sh
+   POD=$(kubectl -n <ns> get pods -l app.kubernetes.io/component=api -o jsonpath='{.items[0].metadata.name}')
+   kubectl -n <ns> get --raw "/api/v1/namespaces/<ns>/pods/$POD:9091/proxy/metrics" \
+     | grep -E '^distant_signal_api_account_(rekeys|continuity_conflicts)_total'
+   ```
+
+   Or in Prometheus, summed over pods and restarts:
+
+   ```promql
+   sum by (matched_by) (increase(distant_signal_api_account_rekeys_total[1d]))
+   sum by (kind) (increase(distant_signal_api_account_continuity_conflicts_total[1d]))
+   ```
+
+   Any conflict needs a manual merge (the table above). The audit lines
+   name the accounts:
+
+   ```sh
+   kubectl -n <ns> logs deploy/<release>-api --since=24h \
+     | jq -c 'select(.event == "account_rekeyed" or .event == "account_continuity_conflict")'
+   ```
+
+   (Loki keeps them longer than the pod does.) Spot checks: a public user's
+   first login through `ds-sso` opens their existing account and adds one
+   to `matched_by="discord_id"`; a staff member's adds one to
+   `matched_by="primary_sub"`.
+
+6. **Afterwards.** Review any account no claim matched
+   (`SELECT id, last_login_at FROM users WHERE last_login_at < '<cut-over time>'`)
+   and merge by hand. Delete the account list from step 2.
+
+#### Rolling back
+
+Before step 4 nothing points at `ds-sso`: leave the claim values empty.
+If the move is abandoned, clear the loaded ids, which then serve no
+purpose (`UPDATE users SET discord_id = NULL`).
+
+After step 4, an account already re-keyed holds its `ds-sso` sub as
+`users.id`, so a login through the primary again would create a new,
+empty account. Put the old ids back first. Collect the pairs from the
+audit lines (`from_user_id,to_user_id`, Loki for anything older than the
+pod), then run, outside the repository, a dry run and then for real as in
+step 3:
+
+```sql
+\set ON_ERROR_STOP on
+BEGIN;
+SET LOCAL lock_timeout = '5s';
+CREATE TEMP TABLE rekey_back (from_user_id text PRIMARY KEY, to_user_id text NOT NULL UNIQUE) ON COMMIT DROP;
+COPY rekey_back FROM STDIN WITH (FORMAT csv, HEADER true);
+from_user_id,to_user_id
+<the audit lines' pairs>
+\.
+DO $$
+BEGIN
+  IF EXISTS (SELECT 1 FROM rekey_back r JOIN users u ON u.id = r.from_user_id) THEN
+    RAISE EXCEPTION 'an old sub has an account again (a login through the old provider): merge it by hand';
+  END IF;
+END $$;
+UPDATE group_train_share_moves m SET added_by = r.from_user_id
+FROM rekey_back r WHERE m.added_by = r.to_user_id;
+UPDATE users u SET id = r.from_user_id
+FROM rekey_back r WHERE u.id = r.to_user_id;
+SELECT count(*) AS restored FROM users u JOIN rekey_back r ON u.id = r.from_user_id;
+:txn_end;
+```
+
+Then, in the same change, set the step 4 values back to the primary and
+empty `api.sso.discordIdClaim` and `api.sso.primarySubClaim`, and point
+ds-mcp back. Sessions, tokens and grants follow the ids back through the
+`ON UPDATE CASCADE` keys; MCP users connect again. The primary's Discord
+source must still exist, which is why it is removed only after the
+cut-over is healthy (the spec's step 5).
 
 ## Observability
 
