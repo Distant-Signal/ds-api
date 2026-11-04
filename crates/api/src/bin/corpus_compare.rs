@@ -78,7 +78,11 @@ async fn main() -> anyhow::Result<()> {
     )
     .fetch_optional(&pool)
     .await?;
-    let locations = corpus_crosswalk::load_corpus_locations(&pool).await?;
+    // An NLC XML snapshot over the frozen JSON extract: the effective rows
+    // (the XML, then the JSON rows it does not cover), and the layered
+    // crosswalk the load stored.
+    let layers = corpus_crosswalk::load_corpus_layers(&pool).await?;
+    let locations = layers.effective();
 
     if args.export_corpus_json {
         let blank = |v: &Option<String>| v.clone().unwrap_or_else(|| " ".to_owned());
@@ -110,7 +114,7 @@ async fn main() -> anyhow::Result<()> {
         }))
     };
     let timetable = corpus_comparison::load_timetable(&pool, date).await?;
-    let comparison = corpus_comparison::compare(&locations, &timetable);
+    let comparison = corpus_comparison::compare_layers(&layers, &timetable);
     if let Some((delivered_at, source_file)) = delivery {
         println!("CORPUS delivery: {source_file}, delivered {delivered_at}");
     }

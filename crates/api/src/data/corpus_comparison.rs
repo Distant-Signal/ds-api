@@ -23,4 +23,6 @@
 
 // Moved to `ds_store::corpus::comparison` (ingest architecture plan 1A.6), with its
 // tests.
-pub use ds_store::corpus::comparison::{ReportDetail, compare, load_timetable, render};
+pub use ds_store::corpus::comparison::{
+    ReportDetail, compare, compare_layers, load_timetable, render,
+};

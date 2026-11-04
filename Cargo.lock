@@ -549,8 +549,8 @@ checksum = "1d07550c9036bf2ae0c684c4297d503f838287c83c53686d05370d0e139ae570"
 
 [[package]]
 name = "common"
-version = "0.1.1"
-source = "git+https://github.com/Distant-Signal/ds-core?tag=v0.1.1#9227da1eee1e82431e2dc3aa30f2cf0f02a94af8"
+version = "0.1.2"
+source = "git+https://github.com/Distant-Signal/ds-core?tag=v0.1.2#3fa142615d04d1d08155922593eb85cdf19e2322"
 dependencies = [
  "anyhow",
  "chrono",
@@ -907,8 +907,8 @@ checksum = "1aaf95b3e5c8f23aa320147307562d361db0ae0d51242340f558153b4eb2439b"
 
 [[package]]
 name = "ds-lines"
-version = "0.1.1"
-source = "git+https://github.com/Distant-Signal/ds-core?tag=v0.1.1#9227da1eee1e82431e2dc3aa30f2cf0f02a94af8"
+version = "0.1.2"
+source = "git+https://github.com/Distant-Signal/ds-core?tag=v0.1.2#3fa142615d04d1d08155922593eb85cdf19e2322"
 dependencies = [
  "anyhow",
  "common",
@@ -916,8 +916,8 @@ dependencies = [
 
 [[package]]
 name = "ds-runtime"
-version = "0.1.1"
-source = "git+https://github.com/Distant-Signal/ds-core?tag=v0.1.1#9227da1eee1e82431e2dc3aa30f2cf0f02a94af8"
+version = "0.1.2"
+source = "git+https://github.com/Distant-Signal/ds-core?tag=v0.1.2#3fa142615d04d1d08155922593eb85cdf19e2322"
 dependencies = [
  "anyhow",
  "chrono",
@@ -937,8 +937,8 @@ dependencies = [
 
 [[package]]
 name = "ds-store"
-version = "0.1.1"
-source = "git+https://github.com/Distant-Signal/ds-core?tag=v0.1.1#9227da1eee1e82431e2dc3aa30f2cf0f02a94af8"
+version = "0.1.2"
+source = "git+https://github.com/Distant-Signal/ds-core?tag=v0.1.2#3fa142615d04d1d08155922593eb85cdf19e2322"
 dependencies = [
  "anyhow",
  "chrono",
@@ -1075,7 +1075,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "39cab71617ae0d63f51a36d69f866391735b51691dbda63cf6f96d042b63efeb"
 dependencies = [
  "libc",
- "windows-sys 0.61.2",
+ "windows-sys 0.52.0",
 ]
 
 [[package]]
@@ -1466,8 +1466,8 @@ dependencies = [
 
 [[package]]
 name = "health-http"
-version = "0.1.1"
-source = "git+https://github.com/Distant-Signal/ds-core?tag=v0.1.1#9227da1eee1e82431e2dc3aa30f2cf0f02a94af8"
+version = "0.1.2"
+source = "git+https://github.com/Distant-Signal/ds-core?tag=v0.1.2#3fa142615d04d1d08155922593eb85cdf19e2322"
 dependencies = [
  "axum",
  "ds-runtime",
@@ -2292,7 +2292,7 @@ version = "5.0.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "51e219e79014df21a225b1860a479e2dcd7cbd9130f4defd4bd0e191ea31d67d"
 dependencies = [
- "base64 0.22.1",
+ "base64 0.21.7",
  "chrono",
  "getrandom 0.2.17",
  "http",
@@ -2689,7 +2689,7 @@ dependencies = [
  "once_cell",
  "socket2",
  "tracing",
- "windows-sys 0.61.2",
+ "windows-sys 0.52.0",
 ]
 
 [[package]]
@@ -3044,7 +3044,7 @@ dependencies = [
  "errno",
  "libc",
  "linux-raw-sys",
- "windows-sys 0.61.2",
+ "windows-sys 0.52.0",
 ]
 
 [[package]]
@@ -3140,8 +3140,8 @@ dependencies = [
 
 [[package]]
 name = "schedule-query"
-version = "0.1.1"
-source = "git+https://github.com/Distant-Signal/ds-core?tag=v0.1.1#9227da1eee1e82431e2dc3aa30f2cf0f02a94af8"
+version = "0.1.2"
+source = "git+https://github.com/Distant-Signal/ds-core?tag=v0.1.2#3fa142615d04d1d08155922593eb85cdf19e2322"
 dependencies = [
  "chrono",
  "compact_str",
@@ -3844,7 +3844,7 @@ dependencies = [
  "getrandom 0.4.3",
  "once_cell",
  "rustix",
- "windows-sys 0.61.2",
+ "windows-sys 0.52.0",
 ]
 
 [[package]]
@@ -4215,8 +4215,8 @@ dependencies = [
 
 [[package]]
 name = "trust-schema"
-version = "0.1.1"
-source = "git+https://github.com/Distant-Signal/ds-core?tag=v0.1.1#9227da1eee1e82431e2dc3aa30f2cf0f02a94af8"
+version = "0.1.2"
+source = "git+https://github.com/Distant-Signal/ds-core?tag=v0.1.2#3fa142615d04d1d08155922593eb85cdf19e2322"
 dependencies = [
  "anyhow",
  "chrono",
@@ -4512,7 +4512,7 @@ version = "0.1.11"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "c2a7b1c03c876122aa43f3020e6c3c3ee5c05081c9a00739faf7503aeba10d22"
 dependencies = [
- "windows-sys 0.61.2",
+ "windows-sys 0.52.0",
 ]
 
 [[package]]
