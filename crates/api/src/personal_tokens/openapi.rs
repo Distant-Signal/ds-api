@@ -551,7 +551,7 @@ mod tests {
         let document = document();
         let mut refs = Vec::new();
         walk(document, &mut refs);
-        assert!(!refs.is_empty());
+        assert_ne!(refs, [] as [String; 0]);
         let schemas = document["components"]["schemas"].as_object().unwrap();
         for target in refs {
             let name = target
