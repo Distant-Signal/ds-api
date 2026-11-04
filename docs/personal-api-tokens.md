@@ -126,11 +126,11 @@ breaking change: v1 only grows. A breaking change needs a `/v2` document.
 
 Step-by-step guides for using a token from things people already run:
 
-- [Home Assistant](recipes/home-assistant.md): line status, the next
-  journey and a train's delay as REST sensors, with the credits on a
-  dashboard.
-- [Apple Shortcuts](recipes/apple-shortcuts.md): "how's my line" and "my
-  next train" with Siri.
+- [Home Assistant](https://github.com/Distant-Signal/distant-signal/blob/main/docs/recipes/home-assistant.md):
+  line status, the next journey and a train's delay as REST sensors, with
+  the credits on a dashboard.
+- [Apple Shortcuts](https://github.com/Distant-Signal/distant-signal/blob/main/docs/recipes/apple-shortcuts.md):
+  "how's my line" and "my next train" with Siri.
 
 ## Revocation and the kill switch
 
