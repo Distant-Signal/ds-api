@@ -129,7 +129,7 @@ The privacy page says so; keep it in step if that changes.
 
 ## Schedule feed SFTP server logs
 
-The schedulefeed pod's SFTP server (SFTPGo, [schedule-feed-sftp.md](schedule-feed-sftp.md))
+The schedulefeed pod's SFTP server (SFTPGo, [schedule-feed-sftp.md](https://github.com/Distant-Signal/ds-deploy/blob/main/docs/schedule-feed-sftp.md))
 is open to the internet. Its log holds the source IP of every connection, any
 username tried, and what was transferred; IPs are personal data when the
 client is a person. Lawful basis: legitimate interests (securing the one
@@ -158,6 +158,6 @@ states the three periods; keep it in step if they change.
 Deleted or pruned data can stay in backups for **up to 14 days**. The account, account-deleted and privacy pages and the delete-account dialog say so (decided 2026-09-30).
 
 - The daily `pg_dump` is age-encrypted and kept for 7 days (Ranma-Config `distant-signal.yaml`).
-- The chart's point-in-time recovery (`postgresql.pgbackrest.enabled`; [postgres-pitr.md](postgres-pitr.md)) keeps WAL and backups in an encrypted pgBackRest repository: a weekly full backup, daily differentials, and `repo.retentionFullType: time` with `retentionFull: 7`. That keeps whatever is needed to restore to any moment in the last 7 days, which includes the weekly full backup taken before that window. So a row deleted just after a full backup stays in the repository until the next-but-one full backup expires it: up to about 14 days.
+- The chart's point-in-time recovery (`postgresql.pgbackrest.enabled`; [postgres-pitr.md](https://github.com/Distant-Signal/ds-deploy/blob/main/docs/postgres-pitr.md)) keeps WAL and backups in an encrypted pgBackRest repository: a weekly full backup, daily differentials, and `repo.retentionFullType: time` with `retentionFull: 7`. That keeps whatever is needed to restore to any moment in the last 7 days, which includes the weekly full backup taken before that window. So a row deleted just after a full backup stays in the repository until the next-but-one full backup expires it: up to about 14 days.
 
 If either retention changes, keep the 14-day figure (or a shorter one) true, and update the pages above.
