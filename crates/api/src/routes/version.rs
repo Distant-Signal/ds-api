@@ -6,10 +6,13 @@
 //!
 //! The list is the file `API_SOURCE_IMAGES_FILE` names
 //! (`config.source_images_file`), which the chart mounts from a config map
-//! rendered from `sourceCode` and each first-party image reference
-//! (`distant-signal.sourceImagesJson`). It is read per request: the chart
-//! changes it on every build, and kubelet updates a mounted config map in
-//! place, so a new revision needs no api restart. Unauthenticated and
+//! rendered from each first-party image's pin: its reference, the
+//! repository that builds it and the commit in its build tag
+//! (Distant-Signal/ds-deploy's `distant-signal.sourceImagesJson`). Since the
+//! repo split the images come from several repositories, so `source`
+//! differs per image; this route echoes the file as it is. It is read per
+//! request: a new pin changes it, and kubelet updates a mounted config map
+//! in place, so a new revision needs no api restart. Unauthenticated and
 //! read-only, like `/public/health`.
 
 use std::path::Path;
@@ -34,10 +37,12 @@ pub struct SourceImage {
     /// The image reference the pods pull: `<repository>@<digest>` when the
     /// chart pins a digest, else `<repository>:<tag>`.
     pub image: String,
-    /// The repository the image was built from.
+    /// The repository the image was built from (each image's own; several
+    /// repositories build them).
     pub source: String,
-    /// The commit the image was built from. `None` when the chart was not
-    /// packaged by CI (an empty `sourceCode.revision`).
+    /// The commit the image was built from, or for an image pinned at a
+    /// release (ds-migrate) its release tag, `vX.Y.Z`. `None` when the chart
+    /// knows neither (an empty `sourceCode.revision`).
     #[serde(default)]
     pub revision: Option<String>,
 }
