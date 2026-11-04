@@ -279,8 +279,10 @@ pub(crate) async fn analyse(
 // Planning the alternatives
 // ---------------------------------------------------------------------------
 
-/// Why alternatives are wanted from a leg (`?cause=`).
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize)]
+/// Why alternatives are wanted from a leg (`?cause=`), and the `cause` of
+/// `POST .../legs/{legId}/replace`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize, ts_rs::TS)]
+#[ts(rename = "AlternativesCause")]
 #[serde(rename_all = "camelCase")]
 pub(crate) enum AskCause {
     Missed,
@@ -1302,9 +1304,11 @@ async fn post_preview(
     )
 }
 
-#[derive(Debug, Deserialize, Serialize)]
+/// `POST /Journeys/{id}/replan/accept`'s body.
+#[derive(Debug, Deserialize, Serialize, ts_rs::TS)]
+#[ts(rename = "AcceptSuggestionRequest", optional_fields = nullable)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
-struct AcceptBody {
+pub(crate) struct AcceptBody {
     break_id: i64,
     suggestion_id: String,
     /// The suggestions' fingerprint the page showed.
@@ -1570,9 +1574,11 @@ async fn post_accept(
     )
 }
 
-#[derive(Debug, Deserialize, Serialize)]
+/// `POST /Journeys/{id}/legs/{legId}/replace`'s body.
+#[derive(Debug, Deserialize, Serialize, ts_rs::TS)]
+#[ts(rename = "ReplaceRequest", optional_fields = nullable)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
-struct ReplaceBody {
+pub(crate) struct ReplaceBody {
     cause: AskCause,
     legs: Vec<crate::routes::journey_itinerary::ItineraryLegRequest>,
     #[serde(default)]
