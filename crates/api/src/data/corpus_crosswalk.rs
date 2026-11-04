@@ -50,4 +50,4 @@
 pub use ds_store::corpus::{FALLBACK_ENV, fallback_enabled, init_fallback_from_env};
 
 // Moved to `ds_store::corpus::crosswalk` (ingest architecture plan 1A.6).
-pub use ds_store::corpus::crosswalk::load_corpus_locations;
+pub use ds_store::corpus::crosswalk::{load_corpus_layers, load_corpus_locations};

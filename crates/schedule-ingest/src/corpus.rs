@@ -32,7 +32,11 @@
 //!    its format's minimum rows is REJECTED: counted, logged and moved to
 //!    `storage_dir/corpus/rejected/`, never loaded;
 //! 5. hands the whole set to the sink (`sink.rs`), which replaces
-//!    `corpus_locations` in Postgres in one transaction;
+//!    `corpus_locations` in Postgres in one transaction -- for an XML
+//!    snapshot, every row but the last JSON extract's, kept as a frozen
+//!    fallback so no code the JSON resolved stops resolving
+//!    (`ds_store::corpus::crosswalk::CorpusLayers`; the XML wins every key
+//!    it resolves);
 //! 6. on success moves the file to `storage_dir/corpus/`, and every other
 //!    candidate to `storage_dir/corpus/superseded/` unloaded, keeping the
 //!    newest `CORPUS_RETENTION_KEEP` of each, so files never pile up in

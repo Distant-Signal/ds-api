@@ -26,7 +26,8 @@ use chrono::{DateTime, Utc};
 use ds_runtime::secret::Secret;
 use ds_store::corpus::{
     CorpusLocation, DeliveredFileProvenance, corpus_delivery_problem, corpus_provenance_problem,
-    delivery_source_problem, replace_corpus_locations_with_provenance,
+    delivery_source_problem, replace_corpus_locations_keeping_json_fallback,
+    replace_corpus_locations_with_provenance,
 };
 use ds_store::schedule::{
     ScheduleFeedSource, insert_schedule_feed_ingest, schedule_feed_ingest_problem,
@@ -193,18 +194,36 @@ impl IngestSink for DbSink {
                 anyhow!(problem).context("CORPUS load refused"),
             ));
         }
-        let upserted = replace_corpus_locations_with_provenance(
-            &self.pool,
-            request.delivered_at,
-            request.source_file,
-            &DeliveredFileProvenance {
-                bytes: i64::try_from(request.source_bytes).ok(),
-                sha256: Some(request.sha256),
-                delivery_source: Some(request.delivery_source),
-            },
-            request.locations,
-        )
-        .await
+        let provenance = DeliveredFileProvenance {
+            bytes: i64::try_from(request.source_bytes).ok(),
+            sha256: Some(request.sha256),
+            delivery_source: Some(request.delivery_source),
+        };
+        // An NLC XML snapshot (CORPUS API v2) carries only TIPLOC-bearing
+        // locations: it replaces the previous snapshot and keeps the last
+        // JSON extract's rows as a frozen fallback, so no code the JSON
+        // resolved stops resolving (`ds_store::corpus::crosswalk::
+        // CorpusLayers`). A JSON extract replaces everything.
+        let keep_json = crate::pattern::is_nlc_xml_name(request.source_file);
+        let upserted = if keep_json {
+            replace_corpus_locations_keeping_json_fallback(
+                &self.pool,
+                request.delivered_at,
+                request.source_file,
+                &provenance,
+                request.locations,
+            )
+            .await
+        } else {
+            replace_corpus_locations_with_provenance(
+                &self.pool,
+                request.delivered_at,
+                request.source_file,
+                &provenance,
+                request.locations,
+            )
+            .await
+        }
         .context("CORPUS load failed")
         .map_err(SinkError::from_db)?;
         tracing::info!(
@@ -212,6 +231,7 @@ impl IngestSink for DbSink {
             source_file = %request.source_file,
             sha256 = request.sha256,
             rows = upserted,
+            json_fallback_kept = keep_json,
             "replaced corpus_locations"
         );
         Ok(())
@@ -680,6 +700,124 @@ mod db_tests {
                 Some(sha.clone()),
                 Some("sftp".to_string())
             )
+        );
+        delete().await;
+    }
+
+    /// An NLC XML snapshot through the direct sink, as the
+    /// `schedule_ingest` role: the JSON extract's rows stay as the frozen
+    /// fallback, so a TIPLOC only the JSON has still resolves, and the XML
+    /// wins a TIPLOC both have.
+    #[tokio::test]
+    #[ignore = "requires a live database with no real CORPUS data (CI's fresh one); replaces corpus_locations"]
+    #[expect(
+        clippy::too_many_lines,
+        reason = "one end-to-end scenario: guard, two loads, the rows and the layers"
+    )]
+    async fn an_xml_snapshot_keeps_the_json_rows_through_the_direct_sink() {
+        let json_at = Utc.with_ymd_and_hms(2001, 2, 3, 4, 5, 6).unwrap();
+        let xml_at = Utc.with_ymd_and_hms(2001, 2, 10, 4, 5, 6).unwrap();
+        let cleanup = cleanup_pool().await;
+        let foreign: i64 = sqlx::query_scalar(
+            "SELECT (SELECT COUNT(*) FROM corpus_deliveries WHERE delivered_at <> ALL($1)) \
+                  + (SELECT COUNT(*) FROM corpus_crosswalk_build WHERE delivered_at <> ALL($1))",
+        )
+        .bind([json_at, xml_at])
+        .fetch_one(&cleanup)
+        .await
+        .unwrap();
+        assert_eq!(
+            foreign, 0,
+            "refusing to replace corpus_locations: this database holds another CORPUS delivery"
+        );
+        let delete = || async {
+            for sql in [
+                "DELETE FROM corpus_locations WHERE delivered_at = ANY($1)",
+                "DELETE FROM corpus_deliveries WHERE delivered_at = ANY($1)",
+                "DELETE FROM corpus_crosswalk_build WHERE delivered_at = ANY($1)",
+            ] {
+                sqlx::query(sql)
+                    .bind([json_at, xml_at])
+                    .execute(&cleanup)
+                    .await
+                    .expect("cleanup");
+            }
+        };
+        delete().await;
+
+        let row = |nlc: &str, tiploc: &str| {
+            let mut l = location(nlc);
+            l.tiploc = Some(tiploc.to_string());
+            l
+        };
+        let json = [
+            row("559500", "CLPHMJN"),
+            row("559572", "JSONONL"),
+            location("000800"),
+        ];
+        let mut moved = row("559500", "CLPHMJN");
+        moved.nlc_desc = Some("CLAPHAM JUNCTION (XML)".to_string());
+        let xml = [moved];
+        let sha = "0f".repeat(32);
+        let sink = sink().await;
+        sink.load_corpus(&CorpusLoadRequest {
+            delivered_at: json_at,
+            source_file: "CORPUSExtract.json.gz",
+            locations: &json,
+            source_bytes: 295_957,
+            sha256: &sha,
+            delivery_source: "sftp",
+        })
+        .await
+        .unwrap();
+        sink.load_corpus(&CorpusLoadRequest {
+            delivered_at: xml_at,
+            source_file: "NLC20010209.xml.gz",
+            locations: &xml,
+            source_bytes: 1_000,
+            sha256: &sha,
+            delivery_source: "sftp",
+        })
+        .await
+        .unwrap();
+
+        let rows: Vec<(String, Option<String>, String)> = sqlx::query_as(
+            "SELECT nlc, tiploc, source_file FROM corpus_locations ORDER BY source_file, nlc",
+        )
+        .fetch_all(&cleanup)
+        .await
+        .unwrap();
+        let r = |nlc: &str, tiploc: Option<&str>, file: &str| {
+            (
+                nlc.to_string(),
+                tiploc.map(str::to_string),
+                file.to_string(),
+            )
+        };
+        assert_eq!(
+            rows,
+            [
+                r("000800", None, "CORPUSExtract.json.gz"),
+                r("559500", Some("CLPHMJN"), "CORPUSExtract.json.gz"),
+                r("559572", Some("JSONONL"), "CORPUSExtract.json.gz"),
+                r("559500", Some("CLPHMJN"), "NLC20010209.xml.gz"),
+            ]
+        );
+        let layers = ds_store::corpus::crosswalk::load_corpus_layers(&cleanup)
+            .await
+            .unwrap();
+        let effective = layers.effective();
+        assert_eq!(effective.len(), 3, "{effective:?}");
+        assert_eq!(
+            effective[0].nlc_desc.as_deref(),
+            Some("CLAPHAM JUNCTION (XML)"),
+            "the XML wins CLPHMJN"
+        );
+        assert!(
+            effective
+                .iter()
+                .any(|l| l.tiploc.as_deref() == Some("JSONONL")),
+            "the JSON-only TIPLOC is kept"
         );
         delete().await;
     }
