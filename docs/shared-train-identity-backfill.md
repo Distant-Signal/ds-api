@@ -32,7 +32,7 @@ database that has already applied `20260906140000`.
    ```
 
    It refuses the api's own role (`distant_signal_api`): since the ingest
-   phase 5 prep (Q2 of `docs/ingest-phase5-runbook.md`) these one-offs never
+   phase 5 prep (Q2 of [ds-ingest's ingest-phase5-runbook.md](https://github.com/Distant-Signal/ds-ingest/blob/main/docs/ingest-phase5-runbook.md)) these one-offs never
    run with the api's credentials. The api image's old `backfill_trains`
    binary is gone (phase 5 step 5.4b).
 

@@ -28,7 +28,7 @@
 # and names `ds-migrate backfill-trains`, which the ds-migrate image runs.
 # See ds-store's src/migrate/legacy_backfill.rs module doc.
 #
-# Ingest phase 5, step 5.4b (Q2, docs/ingest-phase5-runbook.md): the api's
+# Ingest phase 5, step 5.4b (Q2, ds-ingest's docs/ingest-phase5-runbook.md): the api's
 # four writing one-offs (`backfill_trains`, `backfill_incident_lines`,
 # `backfill_line_train_summaries`, `replay_uidless_movements`) are gone from
 # this image, so nothing in it can write outside the api role's grants.
