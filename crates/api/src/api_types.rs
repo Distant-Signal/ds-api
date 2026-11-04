@@ -89,6 +89,8 @@ fn visit_roots(v: &mut Collector) {
     v.visit::<crate::routes::journey_replan::SuggestionStaleResponse>();
     v.visit::<crate::data::journey_replace::ReplaceResponse>();
     v.visit::<crate::routes::journey_replan::RevisionsResponse>();
+    v.visit::<crate::routes::journey_replan::AcceptBody>();
+    v.visit::<crate::routes::journey_replan::ReplaceBody>();
     // Line status and stats.
     v.visit::<crate::render::LineStatusReportJson>();
     v.visit::<crate::routes::line_status::DailyStats>();

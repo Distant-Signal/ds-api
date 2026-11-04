@@ -2,6 +2,15 @@
 // Do not edit: regenerate with `UPDATE_API_TYPES=1 cargo test -p api api_types`.
 
 /**
+ * `POST /Journeys/{id}/replan/accept`'s body.
+ */
+export type AcceptSuggestionRequest = { breakId: number, suggestionId: string, 
+/**
+ * The suggestions' fingerprint the page showed.
+ */
+fingerprint?: string | null, };
+
+/**
  * How a candidate was found.
  */
 export type AccessBasis = "hub" | "line" | "walk" | "nearest";
@@ -94,6 +103,12 @@ trackingId: number | null, };
  * One affected route of a [`DisruptionJson`], by CRS.
  */
 export type AffectedRoute = { from: string, to: string, };
+
+/**
+ * Why alternatives are wanted from a leg (`?cause=`), and the `cause` of
+ * `POST .../legs/{legId}/replace`.
+ */
+export type AlternativesCause = "missed" | "cancelled" | "connection" | "choice";
 
 export type AttachTicketRequest = { trackingId: number, };
 
@@ -2829,6 +2844,11 @@ export type RenameResponse = {
  * un-normalized value the caller sent.
  */
 customName: string | null, };
+
+/**
+ * `POST /Journeys/{id}/legs/{legId}/replace`'s body.
+ */
+export type ReplaceRequest = { cause: AlternativesCause, legs: Array<ItineraryLegRequest>, throughLegId?: number | null, };
 
 /**
  * What a replacement answers (`POST .../replan/accept`, `.../replace`,
