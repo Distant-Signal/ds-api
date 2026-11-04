@@ -14,7 +14,7 @@ Runbook for mid-journey changes (design:
   with a train leg leaving inside the live window (at most
   `maxJourneysPerTick`), opens, updates or ends each break, and plans its
   suggestions through its own planning slot (never a user's).
-- **The notifier** (`crates/notifier/src/break_notices.rs`) reads open
+- **The notifier** (ds-workers' `crates/notifier/src/break_notices.rs`) reads open
   breaks with suggestions every `notifier.journeyBreaksPollIntervalSecs`
   (15) and pushes one notice per break, again only when it gets worse. A
   notice is that train's push: the train's own delay, cancel or predicted
