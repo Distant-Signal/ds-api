@@ -4,7 +4,7 @@ A registered client, today only the Distant-Signal-MCP (ds-mcp), can act
 for a Distant Signal (DS) user who connected it on the Connected apps page:
 list and read their journeys, save an itinerary, and delete journeys it
 saved itself. Design and threat model:
-[the delegated-access spec](superpowers/specs/2026-10-14-ds-mcp-delegated-access-design.md).
+[the delegated-access spec](https://github.com/Distant-Signal/distant-signal/blob/main/docs/superpowers/specs/2026-10-14-ds-mcp-delegated-access-design.md).
 Client-facing contract: [api-changelog.md](api-changelog.md), 2026-10-15.
 
 Personal API tokens, which a user creates for their own devices and which
