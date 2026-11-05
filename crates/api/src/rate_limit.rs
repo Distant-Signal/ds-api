@@ -26,7 +26,9 @@
 //! - `/Train/by-uid/*` (anonymous, and a cache miss runs schedule matching),
 //!   and `/public/tfl/stops/{id}/arrivals` in the same budget (a cache miss
 //!   calls `TfL`), and the Atom feeds (`/public/feeds/*`, DB reads a
-//!   feed reader polls; usually answered from the edge cache);
+//!   feed reader polls; usually answered from the edge cache), and the
+//!   Irish train page's `/public/island-of-ireland/trains/*` (an
+//!   anonymous page of DB reads, uncached);
 //! - `POST /public/events` (opt-in usage analytics, DS-190), in a budget of
 //!   its own so a chatty page can't spend a visitor's public-write budget;
 //! - every other public write (non-GET/HEAD/OPTIONS), with a generous
@@ -225,6 +227,7 @@ pub fn classify(method: &Method, path: &str) -> Option<LimitClass> {
     if path.starts_with("/Train/by-uid/")
         || is_tfl_arrivals(path)
         || path.starts_with("/public/feeds/")
+        || path.starts_with("/public/island-of-ireland/trains/")
     {
         return Some(LimitClass::TrainByUid);
     }
@@ -1506,6 +1509,20 @@ mod tests {
         assert_eq!(
             classify(&Method::HEAD, "/public/feeds/network"),
             Some(LimitClass::TrainByUid)
+        );
+        assert_eq!(
+            classify(
+                &Method::GET,
+                "/public/island-of-ireland/trains/A120/2026-11-05"
+            ),
+            Some(LimitClass::TrainByUid)
+        );
+        assert_eq!(
+            classify(
+                &Method::GET,
+                "/public/island-of-ireland/stations/CNLLY/departures"
+            ),
+            None
         );
         assert_eq!(
             classify(&Method::GET, "/public/tfl/stops/940GZZLURSQ/arrivals"),

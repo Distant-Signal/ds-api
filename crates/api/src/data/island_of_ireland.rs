@@ -210,6 +210,115 @@ pub async fn latest_station_sample(
     .transpose()
 }
 
+/// One train's board history: `island_of_ireland_trains` and its
+/// `island_of_ireland_train_calls`, as the writer recorded them (ds-core's
+/// `record_train_history`). Raw feed values; the route reads them with
+/// `common::island_of_ireland::train_state`.
+#[derive(Debug, Clone, PartialEq)]
+pub struct TrainHistory {
+    pub network: IslandOfIrelandNetwork,
+    pub train_code: String,
+    pub train_date: chrono::NaiveDate,
+    pub origin: String,
+    pub destination: String,
+    pub origin_time: Option<String>,
+    pub destination_time: Option<String>,
+    pub status: String,
+    pub late_minutes: Option<i32>,
+    pub last_location: Option<String>,
+    pub first_seen_at: chrono::DateTime<chrono::Utc>,
+    pub last_seen_at: chrono::DateTime<chrono::Utc>,
+    /// In no particular order.
+    pub calls: Vec<TrainHistoryCall>,
+}
+
+/// One station whose board showed the train, with that board's times.
+#[derive(Debug, Clone, PartialEq)]
+pub struct TrainHistoryCall {
+    /// The live `StationCode`.
+    pub station_code: String,
+    /// The catalogue station whose `live_code` it is, if any.
+    pub station_id: Option<String>,
+    /// The catalogue station's name, else the live list's.
+    pub name: Option<String>,
+    pub scheduled_arrival: Option<String>,
+    pub scheduled_departure: Option<String>,
+    pub expected_arrival: Option<String>,
+    pub expected_departure: Option<String>,
+}
+
+/// The board history of `train_code` on `train_date` in `network`, or
+/// `None` when no board has shown it (or it has been pruned).
+pub async fn train_history(
+    pool: &PgPool,
+    network: IslandOfIrelandNetwork,
+    train_code: &str,
+    train_date: chrono::NaiveDate,
+) -> Result<Option<TrainHistory>> {
+    use sqlx::Row;
+    let wire = network_wire(network);
+    let Some(row) = sqlx::query(
+        "SELECT origin, destination, origin_time, destination_time, status, late_minutes, \
+                last_location, first_seen_at, last_seen_at \
+         FROM island_of_ireland_trains \
+         WHERE network = $1 AND train_code = $2 AND train_date = $3",
+    )
+    .bind(wire)
+    .bind(train_code)
+    .bind(train_date)
+    .fetch_optional(pool)
+    .await?
+    else {
+        return Ok(None);
+    };
+    let calls = sqlx::query(
+        "SELECT c.station_code, s.id AS station_id, COALESCE(s.name, ls.name) AS name, \
+                c.scheduled_arrival, c.scheduled_departure, c.expected_arrival, \
+                c.expected_departure \
+         FROM island_of_ireland_train_calls c \
+         LEFT JOIN LATERAL ( \
+             SELECT id, name FROM island_of_ireland_stations \
+             WHERE live_code = c.station_code AND network = c.network \
+             ORDER BY id LIMIT 1 \
+         ) s ON TRUE \
+         LEFT JOIN island_of_ireland_live_stations ls ON ls.code = c.station_code \
+         WHERE c.network = $1 AND c.train_code = $2 AND c.train_date = $3",
+    )
+    .bind(wire)
+    .bind(train_code)
+    .bind(train_date)
+    .fetch_all(pool)
+    .await?
+    .into_iter()
+    .map(|c| {
+        Ok(TrainHistoryCall {
+            station_code: c.try_get("station_code")?,
+            station_id: c.try_get("station_id")?,
+            name: c.try_get("name")?,
+            scheduled_arrival: c.try_get("scheduled_arrival")?,
+            scheduled_departure: c.try_get("scheduled_departure")?,
+            expected_arrival: c.try_get("expected_arrival")?,
+            expected_departure: c.try_get("expected_departure")?,
+        })
+    })
+    .collect::<Result<Vec<_>>>()?;
+    Ok(Some(TrainHistory {
+        network,
+        train_code: train_code.to_owned(),
+        train_date,
+        origin: row.try_get("origin")?,
+        destination: row.try_get("destination")?,
+        origin_time: row.try_get("origin_time")?,
+        destination_time: row.try_get("destination_time")?,
+        status: row.try_get("status")?,
+        late_minutes: row.try_get("late_minutes")?,
+        last_location: row.try_get("last_location")?,
+        first_seen_at: row.try_get("first_seen_at")?,
+        last_seen_at: row.try_get("last_seen_at")?,
+        calls,
+    }))
+}
+
 #[cfg(test)]
 mod db_tests {
     use common::island_of_ireland::{IslandOfIrelandLineDefinition, IslandOfIrelandStation};
@@ -576,6 +685,10 @@ mod sample_db_tests {
                 late_minutes: 0,
                 status: "On Time".to_string(),
                 due_in_minutes: Some(3),
+                train_date: None,
+                origin_time: None,
+                destination_time: None,
+                last_location: None,
             }],
         };
         upsert_station_samples(&pool, &[first])
@@ -634,6 +747,10 @@ mod sample_db_tests {
             late_minutes: 2,
             status: "Late".to_string(),
             due_in_minutes: Some(5),
+            train_date: None,
+            origin_time: None,
+            destination_time: None,
+            last_location: None,
         };
         let xmin = |pool: PgPool| async move {
             sqlx::query_scalar::<_, String>(

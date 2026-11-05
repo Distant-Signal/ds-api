@@ -1052,7 +1052,21 @@ token: string | null, expiresAt: string, };
  * public departures endpoint, every absent value a present `null`. Times
  * are the upstream's own `HH:MM` strings.
  */
-export type IslandOfIrelandDepartureResponse = { trainCode: string, origin: string, destination: string, scheduledArrival: string | null, scheduledDeparture: string | null, expectedArrival: string | null, expectedDeparture: string | null, lateMinutes: number, status: string, dueInMinutes: number | null, };
+export type IslandOfIrelandDepartureResponse = { trainCode: string, origin: string, destination: string, scheduledArrival: string | null, scheduledDeparture: string | null, expectedArrival: string | null, expectedDeparture: string | null, lateMinutes: number, status: string, dueInMinutes: number | null, 
+/**
+ * The day the train started (`YYYY-MM-DD`): with `trainCode`, its
+ * train page. `null` until the poller sends it.
+ */
+trainDate: string | null, 
+/**
+ * When the train leaves its origin and reaches its destination,
+ * `HH:MM`.
+ */
+originTime: string | null, destinationTime: string | null, 
+/**
+ * The feed's last report, e.g. `Departed Dundalk`; `null` when none.
+ */
+lastLocation: string | null, };
 
 /**
  * One row of `GET /public/island-of-ireland/lines`.
@@ -1111,6 +1125,60 @@ liveCode: string | null,
  * (`HOLLYWOOD RAIL HALT`), else `null`.
  */
 rawName: string | null, };
+
+/**
+ * One station whose board showed the train, with that board's times
+ * (`HH:MM`, Irish local time; `null` where the board had none).
+ */
+export type IslandOfIrelandTrainCall = { 
+/**
+ * The live board's `StationCode`.
+ */
+stationCode: string, 
+/**
+ * The catalogue station (its page), when one has this live code.
+ */
+stationId: string | null, 
+/**
+ * The catalogue name, else the live list's; `null` when neither knows
+ * the code.
+ */
+name: string | null, scheduledArrival: string | null, scheduledDeparture: string | null, expectedArrival: string | null, expectedDeparture: string | null, };
+
+/**
+ * The train's state as the boards show it (`train_state::interpret`).
+ */
+export type IslandOfIrelandTrainLive = { state: LiveState, 
+/**
+ * Minutes late (negative: early), only while the train reports;
+ * `null` otherwise. Never a guess.
+ */
+lateMinutes: number | null, lastLocation: LastLocation | null, 
+/**
+ * When a board last showed the train.
+ */
+observedAt: string, };
+
+/**
+ * `GET /public/island-of-ireland/trains/{trainCode}/{date}`.
+ */
+export type IslandOfIrelandTrainResponse = { network: "northern-ireland" | "republic-of-ireland", trainCode: string, 
+/**
+ * The day the train started, `YYYY-MM-DD`.
+ */
+serviceDate: string, origin: string, destination: string, 
+/**
+ * `HH:MM`, Irish local time; `null` when the boards didn't say.
+ */
+originTime: string | null, destinationTime: string | null, live: IslandOfIrelandTrainLive, 
+/**
+ * The stations whose boards showed it, in running order.
+ */
+calls: Array<IslandOfIrelandTrainCall>, 
+/**
+ * When a board first and last showed the train.
+ */
+firstSeenAt: string, lastSeenAt: string, };
 
 /**
  * One leg, a train leg or (`kind: "untracked"`) an untracked one. Flat
@@ -1733,6 +1801,16 @@ export type JourneyTemplateListItem = { id: number, customName: string | null, c
 export type JsonValue = number | string | boolean | Array<JsonValue> | { [key in string]: JsonValue } | null;
 
 /**
+ * `Lastlocation` read: `"Departed Dundalk"` is `Departed` at `"Dundalk"`.
+ */
+export type LastLocation = { event: LastLocationEvent, place: string, };
+
+/**
+ * What `Lastlocation` says happened.
+ */
+export type LastLocationEvent = "departed" | "arrived";
+
+/**
  * A change that works only because the train it changes onto is running
  * late (DS-141): served as a train leg's `live.reliesOnLateDeparture` on
  * `/Trips/plan` (`T` a local clock time), and as a saved journey's
@@ -2143,6 +2221,11 @@ lineId: string,
  * Station names, as the timetable names them, sorted.
  */
 destinations: Array<string>, };
+
+/**
+ * A train's live state, as far as the boards show it.
+ */
+export type LiveState = "noReport" | "running" | "arrived" | "notSeenRecently";
 
 /**
  * See the module doc for each value's meaning. `PascalCase` on the wire,
@@ -5511,6 +5594,7 @@ export const USAGE_EVENTS = {
     "/island-of-ireland/[network]",
     "/island-of-ireland/[network]/lines/[line]",
     "/island-of-ireland/[network]/stations/[station]",
+    "/island-of-ireland/[network]/trains/[train]/[date]",
     "/journeys",
     "/journeys/[id]",
     "/journeys/shared/[token]",
