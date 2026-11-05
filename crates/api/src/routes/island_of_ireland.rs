@@ -2,23 +2,21 @@
 //! the Iarnród Éireann (and, once built, NIR) station/line catalogue.
 //! `GET /public/island-of-ireland/stations/{id}/departures`: raw
 //! pass-through of the live `island_of_ireland_station_samples` board
-//! (Tier B). Unauthenticated, read-only, no pagination -- the whole
-//! catalogue is a few hundred rows at most. See
-//! docs/superpowers/plans/2026-09-05-ireland-rail-support-plan.md's
-//! Judgment Call #5 for why these routes exist at all (verifiability, not a
-//! frontend feature -- nothing in `frontend/` consumes this).
+//! (Tier B), for a catalogue station id (through its `liveCode`) or a live
+//! `StationCode`. Unauthenticated, read-only, no pagination -- the whole
+//! catalogue is a few hundred rows at most. The web app's Irish Rail
+//! pages read them (docs/api-changelog.md, 2026-11-04).
 
 use axum::Json;
 use axum::extract::{Path, Query, State};
 use axum::http::{StatusCode, header};
-use common::island_of_ireland::{
-    IslandOfIrelandDeparture, IslandOfIrelandLineDefinition, IslandOfIrelandNetwork,
-    IslandOfIrelandStation,
-};
-use serde::Deserialize;
+use common::island_of_ireland::{IslandOfIrelandDeparture, IslandOfIrelandNetwork};
+use serde::{Deserialize, Serialize};
 
 use crate::app::{App, Router};
-use crate::data::island_of_ireland;
+use crate::data::island_of_ireland::{
+    self, IslandOfIrelandLineResponse, IslandOfIrelandStationResponse,
+};
 
 /// `Cache-Control` for the two whole-catalogue dumps below
 /// (`list_stations`/`list_lines`) -- same rationale and value as
@@ -75,7 +73,7 @@ async fn list_stations(
 ) -> Result<
     (
         [(header::HeaderName, &'static str); 1],
-        Json<Vec<IslandOfIrelandStation>>,
+        Json<Vec<IslandOfIrelandStationResponse>>,
     ),
     (StatusCode, String),
 > {
@@ -95,7 +93,7 @@ async fn list_lines(
 ) -> Result<
     (
         [(header::HeaderName, &'static str); 1],
-        Json<Vec<IslandOfIrelandLineDefinition>>,
+        Json<Vec<IslandOfIrelandLineResponse>>,
     ),
     (StatusCode, String),
 > {
@@ -109,16 +107,36 @@ async fn list_lines(
     ))
 }
 
-/// 404 when `island_of_ireland_station_samples` has no row for `id` at
-/// all -- identical honesty split to
-/// `routes::departures::get_station_departures`. `200 []` is the same
-/// "row exists, board is genuinely empty right now" fact that route
-/// already draws.
+/// `id` is a catalogue station id, answered from its `liveCode`'s board,
+/// or a live `StationCode` itself. 404 when the station has no live code,
+/// or `island_of_ireland_station_samples` has no row for the code yet --
+/// identical honesty split to `routes::departures::get_station_departures`.
+/// `200 []` is the same "row exists, board is genuinely empty right now"
+/// fact that route already draws.
+///
+/// The body stays a bare array; the board's age is in the headers:
+/// `X-Polled-At` (the sample's `polled_at`, RFC 3339) and `Last-Modified`
+/// (the same instant as an HTTP date).
 async fn get_station_departures(
     State(app): State<App>,
     Path(id): Path<String>,
-) -> Result<Json<Vec<serde_json::Value>>, (StatusCode, String)> {
-    let Some(sample) = island_of_ireland::latest_station_sample(&app.database, &id)
+) -> Result<
+    (
+        [(header::HeaderName, String); 2],
+        Json<Vec<IslandOfIrelandDepartureResponse>>,
+    ),
+    (StatusCode, String),
+> {
+    let Some(code) = island_of_ireland::live_board_key(&app.database, &id)
+        .await
+        .map_err(internal_error)?
+    else {
+        return Err((
+            StatusCode::NOT_FOUND,
+            format!("island-of-ireland station has no live departure board: {id}"),
+        ));
+    };
+    let Some(sample) = island_of_ireland::latest_station_sample(&app.database, &code)
         .await
         .map_err(internal_error)?
     else {
@@ -128,25 +146,63 @@ async fn get_station_departures(
         ));
     };
 
-    Ok(Json(sample.departures.iter().map(departure_json).collect()))
+    Ok((
+        polled_at_headers(sample.polled_at),
+        Json(sample.departures.iter().map(departure_json).collect()),
+    ))
 }
 
-/// Hand-built camelCase JSON, matching `render::station_departure_json`'s
-/// established convention for a public departures endpoint even though
-/// this route's own producer (Task B4) writes `snake_case` internally.
-fn departure_json(d: &IslandOfIrelandDeparture) -> serde_json::Value {
-    serde_json::json!({
-        "trainCode": d.train_code,
-        "origin": d.origin,
-        "destination": d.destination,
-        "scheduledArrival": d.scheduled_arrival,
-        "scheduledDeparture": d.scheduled_departure,
-        "expectedArrival": d.expected_arrival,
-        "expectedDeparture": d.expected_departure,
-        "lateMinutes": d.late_minutes,
-        "status": d.status,
-        "dueInMinutes": d.due_in_minutes,
-    })
+/// The header carrying a board's `polled_at` as RFC 3339.
+pub(crate) const POLLED_AT_HEADER: &str = "x-polled-at";
+
+/// `X-Polled-At` and `Last-Modified` for a board polled at `polled_at`.
+fn polled_at_headers(
+    polled_at: chrono::DateTime<chrono::Utc>,
+) -> [(header::HeaderName, String); 2] {
+    [
+        (
+            header::HeaderName::from_static(POLLED_AT_HEADER),
+            polled_at.to_rfc3339_opts(chrono::SecondsFormat::Secs, true),
+        ),
+        (
+            header::LAST_MODIFIED,
+            polled_at.format("%a, %d %b %Y %H:%M:%S GMT").to_string(),
+        ),
+    ]
+}
+
+/// One row of `GET /public/island-of-ireland/stations/{id}/departures`:
+/// camelCase, matching `render::station_departure_json`'s convention for a
+/// public departures endpoint, every absent value a present `null`. Times
+/// are the upstream's own `HH:MM` strings.
+#[derive(Debug, Clone, PartialEq, Serialize, ts_rs::TS)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct IslandOfIrelandDepartureResponse {
+    train_code: String,
+    origin: String,
+    destination: String,
+    scheduled_arrival: Option<String>,
+    scheduled_departure: Option<String>,
+    expected_arrival: Option<String>,
+    expected_departure: Option<String>,
+    late_minutes: i32,
+    status: String,
+    due_in_minutes: Option<i32>,
+}
+
+fn departure_json(d: &IslandOfIrelandDeparture) -> IslandOfIrelandDepartureResponse {
+    IslandOfIrelandDepartureResponse {
+        train_code: d.train_code.clone(),
+        origin: d.origin.clone(),
+        destination: d.destination.clone(),
+        scheduled_arrival: d.scheduled_arrival.clone(),
+        scheduled_departure: d.scheduled_departure.clone(),
+        expected_arrival: d.expected_arrival.clone(),
+        expected_departure: d.expected_departure.clone(),
+        late_minutes: d.late_minutes,
+        status: d.status.clone(),
+        due_in_minutes: d.due_in_minutes,
+    }
 }
 
 #[expect(
@@ -187,6 +243,16 @@ mod tests {
     }
 
     #[test]
+    fn the_board_age_headers_carry_polled_at() {
+        let polled_at = "2026-11-04T09:05:03.250Z".parse().unwrap();
+        let [(name, value), (last_name, last_value)] = polled_at_headers(polled_at);
+        assert_eq!(name.as_str(), "x-polled-at");
+        assert_eq!(value, "2026-11-04T09:05:03Z");
+        assert_eq!(last_name, header::LAST_MODIFIED);
+        assert_eq!(last_value, "Wed, 04 Nov 2026 09:05:03 GMT");
+    }
+
+    #[test]
     fn departure_json_maps_every_field_to_camel_case() {
         let departure = IslandOfIrelandDeparture {
             train_code: "A101".to_string(),
@@ -200,7 +266,7 @@ mod tests {
             status: "On Time".to_string(),
             due_in_minutes: Some(5),
         };
-        let json = departure_json(&departure);
+        let json = serde_json::to_value(departure_json(&departure)).unwrap();
         assert_eq!(
             json,
             serde_json::json!({
@@ -340,6 +406,76 @@ mod db_tests {
                 Some(CATALOGUE_CACHE_CONTROL),
                 "uri {uri} must carry a public, positive-max-age Cache-Control"
             );
+        }
+    }
+
+    /// A catalogue id answers from its live code's board, with the board's
+    /// age in the headers; a live code still works; a station without a
+    /// live code is a 404.
+    #[tokio::test]
+    #[ignore = "requires a live database; run with `cargo test -p api \
+                departures_resolve_a_catalogue_id -- --ignored --test-threads=1`"]
+    async fn departures_resolve_a_catalogue_id_through_its_live_code() {
+        let pool = connect().await;
+        for sql in [
+            "DELETE FROM island_of_ireland_stations WHERE id LIKE 'ZQRT%'",
+            "DELETE FROM island_of_ireland_station_samples WHERE station_id LIKE 'ZQRT%'",
+            "INSERT INTO island_of_ireland_stations (id, name, network, live_code) VALUES \
+             ('ZQRT1', 'Zesttown', 'republic-of-ireland', 'ZQRTCODE'), \
+             ('ZQRT2', 'Zorough', 'northern-ireland', NULL)",
+            "INSERT INTO island_of_ireland_station_samples (station_id, network, polled_at, departures) \
+             VALUES ('ZQRTCODE', 'republic-of-ireland', '2026-11-04T09:05:03Z', \
+             '[{\"train_code\":\"A1\",\"origin\":\"Zesttown\",\"destination\":\"Zorough\",\
+             \"late_minutes\":2,\"status\":\"En Route\"}]')",
+        ] {
+            sqlx::query(sql).execute(&pool).await.unwrap();
+        }
+        let router: axum::Router = Router::new()
+            .merge(router())
+            .with_state(test_app(pool.clone()));
+        let get = |uri: &'static str| {
+            let router = router.clone();
+            async move {
+                router
+                    .oneshot(Request::builder().uri(uri).body(Body::empty()).unwrap())
+                    .await
+                    .unwrap()
+            }
+        };
+
+        for uri in [
+            "/island-of-ireland/stations/ZQRT1/departures",
+            "/island-of-ireland/stations/ZQRTCODE/departures",
+        ] {
+            let response = get(uri).await;
+            assert_eq!(response.status(), StatusCode::OK, "{uri}");
+            assert_eq!(
+                response.headers().get(POLLED_AT_HEADER).unwrap(),
+                "2026-11-04T09:05:03Z"
+            );
+            assert_eq!(
+                response.headers().get(header::LAST_MODIFIED).unwrap(),
+                "Wed, 04 Nov 2026 09:05:03 GMT"
+            );
+            let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+                .await
+                .unwrap();
+            let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+            assert_eq!(json[0]["trainCode"], "A1");
+            assert_eq!(json[0]["lateMinutes"], 2);
+        }
+        for uri in [
+            "/island-of-ireland/stations/ZQRT2/departures",
+            "/island-of-ireland/stations/ZQRTNONE/departures",
+        ] {
+            assert_eq!(get(uri).await.status(), StatusCode::NOT_FOUND, "{uri}");
+        }
+
+        for sql in [
+            "DELETE FROM island_of_ireland_stations WHERE id LIKE 'ZQRT%'",
+            "DELETE FROM island_of_ireland_station_samples WHERE station_id LIKE 'ZQRT%'",
+        ] {
+            sqlx::query(sql).execute(&pool).await.unwrap();
         }
     }
 }

@@ -6,8 +6,7 @@
 
 use anyhow::Result;
 use common::island_of_ireland::{
-    IslandOfIrelandDeparture, IslandOfIrelandLineDefinition, IslandOfIrelandNetwork,
-    IslandOfIrelandStation, IslandOfIrelandStationSample,
+    IslandOfIrelandDeparture, IslandOfIrelandNetwork, IslandOfIrelandStationSample,
 };
 use sqlx::PgPool;
 
@@ -27,86 +26,153 @@ pub use ds_store::samples::island_of_ireland::{
     last_lines_fetch, last_stations_fetch, upsert_lines, upsert_stations,
 };
 
-/// Backs `GET /public/island-of-ireland/stations` (Task A3) -- the whole
-/// catalogue is small (~150-300 rows across both networks even once NIR
-/// exists), so this is a plain unpaginated list, optionally filtered by
-/// network, ordered by name -- same ordering choice as
-/// `reference::get_all_tocs`.
-/// `(id, name, network, latitude, longitude)`, factored into a named alias
-/// so clippy's `type_complexity` lint doesn't fire on `list_stations`'s own
-/// row-tuple annotation.
-type StationRow = (String, String, String, Option<f64>, Option<f64>);
+/// One row of `GET /public/island-of-ireland/stations`.
+#[derive(Debug, Clone, PartialEq, serde::Serialize, ts_rs::TS)]
+#[serde(rename_all = "camelCase")]
+pub struct IslandOfIrelandStationResponse {
+    /// The catalogue id: a GTFS `stop_id` (`7020IR2162`) or an NIR slug
+    /// (`nir-bangor`).
+    pub id: String,
+    /// The display name.
+    pub name: String,
+    #[ts(type = "\"northern-ireland\" | \"republic-of-ireland\"")]
+    pub network: IslandOfIrelandNetwork,
+    pub latitude: Option<f64>,
+    pub longitude: Option<f64>,
+    /// Iarnród Éireann's live-board `StationCode` (`BFSTC`), or `null`
+    /// when the station has no live board or no confident match.
+    pub live_code: Option<String>,
+    /// The source's own name when `name` is a tidied form of it
+    /// (`HOLLYWOOD RAIL HALT`), else `null`.
+    pub raw_name: Option<String>,
+}
 
+/// One row of `GET /public/island-of-ireland/lines`.
+#[derive(Debug, Clone, PartialEq, serde::Serialize, ts_rs::TS)]
+#[serde(rename_all = "camelCase")]
+pub struct IslandOfIrelandLineResponse {
+    /// The line id; a corridor the GTFS feed splits by direction has one
+    /// row (`DUB-BFT`, not `DUB-BFT-I`/`DUB-BFT-O`).
+    pub id: String,
+    /// The display name, e.g. `Dublin - Belfast`.
+    pub name: String,
+    /// The feed's short name, when it has one.
+    pub short_name: Option<String>,
+    #[ts(type = "\"northern-ireland\" | \"republic-of-ireland\"")]
+    pub network: IslandOfIrelandNetwork,
+    /// The operator's name.
+    pub agency: Option<String>,
+    /// `#RRGGBB`, from the feed; `null` when it gives none.
+    pub color: Option<String>,
+    /// `#RRGGBB` text colour to draw on `color`.
+    pub text_color: Option<String>,
+    /// Ordered catalogue station ids.
+    pub stations: Vec<String>,
+}
+
+/// `(id, name, network, latitude, longitude, live_code, raw_name)`.
+type StationRow = (
+    String,
+    String,
+    String,
+    Option<f64>,
+    Option<f64>,
+    Option<String>,
+    Option<String>,
+);
+
+/// Backs `GET /public/island-of-ireland/stations` (Task A3) -- the whole
+/// catalogue is small (~150-300 rows across both networks), so this is a
+/// plain unpaginated list, optionally filtered by network, ordered by name
+/// (then id, so equal names keep one order) -- same ordering choice as
+/// `reference::get_all_tocs`.
 pub async fn list_stations(
     pool: &PgPool,
     network: Option<IslandOfIrelandNetwork>,
-) -> Result<Vec<IslandOfIrelandStation>> {
-    let rows: Vec<StationRow> = match network {
-        Some(network) => {
-            sqlx::query_as(
-                "SELECT id, name, network, latitude, longitude FROM island_of_ireland_stations \
-                 WHERE network = $1 ORDER BY name",
-            )
-            .bind(network_wire(network))
-            .fetch_all(pool)
-            .await?
-        }
-        None => {
-            sqlx::query_as(
-                "SELECT id, name, network, latitude, longitude FROM island_of_ireland_stations \
-                 ORDER BY name",
-            )
-            .fetch_all(pool)
-            .await?
-        }
-    };
+) -> Result<Vec<IslandOfIrelandStationResponse>> {
+    let rows: Vec<StationRow> = sqlx::query_as(
+        "SELECT id, name, network, latitude, longitude, live_code, raw_name \
+         FROM island_of_ireland_stations \
+         WHERE $1::text IS NULL OR network = $1 ORDER BY name, id",
+    )
+    .bind(network.map(network_wire))
+    .fetch_all(pool)
+    .await?;
 
     rows.into_iter()
-        .map(|(id, name, network, latitude, longitude)| {
-            Ok(IslandOfIrelandStation {
-                id,
-                name,
-                network: network_from_wire(&network)?,
-                latitude,
-                longitude,
-            })
-        })
+        .map(
+            |(id, name, network, latitude, longitude, live_code, raw_name)| {
+                Ok(IslandOfIrelandStationResponse {
+                    id,
+                    name,
+                    network: network_from_wire(&network)?,
+                    latitude,
+                    longitude,
+                    live_code,
+                    raw_name,
+                })
+            },
+        )
         .collect()
 }
+
+/// `(id, name, short_name, network, agency, color, text_color, stations)`.
+type LineRow = (
+    String,
+    String,
+    Option<String>,
+    String,
+    Option<String>,
+    Option<String>,
+    Option<String>,
+    serde_json::Value,
+);
 
 pub async fn list_lines(
     pool: &PgPool,
     network: Option<IslandOfIrelandNetwork>,
-) -> Result<Vec<IslandOfIrelandLineDefinition>> {
-    let rows: Vec<(String, String, String, serde_json::Value)> = match network {
-        Some(network) => {
-            sqlx::query_as(
-                "SELECT id, name, network, stations FROM island_of_ireland_lines \
-                 WHERE network = $1 ORDER BY name",
-            )
-            .bind(network_wire(network))
-            .fetch_all(pool)
-            .await?
-        }
-        None => {
-            sqlx::query_as(
-                "SELECT id, name, network, stations FROM island_of_ireland_lines ORDER BY name",
-            )
-            .fetch_all(pool)
-            .await?
-        }
-    };
+) -> Result<Vec<IslandOfIrelandLineResponse>> {
+    let rows: Vec<LineRow> = sqlx::query_as(
+        "SELECT id, name, short_name, network, agency, color, text_color, stations \
+         FROM island_of_ireland_lines \
+         WHERE $1::text IS NULL OR network = $1 ORDER BY name, id",
+    )
+    .bind(network.map(network_wire))
+    .fetch_all(pool)
+    .await?;
 
     rows.into_iter()
-        .map(|(id, name, network, stations)| {
-            Ok(IslandOfIrelandLineDefinition {
-                id,
-                name,
-                network: network_from_wire(&network)?,
-                stations: serde_json::from_value(stations)?,
-            })
-        })
+        .map(
+            |(id, name, short_name, network, agency, color, text_color, stations)| {
+                Ok(IslandOfIrelandLineResponse {
+                    id,
+                    name,
+                    short_name,
+                    network: network_from_wire(&network)?,
+                    agency,
+                    color,
+                    text_color,
+                    stations: serde_json::from_value(stations)?,
+                })
+            },
+        )
         .collect()
+}
+
+/// The live-board key for `id`: the catalogue station's `live_code` when
+/// `id` is a catalogue id, `None` when it is one without a live code, or
+/// `id` itself when it is no catalogue id (a live `StationCode`, as the
+/// route took before the catalogue carried live codes).
+pub async fn live_board_key(pool: &PgPool, id: &str) -> Result<Option<String>> {
+    let row: Option<(Option<String>,)> =
+        sqlx::query_as("SELECT live_code FROM island_of_ireland_stations WHERE id = $1")
+            .bind(id)
+            .fetch_optional(pool)
+            .await?;
+    Ok(match row {
+        Some((live_code,)) => live_code,
+        None => Some(id.to_owned()),
+    })
 }
 
 // Moved to `ds_store::samples::island_of_ireland` (ingest architecture plan 1A.5).
@@ -146,6 +212,7 @@ pub async fn latest_station_sample(
 
 #[cfg(test)]
 mod db_tests {
+    use common::island_of_ireland::{IslandOfIrelandLineDefinition, IslandOfIrelandStation};
     use sqlx::postgres::PgPoolOptions;
 
     use super::*;
@@ -190,6 +257,7 @@ mod db_tests {
                 network: IslandOfIrelandNetwork::RepublicOfIreland,
                 latitude: Some(53.0),
                 longitude: Some(-6.0),
+                raw_name: None,
             },
             IslandOfIrelandStation {
                 id: "ZIOI2".to_string(),
@@ -197,6 +265,7 @@ mod db_tests {
                 network: IslandOfIrelandNetwork::NorthernIreland,
                 latitude: None,
                 longitude: None,
+                raw_name: None,
             },
         ];
         let upserted = upsert_stations(&pool, &stations).await.expect("upsert");
@@ -228,6 +297,11 @@ mod db_tests {
             name: "Zest Line".to_string(),
             network: IslandOfIrelandNetwork::RepublicOfIreland,
             stations: vec!["ZIOI1".to_string(), "ZIOI2".to_string()],
+            short_name: None,
+            agency: None,
+            color: None,
+            text_color: None,
+            replaces: vec![],
         };
         upsert_lines(&pool, &[first]).await.expect("first upsert");
 
@@ -236,6 +310,11 @@ mod db_tests {
             name: "Zest Line (renamed)".to_string(),
             network: IslandOfIrelandNetwork::RepublicOfIreland,
             stations: vec!["ZIOI2".to_string(), "ZIOI1".to_string()],
+            short_name: None,
+            agency: None,
+            color: None,
+            text_color: None,
+            replaces: vec![],
         };
         upsert_lines(&pool, &[second]).await.expect("second upsert");
 
@@ -285,6 +364,7 @@ mod db_tests {
             network: IslandOfIrelandNetwork::RepublicOfIreland,
             latitude: Some(53.0),
             longitude: None,
+            raw_name: None,
         };
 
         // A duplicate id in one batch: the last entry wins (one statement
@@ -330,6 +410,89 @@ mod db_tests {
         delete_fixture_station(&pool, "ZIOI4").await;
     }
 
+    /// The live code, raw name and line display fields are read back, and
+    /// the departures key resolves a catalogue id through its live code.
+    #[tokio::test]
+    #[ignore = "requires a live database; run with `cargo test -p api \
+                island_of_ireland -- --ignored --test-threads=1`"]
+    async fn the_display_fields_and_live_code_are_served() {
+        let pool = connect().await;
+        delete_fixture_station(&pool, "ZIOI5").await;
+        delete_fixture_station(&pool, "ZIOI6").await;
+        delete_fixture_line(&pool, "ZLINE3").await;
+        let nir = IslandOfIrelandStation {
+            id: "ZIOI5".to_string(),
+            name: "Zesthalt".to_string(),
+            network: IslandOfIrelandNetwork::NorthernIreland,
+            latitude: Some(54.6),
+            longitude: Some(-5.8),
+            raw_name: Some("ZESTHALT RAIL HALT".to_string()),
+        };
+        let roi = IslandOfIrelandStation {
+            id: "ZIOI6".to_string(),
+            name: "Zorough".to_string(),
+            network: IslandOfIrelandNetwork::RepublicOfIreland,
+            raw_name: None,
+            ..nir.clone()
+        };
+        upsert_stations(&pool, &[nir.clone(), roi]).await.unwrap();
+        // The writer's refresh sets live codes; stand in for it here.
+        sqlx::query("UPDATE island_of_ireland_stations SET live_code = 'ZORGH' WHERE id = 'ZIOI6'")
+            .execute(&pool)
+            .await
+            .unwrap();
+        upsert_lines(
+            &pool,
+            &[IslandOfIrelandLineDefinition {
+                id: "ZLINE3".to_string(),
+                name: "Zesttown - Zorough".to_string(),
+                network: IslandOfIrelandNetwork::RepublicOfIreland,
+                stations: vec!["ZIOI6".to_string()],
+                short_name: Some("ZR".to_string()),
+                agency: Some("Zest Rail".to_string()),
+                color: Some("#00A651".to_string()),
+                text_color: Some("#FFFFFF".to_string()),
+                replaces: vec![],
+            }],
+        )
+        .await
+        .unwrap();
+
+        let stations = list_stations(&pool, None).await.unwrap();
+        let get = |id: &str| stations.iter().find(|s| s.id == id).unwrap().clone();
+        assert_eq!(get("ZIOI5").raw_name.as_deref(), Some("ZESTHALT RAIL HALT"));
+        assert_eq!(get("ZIOI5").live_code, None);
+        assert_eq!(get("ZIOI6").live_code.as_deref(), Some("ZORGH"));
+        let json = serde_json::to_value(get("ZIOI6")).unwrap();
+        assert_eq!(json["liveCode"], "ZORGH");
+        assert_eq!(json["rawName"], serde_json::Value::Null);
+        assert_eq!(json["network"], "republic-of-ireland");
+
+        let lines = list_lines(&pool, Some(IslandOfIrelandNetwork::RepublicOfIreland))
+            .await
+            .unwrap();
+        let line = lines.iter().find(|l| l.id == "ZLINE3").unwrap();
+        assert_eq!(line.color.as_deref(), Some("#00A651"));
+        assert_eq!(line.agency.as_deref(), Some("Zest Rail"));
+        assert_eq!(line.short_name.as_deref(), Some("ZR"));
+        let json = serde_json::to_value(line).unwrap();
+        assert_eq!(json["textColor"], "#FFFFFF");
+
+        assert_eq!(
+            live_board_key(&pool, "ZIOI6").await.unwrap().as_deref(),
+            Some("ZORGH")
+        );
+        assert_eq!(live_board_key(&pool, "ZIOI5").await.unwrap(), None);
+        assert_eq!(
+            live_board_key(&pool, "BFSTC").await.unwrap().as_deref(),
+            Some("BFSTC")
+        );
+
+        delete_fixture_station(&pool, "ZIOI5").await;
+        delete_fixture_station(&pool, "ZIOI6").await;
+        delete_fixture_line(&pool, "ZLINE3").await;
+    }
+
     #[tokio::test]
     #[ignore = "requires a live database; run with `cargo test -p api \
                 island_of_ireland -- --ignored --test-threads=1`"]
@@ -341,6 +504,11 @@ mod db_tests {
             name: "Zest Loop".to_string(),
             network: IslandOfIrelandNetwork::NorthernIreland,
             stations: stations.iter().map(ToString::to_string).collect(),
+            short_name: None,
+            agency: None,
+            color: None,
+            text_color: None,
+            replaces: vec![],
         };
         upsert_lines(&pool, &[line(&["ZA", "ZB"])]).await.unwrap();
         let before = xmin(&pool, "island_of_ireland_lines", "ZLINE2").await;

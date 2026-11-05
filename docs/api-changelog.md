@@ -3,6 +3,32 @@
 Changes to the Distant Signal (DS) HTTP API that a client such as DS-MCP
 needs to know about. Newest first. Field names are as served (camelCase).
 
+## 2026-11-04: island of Ireland live codes, line colours and display names
+
+Additive; existing keys keep their names and values' meaning.
+
+- `GET /public/island-of-ireland/stations` rows gain `liveCode` (Iarnród
+  Éireann's live-board `StationCode`, e.g. `BFSTC`, or `null` when the
+  station has no live board or no confident match; always `null` for
+  NI Railways stations) and `rawName` (the source's own name when `name`
+  is a tidied form of it, else `null`). NI Railways names are now display
+  names: `HOLLYWOOD RAIL HALT` is served as `Holywood` with that raw name.
+  Station ids are unchanged.
+- `GET /public/island-of-ireland/lines` rows gain `shortName`, `agency`
+  (the operator's name), `color` and `textColor` (`#RRGGBB` or `null`).
+  A corridor the GTFS feed splits by direction is now one row under its
+  base id (`DUB-BFT` "Dublin - Belfast" replaces `DUB-BFT-I` and
+  `DUB-BFT-O`), once the new GTFS poller has run.
+- `GET /public/island-of-ireland/stations/{id}/departures` accepts a
+  catalogue station id (answered from its `liveCode`'s board) as well as
+  a live `StationCode`; 404 when the station has no live code. The body is
+  unchanged; the board's age is in two new headers, `X-Polled-At` (RFC
+  3339) and `Last-Modified`.
+
+Types: `IslandOfIrelandStationResponse`, `IslandOfIrelandLineResponse`
+and `IslandOfIrelandDepartureResponse` in `api-types/api.ts`. DS-MCP: no
+change needed.
+
 ## 2026-11-04: usage events for the island of Ireland pages
 
 Additive. `POST /public/events` accepts four more page templates,

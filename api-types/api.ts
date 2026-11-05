@@ -1047,6 +1047,72 @@ export type InviteLink = {
 token: string | null, expiresAt: string, };
 
 /**
+ * One row of `GET /public/island-of-ireland/stations/{id}/departures`:
+ * camelCase, matching `render::station_departure_json`'s convention for a
+ * public departures endpoint, every absent value a present `null`. Times
+ * are the upstream's own `HH:MM` strings.
+ */
+export type IslandOfIrelandDepartureResponse = { trainCode: string, origin: string, destination: string, scheduledArrival: string | null, scheduledDeparture: string | null, expectedArrival: string | null, expectedDeparture: string | null, lateMinutes: number, status: string, dueInMinutes: number | null, };
+
+/**
+ * One row of `GET /public/island-of-ireland/lines`.
+ */
+export type IslandOfIrelandLineResponse = { 
+/**
+ * The line id; a corridor the GTFS feed splits by direction has one
+ * row (`DUB-BFT`, not `DUB-BFT-I`/`DUB-BFT-O`).
+ */
+id: string, 
+/**
+ * The display name, e.g. `Dublin - Belfast`.
+ */
+name: string, 
+/**
+ * The feed's short name, when it has one.
+ */
+shortName: string | null, network: "northern-ireland" | "republic-of-ireland", 
+/**
+ * The operator's name.
+ */
+agency: string | null, 
+/**
+ * `#RRGGBB`, from the feed; `null` when it gives none.
+ */
+color: string | null, 
+/**
+ * `#RRGGBB` text colour to draw on `color`.
+ */
+textColor: string | null, 
+/**
+ * Ordered catalogue station ids.
+ */
+stations: Array<string>, };
+
+/**
+ * One row of `GET /public/island-of-ireland/stations`.
+ */
+export type IslandOfIrelandStationResponse = { 
+/**
+ * The catalogue id: a GTFS `stop_id` (`7020IR2162`) or an NIR slug
+ * (`nir-bangor`).
+ */
+id: string, 
+/**
+ * The display name.
+ */
+name: string, network: "northern-ireland" | "republic-of-ireland", latitude: number | null, longitude: number | null, 
+/**
+ * Iarnród Éireann's live-board `StationCode` (`BFSTC`), or `null`
+ * when the station has no live board or no confident match.
+ */
+liveCode: string | null, 
+/**
+ * The source's own name when `name` is a tidied form of it
+ * (`HOLLYWOOD RAIL HALT`), else `null`.
+ */
+rawName: string | null, };
+
+/**
  * One leg, a train leg or (`kind: "untracked"`) an untracked one. Flat
  * rather than a tagged enum so a body from before untracked legs existed
  * (no `kind`) still parses, and errors stay sentences.

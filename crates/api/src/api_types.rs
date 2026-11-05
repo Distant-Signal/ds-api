@@ -126,6 +126,10 @@ fn visit_roots(v: &mut Collector) {
     v.visit::<crate::routes::trains::TrainSearchDates>();
     v.visit::<crate::routes::trains::TrainSearchOperators>();
     v.visit::<crate::routes::trains::TrainResolveResult>();
+    // Island of Ireland.
+    v.visit::<crate::data::island_of_ireland::IslandOfIrelandStationResponse>();
+    v.visit::<crate::data::island_of_ireland::IslandOfIrelandLineResponse>();
+    v.visit::<crate::routes::island_of_ireland::IslandOfIrelandDepartureResponse>();
     // Transit networks.
     v.visit::<crate::routes::transit::TransitNetworksResponse>();
     v.visit::<crate::routes::transit::TransitRailLinksResponse>();
