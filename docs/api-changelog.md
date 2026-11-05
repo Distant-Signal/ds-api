@@ -3,6 +3,51 @@
 Changes to the Distant Signal (DS) HTTP API that a client such as DS-MCP
 needs to know about. Newest first. Field names are as served (camelCase).
 
+## 2026-11-06: tracking Iarnród Éireann trains
+
+Additive; existing keys keep their names and values' meaning.
+
+- New: `POST /Journeys/irish-train` (session cookie, `PublicWrite`
+  rate-limit budget), body `{ trainCode, serviceDate, fromStation? }`.
+  Tracks an Iarnród Éireann train as a one-leg journey and answers
+  `{ journeyId, trackingId }`: 201 when it made one, 200 with the existing
+  journey when the caller already tracks the train.
+  - `trainCode` is trimmed and upper-cased (1 to 8 letters and digits);
+    `serviceDate` must be Dublin's today or yesterday; `fromStation`, a
+    live `StationCode`, must be one the train was seen at. Otherwise 400.
+  - 404, "We haven't seen this train on a departure board.", when no
+    board has shown it: there is no Irish timetable, so an unseen train
+    can't be tracked.
+  - The journey's caps (`MAX_FUTURE_PINS_PER_USER`, the journey cap)
+    apply as for GB trains.
+- A tracked Irish train's `trainUid` is `ie:<trainCode>`. `GET /Train/{id}`
+  (and the journey detail's `trackedTrainState`), `GET /Train/mine` and
+  `GET /Journeys/mine` rows gain `irishTrain`: `{ trainCode, serviceDate }`
+  for an Irish train, `null` for every GB train. Link to the Irish train
+  page with it.
+- For an Irish train:
+  - the station names (`pinOriginName`, `pinDestinationName`,
+    `scheduleDestinationName`, a journey's and a leg's `originName` and
+    `destinationName`) are the boards' `Origin` and `Destination`, with
+    every CRS `null`;
+  - `status`, `delayMinutes` (the boards' `Late`, `delayBasis`
+    `working`), `lastReportedLocation` (a place name) and
+    `lastEventType` (`DEPARTURE` or `ARRIVAL`) come from the departure
+    boards, at most about 5 minutes behind. With no report yet the status
+    is `awaiting_activation` and the delay `null`, never 0;
+  - `operatorName` is `Iarnród Éireann` and `operatorCode` `null`;
+  - `journeyStops`, `cancellation`, `predictedStart`, `trackingPhase` and
+    the skip flags are `null`: the boards don't say. An Irish train is
+    never `cancelled`.
+- `GET /Train/by-uid/{uid}/{date}` stays GB-only: an `ie:` uid, in any
+  case, is a 404 (it is no longer upper-cased into a GB key).
+
+Types: `TrackIrishTrainRequest`, `TrackIrishTrainResponse` and
+`IrishTrain`, and the wider `TrackedTrainState`, `TrackedTrainListItem`
+and `JourneyListItem` in `api-types/api.ts`. DS-MCP: no change needed;
+an Irish journey in `GET /Journeys/mine` or `GET /Journeys/{id}` carries
+the fields above.
+
 ## 2026-11-05: Iarnród Éireann train pages
 
 Additive; existing keys keep their names and values' meaning.

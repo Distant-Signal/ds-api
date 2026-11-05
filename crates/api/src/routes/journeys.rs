@@ -63,6 +63,12 @@ pub fn router() -> Router {
             "/Journeys/itinerary",
             axum::routing::post(super::journey_itinerary::post_itinerary),
         )
+        // "Track this train" for an Iarnród Éireann train (a literal
+        // segment, like `itinerary`).
+        .route(
+            "/Journeys/irish-train",
+            axum::routing::post(super::journey_irish_train::post_irish_train),
+        )
         // Ahead of `/Journeys/{journey_id}` -- pure documentation, since
         // `matchit` already resolves a literal segment ahead of a
         // same-position dynamic one regardless of registration order (see

@@ -138,6 +138,11 @@ pub async fn attach_to_tracked_state(
     let Some(train_uid) = state.train_uid.clone() else {
         return state;
     };
+    // An Iarnród Éireann train has no CIF operator: its name is set by
+    // `data::irish_trains::attach`.
+    if state.irish_train.is_some() {
+        return state;
+    }
     match operator_for_train(pool, &train_uid, state.service_date).await {
         Ok(operator) => {
             (state.operator_code, state.operator_name) = split(operator);
@@ -161,6 +166,9 @@ pub async fn attach_to_tracked_states(
 ) {
     let mut uids_by_date: HashMap<NaiveDate, Vec<String>> = HashMap::new();
     for state in states.iter() {
+        if state.irish_train.is_some() {
+            continue;
+        }
         if let Some(uid) = &state.train_uid {
             uids_by_date
                 .entry(state.service_date)
@@ -179,7 +187,7 @@ pub async fn attach_to_tracked_states(
             }
         };
         for state in states.iter_mut() {
-            if state.service_date != service_date {
+            if state.service_date != service_date || state.irish_train.is_some() {
                 continue;
             }
             if let Some(uid) = &state.train_uid {

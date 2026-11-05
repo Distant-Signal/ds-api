@@ -1054,6 +1054,16 @@ pub(crate) async fn get_by_uid_and_date(
     // here, matching the same trim+uppercase this codebase already applies
     // to caller-typed CRS codes (e.g. `post_journey`'s `Window` arm, just
     // below in `routes/journeys.rs`).
+    //
+    // GB-only: an Iarnród Éireann uid (`ie:<CODE>`, any case) is never
+    // upper-cased into some other row's key. Its page is
+    // `/public/island-of-ireland/trains/{trainCode}/{date}`.
+    if common::island_of_ireland::tracking::is_train_uid(train_uid.trim()) {
+        return Err((
+            StatusCode::NOT_FOUND,
+            "no train with that uid on that date".to_string(),
+        ));
+    }
     let train_uid = train_uid.trim().to_ascii_uppercase();
     let mut state = crate::data::trains::get_public_train_state(&app.database, &train_uid, date)
         .await
@@ -2528,6 +2538,7 @@ mod tests {
             cancellation: None,
             tracking_phase: None,
             first_report_expected_at: None,
+            irish_train: None,
         }
     }
 

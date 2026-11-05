@@ -131,6 +131,8 @@ fn visit_roots(v: &mut Collector) {
     v.visit::<crate::data::island_of_ireland::IslandOfIrelandLineResponse>();
     v.visit::<crate::routes::island_of_ireland::IslandOfIrelandDepartureResponse>();
     v.visit::<crate::routes::island_of_ireland::IslandOfIrelandTrainResponse>();
+    v.visit::<crate::routes::journey_irish_train::TrackIrishTrainRequest>();
+    v.visit::<crate::routes::journey_irish_train::TrackIrishTrainResponse>();
     // Transit networks.
     v.visit::<crate::routes::transit::TransitNetworksResponse>();
     v.visit::<crate::routes::transit::TransitRailLinksResponse>();

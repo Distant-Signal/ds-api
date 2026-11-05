@@ -1047,6 +1047,20 @@ export type InviteLink = {
 token: string | null, expiresAt: string, };
 
 /**
+ * `irishTrain` on a tracked train, a journey or a group row: which Irish
+ * train page it is (`/island-of-ireland/iarnrod-eireann/trains/{trainCode}/{serviceDate}`).
+ */
+export type IrishTrain = { 
+/**
+ * The train code, like `A120`.
+ */
+trainCode: string, 
+/**
+ * The day the train started (`Traindate`), `YYYY-MM-DD`.
+ */
+serviceDate: string, };
+
+/**
  * One row of `GET /public/island-of-ireland/stations/{id}/departures`:
  * camelCase, matching `render::station_departure_json`'s convention for a
  * public departures endpoint, every absent value a present `null`. Times
@@ -1556,7 +1570,13 @@ followedFrom?: FollowedFrom,
  * caller's own journeys; a followed journey that is also shared into
  * one of their groups carries both.
  */
-sharedVia?: Array<SharedVia>, };
+sharedVia?: Array<SharedVia>, 
+/**
+ * Set when this row's leg is an Iarnród Éireann train (an `ie:`
+ * uid): its code and service date, for the Irish train page; `null`
+ * otherwise (`data::irish_trains`). Additive (2026-11-06).
+ */
+irishTrain: IrishTrain | null, };
 
 /**
  * A stored filter, as `GET /Journeys/{id}` serves it.
@@ -3913,6 +3933,31 @@ scheduledDeparture: string | null, };
 export type TimetabledRide = { departure: string, arrival: string, };
 
 /**
+ * `POST /Journeys/irish-train`'s body.
+ */
+export type TrackIrishTrainRequest = { 
+/**
+ * The train code, like `A120` (trimmed and upper-cased).
+ */
+trainCode: string, 
+/**
+ * The day the train started, `YYYY-MM-DD`: Dublin's today or
+ * yesterday.
+ */
+serviceDate: string, 
+/**
+ * The live `StationCode` of the board it was tracked from, like
+ * `CNLLY`: one the train was seen at. Optional.
+ */
+fromStation?: string, };
+
+/**
+ * `POST /Journeys/irish-train`'s response: the one-leg journey and the
+ * tracked train (`GET /Train/{trackingId}`).
+ */
+export type TrackIrishTrainResponse = { journeyId: number, trackingId: number, };
+
+/**
  * Pin-creation payload for `POST /Train/track` (`crates/api/src/routes/train.rs`).
  * Deliberately does NOT include `train_uid` -- per the design doc's
  * Tracking semantics, the pinned service is only ever known by what a
@@ -4067,7 +4112,11 @@ departsAt: string,
  * form): full or partial, where it now starts or terminates, and why.
  * `null` when no part of its run is cancelled. Additive (2026-10-27).
  */
-cancellation: CancellationSummary | null, serviceMode: ServiceMode, liveTracking: boolean, };
+cancellation: CancellationSummary | null, 
+/**
+ * See `TrackedTrainState::irish_train`. Additive (2026-11-06).
+ */
+irishTrain: IrishTrain | null, serviceMode: ServiceMode, liveTracking: boolean, };
 
 /**
  * The public read-model for a tracked train, returned directly as JSON by
@@ -4304,7 +4353,14 @@ trackingPhase: TrackingPhase | null,
  * Activation before it is activated, the origin departure after.
  * `None` once live, or when the origin departure is unknown.
  */
-firstReportExpectedAt: string | null, serviceMode: ServiceMode, liveTracking: boolean, };
+firstReportExpectedAt: string | null, 
+/**
+ * Set for an Iarnród Éireann train (an `ie:` uid): its code and
+ * service date, for the Irish train page. `null` for every GB train.
+ * Filled after the read by `data::irish_trains::attach`. Additive
+ * (2026-11-06).
+ */
+irishTrain: IrishTrain | null, serviceMode: ServiceMode, liveTracking: boolean, };
 
 /**
  * The public read-model for a ticket, returned directly as JSON by

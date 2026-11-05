@@ -414,6 +414,25 @@
         ],
         "type": "object"
       },
+      "IrishTrain": {
+        "description": "`irishTrain` on a tracked train, a journey or a group row: which Irish\ntrain page it is (`/island-of-ireland/iarnrod-eireann/trains/{trainCode}/{serviceDate}`).",
+        "properties": {
+          "serviceDate": {
+            "description": "The day the train started (`Traindate`), `YYYY-MM-DD`.",
+            "format": "date",
+            "type": "string"
+          },
+          "trainCode": {
+            "description": "The train code, like `A120`.",
+            "type": "string"
+          }
+        },
+        "required": [
+          "trainCode",
+          "serviceDate"
+        ],
+        "type": "object"
+      },
       "JourneyDetailResponse": {
         "description": "What `GET /Journeys/{id}` gains (flattened into its response).",
         "properties": {
@@ -924,6 +943,17 @@
           "id": {
             "format": "int64",
             "type": "integer"
+          },
+          "irishTrain": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/IrishTrain"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Set when this row's leg is an Iarnród Éireann train (an `ie:`\nuid): its code and service date, for the Irish train page; `null`\notherwise (`data::irish_trains`). Additive (2026-11-06)."
           },
           "kind": {
             "$ref": "#/components/schemas/JourneyLegKind",
@@ -2808,6 +2838,17 @@
           "id": {
             "format": "int64",
             "type": "integer"
+          },
+          "irishTrain": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/IrishTrain"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Set for an Iarnród Éireann train (an `ie:` uid): its code and\nservice date, for the Irish train page. `null` for every GB train.\nFilled after the read by `data::irish_trains::attach`. Additive\n(2026-11-06)."
           },
           "journeyIds": {
             "description": "The caller's journeys this train belongs to (any leg), and of\nthose, the train's own: one-leg journeys whose leg is bound to this\nsubscription, which \"Stop tracking\" deletes (DS-124). Filled only by\nthe owner's `GET /Train/{trackingId}` (`attach_journey_ids`), never\non a journey's or a group's view of the train, which must not show\nthe owner's other journeys; absent from the JSON otherwise.\nAdditive (2026-10-22).",

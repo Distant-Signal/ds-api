@@ -1498,6 +1498,10 @@ mod tests {
             Some(LimitClass::PublicWrite)
         );
         assert_eq!(
+            classify(&Method::POST, "/Journeys/irish-train"),
+            Some(LimitClass::PublicWrite)
+        );
+        assert_eq!(
             classify(&Method::POST, "/public/events"),
             Some(LimitClass::Events)
         );

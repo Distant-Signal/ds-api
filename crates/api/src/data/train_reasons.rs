@@ -530,6 +530,7 @@ mod tests {
             cancellation: None,
             tracking_phase: None,
             first_report_expected_at: None,
+            irish_train: None,
         }
     }
 

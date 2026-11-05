@@ -137,6 +137,7 @@ pub async fn run_sweep(app: &App, now: DateTime<Utc>) -> anyhow::Result<Swept> {
          JOIN train_subscriptions ts ON ts.id = jl.train_subscription_id \
          JOIN trains tr ON tr.id = ts.trains_id \
          WHERE jl.kind = 'train' \
+           AND tr.train_uid NOT LIKE 'ie:%' \
            AND jl.service_date BETWEEN ($1 AT TIME ZONE 'Europe/London')::date - 1 \
                                    AND ($1 AT TIME ZONE 'Europe/London')::date \
            AND COALESCE({departs}, ts.pin_scheduled_departure) \

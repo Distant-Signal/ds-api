@@ -245,9 +245,13 @@ pub fn transit_uid(network: &str, index: usize) -> String {
 }
 
 /// Whether `uid` is a transit trip's ([`transit_uid`]): no CIF UID, TRUST
-/// id or Darwin RID contains `:`.
+/// id or Darwin RID contains `:`. An Iarnród Éireann train's `ie:<CODE>`
+/// uid has a colon too, and is never a transit trip: `ie` is reserved and
+/// is no transit network's id (distant-signal's
+/// docs/superpowers/specs/2026-11-05-irish-rail-train-tracking-design.md
+/// §3).
 pub fn is_transit_uid(uid: &str) -> bool {
-    uid.contains(':')
+    uid.contains(':') && !common::island_of_ireland::tracking::is_train_uid(uid)
 }
 
 fn split_uid(uid: &str) -> Option<(&str, usize)> {
@@ -2205,6 +2209,17 @@ mod tests {
         }
         assert!(!is_transit_uid("C01355"));
         assert!(!is_transit_uid("202611047654321"));
+    }
+
+    /// An Iarnród Éireann uid has a colon but is never a transit trip, in
+    /// any case; the transit split still finds no trip in it.
+    #[test]
+    fn irish_train_uids_are_not_transit_uids() {
+        assert!(!is_transit_uid("ie:A120"));
+        assert!(!is_transit_uid("IE:A120"));
+        assert!(!is_transit_uid("ie:1"));
+        assert!(is_transit_uid("luas:1"));
+        assert_eq!(split_uid("ie:A120"), None);
     }
 
     #[test]
