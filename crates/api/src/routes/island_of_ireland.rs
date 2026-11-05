@@ -6,10 +6,18 @@
 //! `StationCode`. Unauthenticated, read-only, no pagination -- the whole
 //! catalogue is a few hundred rows at most. The web app's Irish Rail
 //! pages read them (docs/api-changelog.md, 2026-11-04).
+//! `GET /public/island-of-ireland/trains/{trainCode}/{date}`: one Iarnród
+//! Éireann train's board history (`island_of_ireland_trains` and its
+//! calls), read with `common::island_of_ireland::train_state`, for the web
+//! app's train page (distant-signal's
+//! docs/superpowers/specs/2026-11-05-irish-rail-train-tracking-design.md
+//! §5.2). A train no board has shown is not found: unknown, never
+//! "on time".
 
 use axum::Json;
 use axum::extract::{Path, Query, State};
 use axum::http::{StatusCode, header};
+use common::island_of_ireland::train_state::{self, LastLocation, LiveState};
 use common::island_of_ireland::{IslandOfIrelandDeparture, IslandOfIrelandNetwork};
 use serde::{Deserialize, Serialize};
 
@@ -40,6 +48,10 @@ pub fn router() -> Router {
         .route(
             "/island-of-ireland/stations/{id}/departures",
             axum::routing::get(get_station_departures),
+        )
+        .route(
+            "/island-of-ireland/trains/{train_code}/{date}",
+            axum::routing::get(get_train),
         )
 }
 
@@ -188,6 +200,16 @@ pub(crate) struct IslandOfIrelandDepartureResponse {
     late_minutes: i32,
     status: String,
     due_in_minutes: Option<i32>,
+    /// The day the train started (`YYYY-MM-DD`): with `trainCode`, its
+    /// train page. `null` until the poller sends it.
+    #[ts(type = "string | null")]
+    train_date: Option<chrono::NaiveDate>,
+    /// When the train leaves its origin and reaches its destination,
+    /// `HH:MM`.
+    origin_time: Option<String>,
+    destination_time: Option<String>,
+    /// The feed's last report, e.g. `Departed Dundalk`; `null` when none.
+    last_location: Option<String>,
 }
 
 fn departure_json(d: &IslandOfIrelandDeparture) -> IslandOfIrelandDepartureResponse {
@@ -202,6 +224,179 @@ fn departure_json(d: &IslandOfIrelandDeparture) -> IslandOfIrelandDepartureRespo
         late_minutes: d.late_minutes,
         status: d.status.clone(),
         due_in_minutes: d.due_in_minutes,
+        train_date: d.train_date,
+        origin_time: d.origin_time.clone(),
+        destination_time: d.destination_time.clone(),
+        last_location: d.last_location.clone(),
+    }
+}
+
+/// `GET /public/island-of-ireland/trains/{trainCode}/{date}`.
+#[derive(Debug, Clone, PartialEq, Serialize, ts_rs::TS)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct IslandOfIrelandTrainResponse {
+    #[ts(type = "\"northern-ireland\" | \"republic-of-ireland\"")]
+    network: IslandOfIrelandNetwork,
+    train_code: String,
+    /// The day the train started, `YYYY-MM-DD`.
+    #[ts(type = "string")]
+    service_date: chrono::NaiveDate,
+    origin: String,
+    destination: String,
+    /// `HH:MM`, Irish local time; `null` when the boards didn't say.
+    origin_time: Option<String>,
+    destination_time: Option<String>,
+    live: IslandOfIrelandTrainLive,
+    /// The stations whose boards showed it, in running order.
+    calls: Vec<IslandOfIrelandTrainCall>,
+    /// When a board first and last showed the train.
+    #[ts(type = "string")]
+    first_seen_at: chrono::DateTime<chrono::Utc>,
+    #[ts(type = "string")]
+    last_seen_at: chrono::DateTime<chrono::Utc>,
+}
+
+/// The train's state as the boards show it (`train_state::interpret`).
+#[derive(Debug, Clone, PartialEq, Serialize, ts_rs::TS)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct IslandOfIrelandTrainLive {
+    state: LiveState,
+    /// Minutes late (negative: early), only while the train reports;
+    /// `null` otherwise. Never a guess.
+    late_minutes: Option<i32>,
+    last_location: Option<LastLocation>,
+    /// When a board last showed the train.
+    #[ts(type = "string")]
+    observed_at: chrono::DateTime<chrono::Utc>,
+}
+
+/// One station whose board showed the train, with that board's times
+/// (`HH:MM`, Irish local time; `null` where the board had none).
+#[derive(Debug, Clone, PartialEq, Serialize, ts_rs::TS)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct IslandOfIrelandTrainCall {
+    /// The live board's `StationCode`.
+    station_code: String,
+    /// The catalogue station (its page), when one has this live code.
+    station_id: Option<String>,
+    /// The catalogue name, else the live list's; `null` when neither knows
+    /// the code.
+    name: Option<String>,
+    scheduled_arrival: Option<String>,
+    scheduled_departure: Option<String>,
+    expected_arrival: Option<String>,
+    expected_departure: Option<String>,
+}
+
+/// The train code as the history stores it: trimmed, upper-cased, 1 to 8
+/// letters and digits (the tables' `CHECK`).
+fn parse_train_code(raw: &str) -> Option<String> {
+    let code = raw.trim().to_ascii_uppercase();
+    ((1..=8).contains(&code.len()) && code.bytes().all(|b| b.is_ascii_alphanumeric()))
+        .then_some(code)
+}
+
+async fn get_train(
+    State(app): State<App>,
+    Path((train_code, date)): Path<(String, String)>,
+) -> Result<
+    (
+        [(header::HeaderName, &'static str); 1],
+        Json<IslandOfIrelandTrainResponse>,
+    ),
+    (StatusCode, String),
+> {
+    let Some(code) = parse_train_code(&train_code) else {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            "train codes are 1 to 8 letters and digits, like A120".to_string(),
+        ));
+    };
+    let Ok(date) = chrono::NaiveDate::parse_from_str(&date, "%Y-%m-%d") else {
+        return Err((StatusCode::BAD_REQUEST, "dates are YYYY-MM-DD".to_string()));
+    };
+    let Some(history) = island_of_ireland::train_history(
+        &app.database,
+        IslandOfIrelandNetwork::RepublicOfIreland,
+        &code,
+        date,
+    )
+    .await
+    .map_err(internal_error)?
+    else {
+        return Err((
+            StatusCode::NOT_FOUND,
+            format!("no departure board has shown train {code} on {date}"),
+        ));
+    };
+    Ok((
+        [(header::CACHE_CONTROL, "no-store")],
+        Json(train_json(history, chrono::Utc::now())),
+    ))
+}
+
+/// The response for `history` at `now`: the live state read once, and the
+/// calls in running order (by timetabled time, departure before arrival,
+/// a time before the origin's counted as the next day; a call with no time
+/// last, then by station code).
+fn train_json(
+    history: island_of_ireland::TrainHistory,
+    now: chrono::DateTime<chrono::Utc>,
+) -> IslandOfIrelandTrainResponse {
+    let read = train_state::interpret(
+        &train_state::Observation {
+            status: &history.status,
+            late_minutes: history.late_minutes,
+            last_location: history.last_location.as_deref(),
+            destination: &history.destination,
+            last_seen_at: history.last_seen_at,
+        },
+        now,
+    );
+    let origin_time = history.origin_time.as_deref();
+    let order = |c: &island_of_ireland::TrainHistoryCall| {
+        let time = c
+            .scheduled_departure
+            .as_deref()
+            .or(c.scheduled_arrival.as_deref())
+            .or(c.expected_departure.as_deref())
+            .or(c.expected_arrival.as_deref());
+        (
+            time.and_then(|t| train_state::running_order_minutes(t, origin_time))
+                .unwrap_or(u32::MAX),
+            c.station_code.clone(),
+        )
+    };
+    let mut calls = history.calls;
+    calls.sort_by_cached_key(order);
+    IslandOfIrelandTrainResponse {
+        network: history.network,
+        train_code: history.train_code,
+        service_date: history.train_date,
+        origin: history.origin,
+        destination: history.destination,
+        origin_time: history.origin_time,
+        destination_time: history.destination_time,
+        live: IslandOfIrelandTrainLive {
+            state: read.state,
+            late_minutes: read.late_minutes,
+            last_location: read.last_location,
+            observed_at: history.last_seen_at,
+        },
+        calls: calls
+            .into_iter()
+            .map(|c| IslandOfIrelandTrainCall {
+                station_code: c.station_code,
+                station_id: c.station_id,
+                name: c.name,
+                scheduled_arrival: c.scheduled_arrival,
+                scheduled_departure: c.scheduled_departure,
+                expected_arrival: c.expected_arrival,
+                expected_departure: c.expected_departure,
+            })
+            .collect(),
+        first_seen_at: history.first_seen_at,
+        last_seen_at: history.last_seen_at,
     }
 }
 
@@ -253,6 +448,91 @@ mod tests {
     }
 
     #[test]
+    fn train_codes_are_trimmed_upper_cased_and_bounded() {
+        assert_eq!(parse_train_code(" a120 ").as_deref(), Some("A120"));
+        assert_eq!(parse_train_code("E101").as_deref(), Some("E101"));
+        assert_eq!(parse_train_code(""), None);
+        assert_eq!(parse_train_code("ie:A120"), None);
+        assert_eq!(parse_train_code("ABCDEFGHI"), None);
+    }
+
+    fn history_call(
+        code: &str,
+        arrival: Option<&str>,
+        departure: Option<&str>,
+    ) -> island_of_ireland::TrainHistoryCall {
+        island_of_ireland::TrainHistoryCall {
+            station_code: code.into(),
+            station_id: None,
+            name: Some(code.into()),
+            scheduled_arrival: arrival.map(Into::into),
+            scheduled_departure: departure.map(Into::into),
+            expected_arrival: arrival.map(Into::into),
+            expected_departure: departure.map(Into::into),
+        }
+    }
+
+    fn history(
+        status: &str,
+        late: i32,
+        last_location: Option<&str>,
+    ) -> island_of_ireland::TrainHistory {
+        island_of_ireland::TrainHistory {
+            network: IslandOfIrelandNetwork::RepublicOfIreland,
+            train_code: "A120".into(),
+            train_date: chrono::NaiveDate::from_ymd_opt(2026, 11, 5).unwrap(),
+            origin: "Dublin Connolly".into(),
+            destination: "Belfast".into(),
+            origin_time: Some("23:30".into()),
+            destination_time: Some("01:40".into()),
+            status: status.into(),
+            late_minutes: Some(late),
+            last_location: last_location.map(Into::into),
+            first_seen_at: "2026-11-05T22:00:00Z".parse().unwrap(),
+            last_seen_at: "2026-11-05T23:50:00Z".parse().unwrap(),
+            calls: vec![
+                history_call("BFSTC", Some("01:40"), None),
+                history_call("NOTIM", None, None),
+                history_call("DDALK", Some("00:25"), Some("00:26")),
+                history_call("CNLLY", None, Some("23:30")),
+                history_call("DGHDA", Some("23:58"), Some("23:59")),
+            ],
+        }
+    }
+
+    /// Calls come in running order past midnight, a call with no time
+    /// last; the live state is `train_state`'s.
+    #[test]
+    fn train_json_orders_the_calls_and_reads_the_live_state() {
+        let now = "2026-11-05T23:52:00Z".parse().unwrap();
+        let json = train_json(history("En Route", 3, Some("Departed Drogheda")), now);
+        let codes: Vec<&str> = json.calls.iter().map(|c| c.station_code.as_str()).collect();
+        assert_eq!(codes, ["CNLLY", "DGHDA", "DDALK", "BFSTC", "NOTIM"]);
+        let value = serde_json::to_value(&json).unwrap();
+        assert_eq!(
+            value["live"],
+            serde_json::json!({
+                "state": "running",
+                "lateMinutes": 3,
+                "lastLocation": {"event": "departed", "place": "Drogheda"},
+                "observedAt": "2026-11-05T23:50:00Z",
+            })
+        );
+        assert_eq!(value["serviceDate"], "2026-11-05");
+        assert_eq!(value["network"], "republic-of-ireland");
+    }
+
+    /// "No Information" with `Late` 0 is no report and no delay, not "on
+    /// time".
+    #[test]
+    fn a_train_with_no_report_has_no_delay() {
+        let now = "2026-11-05T23:52:00Z".parse().unwrap();
+        let json = train_json(history("No Information", 0, None), now);
+        assert_eq!(json.live.state, LiveState::NoReport);
+        assert_eq!(json.live.late_minutes, None);
+    }
+
+    #[test]
     fn departure_json_maps_every_field_to_camel_case() {
         let departure = IslandOfIrelandDeparture {
             train_code: "A101".to_string(),
@@ -265,6 +545,10 @@ mod tests {
             late_minutes: 0,
             status: "On Time".to_string(),
             due_in_minutes: Some(5),
+            train_date: chrono::NaiveDate::from_ymd_opt(2026, 11, 5),
+            origin_time: Some("06:00".to_string()),
+            destination_time: Some("08:15".to_string()),
+            last_location: None,
         };
         let json = serde_json::to_value(departure_json(&departure)).unwrap();
         assert_eq!(
@@ -280,6 +564,10 @@ mod tests {
                 "lateMinutes": 0,
                 "status": "On Time",
                 "dueInMinutes": 5,
+                "trainDate": "2026-11-05",
+                "originTime": "06:00",
+                "destinationTime": "08:15",
+                "lastLocation": null,
             })
         );
     }
@@ -474,6 +762,99 @@ mod db_tests {
         for sql in [
             "DELETE FROM island_of_ireland_stations WHERE id LIKE 'ZQRT%'",
             "DELETE FROM island_of_ireland_station_samples WHERE station_id LIKE 'ZQRT%'",
+        ] {
+            sqlx::query(sql).execute(&pool).await.unwrap();
+        }
+    }
+
+    /// A train the boards showed comes back with its calls joined to the
+    /// catalogue (or the live list) and `no-store`; one they didn't is a
+    /// 404; a malformed code or date is a 400.
+    #[tokio::test]
+    #[ignore = "requires a live database; run with `cargo test -p api \
+                train_route -- --ignored --test-threads=1`"]
+    async fn train_route_serves_the_board_history() {
+        let pool = connect().await;
+        for sql in [
+            "DELETE FROM island_of_ireland_train_calls WHERE train_code = 'ZQ7'",
+            "DELETE FROM island_of_ireland_trains WHERE train_code = 'ZQ7'",
+            "DELETE FROM island_of_ireland_stations WHERE id = 'ZQRT7'",
+            "DELETE FROM island_of_ireland_live_stations WHERE code LIKE 'ZQRT%'",
+            "INSERT INTO island_of_ireland_stations (id, name, network, live_code) VALUES \
+             ('ZQRT7', 'Zesttown', 'republic-of-ireland', 'ZQRTA')",
+            "INSERT INTO island_of_ireland_live_stations (code, name, fetched_at) VALUES \
+             ('ZQRTB', 'Zorough Live', now())",
+            "INSERT INTO island_of_ireland_trains (network, train_code, train_date, origin, \
+             destination, origin_time, destination_time, status, late_minutes, last_location, \
+             first_seen_at, last_seen_at, changed_at) VALUES ('republic-of-ireland', 'ZQ7', \
+             '2051-01-02', 'Zesttown', 'Zorough', '10:00', '10:40', 'En Route', 5, \
+             'Departed Zesttown', now(), now(), now())",
+            "INSERT INTO island_of_ireland_train_calls (network, train_code, train_date, \
+             station_code, scheduled_arrival, scheduled_departure, expected_arrival, \
+             expected_departure, late_minutes, first_seen_at, changed_at) VALUES \
+             ('republic-of-ireland', 'ZQ7', '2051-01-02', 'ZQRTB', '10:40', NULL, '10:45', \
+              NULL, 5, now(), now()), \
+             ('republic-of-ireland', 'ZQ7', '2051-01-02', 'ZQRTA', NULL, '10:00', NULL, \
+              '10:05', 5, now(), now())",
+        ] {
+            sqlx::query(sql).execute(&pool).await.unwrap();
+        }
+        let router: axum::Router = Router::new()
+            .merge(router())
+            .with_state(test_app(pool.clone()));
+        let get = |uri: &'static str| {
+            let router = router.clone();
+            async move {
+                router
+                    .oneshot(Request::builder().uri(uri).body(Body::empty()).unwrap())
+                    .await
+                    .unwrap()
+            }
+        };
+
+        let response = get("/island-of-ireland/trains/zq7/2051-01-02").await;
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(
+            response.headers().get(header::CACHE_CONTROL).unwrap(),
+            "no-store"
+        );
+        let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(json["trainCode"], "ZQ7");
+        assert_eq!(json["live"]["state"], "running");
+        assert_eq!(json["live"]["lateMinutes"], 5);
+        assert_eq!(json["calls"][0]["stationId"], "ZQRT7");
+        assert_eq!(json["calls"][0]["name"], "Zesttown");
+        assert_eq!(json["calls"][0]["expectedDeparture"], "10:05");
+        assert_eq!(json["calls"][1]["stationId"], serde_json::Value::Null);
+        assert_eq!(json["calls"][1]["name"], "Zorough Live");
+
+        assert_eq!(
+            get("/island-of-ireland/trains/ZQ7/2051-01-03")
+                .await
+                .status(),
+            StatusCode::NOT_FOUND
+        );
+        assert_eq!(
+            get("/island-of-ireland/trains/ie:ZQ7/2051-01-02")
+                .await
+                .status(),
+            StatusCode::BAD_REQUEST
+        );
+        assert_eq!(
+            get("/island-of-ireland/trains/ZQ7/02-01-2051")
+                .await
+                .status(),
+            StatusCode::BAD_REQUEST
+        );
+
+        for sql in [
+            "DELETE FROM island_of_ireland_train_calls WHERE train_code = 'ZQ7'",
+            "DELETE FROM island_of_ireland_trains WHERE train_code = 'ZQ7'",
+            "DELETE FROM island_of_ireland_stations WHERE id = 'ZQRT7'",
+            "DELETE FROM island_of_ireland_live_stations WHERE code LIKE 'ZQRT%'",
         ] {
             sqlx::query(sql).execute(&pool).await.unwrap();
         }

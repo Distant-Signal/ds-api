@@ -3,6 +3,40 @@
 Changes to the Distant Signal (DS) HTTP API that a client such as DS-MCP
 needs to know about. Newest first. Field names are as served (camelCase).
 
+## 2026-11-05: Iarnród Éireann train pages
+
+Additive; existing keys keep their names and values' meaning.
+
+- `GET /public/island-of-ireland/stations/{id}/departures` rows gain
+  `trainDate` (`YYYY-MM-DD`, the day the train started, which stays the
+  same past midnight), `originTime` and `destinationTime` (`HH:MM`), and
+  `lastLocation` (the feed's last report, e.g. `Departed Dundalk`). Each is
+  `null` until the Irish Rail poller sends it.
+- New: `GET /public/island-of-ireland/trains/{trainCode}/{date}`, public
+  and `Cache-Control: no-store`, in the `/Train/by-uid` rate-limit budget.
+  One Iarnród Éireann train's history from the departure boards, kept 14
+  days:
+  - `trainCode`, `serviceDate`, `origin`, `destination`, `originTime` and
+    `destinationTime`;
+  - `live`: `state` (`noReport`, `running`, `arrived` or
+    `notSeenRecently`), `lateMinutes` (signed; `null` unless the train is
+    reporting, never a guessed 0), `lastLocation` (`{event: "departed" |
+    "arrived", place}` or `null`) and `observedAt`;
+  - `calls`: each station whose board showed the train, in running order,
+    with `stationCode`, `stationId` (the catalogue station, or `null`),
+    `name` and the board's scheduled and expected times;
+  - `firstSeenAt` and `lastSeenAt`.
+
+  404 when no board has shown that train on that date; 400 for a code that
+  isn't 1 to 8 letters and digits or a date that isn't `YYYY-MM-DD`.
+- The usage-event allowlist gains
+  `/island-of-ireland/[network]/trains/[train]/[date]`.
+
+Types: `IslandOfIrelandTrainResponse` (with `IslandOfIrelandTrainLive`,
+`IslandOfIrelandTrainCall`, `LiveState`, `LastLocation` and
+`LastLocationEvent`) and the wider `IslandOfIrelandDepartureResponse` in
+`api-types/api.ts`. DS-MCP: no change needed.
+
 ## 2026-11-04: island of Ireland live codes, line colours and display names
 
 Additive; existing keys keep their names and values' meaning.
