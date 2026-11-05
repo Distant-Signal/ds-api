@@ -1218,6 +1218,10 @@ pub struct GroupTrain {
     pub tracking_phase: Option<crate::data::tracking_phase::TrackingPhase>,
     /// See `TrackedTrainState::first_report_expected_at`.
     pub first_report_expected_at: Option<DateTime<Utc>>,
+    /// Set for an Iarnród Éireann train (`data::irish_trains`): its code
+    /// and service date, for the Irish train page; `null` otherwise.
+    /// Additive (2026-11-06).
+    pub irish_train: Option<crate::data::irish_trains::IrishTrain>,
 }
 
 impl crate::data::stop_delay::PublicDelayFields for GroupTrain {
@@ -1272,6 +1276,7 @@ impl From<GroupTrainRow> for GroupTrain {
             timetable_on_row: row.timetable_on_row,
             tracking_phase: None,
             first_report_expected_at: None,
+            irish_train: None,
         }
     }
 }
@@ -1401,6 +1406,10 @@ pub struct GroupJourney {
     /// Whether the CALLER follows this journey (DS-146,
     /// `journey_follows`); set by the route, `false` here.
     pub following: bool,
+    /// Set for an Iarnród Éireann train (`data::irish_trains`): its code
+    /// and service date, for the Irish train page; `null` otherwise.
+    /// Additive (2026-11-06).
+    pub irish_train: Option<crate::data::irish_trains::IrishTrain>,
 }
 
 impl crate::data::stop_delay::PublicDelayFields for GroupJourney {
@@ -1453,6 +1462,7 @@ impl From<GroupJourneyRow> for GroupJourney {
             timetable_on_row: row.timetable_on_row,
             tracking_phase: None,
             first_report_expected_at: None,
+            irish_train: None,
             kind: row.kind,
             transit_mode: row.transit_mode,
             planned_departure: row.planned_departure,
@@ -1489,7 +1499,7 @@ macro_rules! impl_train_states {
 
             fn phase_signals(&self) -> crate::data::tracking_phase::PhaseSignals<'_> {
                 crate::data::tracking_phase::PhaseSignals {
-                    applies: true,
+                    applies: self.irish_train.is_none(),
                     activated: self.resolution_status == "resolved",
                     status: self.status.as_deref(),
                     timetable_on_row: self.timetable_on_row,
@@ -1503,6 +1513,35 @@ macro_rules! impl_train_states {
             ) {
                 self.tracking_phase = Some(phase);
                 self.first_report_expected_at = expected;
+            }
+        }
+
+        impl crate::data::irish_trains::IrishTrainRow for $row {
+            fn train_key(&self) -> Option<(&str, chrono::NaiveDate)> {
+                self.train_uid
+                    .as_deref()
+                    .map(|uid| (uid, self.service_date))
+            }
+
+            fn set_irish_train(&mut self, train: crate::data::irish_trains::IrishTrain) {
+                self.irish_train = Some(train);
+            }
+
+            fn lacks_state(&self) -> bool {
+                self.status.is_none()
+            }
+
+            fn set_board_state(
+                &mut self,
+                state: common::island_of_ireland::train_state::CurrentState,
+            ) {
+                self.status = Some(state.status.to_owned());
+                self.working_delay_minutes = state.delay_minutes;
+                self.delay_minutes = state.delay_minutes;
+                self.delay_basis = state
+                    .delay_minutes
+                    .map(|_| crate::data::stop_delay::DelayBasis::Working);
+                self.delay_provisional = false;
             }
         }
 
@@ -1554,7 +1593,7 @@ macro_rules! impl_journey_states {
 
             fn phase_signals(&self) -> crate::data::tracking_phase::PhaseSignals<'_> {
                 crate::data::tracking_phase::PhaseSignals {
-                    applies: self.has_train(),
+                    applies: self.has_train() && self.irish_train.is_none(),
                     activated: self.resolution_status.as_deref() == Some("resolved"),
                     status: self.status.as_deref(),
                     timetable_on_row: self.timetable_on_row,
@@ -1568,6 +1607,35 @@ macro_rules! impl_journey_states {
             ) {
                 self.tracking_phase = Some(phase);
                 self.first_report_expected_at = expected;
+            }
+        }
+
+        impl crate::data::irish_trains::IrishTrainRow for $row {
+            fn train_key(&self) -> Option<(&str, chrono::NaiveDate)> {
+                self.train_uid
+                    .as_deref()
+                    .map(|uid| (uid, self.service_date))
+            }
+
+            fn set_irish_train(&mut self, train: crate::data::irish_trains::IrishTrain) {
+                self.irish_train = Some(train);
+            }
+
+            fn lacks_state(&self) -> bool {
+                self.status.is_none()
+            }
+
+            fn set_board_state(
+                &mut self,
+                state: common::island_of_ireland::train_state::CurrentState,
+            ) {
+                self.status = Some(state.status.to_owned());
+                self.working_delay_minutes = state.delay_minutes;
+                self.delay_minutes = state.delay_minutes;
+                self.delay_basis = state
+                    .delay_minutes
+                    .map(|_| crate::data::stop_delay::DelayBasis::Working);
+                self.delay_provisional = false;
             }
         }
 
@@ -1603,8 +1671,13 @@ impl_journey_states!(SharedJourney);
 /// mode on a journey row; no phase).
 async fn attach_train_states<T>(pool: &PgPool, items: &mut [T], now: DateTime<Utc>)
 where
-    T: crate::data::tracking_phase::PhaseRow + crate::data::schedule_services::HasServiceMode,
+    T: crate::data::tracking_phase::PhaseRow
+        + crate::data::schedule_services::HasServiceMode
+        + crate::data::irish_trains::IrishTrainRow,
 {
+    // First: an Irish row has no phase, and takes its state from the
+    // boards until the writer has written one.
+    crate::data::irish_trains::attach(pool, items, now).await;
     crate::data::schedule_services::attach(pool, items).await;
     crate::data::tracking_phase::attach(pool, items, now).await;
 }
@@ -1619,7 +1692,8 @@ pub async fn list_group_trains(pool: &PgPool, group_id: &str) -> Result<Vec<Grou
         "SELECT gt.train_subscription_id, \
                 COALESCE(ts.pin_origin_crs, tr.origin_crs) AS pin_origin_crs, \
                 COALESCE(ts.pin_destination_crs, tr.destination_crs) AS pin_destination_crs, \
-                so.name AS pin_origin_name, sd.name AS pin_destination_name, \
+                COALESCE(so.name, tr.origin_name) AS pin_origin_name, \
+                COALESCE(sd.name, tr.destination_name) AS pin_destination_name, \
                 COALESCE(ts.pin_scheduled_departure, tr.scheduled_departure) \
                     AS pin_scheduled_departure, \
                 ts.service_date, ts.resolution_status, \
@@ -1696,7 +1770,8 @@ static LIST_GROUP_JOURNEYS_SQL: std::sync::LazyLock<String> = std::sync::LazyLoc
                 (SELECT COUNT(*) FROM journey_legs jl2 WHERE jl2.journey_id = j.id) AS leg_count, \
                 COALESCE(ts.pin_origin_crs, tr.origin_crs) AS pin_origin_crs, \
                 COALESCE(ts.pin_destination_crs, tr.destination_crs) AS pin_destination_crs, \
-                so.name AS pin_origin_name, sd.name AS pin_destination_name, \
+                COALESCE(so.name, tr.origin_name) AS pin_origin_name, \
+                COALESCE(sd.name, tr.destination_name) AS pin_destination_name, \
                 COALESCE(ts.pin_scheduled_departure, tr.scheduled_departure) AS pin_scheduled_departure, \
                 fl.origin_crs AS first_origin_crs, \
                 COALESCE(sfo.name, fl.origin_place) AS first_origin_name, \
@@ -1862,6 +1937,10 @@ pub struct SharedTrain {
     pub tracking_phase: Option<crate::data::tracking_phase::TrackingPhase>,
     /// See `TrackedTrainState::first_report_expected_at`.
     pub first_report_expected_at: Option<DateTime<Utc>>,
+    /// Set for an Iarnród Éireann train (`data::irish_trains`): its code
+    /// and service date, for the Irish train page; `null` otherwise.
+    /// Additive (2026-11-06).
+    pub irish_train: Option<crate::data::irish_trains::IrishTrain>,
 }
 
 impl crate::data::stop_delay::PublicDelayFields for SharedTrain {
@@ -1917,6 +1996,7 @@ impl From<SharedTrainRow> for SharedTrain {
             timetable_on_row: row.timetable_on_row,
             tracking_phase: None,
             first_report_expected_at: None,
+            irish_train: None,
         }
     }
 }
@@ -1976,7 +2056,8 @@ pub async fn list_shared_trains_for_user(pool: &PgPool, user_id: &str) -> Result
                 gt.train_subscription_id, \
                 COALESCE(ts.pin_origin_crs, tr.origin_crs) AS pin_origin_crs, \
                 COALESCE(ts.pin_destination_crs, tr.destination_crs) AS pin_destination_crs, \
-                so.name AS pin_origin_name, sd.name AS pin_destination_name, \
+                COALESCE(so.name, tr.origin_name) AS pin_origin_name, \
+                COALESCE(sd.name, tr.destination_name) AS pin_destination_name, \
                 COALESCE(ts.pin_scheduled_departure, tr.scheduled_departure) \
                     AS pin_scheduled_departure, \
                 ts.service_date, ts.resolution_status, \
@@ -2122,6 +2203,10 @@ pub struct SharedJourney {
     /// Whether the CALLER follows this journey (DS-146,
     /// `journey_follows`); set by the route, `false` here.
     pub following: bool,
+    /// Set for an Iarnród Éireann train (`data::irish_trains`): its code
+    /// and service date, for the Irish train page; `null` otherwise.
+    /// Additive (2026-11-06).
+    pub irish_train: Option<crate::data::irish_trains::IrishTrain>,
 }
 
 impl crate::data::stop_delay::PublicDelayFields for SharedJourney {
@@ -2176,6 +2261,7 @@ impl From<SharedJourneyRow> for SharedJourney {
             timetable_on_row: row.timetable_on_row,
             tracking_phase: None,
             first_report_expected_at: None,
+            irish_train: None,
             kind: row.kind,
             transit_mode: row.transit_mode,
             planned_departure: row.planned_departure,
@@ -2277,7 +2363,8 @@ static LIST_SHARED_JOURNEYS_SQL: std::sync::LazyLock<String> = std::sync::LazyLo
                 (SELECT COUNT(*) FROM journey_legs jl2 WHERE jl2.journey_id = j.id) AS leg_count, \
                 COALESCE(ts.pin_origin_crs, tr.origin_crs) AS pin_origin_crs, \
                 COALESCE(ts.pin_destination_crs, tr.destination_crs) AS pin_destination_crs, \
-                so.name AS pin_origin_name, sd.name AS pin_destination_name, \
+                COALESCE(so.name, tr.origin_name) AS pin_origin_name, \
+                COALESCE(sd.name, tr.destination_name) AS pin_destination_name, \
                 COALESCE(ts.pin_scheduled_departure, tr.scheduled_departure) AS pin_scheduled_departure, \
                 fl.origin_crs AS first_origin_crs, \
                 COALESCE(sfo.name, fl.origin_place) AS first_origin_name, \
@@ -6342,6 +6429,7 @@ mod group_train_wire_shape_tests {
             timetable_on_row: false,
             tracking_phase: None,
             first_report_expected_at: None,
+            irish_train: None,
         };
         let value = serde_json::to_value(&train).expect("serialize");
         let mut keys: Vec<&str> = value
@@ -6362,6 +6450,7 @@ mod group_train_wire_shape_tests {
                 "delayMinutes",
                 "delayProvisional",
                 "firstReportExpectedAt",
+                "irishTrain",
                 "liveTracking",
                 "pinDestinationCrs",
                 "pinDestinationName",
@@ -6409,6 +6498,7 @@ mod group_train_wire_shape_tests {
             timetable_on_row: false,
             tracking_phase: None,
             first_report_expected_at: None,
+            irish_train: None,
             kind: "untracked".to_string(),
             transit_mode: Some("walk".to_string()),
             planned_departure: Some("2026-10-21T08:00:00Z".parse().unwrap()),
@@ -6444,6 +6534,7 @@ mod group_train_wire_shape_tests {
                 "firstOriginName",
                 "firstReportExpectedAt",
                 "following",
+                "irishTrain",
                 "journeyId",
                 "kind",
                 "lastDestinationCrs",
@@ -6515,6 +6606,7 @@ mod group_train_wire_shape_tests {
             timetable_on_row: true,
             tracking_phase: phase,
             first_report_expected_at: expected,
+            irish_train: None,
         };
         let shared = SharedTrain {
             group_id: "group-1".to_string(),
@@ -6542,6 +6634,7 @@ mod group_train_wire_shape_tests {
             timetable_on_row: true,
             tracking_phase: phase,
             first_report_expected_at: expected,
+            irish_train: None,
         };
         let journey = GroupJourney {
             kind: "train".to_string(),
@@ -6588,6 +6681,7 @@ mod group_train_wire_shape_tests {
             timetable_on_row: true,
             tracking_phase: phase,
             first_report_expected_at: expected,
+            irish_train: None,
             kind: "train".to_string(),
             transit_mode: None,
             planned_departure: None,
@@ -6649,6 +6743,7 @@ mod shared_train_wire_shape_tests {
             timetable_on_row: false,
             tracking_phase: None,
             first_report_expected_at: None,
+            irish_train: None,
         }
     }
 
@@ -6682,6 +6777,7 @@ mod shared_train_wire_shape_tests {
                 "firstReportExpectedAt",
                 "groupId",
                 "groupName",
+                "irishTrain",
                 "liveTracking",
                 "pinDestinationCrs",
                 "pinDestinationName",

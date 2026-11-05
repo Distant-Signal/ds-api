@@ -222,6 +222,26 @@ fn describe(generator: &mut Generator, path: &str) -> Option<(&'static str, Body
                 ),
             ],
         ),
+        "/v1/island-of-ireland/trains/{train_code}/{date}" => (
+            "An Iarnród Éireann train by its code and the day it started, as the live departure boards showed it: its stations with their times and its last report. Kept 14 days (30 for a tracked train); a train no board has shown is not found.",
+            generator.typed::<crate::routes::island_of_ireland::IslandOfIrelandTrainResponse>(),
+            vec![
+                param(
+                    "train_code",
+                    "path",
+                    true,
+                    string(),
+                    "The train code, 1 to 8 letters and digits, e.g. A120.",
+                ),
+                param(
+                    "date",
+                    "path",
+                    true,
+                    json!({ "type": "string", "format": "date" }),
+                    "The day the train started (YYYY-MM-DD), in Irish time.",
+                ),
+            ],
+        ),
         "/v1/stations/{crs}/departures" => (
             "Live departures from a station.",
             tfl_items("Departure objects"),

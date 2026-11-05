@@ -43,6 +43,7 @@ fn today() -> chrono::NaiveDate {
 
 fn cleanup_statements() -> Vec<String> {
     vec![
+        "DELETE FROM groups WHERE id LIKE 'TEST-IRISH-%'".to_string(),
         "DELETE FROM journeys WHERE user_id LIKE 'TEST-IRISH-%'".to_string(),
         "DELETE FROM train_subscriptions WHERE user_id LIKE 'TEST-IRISH-%'".to_string(),
         "DELETE FROM sessions WHERE user_id LIKE 'TEST-IRISH-%'".to_string(),
@@ -347,4 +348,102 @@ async fn gb_only_routes_leave_irish_trains_alone() {
         .await
         .unwrap();
     assert_eq!(swept.journeys, 0, "{swept:?}");
+}
+
+/// Phase 4: an Irish train shared into a group, as a journey and as a
+/// train, reads back marked Irish and named by its boards, for the group
+/// and for the member it was shared with.
+#[tokio::test]
+#[ignore = "requires a live database; run with `cargo test -p api irish_train_db_tests \
+            -- --ignored --test-threads=1`"]
+async fn a_shared_irish_train_reads_back_in_its_group() {
+    let pool = connect().await;
+    let guard_pool = ds_store::test_support::schedule_fixture_pool(&pool).await;
+    let _cleanup = FixtureCleanup::new(&guard_pool, cleanup_statements()).await;
+    let date = today();
+    seed_history(&pool, "ZI03", date, 4).await;
+    let owner = "TEST-IRISH-OWNER";
+    let member = "TEST-IRISH-MEMBER";
+    let cookie = seed_user(&pool, owner).await;
+    seed_user(&pool, member).await;
+    let (status, created) = call(
+        &pool,
+        "POST",
+        "/Journeys/irish-train",
+        &cookie,
+        Some(json!({ "trainCode": "ZI03", "serviceDate": date, "fromStation": "ZIA" })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "{created}");
+    let group = "TEST-IRISH-GROUP";
+    for (sql, bind) in [
+        (
+            "INSERT INTO groups (id, name, created_by) VALUES ($1, 'Zest', $2)",
+            owner,
+        ),
+        (
+            "INSERT INTO group_members (group_id, user_id, role) VALUES ($1, $2, 'owner')",
+            owner,
+        ),
+        (
+            "INSERT INTO group_members (group_id, user_id) VALUES ($1, $2)",
+            member,
+        ),
+    ] {
+        sqlx::query(sql)
+            .bind(group)
+            .bind(bind)
+            .execute(&pool)
+            .await
+            .unwrap();
+    }
+    sqlx::query("INSERT INTO group_journeys (group_id, journey_id, added_by) VALUES ($1, $2, $3)")
+        .bind(group)
+        .bind(created["journeyId"].as_i64().unwrap())
+        .bind(owner)
+        .execute(&pool)
+        .await
+        .unwrap();
+    sqlx::query(
+        "INSERT INTO group_trains (group_id, train_subscription_id, added_by) VALUES ($1, $2, $3)",
+    )
+    .bind(group)
+    .bind(created["trackingId"].as_i64().unwrap())
+    .bind(owner)
+    .execute(&pool)
+    .await
+    .unwrap();
+
+    let irish = Some(crate::data::irish_trains::IrishTrain {
+        train_code: "ZI03".into(),
+        service_date: date,
+    });
+    let journeys = crate::data::groups::list_group_journeys(&pool, group)
+        .await
+        .unwrap();
+    let journey = &journeys[0];
+    assert_eq!(journey.irish_train, irish);
+    assert_eq!(journey.first_origin_name.as_deref(), Some("Zesttown"));
+    assert_eq!(journey.last_destination_name.as_deref(), Some("Zorough"));
+    assert_eq!(journey.status.as_deref(), Some("en_route"));
+    assert_eq!(journey.delay_minutes, Some(4));
+    assert_eq!(journey.tracking_phase, None);
+
+    let trains = crate::data::groups::list_group_trains(&pool, group)
+        .await
+        .unwrap();
+    assert_eq!(trains[0].irish_train, irish);
+    assert_eq!(trains[0].pin_origin_name.as_deref(), Some("Zesttown"));
+    assert_eq!(trains[0].pin_destination_name.as_deref(), Some("Zorough"));
+
+    let shared = crate::data::groups::list_shared_trains_for_user(&pool, member)
+        .await
+        .unwrap();
+    assert_eq!(shared[0].irish_train, irish);
+    assert_eq!(shared[0].pin_origin_name.as_deref(), Some("Zesttown"));
+    let shared = crate::data::groups::list_shared_journeys_for_user(&pool, member)
+        .await
+        .unwrap();
+    assert_eq!(shared[0].irish_train, irish);
+    assert_eq!(shared[0].first_origin_name.as_deref(), Some("Zesttown"));
 }

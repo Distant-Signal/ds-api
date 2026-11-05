@@ -232,10 +232,11 @@ fn departure_json(d: &IslandOfIrelandDeparture) -> IslandOfIrelandDepartureRespo
 }
 
 /// `GET /public/island-of-ireland/trains/{trainCode}/{date}`.
-#[derive(Debug, Clone, PartialEq, Serialize, ts_rs::TS)]
+#[derive(Debug, Clone, PartialEq, Serialize, ts_rs::TS, schemars::JsonSchema)]
 #[serde(rename_all = "camelCase")]
 pub(crate) struct IslandOfIrelandTrainResponse {
     #[ts(type = "\"northern-ireland\" | \"republic-of-ireland\"")]
+    #[schemars(with = "crate::ts_values::IslandOfIrelandNetworkWire")]
     network: IslandOfIrelandNetwork,
     train_code: String,
     /// The day the train started, `YYYY-MM-DD`.
@@ -257,7 +258,7 @@ pub(crate) struct IslandOfIrelandTrainResponse {
 }
 
 /// The train's state as the boards show it (`train_state::interpret`).
-#[derive(Debug, Clone, PartialEq, Serialize, ts_rs::TS)]
+#[derive(Debug, Clone, PartialEq, Serialize, ts_rs::TS, schemars::JsonSchema)]
 #[serde(rename_all = "camelCase")]
 pub(crate) struct IslandOfIrelandTrainLive {
     state: LiveState,
@@ -272,7 +273,7 @@ pub(crate) struct IslandOfIrelandTrainLive {
 
 /// One station whose board showed the train, with that board's times
 /// (`HH:MM`, Irish local time; `null` where the board had none).
-#[derive(Debug, Clone, PartialEq, Serialize, ts_rs::TS)]
+#[derive(Debug, Clone, PartialEq, Serialize, ts_rs::TS, schemars::JsonSchema)]
 #[serde(rename_all = "camelCase")]
 pub(crate) struct IslandOfIrelandTrainCall {
     /// The live board's `StationCode`.
@@ -296,7 +297,7 @@ fn parse_train_code(raw: &str) -> Option<String> {
         .then_some(code)
 }
 
-async fn get_train(
+pub(crate) async fn get_train(
     State(app): State<App>,
     Path((train_code, date)): Path<(String, String)>,
 ) -> Result<

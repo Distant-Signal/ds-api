@@ -3,6 +3,31 @@
 Changes to the Distant Signal (DS) HTTP API that a client such as DS-MCP
 needs to know about. Newest first. Field names are as served (camelCase).
 
+## 2026-11-06: Iarnród Éireann trains in groups, delegated and token APIs
+
+Additive; existing keys keep their names and values' meaning.
+
+- The group lists (`GET /public/groups/{id}/trains`, `/{id}/journeys`,
+  `/public/groups/shared-trains` and `/shared-journeys`): shared trains
+  and journeys (`GroupTrain`, `GroupJourney`, `SharedTrain`,
+  `SharedJourney`) gain `irishTrain` (`{ trainCode, serviceDate }` or
+  `null`), and name an Irish train's ends and state as `GET /Train/{id}`
+  does (the boards' `Origin` and `Destination`, `null` CRS).
+- Delegated API: `POST /Journeys/irish-train` joins `DELEGATED_ROUTES`
+  with the `journeys:write` scope; its errors are the delegated JSON shape
+  (code `invalid_request` for a 400). No `Idempotency-Key` is needed: a
+  repeat tracks nothing new and answers 200 with the existing journey.
+- Personal tokens: new `GET /v1/island-of-ireland/trains/{trainCode}/{date}`
+  (`trains:read`, the train bucket, `Cache-Control: private, max-age=30`),
+  the same body as `GET /public/island-of-ireland/trains/{trainCode}/{date}`.
+  Its `sources` credit `Iarnród Éireann` (new `irishRailRealtime` in
+  `ATTRIBUTION_SOURCES`). The OpenAPI document (`/v1/openapi.json`)
+  describes it.
+
+Types: the wider group types in `api-types/api.ts`; the OpenAPI document
+gains the route and `IslandOfIrelandTrainResponse`. DS-MCP: can track an
+Irish train through the delegated route, and read it as above.
+
 ## 2026-11-06: tracking Iarnród Éireann trains
 
 Additive; existing keys keep their names and values' meaning.

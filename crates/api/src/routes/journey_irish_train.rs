@@ -12,7 +12,8 @@
 //! leg mode, so `validate_train_uid` and the `knownTrain` checks stay
 //! GB-only.
 //!
-//! A session, with the Origin check every cookie mutation gets. Tracking a
+//! A session (with the Origin check every cookie mutation gets) or a
+//! delegated caller with `journeys:write` (`DELEGATED_ROUTES`). Tracking a
 //! train already tracked hands back that journey (200) rather than making
 //! a second one (201).
 
@@ -26,7 +27,7 @@ use common::island_of_ireland::{IslandOfIrelandNetwork, tracking};
 use serde::{Deserialize, Serialize};
 
 use crate::app::App;
-use crate::auth::AuthenticatedUser;
+use crate::auth::delegated::{DelegatedOrSessionUser, WriteScope};
 use crate::data::island_of_ireland::{self, TrainHistory};
 use crate::routes::journey_itinerary::RouteError;
 
@@ -57,12 +58,13 @@ pub(crate) struct TrackIrishTrainResponse {
 
 pub(crate) async fn post_irish_train(
     State(app): State<App>,
-    user: AuthenticatedUser,
+    user: DelegatedOrSessionUser<WriteScope>,
     body: Bytes,
 ) -> Response {
-    match track(&app, &user.id, &body).await {
+    let delegated = user.is_delegated();
+    match track(&app, &user.user_id, &body).await {
         Ok(response) => response,
-        Err(err) => err.render(false, "invalid_request"),
+        Err(err) => err.render(delegated, "invalid_request"),
     }
 }
 

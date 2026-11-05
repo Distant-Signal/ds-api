@@ -256,6 +256,7 @@ fn render_values(out: &mut String) {
                 "railDeliveryGroup": tokens::RAIL_DELIVERY_GROUP,
                 "rsp": tokens::RSP,
                 "tfl": tokens::TFL,
+                "irishRailRealtime": tokens::IRISH_RAIL_REALTIME,
             }),
         ),
         (

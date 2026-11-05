@@ -433,6 +433,167 @@
         ],
         "type": "object"
       },
+      "IslandOfIrelandNetworkWire": {
+        "description": "`common::island_of_ireland::IslandOfIrelandNetwork` as served (kebab\ncase): for the `OpenAPI` document only (the TypeScript spells it out\nwith `#[ts(type = ...)]`).",
+        "enum": [
+          "northern-ireland",
+          "republic-of-ireland"
+        ],
+        "type": "string"
+      },
+      "IslandOfIrelandTrainCall": {
+        "description": "One station whose board showed the train, with that board's times\n(`HH:MM`, Irish local time; `null` where the board had none).",
+        "properties": {
+          "expectedArrival": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "expectedDeparture": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "name": {
+            "description": "The catalogue name, else the live list's; `null` when neither knows\nthe code.",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "scheduledArrival": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "scheduledDeparture": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "stationCode": {
+            "description": "The live board's `StationCode`.",
+            "type": "string"
+          },
+          "stationId": {
+            "description": "The catalogue station (its page), when one has this live code.",
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        },
+        "required": [
+          "stationCode"
+        ],
+        "type": "object"
+      },
+      "IslandOfIrelandTrainLive": {
+        "description": "The train's state as the boards show it (`train_state::interpret`).",
+        "properties": {
+          "lastLocation": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/LastLocation"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "lateMinutes": {
+            "description": "Minutes late (negative: early), only while the train reports;\n`null` otherwise. Never a guess.",
+            "format": "int32",
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "observedAt": {
+            "description": "When a board last showed the train.",
+            "format": "date-time",
+            "type": "string"
+          },
+          "state": {
+            "$ref": "#/components/schemas/LiveState"
+          }
+        },
+        "required": [
+          "state",
+          "observedAt"
+        ],
+        "type": "object"
+      },
+      "IslandOfIrelandTrainResponse": {
+        "description": "`GET /public/island-of-ireland/trains/{trainCode}/{date}`.",
+        "properties": {
+          "calls": {
+            "description": "The stations whose boards showed it, in running order.",
+            "items": {
+              "$ref": "#/components/schemas/IslandOfIrelandTrainCall"
+            },
+            "type": "array"
+          },
+          "destination": {
+            "type": "string"
+          },
+          "destinationTime": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "firstSeenAt": {
+            "description": "When a board first and last showed the train.",
+            "format": "date-time",
+            "type": "string"
+          },
+          "lastSeenAt": {
+            "format": "date-time",
+            "type": "string"
+          },
+          "live": {
+            "$ref": "#/components/schemas/IslandOfIrelandTrainLive"
+          },
+          "network": {
+            "$ref": "#/components/schemas/IslandOfIrelandNetworkWire"
+          },
+          "origin": {
+            "type": "string"
+          },
+          "originTime": {
+            "description": "`HH:MM`, Irish local time; `null` when the boards didn't say.",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "serviceDate": {
+            "description": "The day the train started, `YYYY-MM-DD`.",
+            "format": "date",
+            "type": "string"
+          },
+          "trainCode": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "network",
+          "trainCode",
+          "serviceDate",
+          "origin",
+          "destination",
+          "live",
+          "calls",
+          "firstSeenAt",
+          "lastSeenAt"
+        ],
+        "type": "object"
+      },
       "JourneyDetailResponse": {
         "description": "What `GET /Journeys/{id}` gains (flattened into its response).",
         "properties": {
@@ -1504,6 +1665,30 @@
         ],
         "type": "object"
       },
+      "LastLocation": {
+        "description": "`Lastlocation` read: `\"Departed Dundalk\"` is `Departed` at `\"Dundalk\"`.",
+        "properties": {
+          "event": {
+            "$ref": "#/components/schemas/LastLocationEvent"
+          },
+          "place": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "event",
+          "place"
+        ],
+        "type": "object"
+      },
+      "LastLocationEvent": {
+        "description": "What `Lastlocation` says happened.",
+        "enum": [
+          "departed",
+          "arrived"
+        ],
+        "type": "string"
+      },
       "LateDepartureReliance": {
         "description": "A change that works only because the train it changes onto is running\nlate (DS-141): served as a train leg's `live.reliesOnLateDeparture` on\n`/Trips/plan` (`T` a local clock time), and as a saved journey's\n`connection.reliesOnLateDeparture` and an alternative's train leg's\n(`T` an instant). Absent otherwise.\n\nThe live overlay keeps a late train late (no recovery is modelled), so\nsuch a change is offered, but the train could make up time and leave\nnearer its booked time, before the traveller can reach it.",
         "properties": {
@@ -1802,6 +1987,31 @@
           "destinations"
         ],
         "type": "object"
+      },
+      "LiveState": {
+        "description": "A train's live state, as far as the boards show it.",
+        "oneOf": [
+          {
+            "const": "noReport",
+            "description": "On a board, but with no report: not running yet, or not reporting.",
+            "type": "string"
+          },
+          {
+            "const": "running",
+            "description": "Reporting: `Status` \"En Route\" or a `Lastlocation`.",
+            "type": "string"
+          },
+          {
+            "const": "arrived",
+            "description": "`Lastlocation` says it arrived at its destination.",
+            "type": "string"
+          },
+          {
+            "const": "notSeenRecently",
+            "description": "Was on a board, but on none for [`NOT_SEEN_RECENTLY_AFTER`], and we\nnever saw it arrive.",
+            "type": "string"
+          }
+        ]
       },
       "LiveStopStatus": {
         "description": "See the module doc for each value's meaning. `PascalCase` on the wire,\nlike `StopStatus` beside it.",
@@ -3875,6 +4085,118 @@
           }
         },
         "summary": "A train by its timetable id and date, with its calls and live state.",
+        "x-ds-scope": "trains:read"
+      }
+    },
+    "/v1/island-of-ireland/trains/{train_code}/{date}": {
+      "get": {
+        "operationId": "getV1IslandOfIrelandTrainsTrainCodeDate",
+        "parameters": [
+          {
+            "description": "The train code, 1 to 8 letters and digits, e.g. A120.",
+            "in": "path",
+            "name": "train_code",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "description": "The day the train started (YYYY-MM-DD), in Irish time.",
+            "in": "path",
+            "name": "date",
+            "required": true,
+            "schema": {
+              "format": "date",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "properties": {
+                    "attribution": {
+                      "$ref": "#/components/schemas/Attribution"
+                    },
+                    "data": {
+                      "$ref": "#/components/schemas/IslandOfIrelandTrainResponse"
+                    }
+                  },
+                  "required": [
+                    "data",
+                    "attribution"
+                  ],
+                  "type": "object"
+                }
+              }
+            },
+            "description": "The data, with its attribution.",
+            "headers": {
+              "Cache-Control": {
+                "description": "private, max-age=30",
+                "schema": {
+                  "type": "string"
+                }
+              },
+              "DS-Poll-Interval": {
+                "description": "The shortest sensible poll interval, in seconds.",
+                "schema": {
+                  "type": "integer"
+                }
+              },
+              "ETag": {
+                "description": "Weak; send it back as If-None-Match for a 304.",
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "304": {
+            "description": "Not modified (If-None-Match matched the ETag)."
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "No token, or a malformed, unknown, revoked, expired or idle one."
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "The token lacks this route's scope (`insufficient_scope`)."
+          },
+          "429": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "Rate limited (`rate_limited`); wait Retry-After seconds.",
+            "headers": {
+              "Retry-After": {
+                "schema": {
+                  "type": "integer"
+                }
+              }
+            }
+          }
+        },
+        "summary": "An Iarnród Éireann train by its code and the day it started, as the live departure boards showed it: its stations with their times and its last report. Kept 14 days (30 for a tracked train); a train no board has shown is not found.",
         "x-ds-scope": "trains:read"
       }
     },
