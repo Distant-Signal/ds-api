@@ -32,6 +32,7 @@ pub mod journey_revisions;
 pub mod journey_templates;
 pub mod journeys;
 pub mod leave_by;
+pub mod leg_outcomes;
 pub mod leg_validation;
 pub mod line_train_summaries;
 pub mod notification_settings;
