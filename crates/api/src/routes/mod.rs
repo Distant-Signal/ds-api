@@ -34,6 +34,7 @@ mod journey_follows_db_tests;
 mod journey_history_order_db_tests;
 pub mod journey_irish_train;
 pub mod journey_itinerary;
+pub mod journey_repeat;
 pub mod journey_replan;
 pub mod journey_templates;
 pub mod journey_tickets;

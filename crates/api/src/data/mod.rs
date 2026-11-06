@@ -27,6 +27,7 @@ pub mod journey_breaks;
 pub mod journey_feasibility;
 pub mod journey_follows;
 pub mod journey_operator_filter;
+pub mod journey_repeat;
 pub mod journey_replace;
 pub mod journey_revisions;
 pub mod journey_templates;

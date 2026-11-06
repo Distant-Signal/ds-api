@@ -132,6 +132,8 @@ pub fn router() -> Router {
         .merge(super::journey_tickets::router())
         // Reliability across the caller's journeys (2026-11-06).
         .merge(super::reliability::router())
+        // Track this journey again, and move it.
+        .merge(super::journey_repeat::router())
 }
 
 /// Three mutually-exclusive leg-creation shapes, discriminated by an
