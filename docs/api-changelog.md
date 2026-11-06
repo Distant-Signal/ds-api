@@ -46,9 +46,13 @@ Everything here is additive.
   open break. The journey keeps its id, name and `sourceTemplateId`; a
   regular plan the sweep made for it is cleared. 409 once a leg has left
   (the body says the journey has started).
-- `GET /JourneyTemplates` lists the most recently used regular journey
+- `GET /JourneyTemplates/mine` lists the most recently used regular journey
   first: the one with the newest journey made from it, else the newest.
   It was newest first.
+- `POST /JourneyTemplates` `mode: "plan"` takes `daysOfWeek` absent or
+  `null`: a regular journey with no days, a saved route. It has no next
+  date and nothing is made from it until the owner adds a date. A mask of
+  0 is still a 400.
 
 DS-MCP: nothing needed. It can offer "plan this journey again" with
 `GET .../repeat` and save the choice with `POST /Journeys/itinerary`.

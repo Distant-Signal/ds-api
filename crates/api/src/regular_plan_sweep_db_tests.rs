@@ -162,7 +162,7 @@ async fn occurrence(
         pool,
         USER,
         &PlanRecurrence {
-            days_of_week: 127,
+            days_of_week: Some(127),
             starts_on: None,
             ends_on: None,
             default_match_mode: mode.to_string(),

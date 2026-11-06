@@ -389,9 +389,10 @@ resolutionStatus: ResolutionStatus | null, };
  */
 export type CreateJourneyTemplateRequest = { "mode": "manual", customName?: string | null, legs: Array<TemplateLegRequest>, } | { "mode": "fromJourney", customName?: string | null, journeyId: number, } | { "mode": "plan", customName?: string | null, originCrs: string, destinationCrs: string, target: TemplateTarget, planOptions?: PlanOptions | null, usualItinerary: UsualItinerary, 
 /**
- * Required: a regular journey recurs.
+ * The days it recurs on; absent or `null` for none, a saved
+ * route that only runs when the owner adds a date.
  */
-daysOfWeek: number, startsOn?: string | null, endsOn?: string | null, 
+daysOfWeek?: number | null, startsOn?: string | null, endsOn?: string | null, 
 /**
  * `manual` (the default: remind me to pick) or `auto`.
  */

@@ -140,8 +140,10 @@ pub(crate) enum CreateJourneyTemplateRequest {
         #[serde(default)]
         plan_options: Option<PlanOptions>,
         usual_itinerary: UsualItinerary,
-        /// Required: a regular journey recurs.
-        days_of_week: i16,
+        /// The days it recurs on; absent or `null` for none, a saved
+        /// route that only runs when the owner adds a date.
+        #[serde(default)]
+        days_of_week: Option<i16>,
         #[serde(default)]
         starts_on: Option<NaiveDate>,
         #[serde(default)]
@@ -596,7 +598,7 @@ async fn post_journey_template(
             journey_templates::validate_template_recurrence(
                 &default_match_mode,
                 auto_commit_rule,
-                Some(days_of_week),
+                days_of_week,
                 starts_on,
                 ends_on,
             )
@@ -2691,6 +2693,65 @@ mod db_tests {
 
     fn date(text: &str) -> chrono::NaiveDate {
         text.parse().unwrap()
+    }
+
+    /// No days is a saved route: it has no next date, and the list
+    /// still shows it.
+    #[tokio::test]
+    #[ignore = "requires a live database: DATABASE_URL"]
+    async fn plan_mode_with_no_days_saves_a_route() {
+        let pool = connect().await;
+        let user_id = "test-regular-plan-no-days";
+        cleanup_user(&pool, user_id).await;
+        let token = seed_session(&pool, user_id).await;
+        let router = test_router(test_app(pool.clone()));
+        for days in [Value::Null, Value::from(0)] {
+            let mut body = plan_body(false);
+            body["daysOfWeek"] = days.clone();
+            let (status, created) = post_json(
+                router.clone(),
+                "/JourneyTemplates".to_string(),
+                Some(&token),
+                body,
+            )
+            .await;
+            if days.is_null() {
+                assert_eq!(status, StatusCode::OK, "{created}");
+                let id = created["templateId"].as_i64().unwrap();
+                let (_, detail) = request(
+                    router.clone(),
+                    format!("/JourneyTemplates/{id}"),
+                    Some(&token),
+                )
+                .await;
+                assert_eq!(detail["daysOfWeek"], Value::Null, "{detail}");
+                let (_, list) = request(
+                    router.clone(),
+                    "/JourneyTemplates/mine".to_string(),
+                    Some(&token),
+                )
+                .await;
+                let row = &list.as_array().unwrap()[0];
+                assert_eq!(
+                    (row["id"].as_i64(), &row["nextRunOn"]),
+                    (Some(id), &Value::Null)
+                );
+            } else {
+                // An empty mask is still refused: no days is null.
+                assert_eq!(status, StatusCode::BAD_REQUEST, "{created}");
+            }
+        }
+        let mut absent = plan_body(false);
+        absent.as_object_mut().unwrap().remove("daysOfWeek");
+        let (status, created) = post_json(
+            router,
+            "/JourneyTemplates".to_string(),
+            Some(&token),
+            absent,
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{created}");
+        cleanup_user(&pool, user_id).await;
     }
 
     #[tokio::test]
