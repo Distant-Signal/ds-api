@@ -443,6 +443,8 @@ pub struct PlanRecurrence {
     pub ends_on: Option<NaiveDate>,
     /// `manual` or `auto`.
     pub default_match_mode: String,
+    /// Skip the owner's bank holidays (phase 5; both of a pair).
+    pub skip_bank_holidays: bool,
 }
 
 /// What [`create_plan_templates`] did.
@@ -519,8 +521,9 @@ async fn insert_plan_template(
         "INSERT INTO journey_templates \
             (user_id, custom_name, days_of_week, active, starts_on, ends_on, default_match_mode, \
              auto_commit_rule, origin_crs, destination_crs, target_kind, target_time, \
-             target_day_offset, plan_options, usual_itinerary, station_buffer_minutes) \
-         VALUES ($1, $2, $3, TRUE, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15) \
+             target_day_offset, plan_options, usual_itinerary, station_buffer_minutes, \
+             skip_bank_holidays) \
+         VALUES ($1, $2, $3, TRUE, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16) \
          RETURNING id",
     )
     .bind(user_id)
@@ -538,6 +541,7 @@ async fn insert_plan_template(
     .bind(input.plan_options.as_ref().map(Json))
     .bind(Json(&input.usual_itinerary))
     .bind(input.station_buffer_minutes)
+    .bind(recurrence.skip_bank_holidays)
     .fetch_one(&mut **tx)
     .await?;
     for (index, leg) in template_legs_from_itinerary(&input.usual_itinerary)
@@ -857,6 +861,23 @@ pub async fn next_dates<'c, E>(
 where
     E: sqlx::PgExecutor<'c>,
 {
+    Ok(next_dates_and_skips(executor, template_ids, now)
+        .await?
+        .into_iter()
+        .map(|(id, (next, _))| (id, next))
+        .collect())
+}
+
+/// [`next_dates`] with each template's [`next_skips`]: the dates it
+/// passes over on the way to its next date, and why.
+pub async fn next_dates_and_skips<'c, E>(
+    executor: E,
+    template_ids: &[i64],
+    now: DateTime<Utc>,
+) -> anyhow::Result<HashMap<i64, (Option<NaiveDate>, Vec<NextSkip>)>>
+where
+    E: sqlx::PgExecutor<'c>,
+{
     let today = london_date(now);
     let rows: Vec<NextDateRow> = sqlx::query_as(&format!(
         "SELECT jt.id, jt.active, jt.days_of_week, jt.starts_on, jt.ends_on, \
@@ -867,9 +888,11 @@ where
                           AND {started}) AS today_started, \
                 ARRAY(SELECT s.service_date FROM journey_template_skipped_dates s \
                       WHERE s.template_id = jt.id AND s.service_date >= $3 \
-                      ORDER BY s.service_date) AS skipped_dates \
+                      ORDER BY s.service_date) AS skipped_dates, \
+                {bank_holidays} AS bank_holidays \
          FROM journey_templates jt WHERE jt.id = ANY($1)",
         started = occurrence_started_sql("j", "$2", "$3"),
+        bank_holidays = bank_holiday_dates_sql("jt", "$3"),
     ))
     .bind(template_ids)
     .bind(now)
@@ -878,7 +901,18 @@ where
     .await?;
     Ok(rows
         .into_iter()
-        .map(|row| (row.id, next_date_for(&row, today)))
+        .map(|row| {
+            let next = next_date_for(&row, today);
+            let skips = next_skips(
+                row.days_of_week.filter(|_| row.active),
+                row.starts_on,
+                today,
+                next,
+                &row.skipped_dates,
+                &row.bank_holidays,
+            );
+            (row.id, (next, skips))
+        })
         .collect())
 }
 
@@ -894,11 +928,15 @@ pub(crate) struct NextDateRow {
     pub today_started: bool,
     /// Skip markers from today on.
     pub skipped_dates: Vec<NaiveDate>,
+    /// Bank holidays the template skips from today on
+    /// ([`bank_holiday_dates_sql`]).
+    pub bank_holidays: Vec<NaiveDate>,
 }
 
 /// A template's next date: the next due date on or after `today` that
-/// isn't skipped, and isn't today when today's occurrence has already
-/// started. `None` when paused, not recurring, or past its end.
+/// isn't skipped, isn't a bank holiday it skips, and isn't today when
+/// today's occurrence has already started. `None` when paused, not
+/// recurring, or past its end.
 pub(crate) fn next_date_for(row: &NextDateRow, today: NaiveDate) -> Option<NaiveDate> {
     journey_templates::next_run_on(
         row.active,
@@ -907,8 +945,92 @@ pub(crate) fn next_date_for(row: &NextDateRow, today: NaiveDate) -> Option<Naive
         row.ends_on,
         today,
         row.today_started,
-        &row.skipped_dates,
+        &passed_over(&row.skipped_dates, &row.bank_holidays),
     )
+}
+
+/// The dates a template passes over: its skip markers and the bank
+/// holidays it skips, ascending, each once.
+pub(crate) fn passed_over(skipped: &[NaiveDate], bank_holidays: &[NaiveDate]) -> Vec<NaiveDate> {
+    let mut dates: Vec<NaiveDate> = skipped.iter().chain(bank_holidays).copied().collect();
+    dates.sort_unstable();
+    dates.dedup();
+    dates
+}
+
+/// SQL for the bank holidays template `template` skips from `from` (an SQL
+/// `DATE` expression) on, ascending: the owner's division's
+/// (`ds_store::bank_holidays::owner_division_sql`, England and Wales when
+/// they haven't chosen) when `skip_bank_holidays` is set, else none. The
+/// same rule as `ds_store::bank_holidays::bank_holiday_skip_sql`, which the
+/// notifier's mint reads, as a list.
+pub(crate) fn bank_holiday_dates_sql(template: &str, from: &str) -> String {
+    let division = ds_store::bank_holidays::owner_division_sql(template);
+    format!(
+        "CASE WHEN {template}.skip_bank_holidays THEN ARRAY( \
+             SELECT bh_l.holiday_date FROM bank_holidays bh_l \
+              WHERE bh_l.division = {division} AND bh_l.holiday_date >= {from} \
+              ORDER BY bh_l.holiday_date) \
+         ELSE ARRAY[]::date[] END"
+    )
+}
+
+/// Why [`next_skips`] lists a date: a skip marker (`"skipped"`) or a bank
+/// holiday in the owner's division (`"bank_holiday"`).
+pub const SKIP_REASON_SKIPPED: &str = "skipped";
+/// See [`SKIP_REASON_SKIPPED`].
+pub const SKIP_REASON_BANK_HOLIDAY: &str = "bank_holiday";
+
+/// One date a template passes over before its next date.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, ts_rs::TS)]
+#[serde(rename_all = "camelCase")]
+pub struct NextSkip {
+    pub date: NaiveDate,
+    /// `"skipped"` or `"bank_holiday"`; `"skipped"` when both apply.
+    #[ts(as = "crate::ts_values::NextSkipReason")]
+    pub reason: &'static str,
+}
+
+/// The due dates from `today` (or `starts_on`, if later) up to, not
+/// including, `next`, that the template passes over, ascending: each with
+/// a skip marker (`"skipped"`) or a bank holiday it skips
+/// (`"bank_holiday"`); a date with both is `"skipped"`. Only days in
+/// `days_of_week` count (a Saturday bank holiday is no skip for a weekday
+/// journey). Empty when there is no next date (paused, not recurring, or
+/// past `endsOn`).
+pub(crate) fn next_skips(
+    days_of_week: Option<i16>,
+    starts_on: Option<NaiveDate>,
+    today: NaiveDate,
+    next: Option<NaiveDate>,
+    skipped: &[NaiveDate],
+    bank_holidays: &[NaiveDate],
+) -> Vec<NextSkip> {
+    use chrono::Datelike;
+
+    let (Some(days), Some(next)) = (days_of_week, next) else {
+        return Vec::new();
+    };
+    let mut skips = Vec::new();
+    let mut date = starts_on.map_or(today, |start| start.max(today));
+    while date < next {
+        let bit = 1_i16 << date.weekday().num_days_from_monday();
+        if days & bit != 0 {
+            let reason = if skipped.contains(&date) {
+                Some(SKIP_REASON_SKIPPED)
+            } else if bank_holidays.contains(&date) {
+                Some(SKIP_REASON_BANK_HOLIDAY)
+            } else {
+                None
+            };
+            if let Some(reason) = reason {
+                skips.push(NextSkip { date, reason });
+            }
+        }
+        let Some(after) = date.succ_opt() else { break };
+        date = after;
+    }
+    skips
 }
 
 /// Skip markers on `template_id` from London's today on, ascending.
@@ -1084,6 +1206,7 @@ mod tests {
             ends_on,
             today_started,
             skipped_dates: skipped,
+            bank_holidays: vec![],
         };
         assert_eq!(next_date_for(&row(false, vec![], None), today), Some(today));
         let tuesday = today.succ_opt().unwrap();

@@ -166,6 +166,7 @@ async fn occurrence(
             starts_on: None,
             ends_on: None,
             default_match_mode: mode.to_string(),
+            skip_bank_holidays: true,
         },
         &PlanTemplateInput {
             custom_name: None,

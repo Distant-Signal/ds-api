@@ -55,6 +55,8 @@ pub struct JourneyTemplateRow {
     pub paired_template_id: Option<i64>,
     /// Minutes to get to the station, for the leave-by (phase 2).
     pub station_buffer_minutes: Option<i16>,
+    /// Whether it skips its owner's bank holidays (phase 5).
+    pub skip_bank_holidays: bool,
 }
 
 impl JourneyTemplateRow {
@@ -136,6 +138,12 @@ pub struct JourneyTemplateListItem {
     pub next_date: Option<NaiveDate>,
     /// Skipped dates from today on, ascending.
     pub skipped_dates: Vec<NaiveDate>,
+    /// Bank holidays (phase 5, additive): whether the template skips the
+    /// bank holidays of its owner's division (default true), and the dates
+    /// it passes over before `nextDate`, ascending, with why
+    /// (`regular_journeys::next_skips`).
+    pub skip_bank_holidays: bool,
+    pub next_skips: Vec<crate::data::regular_journeys::NextSkip>,
 }
 
 /// [`list_templates_for_user`]'s row, before [`next_run_on`] is worked out.
@@ -167,6 +175,10 @@ struct JourneyTemplateListRow {
     today_started: bool,
     /// Skipped dates (`journey_template_skipped_dates`) from today on.
     skipped_dates: Vec<NaiveDate>,
+    skip_bank_holidays: bool,
+    /// The bank holidays it skips from today on
+    /// (`regular_journeys::bank_holiday_dates_sql`).
+    bank_holidays: Vec<NaiveDate>,
     origin_crs: Option<String>,
     origin_name: Option<String>,
     destination_crs: Option<String>,
@@ -549,7 +561,7 @@ where
                 jt.updated_at, jt.origin_crs, so.name AS origin_name, jt.destination_crs, \
                 sd.name AS destination_name, jt.target_kind, jt.target_time, \
                 jt.target_day_offset, jt.plan_options, jt.usual_itinerary, jt.paired_template_id, \
-                jt.station_buffer_minutes \
+                jt.station_buffer_minutes, jt.skip_bank_holidays \
          FROM journey_templates jt \
          LEFT JOIN stations so ON so.crs = UPPER(jt.origin_crs)::bpchar \
          LEFT JOIN stations sd ON sd.crs = UPPER(jt.destination_crs)::bpchar \
@@ -629,7 +641,9 @@ pub async fn list_templates_for_user(
                     SELECT s.service_date FROM journey_template_skipped_dates s \
                     WHERE s.template_id = jt.id AND s.service_date >= $3 \
                     ORDER BY s.service_date \
-                ) AS skipped_dates \
+                ) AS skipped_dates, \
+                jt.skip_bank_holidays, \
+                {bank_holidays} AS bank_holidays \
          FROM journey_templates jt \
          LEFT JOIN ( \
              SELECT template_id, COUNT(*) AS leg_count, \
@@ -652,6 +666,7 @@ pub async fn list_templates_for_user(
          ORDER BY jt.created_at DESC \
          LIMIT $2",
         started = crate::data::regular_journeys::occurrence_started_sql("j", "$4", "$3"),
+        bank_holidays = crate::data::regular_journeys::bank_holiday_dates_sql("jt", "$3"),
     ))
     .bind(user_id)
     .bind(crate::data::train_tracking::MINE_LIST_LIMIT)
@@ -661,56 +676,71 @@ pub async fn list_templates_for_user(
     .await?;
     Ok(rows
         .into_iter()
-        .map(|row| JourneyTemplateListItem {
-            next_date: next_run_on(
+        .map(|row| {
+            let passed_over =
+                crate::data::regular_journeys::passed_over(&row.skipped_dates, &row.bank_holidays);
+            let next_date = next_run_on(
                 row.active,
                 row.days_of_week,
                 row.starts_on,
                 row.ends_on,
                 today,
                 row.today_started,
-                &row.skipped_dates,
-            ),
-            target: row
-                .target_kind
-                .clone()
-                .zip(row.target_time)
-                .map(
-                    |(kind, time)| crate::data::regular_journeys::TemplateTarget {
-                        kind,
-                        time,
-                        day_offset: row.target_day_offset,
-                    },
-                ),
-            next_run_on: next_run_on(
-                row.active,
-                row.days_of_week,
+                &passed_over,
+            );
+            let next_skips = crate::data::regular_journeys::next_skips(
+                row.days_of_week.filter(|_| row.active),
                 row.starts_on,
-                row.ends_on,
                 today,
-                row.ran_today,
+                next_date,
                 &row.skipped_dates,
-            ),
-            id: row.id,
-            custom_name: row.custom_name,
-            created_at: row.created_at,
-            leg_count: row.leg_count,
-            first_origin_crs: row.first_origin_crs,
-            first_origin_name: row.first_origin_name,
-            last_destination_crs: row.last_destination_crs,
-            last_destination_name: row.last_destination_name,
-            active: row.active,
-            days_of_week: row.days_of_week,
-            default_match_mode: row.default_match_mode,
-            has_open_legs: row.has_open_legs,
-            origin_crs: row.origin_crs,
-            origin_name: row.origin_name,
-            destination_crs: row.destination_crs,
-            destination_name: row.destination_name,
-            paired_template_id: row.paired_template_id,
-            starts_on: row.starts_on,
-            ends_on: row.ends_on,
-            skipped_dates: row.skipped_dates,
+                &row.bank_holidays,
+            );
+            JourneyTemplateListItem {
+                next_date,
+                next_skips,
+                skip_bank_holidays: row.skip_bank_holidays,
+                target: row
+                    .target_kind
+                    .clone()
+                    .zip(row.target_time)
+                    .map(
+                        |(kind, time)| crate::data::regular_journeys::TemplateTarget {
+                            kind,
+                            time,
+                            day_offset: row.target_day_offset,
+                        },
+                    ),
+                next_run_on: next_run_on(
+                    row.active,
+                    row.days_of_week,
+                    row.starts_on,
+                    row.ends_on,
+                    today,
+                    row.ran_today,
+                    &passed_over,
+                ),
+                id: row.id,
+                custom_name: row.custom_name,
+                created_at: row.created_at,
+                leg_count: row.leg_count,
+                first_origin_crs: row.first_origin_crs,
+                first_origin_name: row.first_origin_name,
+                last_destination_crs: row.last_destination_crs,
+                last_destination_name: row.last_destination_name,
+                active: row.active,
+                days_of_week: row.days_of_week,
+                default_match_mode: row.default_match_mode,
+                has_open_legs: row.has_open_legs,
+                origin_crs: row.origin_crs,
+                origin_name: row.origin_name,
+                destination_crs: row.destination_crs,
+                destination_name: row.destination_name,
+                paired_template_id: row.paired_template_id,
+                starts_on: row.starts_on,
+                ends_on: row.ends_on,
+                skipped_dates: row.skipped_dates,
+            }
         })
         .collect())
 }
@@ -805,6 +835,7 @@ pub async fn replace_template(
                 plan_options = COALESCE($15, plan_options), \
                 usual_itinerary = COALESCE($16, usual_itinerary), \
                 station_buffer_minutes = CASE WHEN $17 THEN $18 ELSE station_buffer_minutes END, \
+                skip_bank_holidays = COALESCE($19, skip_bank_holidays), \
                 updated_at = NOW() \
          WHERE id = $8 AND user_id = $9",
     )
@@ -826,6 +857,7 @@ pub async fn replace_template(
     .bind(target.usual_itinerary.as_ref().map(sqlx::types::Json))
     .bind(target.station_buffer_minutes.is_some())
     .bind(target.station_buffer_minutes.flatten())
+    .bind(target.skip_bank_holidays)
     .execute(&mut *tx)
     .await?;
     if result.rows_affected() == 0 {
@@ -857,6 +889,8 @@ pub struct TargetUpdate {
     pub usual_itinerary: Option<crate::data::regular_journeys::UsualItinerary>,
     /// `Some(None)` clears the station buffer.
     pub station_buffer_minutes: Option<Option<i16>>,
+    /// Whether it skips its owner's bank holidays (phase 5).
+    pub skip_bank_holidays: Option<bool>,
 }
 
 /// Deletes a template the caller owns. Cascades into

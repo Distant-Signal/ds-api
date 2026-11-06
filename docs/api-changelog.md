@@ -3,6 +3,43 @@
 Changes to the Distant Signal (DS) HTTP API that a client such as DS-MCP
 needs to know about. Newest first. Field names are as served (camelCase).
 
+## 2026-11-06: Bank holidays
+
+Phase 5 of regular journeys (distant-signal's
+`docs/superpowers/specs/2026-11-06-regular-journeys-design.md` §8; ds-core
+v0.9.0). Everything here is additive.
+
+- `GET /JourneyTemplates/mine` items and `GET /JourneyTemplates/{id}`
+  gain:
+  - `skipBankHolidays` (default true): the regular journey skips the bank
+    holidays of its owner's division.
+  - `nextSkips: [{date, reason}]`: the due dates from London's today up
+    to, not including, `nextDate` that it passes over, in date order.
+    `reason` is `"skipped"` (a skip marker, `POST
+    /JourneyTemplates/{id}/skip`) or `"bank_holiday"` (a bank holiday in
+    the owner's division, with `skipBankHolidays` on); when both apply to
+    one date it is `"skipped"`. Only days in `daysOfWeek` count. Empty
+    when `nextDate` is `null`.
+  - `nextDate` (and the legacy `nextRunOn`) now pass over those bank
+    holidays too, and so does the default date of `POST
+    /JourneyTemplates/{id}/skip`.
+- `POST /JourneyTemplates` `mode: "plan"` takes `skipBankHolidays`
+  (default true; the return journey gets the same). `PUT
+  /JourneyTemplates/{id}` takes it optionally: absent keeps it.
+- `GET /preferences` gains `bankHolidayDivision`: `"england-and-wales"`,
+  `"scotland"`, `"northern-ireland"`, or `null` until chosen (England and
+  Wales's holidays are used then). `PUT /preferences/bank-holiday-division`
+  `{division}` sets it (`null` goes back to the default); 204, 400 for
+  another value. Cookie only.
+- The holidays come from GOV.UK's bank holidays JSON (Open Government
+  Licence v3.0), fetched once a day for the whole service when
+  `BANK_HOLIDAYS_ENABLED` (off by default). Until the first fetch nothing
+  is skipped.
+- The account export's `account` gains `bank_holiday_division`, and each
+  journey template `skip_bank_holidays`.
+
+DS-MCP: no change needed; it doesn't read templates.
+
 ## 2026-11-06: each train leg's final arrival is recorded
 
 No route changes. Each retention pass (the api's hourly loop or the

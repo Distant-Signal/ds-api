@@ -162,6 +162,7 @@ fn visit_roots(v: &mut Collector) {
     v.visit::<crate::routes::preferences::NotificationPreferences>();
     v.visit::<crate::routes::preferences::NotificationPreferencesUpdate>();
     v.visit::<crate::routes::preferences::PinnedLineAlerts>();
+    v.visit::<crate::routes::preferences::BankHolidayDivisionUpdate>();
     v.visit::<crate::data::notifications::PushDevice>();
     v.visit::<crate::routes::freshness::DataFreshness>();
     v.visit::<crate::routes::history_retention::HistoryRetention>();

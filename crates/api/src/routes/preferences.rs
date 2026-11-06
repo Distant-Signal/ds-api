@@ -15,7 +15,9 @@ use serde::Serialize;
 use crate::app::{App, Router};
 use crate::auth::AuthenticatedUser;
 use crate::auth::delegated::{DelegatedOrSessionUser, PreferencesReadScope};
-use crate::data::{custom_lines, notification_settings, preferences, queries, reference};
+use crate::data::{
+    bank_holidays, custom_lines, notification_settings, preferences, queries, reference,
+};
 
 pub fn router() -> Router {
     Router::new()
@@ -35,6 +37,10 @@ pub fn router() -> Router {
         .route(
             "/preferences/pinned-operators",
             axum::routing::put(put_pinned_operators),
+        )
+        .route(
+            "/preferences/bank-holiday-division",
+            axum::routing::put(put_bank_holiday_division),
         )
         .route(
             "/preferences/notifications",
@@ -263,6 +269,12 @@ pub(crate) struct PreferencesResponse {
     /// Of `pinned_lines`, the ones whose status pushes are off
     /// (`PUT /preferences/pinned-lines/{lineId}/alerts`, DS-153). Additive.
     silent_pinned_lines: Vec<String>,
+    /// Whose bank holidays the caller's regular journeys skip
+    /// (`PUT /preferences/bank-holiday-division`; regular journeys phase
+    /// 5). `null` until chosen, when England and Wales's are used. Additive.
+    #[ts(as = "Option<crate::ts_values::BankHolidayDivision>")]
+    #[schemars(with = "Option<crate::ts_values::BankHolidayDivision>")]
+    bank_holiday_division: Option<String>,
 }
 
 pub(crate) async fn get_preferences(
@@ -356,12 +368,50 @@ pub(crate) async fn get_preferences(
     let pinned_operators =
         filter_known_pinned_operators(pinned_operator_codes, known_operator_codes);
 
+    let bank_holiday_division = bank_holidays::user_division(&app.database, &user.user_id)
+        .await
+        .map_err(internal_error)?;
+
     Ok(Json(PreferencesResponse {
         pinned_lines,
         pinned_stations,
         pinned_operators,
         silent_pinned_lines,
+        bank_holiday_division,
     }))
+}
+
+/// `PUT /preferences/bank-holiday-division` `{division}`: whose bank
+/// holidays the caller's regular journeys skip, `"england-and-wales"`,
+/// `"scotland"` or `"northern-ireland"`, or `null` to go back to the
+/// default (England and Wales). 204; 400 for another value. Unknown fields
+/// are refused.
+#[derive(Debug, serde::Deserialize, ts_rs::TS)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub(crate) struct BankHolidayDivisionUpdate {
+    #[ts(as = "Option<crate::ts_values::BankHolidayDivision>")]
+    division: Option<String>,
+}
+
+async fn put_bank_holiday_division(
+    State(app): State<App>,
+    user: AuthenticatedUser,
+    Json(body): Json<BankHolidayDivisionUpdate>,
+) -> Result<StatusCode, (StatusCode, String)> {
+    if body
+        .division
+        .as_deref()
+        .is_some_and(|division| !ds_store::bank_holidays::is_division(division))
+    {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            "Choose England and Wales, Scotland or Northern Ireland.".to_string(),
+        ));
+    }
+    bank_holidays::set_user_division(&app.database, &user.id, body.division.as_deref())
+        .await
+        .map_err(internal_error)?;
+    Ok(StatusCode::NO_CONTENT)
 }
 
 /// Upper bound on how many ids/codes a single `PUT /preferences/pinned-*`

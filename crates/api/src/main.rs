@@ -144,11 +144,16 @@ fn main() -> std::process::ExitCode {
 /// clap settings `AppState::init` and `server_main` parse, and the
 /// variables read outside clap (`default: null` where the default is not a
 /// single exported value).
+#[expect(
+    clippy::too_many_lines,
+    reason = "one builder chain, a line or so per setting"
+)]
 fn config_defaults() -> ds_runtime::service_args::ConfigDefaults {
     use clap::CommandFactory as _;
     let live = data::trip_plan_live::LiveConfig::default();
     let sweep = api::journey_break_sweep::SweepConfig::default();
     let plan_sweep = api::regular_plan_sweep::SweepConfig::default();
+    let bank_holidays = api::bank_holidays_sync::SyncConfig::default();
     ds_runtime::service_args::ConfigDefaults::for_config::<data::config::ServiceArguments>("api")
         .args(&api::edge::EdgeSettings::command())
         .args(&api::rate_limit::RateLimitSettings::command())
@@ -238,6 +243,15 @@ fn config_defaults() -> ds_runtime::service_args::ConfigDefaults {
         .env(
             "REGULAR_PLAN_SWEEP_MORNING_CHECK_HOUR",
             Some(&plan_sweep.morning_check_hour.to_string()),
+        )
+        .env(
+            "BANK_HOLIDAYS_ENABLED",
+            Some(&bank_holidays.enabled.to_string()),
+        )
+        .env("BANK_HOLIDAYS_URL", Some(&bank_holidays.url))
+        .env(
+            "BANK_HOLIDAYS_INTERVAL_HOURS",
+            Some(&bank_holidays.interval_hours.to_string()),
         )
 }
 
@@ -790,6 +804,9 @@ fn spawn_background_loops(app: &App, shutdown: &api::shutdown::ShutdownSignal) -
     // The regular journeys plan sweep plans with the same graph cache, so
     // it too runs here whatever API_BACKGROUND_LOOPS says.
     let plan_sweep = spawn_regular_plan_sweep(app, shutdown);
+    // The bank holidays sync is the api's own (only the api writes
+    // bank_holidays), so it too runs whatever API_BACKGROUND_LOOPS says.
+    let bank_holidays = spawn_bank_holidays_sync(app, shutdown);
     // Today's and tomorrow's trip-plan graphs, built ahead of requests in
     // this process's own cache (DS-225), whatever API_BACKGROUND_LOOPS says.
     let prewarm = tokio::spawn(routes::trips::prewarm_graphs(
@@ -799,6 +816,7 @@ fn spawn_background_loops(app: &App, shutdown: &api::shutdown::ShutdownSignal) -
     let break_sweep: Vec<tokio::task::JoinHandle<()>> = break_sweep
         .into_iter()
         .chain(plan_sweep)
+        .chain(bank_holidays)
         .chain(std::iter::once(prewarm))
         .collect();
     if !app.config.background_loops {
@@ -910,6 +928,40 @@ fn spawn_regular_plan_sweep(
     );
     if let Err(err) = runner.register(api::regular_plan_sweep::loop_spec(app.clone(), &config)) {
         tracing::error!(error = ?err, "regular plan sweep not started");
+        return None;
+    }
+    Some(tokio::spawn(
+        runner
+            .spawn(BACKGROUND_LOOP_STALL_AFTER)
+            .run_until(shutdown.triggered()),
+    ))
+}
+
+/// The bank holidays sync (`api::bank_holidays_sync`), when
+/// `BANK_HOLIDAYS_ENABLED`: its own runner and lock session, as the plan
+/// sweep has.
+fn spawn_bank_holidays_sync(
+    app: &App,
+    shutdown: &api::shutdown::ShutdownSignal,
+) -> Option<tokio::task::JoinHandle<()>> {
+    let config = api::bank_holidays_sync::SyncConfig::from_env();
+    tracing::info!(
+        enabled = config.enabled,
+        interval_hours = config.interval_hours,
+        "bank holidays sync (BANK_HOLIDAYS_ENABLED)"
+    );
+    if !config.enabled {
+        return None;
+    }
+    let pool = app.database.clone();
+    let mut runner = ds_store::loops::LoopRunner::new(
+        pool.clone(),
+        ds_store::loops::LockSession::from_pool(pool.clone()),
+    );
+    let registered =
+        api::bank_holidays_sync::loop_spec(pool, &config).and_then(|spec| runner.register(spec));
+    if let Err(err) = registered {
+        tracing::error!(error = ?err, "bank holidays sync not started");
         return None;
     }
     Some(tokio::spawn(
