@@ -1166,6 +1166,20 @@ mod tests {
         );
     }
 
+    /// The 2026-11-06 `ds-sso` token: no `profile` claims at all, only the
+    /// subject and groups. Both fields read as `None` (not `Some("")`), which
+    /// is what tells `data::users::upsert_user_in` to keep the stored names.
+    #[test]
+    fn a_token_without_profile_claims_reads_as_no_name_and_no_username() {
+        let claims = id_token_claims(serde_json::json!({
+            "groups": ["distant-signal-users"],
+        }));
+        let identity = identity_from_claims(raw_claims_from_id_token(&claims));
+        assert_eq!(identity.name, None);
+        assert_eq!(identity.preferred_username, None);
+        assert_eq!(identity.groups, vec!["distant-signal-users".to_string()]);
+    }
+
     /// `localized`'s documented contract, which is otherwise only an
     /// assertion in a comment: the untagged form is what this app reads,
     /// it wins over any language-tagged sibling, and a token carrying ONLY

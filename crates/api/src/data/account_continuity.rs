@@ -466,6 +466,73 @@ mod db_tests {
             .expect("login")
     }
 
+    /// 2026-11-06: a first `ds-sso` login without name claims re-keys the
+    /// account and keeps its name and username, and so does the next
+    /// claimless login on the new sub.
+    #[tokio::test]
+    #[ignore = "requires a live database; run with `cargo test -p api account_continuity -- \
+                --ignored --test-threads=1`"]
+    async fn a_rekey_and_a_claimless_login_keep_the_names() {
+        const FROM: &str = "TEST-CONTINUITY-NAMES-OLD";
+        const TO: &str = "TEST-CONTINUITY-NAMES-NEW";
+        const SNOWFLAKE: &str = "900000000000000077";
+        let pool = connect().await;
+        clear(&pool, &[FROM, TO]).await;
+        sqlx::query(
+            "INSERT INTO users (id, name, username, discord_id) \
+             VALUES ($1, 'Named Rider', 'named-rider', $2)",
+        )
+        .bind(FROM)
+        .bind(SNOWFLAKE)
+        .execute(&pool)
+        .await
+        .expect("seed user");
+        let claimless = OidcIdentity {
+            sub: TO.to_string(),
+            name: None,
+            preferred_username: None,
+            groups: Vec::new(),
+        };
+
+        let result = login(&pool, &claimless, &discord(SNOWFLAKE))
+            .await
+            .expect("re-keying login");
+        assert_eq!(
+            result.outcome,
+            Outcome::Rekeyed {
+                from: FROM.to_string(),
+                matched_by: MatchedBy::DiscordId,
+            }
+        );
+        let user = result.user.expect("a user");
+        assert_eq!(user.id, TO);
+        assert!(!user.created);
+        assert_eq!(user.name.as_deref(), Some("Named Rider"));
+        assert_eq!(user.username.as_deref(), Some("named-rider"));
+
+        let result = login(&pool, &claimless, &ContinuityClaims::default())
+            .await
+            .expect("claimless login");
+        assert_eq!(result.outcome, Outcome::Upserted);
+        let user = result.user.expect("a user");
+        assert_eq!(user.name.as_deref(), Some("Named Rider"));
+        assert_eq!(user.username.as_deref(), Some("named-rider"));
+        let stored: (Option<String>, Option<String>) =
+            sqlx::query_as("SELECT name, username FROM users WHERE id = $1")
+                .bind(TO)
+                .fetch_one(&pool)
+                .await
+                .expect("read the stored names");
+        assert_eq!(
+            stored,
+            (
+                Some("Named Rider".to_string()),
+                Some("named-rider".to_string())
+            )
+        );
+        clear(&pool, &[FROM, TO]).await;
+    }
+
     /// No account matches: a new one is created, with the Discord id.
     #[tokio::test]
     #[ignore = "requires a live database; run with `cargo test -p api account_continuity -- \
