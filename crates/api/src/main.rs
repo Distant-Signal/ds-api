@@ -1016,6 +1016,7 @@ async fn session_cleanup_sweep_loop(app: App) {
     let mut interval = sweep_interval(app.config.session_cleanup_interval_secs);
     let retention_policy = data::retention::RetentionPolicy {
         past_travel_days: app.config.past_travel_retention_days,
+        regular_journey_days: app.config.regular_journey_retention_days,
         stale_push_subscription_days: app.config.stale_push_subscription_days,
         inactive_account_days: app.config.inactive_account_retention_days,
     };

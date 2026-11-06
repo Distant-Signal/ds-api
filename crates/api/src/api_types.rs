@@ -83,6 +83,8 @@ fn visit_roots(v: &mut Collector) {
     v.visit::<crate::routes::journey_templates::JourneyTemplateDetailResponse>();
     v.visit::<crate::routes::journey_templates::CreateJourneyTemplateResponse>();
     v.visit::<crate::routes::journey_templates::MaterializeTemplateResponse>();
+    v.visit::<crate::routes::journey_templates::SetTemplateActiveResponse>();
+    v.visit::<crate::routes::journey_templates::SkipTemplateDateResponse>();
     // Breaks, alternatives and replans.
     v.visit::<crate::data::journey_alternatives::SuggestionSet>();
     v.visit::<crate::routes::journey_replan::BreakResponse>();
@@ -177,6 +179,8 @@ fn visit_roots(v: &mut Collector) {
     v.visit::<crate::routes::journey_templates::CreateJourneyTemplateRequest>();
     v.visit::<crate::routes::journey_templates::PutJourneyTemplateRequest>();
     v.visit::<crate::routes::journey_templates::MaterializeTemplateRequest>();
+    v.visit::<crate::routes::journey_templates::SetTemplateActiveRequest>();
+    v.visit::<crate::routes::journey_templates::SkipTemplateDateRequest>();
     // Train and ticket writes.
     v.visit::<common::TrackPinRequest>();
     v.visit::<crate::routes::train::TrackPinResponse>();

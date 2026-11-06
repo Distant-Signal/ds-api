@@ -429,6 +429,16 @@ pub struct ServiceArguments {
     #[arg(long, env, default_value_t = 548)]
     pub past_travel_retention_days: i64,
 
+    /// Personal-data retention for regular journeys (regular journeys
+    /// design §4.2, decision 11): a journey made from a regular journey is
+    /// deleted this many days after its last leg when nothing on it matters
+    /// for Delay Repay (no ticket, no train 15 minutes late or cancelled;
+    /// `data::retention::prune_regular_occurrences`); the rest fall to
+    /// `past_travel_retention_days`. **Off by default (0)**: the chart sets
+    /// 90 once the website's privacy page says so.
+    #[arg(long, env, default_value_t = 0)]
+    pub regular_journey_retention_days: i64,
+
     /// Personal-data retention: push subscriptions are deleted once their
     /// user has not logged in for this many days AND the subscription has
     /// not been renewed in that time. `last_seen_at` alone is not an

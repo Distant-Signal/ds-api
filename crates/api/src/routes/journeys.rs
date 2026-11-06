@@ -1544,6 +1544,11 @@ pub(crate) struct JourneyDetailResponse {
     #[serde(skip_serializing_if = "std::ops::Not::not")]
     #[ts(optional = nullable)]
     can_follow: bool,
+    /// The regular journey (`journey_templates.id`) this journey was made
+    /// from: the page links to it and offers "Skip". Owner only; `null`
+    /// for anyone else, when it wasn't made from one, or when that was
+    /// deleted. Additive (2026-11-06).
+    source_template_id: Option<i64>,
 }
 
 /// The unlisted share link `unlisted_links::UnlistedLink` mapped onto the
@@ -2332,6 +2337,7 @@ async fn build_journey_detail_response(
         share_link,
         followed_from: None,
         can_follow: false,
+        source_template_id: summary.source_template_id.filter(|_| is_owner),
     })
 }
 
@@ -3241,6 +3247,7 @@ mod db_tests {
             session_cleanup_interval_secs: 3600,
             background_loops: true,
             past_travel_retention_days: 548,
+            regular_journey_retention_days: 0,
             stale_push_subscription_days: 365,
             inactive_account_retention_days: 0,
         };

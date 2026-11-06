@@ -18,6 +18,7 @@ use crate::app::{App, Router};
 use crate::auth::AuthenticatedUser;
 use crate::data::journey_templates::{self, TemplateLegInput};
 use crate::data::journeys;
+use crate::data::regular_journeys::{self, PlanOptions, TemplateTarget, UsualItinerary};
 use crate::data::train_tracking;
 
 pub fn router() -> Router {
@@ -39,6 +40,22 @@ pub fn router() -> Router {
         .route(
             "/JourneyTemplates/{template_id}/materialize",
             axum::routing::post(post_materialize_journey_template),
+        )
+        .route(
+            "/JourneyTemplates/{template_id}/active",
+            axum::routing::put(put_journey_template_active),
+        )
+        .route(
+            "/JourneyTemplates/{template_id}/skip",
+            axum::routing::post(post_journey_template_skip),
+        )
+        .route(
+            "/JourneyTemplates/{template_id}/skip/{service_date}",
+            axum::routing::delete(delete_journey_template_skip),
+        )
+        .route(
+            "/JourneyTemplates/{template_id}/pair",
+            axum::routing::delete(delete_journey_template_pair),
         )
 }
 
@@ -72,6 +89,10 @@ pub(crate) struct TemplateLegRequest {
     rename_all_fields = "camelCase"
 )]
 #[ts(optional_fields = nullable)]
+#[expect(
+    clippy::large_enum_variant,
+    reason = "a request body, deserialised once per request"
+)]
 pub(crate) enum CreateJourneyTemplateRequest {
     /// Build a new template directly from caller-supplied legs. See this
     /// plan's Judgment Call 5: the frontend built in this plan never
@@ -98,6 +119,49 @@ pub(crate) enum CreateJourneyTemplateRequest {
         custom_name: Option<String>,
         journey_id: i64,
     },
+    /// A regular journey from a plan (regular journeys design §4.2): the
+    /// target it was planned for, the plan's options and the itinerary the
+    /// user picked as their usual train. The template legs come from the
+    /// itinerary's train legs, each with a departure window around its
+    /// booked departure. With `return`, the return journey is created too
+    /// (from `destinationCrs` back to `originCrs`, the same days) and the
+    /// two are linked as a pair; the cap counts both.
+    Plan {
+        #[serde(default)]
+        custom_name: Option<String>,
+        origin_crs: String,
+        destination_crs: String,
+        target: TemplateTarget,
+        #[serde(default)]
+        plan_options: Option<PlanOptions>,
+        usual_itinerary: UsualItinerary,
+        /// Required: a regular journey recurs.
+        days_of_week: i16,
+        #[serde(default)]
+        starts_on: Option<NaiveDate>,
+        #[serde(default)]
+        ends_on: Option<NaiveDate>,
+        /// `manual` (the default: remind me to pick) or `auto`.
+        #[serde(default)]
+        #[ts(as = "Option<crate::ts_values::TemplateMatchMode>")]
+        default_match_mode: Option<String>,
+        #[serde(default, rename = "return")]
+        return_journey: Option<ReturnJourneyRequest>,
+    },
+}
+
+/// The return journey of a plan-mode create: its own target, options and
+/// usual itinerary.
+#[derive(Debug, Deserialize, ts_rs::TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(optional_fields = nullable)]
+pub(crate) struct ReturnJourneyRequest {
+    #[serde(default)]
+    custom_name: Option<String>,
+    target: TemplateTarget,
+    #[serde(default)]
+    plan_options: Option<PlanOptions>,
+    usual_itinerary: UsualItinerary,
 }
 
 /// `PUT /JourneyTemplates/{id}`'s body -- full-resource replace (Judgment
@@ -130,6 +194,25 @@ pub(crate) struct PutJourneyTemplateRequest {
     default_match_mode: String,
     #[ts(as = "Option<crate::ts_values::AutoCommitRule>")]
     auto_commit_rule: Option<String>,
+    /// Regular journeys (additive): each optional, and an absent one keeps
+    /// the stored value. `target` needs `originCrs` and `destinationCrs`
+    /// unless the template already has a target; `planOptions` and
+    /// `usualItinerary` need a target.
+    #[serde(default)]
+    #[ts(optional)]
+    origin_crs: Option<String>,
+    #[serde(default)]
+    #[ts(optional)]
+    destination_crs: Option<String>,
+    #[serde(default)]
+    #[ts(optional)]
+    target: Option<TemplateTarget>,
+    #[serde(default)]
+    #[ts(optional)]
+    plan_options: Option<PlanOptions>,
+    #[serde(default)]
+    #[ts(optional)]
+    usual_itinerary: Option<UsualItinerary>,
 }
 
 #[derive(Debug, Deserialize, ts_rs::TS)]
@@ -150,6 +233,47 @@ pub(crate) struct MaterializeTemplateRequest {
 #[serde(rename_all = "camelCase")]
 pub(crate) struct CreateJourneyTemplateResponse {
     template_id: i64,
+    /// The return journey's template, for a `plan` create with `return`;
+    /// `null` otherwise.
+    return_template_id: Option<i64>,
+}
+
+#[derive(Debug, Deserialize, ts_rs::TS)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct SetTemplateActiveRequest {
+    active: bool,
+}
+
+/// `PUT /JourneyTemplates/{id}/active`'s response.
+#[derive(Debug, Serialize, ts_rs::TS)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct SetTemplateActiveResponse {
+    /// The template and, if it has one, its pair.
+    template_ids: Vec<i64>,
+    /// Untouched journeys a pause deleted.
+    deleted_journey_ids: Vec<i64>,
+}
+
+#[derive(Debug, Default, Deserialize, ts_rs::TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(optional_fields = nullable)]
+pub(crate) struct SkipTemplateDateRequest {
+    /// Default: the template's `nextDate`.
+    #[serde(default)]
+    service_date: Option<NaiveDate>,
+    /// Skip the paired return journey's date too.
+    #[serde(default)]
+    pair: Option<bool>,
+}
+
+/// `POST /JourneyTemplates/{id}/skip`'s response.
+#[derive(Debug, Serialize, ts_rs::TS)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct SkipTemplateDateResponse {
+    service_date: NaiveDate,
+    template_ids: Vec<i64>,
+    /// Journeys already added for that date, now deleted.
+    deleted_journey_ids: Vec<i64>,
 }
 
 #[derive(Debug, Serialize, ts_rs::TS)]
@@ -194,6 +318,19 @@ pub(crate) struct JourneyTemplateDetailResponse {
     #[ts(as = "Option<crate::ts_values::AutoCommitRule>")]
     auto_commit_rule: Option<String>,
     legs: Vec<JourneyTemplateLegDetailResponse>,
+    /// Regular journeys (additive): `null` for a template without a
+    /// target. See `JourneyTemplateListItem` for `nextDate` and
+    /// `skippedDates`.
+    origin_crs: Option<String>,
+    origin_name: Option<String>,
+    destination_crs: Option<String>,
+    destination_name: Option<String>,
+    target: Option<TemplateTarget>,
+    plan_options: Option<PlanOptions>,
+    usual_itinerary: Option<UsualItinerary>,
+    paired_template_id: Option<i64>,
+    next_date: Option<NaiveDate>,
+    skipped_dates: Vec<NaiveDate>,
 }
 
 fn internal_error(operation: &'static str) -> impl Fn(anyhow::Error) -> (StatusCode, String) {
@@ -272,7 +409,8 @@ fn promoted_leg_input(
 /// half-blank template leg, this fails loudly with an actionable message).
 #[expect(
     clippy::similar_names,
-    reason = "the similar names are distinct domain terms"
+    clippy::too_many_lines,
+    reason = "the similar names are distinct domain terms; one arm per creation shape"
 )]
 async fn post_journey_template(
     State(app): State<App>,
@@ -325,7 +463,10 @@ async fn post_journey_template(
             )
             .await
             .map_err(internal_error("create journey template"))?;
-            Ok(Json(CreateJourneyTemplateResponse { template_id }))
+            Ok(Json(CreateJourneyTemplateResponse {
+                template_id,
+                return_template_id: None,
+            }))
         }
         CreateJourneyTemplateRequest::FromJourney {
             custom_name,
@@ -394,19 +535,160 @@ async fn post_journey_template(
             )
             .await
             .map_err(internal_error("create journey template from journey"))?;
-            Ok(Json(CreateJourneyTemplateResponse { template_id }))
+            Ok(Json(CreateJourneyTemplateResponse {
+                template_id,
+                return_template_id: None,
+            }))
+        }
+        CreateJourneyTemplateRequest::Plan {
+            custom_name,
+            origin_crs,
+            destination_crs,
+            target,
+            plan_options,
+            usual_itinerary,
+            days_of_week,
+            starts_on,
+            ends_on,
+            default_match_mode,
+            return_journey,
+        } => {
+            let default_match_mode = default_match_mode.unwrap_or_else(|| "manual".to_string());
+            let auto_commit_rule = (default_match_mode == "auto").then_some("nearest_to_now");
+            journey_templates::validate_template_recurrence(
+                &default_match_mode,
+                auto_commit_rule,
+                Some(days_of_week),
+                starts_on,
+                ends_on,
+            )
+            .map_err(bad_request)?;
+            let outbound = plan_template_input(
+                &app,
+                custom_name.as_deref(),
+                &origin_crs,
+                &destination_crs,
+                target,
+                plan_options,
+                &usual_itinerary,
+            )
+            .await?;
+            let return_input = match return_journey {
+                Some(ret) => Some(
+                    plan_template_input(
+                        &app,
+                        ret.custom_name.as_deref(),
+                        &outbound.destination_crs,
+                        &outbound.origin_crs,
+                        ret.target,
+                        ret.plan_options,
+                        &ret.usual_itinerary,
+                    )
+                    .await
+                    .map_err(|(status, message)| (status, format!("Return journey: {message}")))?,
+                ),
+                None => None,
+            };
+            let recurrence = regular_journeys::PlanRecurrence {
+                days_of_week,
+                starts_on,
+                ends_on,
+                default_match_mode,
+            };
+            let outcome = regular_journeys::create_plan_templates(
+                &app.database,
+                &user.id,
+                &recurrence,
+                &outbound,
+                return_input.as_ref(),
+            )
+            .await
+            .map_err(internal_error("create regular journey"))?;
+            match outcome {
+                regular_journeys::CreatePlanOutcome::Created { id, return_id } => {
+                    Ok(Json(CreateJourneyTemplateResponse {
+                        template_id: id,
+                        return_template_id: return_id,
+                    }))
+                }
+                regular_journeys::CreatePlanOutcome::OverCap => Err((
+                    StatusCode::BAD_REQUEST,
+                    format!(
+                        "You can have at most {} regular journeys, and a return journey counts \
+                         as one. Delete one to make room.",
+                        journey_templates::MAX_JOURNEY_TEMPLATES_PER_USER
+                    ),
+                )),
+            }
         }
     }
+}
+
+fn bad_request(message: String) -> (StatusCode, String) {
+    (StatusCode::BAD_REQUEST, message)
+}
+
+/// Validates one template of a plan-mode create: the name, the stations
+/// (different from each other), the target, the plan options and the usual
+/// itinerary, whose trains must call at their stations on the date they
+/// were planned for (`422` otherwise, as `POST /Journeys/itinerary`).
+async fn plan_template_input(
+    app: &App,
+    custom_name: Option<&str>,
+    origin_crs: &str,
+    destination_crs: &str,
+    target: TemplateTarget,
+    plan_options: Option<PlanOptions>,
+    usual_itinerary: &UsualItinerary,
+) -> Result<regular_journeys::PlanTemplateInput, (StatusCode, String)> {
+    let custom_name = train_tracking::validate_custom_name(custom_name).map_err(bad_request)?;
+    let origin_crs = regular_journeys::normalize_crs(origin_crs, "origin").map_err(bad_request)?;
+    let destination_crs =
+        regular_journeys::normalize_crs(destination_crs, "destination").map_err(bad_request)?;
+    if origin_crs == destination_crs {
+        return Err(bad_request(
+            "The origin and destination must be different stations.".to_string(),
+        ));
+    }
+    regular_journeys::validate_target(&target).map_err(bad_request)?;
+    if let Some(options) = &plan_options {
+        regular_journeys::validate_plan_options(options).map_err(bad_request)?;
+    }
+    let usual_itinerary =
+        regular_journeys::validate_usual_itinerary(usual_itinerary).map_err(bad_request)?;
+    if let Some((leg, rejection)) =
+        regular_journeys::check_itinerary_calls(&app.database, &usual_itinerary)
+            .await
+            .map_err(internal_error("check the usual train's calling points"))?
+    {
+        let message = if usual_itinerary.legs.len() > 1 {
+            format!("Leg {leg}: {}", rejection.message)
+        } else {
+            rejection.message
+        };
+        return Err((StatusCode::UNPROCESSABLE_ENTITY, message));
+    }
+    Ok(regular_journeys::PlanTemplateInput {
+        custom_name,
+        origin_crs,
+        destination_crs,
+        target,
+        plan_options,
+        usual_itinerary,
+    })
 }
 
 async fn get_my_journey_templates(
     State(app): State<App>,
     user: AuthenticatedUser,
 ) -> Result<Json<Vec<journey_templates::JourneyTemplateListItem>>, (StatusCode, String)> {
-    let rows =
-        journey_templates::list_templates_for_user(&app.database, &user.id, super::london_today())
-            .await
-            .map_err(internal_error("list journey templates"))?;
+    let rows = journey_templates::list_templates_for_user(
+        &app.database,
+        &user.id,
+        super::london_now().to_utc(),
+    )
+    .await
+    .map_err(internal_error("list journey templates"))?;
     Ok(Json(rows))
 }
 
@@ -425,8 +707,33 @@ async fn get_journey_template(
     let legs = journey_templates::list_template_legs(&app.database, template_id)
         .await
         .map_err(internal_error("list journey template legs"))?;
+    let now = super::london_now().to_utc();
+    let next_date = regular_journeys::next_dates(&app.database, &[template_id], now)
+        .await
+        .map_err(internal_error("read the next date"))?
+        .get(&template_id)
+        .copied()
+        .flatten();
+    let skipped_dates = regular_journeys::skipped_dates_from(
+        &app.database,
+        template_id,
+        regular_journeys::london_date(now),
+    )
+    .await
+    .map_err(internal_error("read skipped dates"))?;
+    let target = template.target();
 
     Ok(Json(JourneyTemplateDetailResponse {
+        origin_crs: template.origin_crs,
+        origin_name: template.origin_name,
+        destination_crs: template.destination_crs,
+        destination_name: template.destination_name,
+        target,
+        plan_options: regular_journeys::decode_stored(template.plan_options),
+        usual_itinerary: regular_journeys::decode_stored(template.usual_itinerary),
+        paired_template_id: template.paired_template_id,
+        next_date,
+        skipped_dates,
         id: template.id,
         custom_name: template.custom_name,
         created_at: template.created_at,
@@ -487,6 +794,17 @@ async fn put_journey_template(
         .collect::<Result<Vec<_>, _>>()?;
     journey_templates::validate_auto_mode_legs(&body.default_match_mode, &leg_inputs)
         .map_err(|msg| (StatusCode::BAD_REQUEST, msg))?;
+    let target_update = put_target_update(
+        &app,
+        template_id,
+        &user.id,
+        body.origin_crs,
+        body.destination_crs,
+        body.target,
+        body.plan_options,
+        body.usual_itinerary,
+    )
+    .await?;
     let replaced = journey_templates::replace_template(
         &app.database,
         template_id,
@@ -499,6 +817,7 @@ async fn put_journey_template(
         body.ends_on,
         &body.default_match_mode,
         body.auto_commit_rule.as_deref(),
+        &target_update,
     )
     .await
     .map_err(internal_error("replace journey template"))?;
@@ -509,6 +828,104 @@ async fn put_journey_template(
         ));
     }
     Ok(StatusCode::NO_CONTENT)
+}
+
+/// The regular-journey fields of a PUT, validated: each absent one keeps
+/// its stored value. A target needs both stations unless the template
+/// already has a target, and options or a usual itinerary need a target,
+/// given or stored. `404` when the template isn't the caller's.
+#[expect(
+    clippy::too_many_arguments,
+    reason = "the PUT body's five optional fields, moved in one by one"
+)]
+async fn put_target_update(
+    app: &App,
+    template_id: i64,
+    user_id: &str,
+    origin_crs: Option<String>,
+    destination_crs: Option<String>,
+    target: Option<TemplateTarget>,
+    plan_options: Option<PlanOptions>,
+    usual_itinerary: Option<UsualItinerary>,
+) -> Result<journey_templates::TargetUpdate, (StatusCode, String)> {
+    if origin_crs.is_none()
+        && destination_crs.is_none()
+        && target.is_none()
+        && plan_options.is_none()
+        && usual_itinerary.is_none()
+    {
+        return Ok(journey_templates::TargetUpdate::default());
+    }
+    let stored = journey_templates::get_owned_template(&app.database, template_id, user_id)
+        .await
+        .map_err(internal_error("read journey template"))?
+        .ok_or((
+            StatusCode::NOT_FOUND,
+            "no journey template with that id".to_string(),
+        ))?;
+    let has_target = stored.target_kind.is_some();
+    let origin_crs = origin_crs
+        .map(|crs| regular_journeys::normalize_crs(&crs, "origin"))
+        .transpose()
+        .map_err(bad_request)?;
+    let destination_crs = destination_crs
+        .map(|crs| regular_journeys::normalize_crs(&crs, "destination"))
+        .transpose()
+        .map_err(bad_request)?;
+    if let Some(target) = &target {
+        regular_journeys::validate_target(target).map_err(bad_request)?;
+    }
+    let gets_target = has_target || target.is_some();
+    if !gets_target && (origin_crs.is_some() || destination_crs.is_some()) {
+        return Err(bad_request(
+            "originCrs and destinationCrs need a target.".to_string(),
+        ));
+    }
+    if !has_target && target.is_some() && (origin_crs.is_none() || destination_crs.is_none()) {
+        return Err(bad_request(
+            "A target needs an originCrs and a destinationCrs.".to_string(),
+        ));
+    }
+    if !gets_target && (plan_options.is_some() || usual_itinerary.is_some()) {
+        return Err(bad_request(
+            "planOptions and usualItinerary need a target.".to_string(),
+        ));
+    }
+    let origin = origin_crs.clone().or(stored.origin_crs);
+    let destination = destination_crs.clone().or(stored.destination_crs);
+    if origin.is_some() && origin == destination {
+        return Err(bad_request(
+            "The origin and destination must be different stations.".to_string(),
+        ));
+    }
+    if let Some(options) = &plan_options {
+        regular_journeys::validate_plan_options(options).map_err(bad_request)?;
+    }
+    let usual_itinerary = match usual_itinerary {
+        Some(itinerary) => {
+            let itinerary =
+                regular_journeys::validate_usual_itinerary(&itinerary).map_err(bad_request)?;
+            if let Some((leg, rejection)) =
+                regular_journeys::check_itinerary_calls(&app.database, &itinerary)
+                    .await
+                    .map_err(internal_error("check the usual train's calling points"))?
+            {
+                return Err((
+                    StatusCode::UNPROCESSABLE_ENTITY,
+                    format!("Leg {leg}: {}", rejection.message),
+                ));
+            }
+            Some(itinerary)
+        }
+        None => None,
+    };
+    Ok(journey_templates::TargetUpdate {
+        origin_crs,
+        destination_crs,
+        target,
+        plan_options,
+        usual_itinerary,
+    })
 }
 
 async fn delete_journey_template(
@@ -561,6 +978,131 @@ async fn post_materialize_journey_template(
         journey_id: materialized.journey_id,
         leg_ids: materialized.leg_ids,
     }))
+}
+
+/// `PUT /JourneyTemplates/{id}/active` `{active}`: pauses or resumes the
+/// template and its pair (`regular_journeys::set_active`). Pausing also
+/// deletes their untouched journeys from today on that haven't started.
+async fn put_journey_template_active(
+    State(app): State<App>,
+    user: AuthenticatedUser,
+    Path(template_id): Path<i64>,
+    Json(body): Json<SetTemplateActiveRequest>,
+) -> Result<Json<SetTemplateActiveResponse>, (StatusCode, String)> {
+    let outcome = regular_journeys::set_active(
+        &app.database,
+        template_id,
+        &user.id,
+        body.active,
+        super::london_now().to_utc(),
+    )
+    .await
+    .map_err(internal_error("pause or resume journey template"))?
+    .ok_or((
+        StatusCode::NOT_FOUND,
+        "no journey template with that id".to_string(),
+    ))?;
+    Ok(Json(SetTemplateActiveResponse {
+        template_ids: outcome.template_ids,
+        deleted_journey_ids: outcome.deleted_journey_ids,
+    }))
+}
+
+/// How far ahead a date may be skipped.
+const MAX_SKIP_DAYS_AHEAD: i64 = 366;
+
+/// `POST /JourneyTemplates/{id}/skip` `{serviceDate?, pair?}`: skips a date
+/// (default: `nextDate`), for the pair too with `pair: true`
+/// (`regular_journeys::skip`). `409` once that date's journey has started.
+async fn post_journey_template_skip(
+    State(app): State<App>,
+    user: AuthenticatedUser,
+    Path(template_id): Path<i64>,
+    body: Option<Json<SkipTemplateDateRequest>>,
+) -> Result<Json<SkipTemplateDateResponse>, (StatusCode, String)> {
+    let body = body.map(|Json(body)| body).unwrap_or_default();
+    let now = super::london_now().to_utc();
+    if let Some(date) = body.service_date
+        && date > regular_journeys::london_date(now) + chrono::Duration::days(MAX_SKIP_DAYS_AHEAD)
+    {
+        return Err(bad_request(
+            "You can skip a date up to a year ahead.".to_string(),
+        ));
+    }
+    let outcome = regular_journeys::skip(
+        &app.database,
+        template_id,
+        &user.id,
+        body.service_date,
+        body.pair.unwrap_or(false),
+        now,
+    )
+    .await
+    .map_err(internal_error("skip a journey template date"))?;
+    match outcome {
+        regular_journeys::SkipOutcome::Skipped {
+            date,
+            template_ids,
+            deleted_journey_ids,
+        } => Ok(Json(SkipTemplateDateResponse {
+            service_date: date,
+            template_ids,
+            deleted_journey_ids,
+        })),
+        regular_journeys::SkipOutcome::NotFound => Err((
+            StatusCode::NOT_FOUND,
+            "no journey template with that id".to_string(),
+        )),
+        regular_journeys::SkipOutcome::NoNextDate => Err((
+            StatusCode::CONFLICT,
+            "This regular journey has no date to skip.".to_string(),
+        )),
+        regular_journeys::SkipOutcome::InThePast => {
+            Err(bad_request("That date has already passed.".to_string()))
+        }
+        regular_journeys::SkipOutcome::Started => Err((
+            StatusCode::CONFLICT,
+            "That journey has already started.".to_string(),
+        )),
+    }
+}
+
+/// `DELETE /JourneyTemplates/{id}/skip/{date}`: undoes a skip. The next
+/// sweep adds the journey again if it is still due.
+async fn delete_journey_template_skip(
+    State(app): State<App>,
+    user: AuthenticatedUser,
+    Path((template_id, service_date)): Path<(i64, NaiveDate)>,
+) -> Result<StatusCode, (StatusCode, String)> {
+    let owned = regular_journeys::unskip(&app.database, template_id, &user.id, service_date)
+        .await
+        .map_err(internal_error("undo a skipped date"))?;
+    if !owned {
+        return Err((
+            StatusCode::NOT_FOUND,
+            "no journey template with that id".to_string(),
+        ));
+    }
+    Ok(StatusCode::NO_CONTENT)
+}
+
+/// `DELETE /JourneyTemplates/{id}/pair`: unlinks the template and its
+/// return journey, both sides. `204` also when it had no pair.
+async fn delete_journey_template_pair(
+    State(app): State<App>,
+    user: AuthenticatedUser,
+    Path(template_id): Path<i64>,
+) -> Result<StatusCode, (StatusCode, String)> {
+    let owned = regular_journeys::unpair(&app.database, template_id, &user.id)
+        .await
+        .map_err(internal_error("unlink a journey template pair"))?;
+    if !owned {
+        return Err((
+            StatusCode::NOT_FOUND,
+            "no journey template with that id".to_string(),
+        ));
+    }
+    Ok(StatusCode::NO_CONTENT)
 }
 
 #[cfg(test)]
@@ -682,6 +1224,7 @@ mod db_tests {
             session_cleanup_interval_secs: 3600,
             background_loops: true,
             past_travel_retention_days: 548,
+            regular_journey_retention_days: 0,
             stale_push_subscription_days: 365,
             inactive_account_retention_days: 0,
         };
@@ -1892,6 +2435,692 @@ mod db_tests {
         assert_eq!(paused["hasOpenLegs"], false);
         assert_eq!(paused["defaultMatchMode"], "auto");
 
+        cleanup_user(&pool, user_id).await;
+    }
+
+    // ---- Regular journeys, phase 1 ----
+
+    /// A plan-mode body: Woking to London Waterloo, leave after 07:45 on
+    /// weekdays, the 07:48 as the usual train, and with `with_return` the
+    /// 17:35 back.
+    fn plan_body(with_return: bool) -> Value {
+        let mut body = serde_json::json!({
+            "mode": "plan",
+            "originCrs": "wok",
+            "destinationCrs": "WAT",
+            "target": {"kind": "depart_after", "time": "07:45"},
+            "planOptions": {"maxChanges": 1},
+            "usualItinerary": {"legs": [
+                {"kind": "untracked", "transitMode": "walk", "originName": "Home", "minutes": 10},
+                {"trainUid": "w12345", "originCrs": "WOK", "destinationCrs": "WAT",
+                 "atocCode": "SW", "departs": "07:48", "arrives": "08:20"}
+            ]},
+            "daysOfWeek": 31
+        });
+        if with_return {
+            body["return"] = serde_json::json!({
+                "target": {"kind": "depart_after", "time": "17:30"},
+                "usualItinerary": {"legs": [
+                    {"trainUid": "W54321", "originCrs": "WAT", "destinationCrs": "WOK",
+                     "departs": "17:35"}
+                ]}
+            });
+        }
+        body
+    }
+
+    async fn create_plan(
+        router: axum::Router,
+        token: &str,
+        with_return: bool,
+    ) -> (i64, Option<i64>) {
+        let (status, body) = post_json(
+            router,
+            "/JourneyTemplates".to_string(),
+            Some(token),
+            plan_body(with_return),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        (
+            body["templateId"].as_i64().unwrap(),
+            body["returnTemplateId"].as_i64(),
+        )
+    }
+
+    /// How an occurrence seeded by [`seed_occurrence`] looks.
+    #[derive(Clone, Copy)]
+    enum Occurrence {
+        /// One unmatched train leg.
+        Untouched,
+        /// A train leg the owner picked a train for.
+        Picked,
+        /// A sweep-committed train leg whose train has a ticket.
+        Ticketed,
+        /// An untracked first leg that set off at `instant`, then an
+        /// unmatched train leg.
+        StartedAt(chrono::DateTime<chrono::Utc>),
+    }
+
+    async fn seed_occurrence(
+        pool: &PgPool,
+        user_id: &str,
+        template_id: i64,
+        date: chrono::NaiveDate,
+        shape: Occurrence,
+    ) -> i64 {
+        let (journey_id,): (i64,) = sqlx::query_as(
+            "INSERT INTO journeys (user_id, source_template_id) VALUES ($1, $2) RETURNING id",
+        )
+        .bind(user_id)
+        .bind(template_id)
+        .fetch_one(pool)
+        .await
+        .unwrap();
+        let mut order = 1;
+        if let Occurrence::StartedAt(instant) = shape {
+            sqlx::query(
+                "INSERT INTO journey_legs (journey_id, leg_order, service_date, match_mode, kind, \
+                     transit_mode, planned_departure, planned_arrival) \
+                 VALUES ($1, 1, $2, 'manual', 'untracked', 'walk', $3, $3 + interval '10 minutes')",
+            )
+            .bind(journey_id)
+            .bind(date)
+            .bind(instant)
+            .execute(pool)
+            .await
+            .unwrap();
+            order = 2;
+        }
+        let (match_mode, subscription) = match shape {
+            Occurrence::Untouched | Occurrence::StartedAt(_) => ("unmatched", None),
+            Occurrence::Picked => ("manual", None),
+            Occurrence::Ticketed => {
+                let (id,): (i64,) = sqlx::query_as(
+                    "INSERT INTO train_subscriptions (user_id, service_date, resolution_status) \
+                     VALUES ($1, $2, 'pending') RETURNING id",
+                )
+                .bind(user_id)
+                .bind(date)
+                .fetch_one(pool)
+                .await
+                .unwrap();
+                sqlx::query(
+                    "INSERT INTO tracked_train_tickets (tracked_train_id, user_id) VALUES ($1, $2)",
+                )
+                .bind(id)
+                .bind(user_id)
+                .execute(pool)
+                .await
+                .unwrap();
+                ("auto", Some(id))
+            }
+        };
+        sqlx::query(
+            "INSERT INTO journey_legs (journey_id, leg_order, origin_crs, destination_crs, \
+                 service_date, match_mode, train_subscription_id, window_searched) \
+             VALUES ($1, $2, 'WOK', 'WAT', $3, $4, $5, TRUE)",
+        )
+        .bind(journey_id)
+        .bind(order)
+        .bind(date)
+        .bind(match_mode)
+        .bind(subscription)
+        .execute(pool)
+        .await
+        .unwrap();
+        journey_id
+    }
+
+    async fn journey_exists(pool: &PgPool, journey_id: i64) -> bool {
+        sqlx::query_scalar("SELECT EXISTS (SELECT 1 FROM journeys WHERE id = $1)")
+            .bind(journey_id)
+            .fetch_one(pool)
+            .await
+            .unwrap()
+    }
+
+    fn mine_row(rows: &Value, id: i64) -> Value {
+        rows.as_array()
+            .unwrap()
+            .iter()
+            .find(|r| r["id"] == id)
+            .unwrap()
+            .clone()
+    }
+
+    /// Tuesday 10 Nov 2026, 07:00 in London (GMT).
+    fn tuesday_morning() -> chrono::DateTime<chrono::Utc> {
+        "2026-11-10T07:00:00Z".parse().unwrap()
+    }
+
+    fn date(text: &str) -> chrono::NaiveDate {
+        text.parse().unwrap()
+    }
+
+    #[tokio::test]
+    #[ignore = "requires a live database; run with `cargo test -p api \
+                plan_mode_creates_a_linked_pair -- --ignored --test-threads=1`"]
+    async fn plan_mode_creates_a_linked_pair() {
+        let pool = connect().await;
+        let user_id = "test-regular-plan-pair";
+        cleanup_user(&pool, user_id).await;
+        let token = seed_session(&pool, user_id).await;
+        let router = test_router(test_app(pool.clone()));
+
+        let (id, return_id) = create_plan(router.clone(), &token, true).await;
+        let return_id = return_id.expect("a return template");
+
+        let (status, detail) = request(
+            router.clone(),
+            format!("/JourneyTemplates/{id}"),
+            Some(&token),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(detail["originCrs"], "WOK");
+        assert_eq!(detail["destinationCrs"], "WAT");
+        assert_eq!(detail["target"]["kind"], "depart_after");
+        assert_eq!(detail["target"]["time"], "07:45:00");
+        assert_eq!(detail["pairedTemplateId"], return_id);
+        assert_eq!(detail["defaultMatchMode"], "manual");
+        assert_eq!(detail["daysOfWeek"], 31);
+        assert_eq!(detail["planOptions"]["maxChanges"], 1);
+        let usual = &detail["usualItinerary"]["legs"];
+        assert_eq!(usual[0]["kind"], "untracked");
+        assert_eq!(usual[1]["trainUid"], "W12345");
+        assert!(usual[1].get("serviceDate").is_none());
+        // One template leg, from the train leg, with a window around 07:48.
+        let legs = detail["legs"].as_array().unwrap();
+        assert_eq!(legs.len(), 1);
+        assert_eq!(legs[0]["originCrs"], "WOK");
+        assert_eq!(legs[0]["departAfter"], "07:43:00");
+        assert_eq!(legs[0]["departBefore"], "07:53:00");
+
+        let (_, back) = request(
+            router.clone(),
+            format!("/JourneyTemplates/{return_id}"),
+            Some(&token),
+        )
+        .await;
+        assert_eq!(back["originCrs"], "WAT");
+        assert_eq!(back["destinationCrs"], "WOK");
+        assert_eq!(back["pairedTemplateId"], id);
+        assert_eq!(back["target"]["time"], "17:30:00");
+
+        // Unlinking clears both sides.
+        let (status, _) = delete_request(
+            router.clone(),
+            format!("/JourneyTemplates/{id}/pair"),
+            Some(&token),
+        )
+        .await;
+        assert_eq!(status, StatusCode::NO_CONTENT);
+        let (_, back) = request(
+            router.clone(),
+            format!("/JourneyTemplates/{return_id}"),
+            Some(&token),
+        )
+        .await;
+        assert_eq!(back["pairedTemplateId"], Value::Null);
+
+        // A bad itinerary is refused, and nothing is created.
+        let mut bad = plan_body(true);
+        bad["return"]["usualItinerary"]["legs"][0]["departs"] = Value::Null;
+        let (status, message) = post_json(
+            router.clone(),
+            "/JourneyTemplates".to_string(),
+            Some(&token),
+            bad,
+        )
+        .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert!(
+            message.as_str().unwrap().starts_with("Return journey: "),
+            "{message}"
+        );
+        let count: i64 =
+            sqlx::query_scalar("SELECT COUNT(*) FROM journey_templates WHERE user_id = $1")
+                .bind(user_id)
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        assert_eq!(count, 2);
+
+        cleanup_user(&pool, user_id).await;
+    }
+
+    #[tokio::test]
+    #[ignore = "requires a live database; run with `cargo test -p api \
+                plan_mode_counts_a_pair_twice_against_the_cap -- --ignored --test-threads=1`"]
+    async fn plan_mode_counts_a_pair_twice_against_the_cap() {
+        let pool = connect().await;
+        let user_id = "test-regular-plan-cap";
+        cleanup_user(&pool, user_id).await;
+        let token = seed_session(&pool, user_id).await;
+        let router = test_router(test_app(pool.clone()));
+        sqlx::query(
+            "INSERT INTO journey_templates (user_id) \
+             SELECT $1 FROM generate_series(1, $2::int)",
+        )
+        .bind(user_id)
+        .bind((journey_templates_cap() - 1) as i32)
+        .execute(&pool)
+        .await
+        .unwrap();
+
+        let (status, _) = post_json(
+            router.clone(),
+            "/JourneyTemplates".to_string(),
+            Some(&token),
+            plan_body(true),
+        )
+        .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "a pair needs two places");
+        let count = |pool: PgPool| async move {
+            sqlx::query_scalar::<_, i64>(
+                "SELECT COUNT(*) FROM journey_templates WHERE user_id = $1",
+            )
+            .bind(user_id)
+            .fetch_one(&pool)
+            .await
+            .unwrap()
+        };
+        assert_eq!(count(pool.clone()).await, journey_templates_cap() - 1);
+
+        let (_, return_id) = create_plan(router, &token, false).await;
+        assert_eq!(return_id, None);
+        assert_eq!(count(pool.clone()).await, journey_templates_cap());
+
+        cleanup_user(&pool, user_id).await;
+    }
+
+    fn journey_templates_cap() -> i64 {
+        crate::data::journey_templates::MAX_JOURNEY_TEMPLATES_PER_USER
+    }
+
+    #[tokio::test]
+    #[ignore = "requires a live database; run with `cargo test -p api \
+                put_without_the_regular_fields_keeps_them -- --ignored --test-threads=1`"]
+    async fn put_without_the_regular_fields_keeps_them() {
+        let pool = connect().await;
+        let user_id = "test-regular-put-keeps";
+        cleanup_user(&pool, user_id).await;
+        let token = seed_session(&pool, user_id).await;
+        let router = test_router(test_app(pool.clone()));
+        let (id, _) = create_plan(router.clone(), &token, false).await;
+
+        // A client from before regular journeys: no target fields.
+        let old_shape = serde_json::json!({
+            "customName": "Commute",
+            "legs": [{"originCrs": "WOK", "destinationCrs": "WAT",
+                      "departWindow": {"after": "07:40:00", "before": "07:55:00"}}],
+            "daysOfWeek": 31, "active": true, "startsOn": null, "endsOn": null,
+            "defaultMatchMode": "manual", "autoCommitRule": null
+        });
+        let (status, body) = put_json(
+            router.clone(),
+            format!("/JourneyTemplates/{id}"),
+            Some(&token),
+            old_shape.clone(),
+        )
+        .await;
+        assert_eq!(status, StatusCode::NO_CONTENT, "{body}");
+        let (_, detail) = request(
+            router.clone(),
+            format!("/JourneyTemplates/{id}"),
+            Some(&token),
+        )
+        .await;
+        assert_eq!(detail["customName"], "Commute");
+        assert_eq!(detail["originCrs"], "WOK");
+        assert_eq!(detail["target"]["time"], "07:45:00");
+        assert_eq!(detail["usualItinerary"]["legs"][1]["trainUid"], "W12345");
+        assert_eq!(detail["planOptions"]["maxChanges"], 1);
+
+        // A new time alone keeps the stations.
+        let mut new_time = old_shape.clone();
+        new_time["target"] = serde_json::json!({"kind": "arrive_by", "time": "08:30"});
+        let (status, _) = put_json(
+            router.clone(),
+            format!("/JourneyTemplates/{id}"),
+            Some(&token),
+            new_time,
+        )
+        .await;
+        assert_eq!(status, StatusCode::NO_CONTENT);
+        let (_, detail) = request(
+            router.clone(),
+            format!("/JourneyTemplates/{id}"),
+            Some(&token),
+        )
+        .await;
+        assert_eq!(detail["target"]["kind"], "arrive_by");
+        assert_eq!(detail["originCrs"], "WOK");
+
+        // A template without a target needs both stations with one.
+        let (status, manual) = post_json(
+            router.clone(),
+            "/JourneyTemplates".to_string(),
+            Some(&token),
+            serde_json::json!({"mode": "manual", "legs": [
+                {"originCrs": "WOK", "destinationCrs": "WAT"}]}),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        let manual_id = manual["templateId"].as_i64().unwrap();
+        let mut target_only = old_shape;
+        target_only["target"] = serde_json::json!({"kind": "depart_after", "time": "07:45"});
+        let (status, _) = put_json(
+            router.clone(),
+            format!("/JourneyTemplates/{manual_id}"),
+            Some(&token),
+            target_only.clone(),
+        )
+        .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        target_only["originCrs"] = Value::from("WOK");
+        target_only["destinationCrs"] = Value::from("WAT");
+        let (status, _) = put_json(
+            router,
+            format!("/JourneyTemplates/{manual_id}"),
+            Some(&token),
+            target_only,
+        )
+        .await;
+        assert_eq!(status, StatusCode::NO_CONTENT);
+
+        cleanup_user(&pool, user_id).await;
+    }
+
+    #[tokio::test]
+    #[ignore = "requires a live database; run with `cargo test -p api \
+                pausing_pauses_the_pair_and_removes_only_untouched_journeys \
+                -- --ignored --test-threads=1`"]
+    #[expect(
+        clippy::too_many_lines,
+        reason = "test code: one scenario read top to bottom"
+    )]
+    async fn pausing_pauses_the_pair_and_removes_only_untouched_journeys() {
+        let pool = connect().await;
+        let user_id = "test-regular-pause";
+        cleanup_user(&pool, user_id).await;
+        let token = seed_session(&pool, user_id).await;
+        let router = test_router(test_app(pool.clone()));
+        let (id, return_id) = create_plan(router.clone(), &token, true).await;
+        let return_id = return_id.unwrap();
+        let now = tuesday_morning();
+        let _pin = crate::routes::pin_london_now_for_tests(now);
+        let (today, tomorrow, yesterday) =
+            (date("2026-11-10"), date("2026-11-11"), date("2026-11-09"));
+
+        let today_untouched =
+            seed_occurrence(&pool, user_id, id, today, Occurrence::Untouched).await;
+        let tomorrow_untouched =
+            seed_occurrence(&pool, user_id, id, tomorrow, Occurrence::Untouched).await;
+        let tomorrow_picked =
+            seed_occurrence(&pool, user_id, id, tomorrow, Occurrence::Picked).await;
+        let today_started = seed_occurrence(
+            &pool,
+            user_id,
+            id,
+            today,
+            Occurrence::StartedAt(now - chrono::Duration::minutes(30)),
+        )
+        .await;
+        let yesterdays =
+            seed_occurrence(&pool, user_id, id, yesterday, Occurrence::Untouched).await;
+        let return_ticketed =
+            seed_occurrence(&pool, user_id, return_id, tomorrow, Occurrence::Ticketed).await;
+        let return_untouched =
+            seed_occurrence(&pool, user_id, return_id, tomorrow, Occurrence::Untouched).await;
+
+        let (status, body) = put_json(
+            router.clone(),
+            format!("/JourneyTemplates/{return_id}/active"),
+            Some(&token),
+            serde_json::json!({"active": false}),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        let mut deleted: Vec<i64> = body["deletedJourneyIds"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|v| v.as_i64().unwrap())
+            .collect();
+        deleted.sort_unstable();
+        let mut expected = vec![today_untouched, tomorrow_untouched, return_untouched];
+        expected.sort_unstable();
+        assert_eq!(deleted, expected);
+        for kept in [tomorrow_picked, today_started, yesterdays, return_ticketed] {
+            assert!(journey_exists(&pool, kept).await, "{kept} must be kept");
+        }
+        for gone in expected {
+            assert!(!journey_exists(&pool, gone).await, "{gone} must be deleted");
+        }
+        let (_, mine) = request(
+            router.clone(),
+            "/JourneyTemplates/mine".to_string(),
+            Some(&token),
+        )
+        .await;
+        for template in [id, return_id] {
+            let row = mine_row(&mine, template);
+            assert_eq!(row["active"], false);
+            assert_eq!(row["nextDate"], Value::Null);
+        }
+        // No skip markers: a paused template is never due.
+        let markers: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM journey_template_skipped_dates WHERE template_id IN ($1, $2)",
+        )
+        .bind(id)
+        .bind(return_id)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!(markers, 0);
+
+        let (status, body) = put_json(
+            router.clone(),
+            format!("/JourneyTemplates/{id}/active"),
+            Some(&token),
+            serde_json::json!({"active": true}),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(body["deletedJourneyIds"], serde_json::json!([]));
+        let (_, mine) = request(
+            router.clone(),
+            "/JourneyTemplates/mine".to_string(),
+            Some(&token),
+        )
+        .await;
+        assert_eq!(mine_row(&mine, return_id)["active"], true);
+
+        // Someone else's template is 404.
+        let other = "test-regular-pause-other";
+        cleanup_user(&pool, other).await;
+        let other_token = seed_session(&pool, other).await;
+        let (status, _) = put_json(
+            router,
+            format!("/JourneyTemplates/{id}/active"),
+            Some(&other_token),
+            serde_json::json!({"active": false}),
+        )
+        .await;
+        assert_eq!(status, StatusCode::NOT_FOUND);
+
+        cleanup_user(&pool, other).await;
+        cleanup_user(&pool, user_id).await;
+    }
+
+    #[tokio::test]
+    #[ignore = "requires a live database; run with `cargo test -p api \
+                skip_next_skips_the_pair_refuses_a_started_journey_and_undoes \
+                -- --ignored --test-threads=1`"]
+    #[expect(
+        clippy::too_many_lines,
+        reason = "test code: one scenario read top to bottom"
+    )]
+    async fn skip_next_skips_the_pair_refuses_a_started_journey_and_undoes() {
+        let pool = connect().await;
+        let user_id = "test-regular-skip";
+        cleanup_user(&pool, user_id).await;
+        let token = seed_session(&pool, user_id).await;
+        let router = test_router(test_app(pool.clone()));
+        let (id, return_id) = create_plan(router.clone(), &token, true).await;
+        let return_id = return_id.unwrap();
+        let now = tuesday_morning();
+        let _pin = crate::routes::pin_london_now_for_tests(now);
+        let (today, tomorrow) = (date("2026-11-10"), date("2026-11-11"));
+
+        let (_, mine) = request(
+            router.clone(),
+            "/JourneyTemplates/mine".to_string(),
+            Some(&token),
+        )
+        .await;
+        assert_eq!(mine_row(&mine, id)["nextDate"], today.to_string());
+
+        // Skip next, with the return: today's journey goes, both skip today.
+        let todays = seed_occurrence(&pool, user_id, id, today, Occurrence::Untouched).await;
+        let (status, body) = post_json(
+            router.clone(),
+            format!("/JourneyTemplates/{id}/skip"),
+            Some(&token),
+            serde_json::json!({"pair": true}),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        assert_eq!(body["serviceDate"], today.to_string());
+        assert_eq!(body["deletedJourneyIds"], serde_json::json!([todays]));
+        assert!(!journey_exists(&pool, todays).await);
+        let (_, mine) = request(
+            router.clone(),
+            "/JourneyTemplates/mine".to_string(),
+            Some(&token),
+        )
+        .await;
+        for template in [id, return_id] {
+            let row = mine_row(&mine, template);
+            assert_eq!(row["nextDate"], tomorrow.to_string());
+            assert_eq!(row["skippedDates"], serde_json::json!([today.to_string()]));
+        }
+
+        // Undo on the outbound only.
+        let (status, _) = delete_request(
+            router.clone(),
+            format!("/JourneyTemplates/{id}/skip/{today}"),
+            Some(&token),
+        )
+        .await;
+        assert_eq!(status, StatusCode::NO_CONTENT);
+        let (_, mine) = request(
+            router.clone(),
+            "/JourneyTemplates/mine".to_string(),
+            Some(&token),
+        )
+        .await;
+        assert_eq!(mine_row(&mine, id)["nextDate"], today.to_string());
+        assert_eq!(mine_row(&mine, return_id)["nextDate"], tomorrow.to_string());
+
+        // Today's journey has set off: it can't be skipped, and the next
+        // date moves on to tomorrow.
+        seed_occurrence(
+            &pool,
+            user_id,
+            id,
+            today,
+            Occurrence::StartedAt(now - chrono::Duration::minutes(5)),
+        )
+        .await;
+        let (status, _) = post_json(
+            router.clone(),
+            format!("/JourneyTemplates/{id}/skip"),
+            Some(&token),
+            serde_json::json!({"serviceDate": today}),
+        )
+        .await;
+        assert_eq!(status, StatusCode::CONFLICT);
+        let (status, body) = post_json(
+            router.clone(),
+            format!("/JourneyTemplates/{id}/skip"),
+            Some(&token),
+            serde_json::json!({}),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(body["serviceDate"], tomorrow.to_string());
+        assert_eq!(body["templateIds"], serde_json::json!([id]));
+        assert_eq!(body["deletedJourneyIds"], serde_json::json!([]));
+
+        // A past date is refused; so is someone else's template.
+        let (status, _) = post_json(
+            router.clone(),
+            format!("/JourneyTemplates/{id}/skip"),
+            Some(&token),
+            serde_json::json!({"serviceDate": "2026-11-09"}),
+        )
+        .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+
+        // endsOn: the return ends today, which is skipped, so it has no
+        // next date and skipping next is a conflict.
+        sqlx::query("UPDATE journey_templates SET ends_on = $2 WHERE id = $1")
+            .bind(return_id)
+            .bind(today)
+            .execute(&pool)
+            .await
+            .unwrap();
+        let (_, mine) = request(
+            router.clone(),
+            "/JourneyTemplates/mine".to_string(),
+            Some(&token),
+        )
+        .await;
+        assert_eq!(mine_row(&mine, return_id)["nextDate"], Value::Null);
+        let (status, _) = post_json(
+            router,
+            format!("/JourneyTemplates/{return_id}/skip"),
+            Some(&token),
+            serde_json::json!({}),
+        )
+        .await;
+        assert_eq!(status, StatusCode::CONFLICT);
+
+        cleanup_user(&pool, user_id).await;
+    }
+
+    #[tokio::test]
+    #[ignore = "requires a live database; run with `cargo test -p api \
+                an_occurrence_names_its_regular_journey -- --ignored --test-threads=1`"]
+    async fn an_occurrence_names_its_regular_journey() {
+        let pool = connect().await;
+        let user_id = "test-regular-source";
+        cleanup_user(&pool, user_id).await;
+        let token = seed_session(&pool, user_id).await;
+        let router = test_router_with_journeys(test_app(pool.clone()));
+        let (id, _) = create_plan(router.clone(), &token, false).await;
+        let journey_id = seed_occurrence(
+            &pool,
+            user_id,
+            id,
+            crate::routes::london_today(),
+            Occurrence::Untouched,
+        )
+        .await;
+        let (status, detail) = request(
+            router.clone(),
+            format!("/Journeys/{journey_id}"),
+            Some(&token),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{detail}");
+        assert_eq!(detail["sourceTemplateId"], id);
+        let (status, mine) = request(router, "/Journeys/mine".to_string(), Some(&token)).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(mine_row(&mine, journey_id)["sourceTemplateId"], id);
         cleanup_user(&pool, user_id).await;
     }
 }

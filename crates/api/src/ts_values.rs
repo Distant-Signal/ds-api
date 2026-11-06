@@ -255,6 +255,15 @@ pub enum TemplateMatchMode {
     Auto,
 }
 
+/// `journey_templates.target_kind` (its CHECK constraint): a regular
+/// journey's target.
+#[derive(TS)]
+#[ts(rename_all = "snake_case")]
+pub enum TemplateTargetKind {
+    DepartAfter,
+    ArriveBy,
+}
+
 /// `journey_templates.auto_commit_rule` (its CHECK constraint).
 #[derive(TS)]
 #[ts(rename_all = "snake_case")]

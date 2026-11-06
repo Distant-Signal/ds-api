@@ -376,9 +376,22 @@ resolutionStatus: ResolutionStatus | null, };
  * serde attributes exactly (same `rename_all_fields` requirement, same
  * reasoning).
  */
-export type CreateJourneyTemplateRequest = { "mode": "manual", customName?: string | null, legs: Array<TemplateLegRequest>, } | { "mode": "fromJourney", customName?: string | null, journeyId: number, };
+export type CreateJourneyTemplateRequest = { "mode": "manual", customName?: string | null, legs: Array<TemplateLegRequest>, } | { "mode": "fromJourney", customName?: string | null, journeyId: number, } | { "mode": "plan", customName?: string | null, originCrs: string, destinationCrs: string, target: TemplateTarget, planOptions?: PlanOptions | null, usualItinerary: UsualItinerary, 
+/**
+ * Required: a regular journey recurs.
+ */
+daysOfWeek: number, startsOn?: string | null, endsOn?: string | null, 
+/**
+ * `manual` (the default: remind me to pick) or `auto`.
+ */
+defaultMatchMode?: TemplateMatchMode | null, return?: ReturnJourneyRequest | null, };
 
-export type CreateJourneyTemplateResponse = { templateId: number, };
+export type CreateJourneyTemplateResponse = { templateId: number, 
+/**
+ * The return journey's template, for a `plan` create with `return`;
+ * `null` otherwise.
+ */
+returnTemplateId: number | null, };
 
 export type CreatePersonalTokenRequest = { name: string, scopes: Array<string>, lifetimeDays: number, };
 
@@ -1303,6 +1316,13 @@ followedFrom?: FollowedFrom,
  */
 canFollow?: boolean, 
 /**
+ * The regular journey (`journey_templates.id`) this journey was made
+ * from: the page links to it and offers "Skip". Owner only; `null`
+ * for anyone else, when it wasn't made from one, or when that was
+ * deleted. Additive (2026-11-06).
+ */
+sourceTemplateId: number | null, 
+/**
  * The open break, `null` when the journey works.
  */
 openBreak: OpenBreakSummary | null, 
@@ -1576,6 +1596,13 @@ cancellation: CancellationSummary | null,
  */
 followedFrom?: FollowedFrom, 
 /**
+ * The regular journey (`journey_templates.id`) this journey was made
+ * from, so the card can link to it and offer "Skip". Only on the
+ * caller's own journeys: `null` on a followed or shared one, and when
+ * it wasn't made from one or that was deleted. Additive (2026-11-06).
+ */
+sourceTemplateId: number | null, 
+/**
  * Set on a journey another member shared into one or more of the
  * caller's groups (DS-178, `include=shared` only): one entry per such
  * group, newest share first. Such a row is read-only. Absent on the
@@ -1815,7 +1842,13 @@ board: StopBoard | null, scheduledArrival: string | null, scheduledDeparture: st
  * read/write) -- this plan's own frontend (Task 8) renders NONE of them
  * as editable controls; see that task's own scope note.
  */
-export type JourneyTemplateDetailResponse = { id: number, customName: string | null, createdAt: string, updatedAt: string, daysOfWeek: number | null, active: boolean, startsOn: string | null, endsOn: string | null, defaultMatchMode: TemplateMatchMode, autoCommitRule: AutoCommitRule | null, legs: Array<JourneyTemplateLegDetailResponse>, };
+export type JourneyTemplateDetailResponse = { id: number, customName: string | null, createdAt: string, updatedAt: string, daysOfWeek: number | null, active: boolean, startsOn: string | null, endsOn: string | null, defaultMatchMode: TemplateMatchMode, autoCommitRule: AutoCommitRule | null, legs: Array<JourneyTemplateLegDetailResponse>, 
+/**
+ * Regular journeys (additive): `null` for a template without a
+ * target. See `JourneyTemplateListItem` for `nextDate` and
+ * `skippedDates`.
+ */
+originCrs: string | null, originName: string | null, destinationCrs: string | null, destinationName: string | null, target: TemplateTarget | null, planOptions: PlanOptions | null, usualItinerary: UsualItinerary | null, pairedTemplateId: number | null, nextDate: string | null, skippedDates: Array<string>, };
 
 export type JourneyTemplateLegDetailResponse = { id: number, originCrs: string | null, originName: string | null, destinationCrs: string | null, destinationName: string | null, departAfter: string | null, departBefore: string | null, arriveAfter: string | null, arriveBefore: string | null, };
 
@@ -1844,7 +1877,24 @@ nextRunOn: string | null,
  * gets no reminder and can't be picked for automatically, so the list
  * asks for times.
  */
-hasOpenLegs: boolean, };
+hasOpenLegs: boolean, 
+/**
+ * Regular journeys (phase 1, additive): the target's stations (with
+ * names), the target, the paired return template, the recurrence
+ * window, the next date and the skipped dates. The target fields are
+ * `null` for a template without a target.
+ */
+originCrs: string | null, originName: string | null, destinationCrs: string | null, destinationName: string | null, target: TemplateTarget | null, pairedTemplateId: number | null, startsOn: string | null, endsOn: string | null, 
+/**
+ * The next due date on or after London's today that isn't skipped,
+ * and isn't today once today's journey has started: the date "Skip
+ * next" skips. `None` when paused, not recurring or past `endsOn`.
+ */
+nextDate: string | null, 
+/**
+ * Skipped dates from today on, ascending.
+ */
+skippedDates: Array<string>, };
 
 export type JsonValue = number | string | boolean | Array<JsonValue> | { [key in string]: JsonValue } | null;
 
@@ -2566,6 +2616,13 @@ export type Pick = "recommended" | "fastest" | "fewestChanges" | "sameOperator" 
  */
 export type PinnedLineAlerts = { notify: boolean, };
 
+/**
+ * The `/Trips/plan` options a regular journey was planned with, as that
+ * route's query parameters take them, so a later plan for the same target
+ * can repeat them. Unknown keys are dropped.
+ */
+export type PlanOptions = { waypoints?: string | null, via?: string | null, avoid?: string | null, avoidStop?: string | null, avoidChange?: string | null, maxChanges?: number | null, transit?: string | null, operator?: string | null, avoidOperator?: string | null, preferOperator?: string | null, };
+
 export type PlannedItinerary = { legs: Array<PlannedLeg>, 
 /**
  * Changes between National Rail trains (rides less one): what
@@ -3024,7 +3081,14 @@ endpointSha256: string, };
  * populates every field from the currently-loaded template before
  * submitting.
  */
-export type PutJourneyTemplateRequest = { customName?: string | null, legs: Array<TemplateLegRequest>, daysOfWeek: number | null, active: boolean, startsOn: string | null, endsOn: string | null, defaultMatchMode: TemplateMatchMode, autoCommitRule: AutoCommitRule | null, };
+export type PutJourneyTemplateRequest = { customName?: string | null, legs: Array<TemplateLegRequest>, daysOfWeek: number | null, active: boolean, startsOn: string | null, endsOn: string | null, defaultMatchMode: TemplateMatchMode, autoCommitRule: AutoCommitRule | null, 
+/**
+ * Regular journeys (additive): each optional, and an absent one keeps
+ * the stored value. `target` needs `originCrs` and `destinationCrs`
+ * unless the template already has a target; `planOptions` and
+ * `usualItinerary` need a target.
+ */
+originCrs?: string, destinationCrs?: string, target?: TemplateTarget, planOptions?: PlanOptions, usualItinerary?: UsualItinerary, };
 
 export type QuietHours = { start: string, end: string, timezone: string, };
 
@@ -3153,6 +3217,12 @@ export type ResolutionStatus = "pending" | "schedule_matched" | "resolved" | "un
  * How `GET /public/trains/resolve` matched: `train_resolve::MatchedOn`.
  */
 export type ResolveMatchedOn = "rsid" | "rsidPrefix" | "timetable";
+
+/**
+ * The return journey of a plan-mode create: its own target, options and
+ * usual itinerary.
+ */
+export type ReturnJourneyRequest = { customName?: string | null, target: TemplateTarget, planOptions?: PlanOptions | null, usualItinerary: UsualItinerary, };
 
 /**
  * `journey_revisions.actor` (its CHECK constraint).
@@ -3285,6 +3355,21 @@ analyticsOptIn: boolean,
  * logged out.
  */
 personalTokensEnabled: boolean, };
+
+export type SetTemplateActiveRequest = { active: boolean, };
+
+/**
+ * `PUT /JourneyTemplates/{id}/active`'s response.
+ */
+export type SetTemplateActiveResponse = { 
+/**
+ * The template and, if it has one, its pair.
+ */
+templateIds: Array<number>, 
+/**
+ * Untouched journeys a pause deleted.
+ */
+deletedJourneyIds: Array<number>, };
 
 /**
  * The unlisted share link `unlisted_links::UnlistedLink` mapped onto the
@@ -3479,6 +3564,25 @@ addedByName: string | null, addedByTag: string | null, addedAt: string, };
  *   corroborates it.
  */
 export type SkipSource = "Darwin" | "Trust" | "Both";
+
+export type SkipTemplateDateRequest = { 
+/**
+ * Default: the template's `nextDate`.
+ */
+serviceDate?: string | null, 
+/**
+ * Skip the paired return journey's date too.
+ */
+pair?: boolean | null, };
+
+/**
+ * `POST /JourneyTemplates/{id}/skip`'s response.
+ */
+export type SkipTemplateDateResponse = { serviceDate: string, templateIds: Array<number>, 
+/**
+ * Journeys already added for that date, now deleted.
+ */
+deletedJourneyIds: Array<number>, };
 
 /**
  * `GET /public/stations/{crs}/accessibility`: the station's RDM
@@ -3697,6 +3801,31 @@ export type TemplateLegRequest = { originCrs: string, destinationCrs: string, de
  * `journey_templates.default_match_mode` (its CHECK constraint).
  */
 export type TemplateMatchMode = "manual" | "auto";
+
+/**
+ * A regular journey's target: leave after, or arrive by, a London clock
+ * time, on the service date or (`dayOffset` 1) the day after it, as
+ * `/Trips/plan`'s `dayOffset`.
+ */
+export type TemplateTarget = { 
+/**
+ * `depart_after` or `arrive_by`.
+ */
+kind: TemplateTargetKind, 
+/**
+ * `HH:MM` (seconds optional).
+ */
+time: string, 
+/**
+ * 0 or 1. Absent means 0.
+ */
+dayOffset: number, };
+
+/**
+ * `journey_templates.target_kind` (its CHECK constraint): a regular
+ * journey's target.
+ */
+export type TemplateTargetKind = "depart_after" | "arrive_by";
 
 /**
  * One arrival as the api serves it.
@@ -5408,6 +5537,46 @@ export type UntrackedStatus = "planned" | "inProgress" | "done";
  * `null` (no stated end); both RFC 3339 (`+00:00`).
  */
 export type UpcomingDisruption = { from: string, to: string | null, summary: string, incidentId: string, };
+
+/**
+ * The itinerary the user picked when they made the regular journey,
+ * trimmed to what a later day needs: clock times, not instants, since the
+ * template has no date.
+ */
+export type UsualItinerary = { legs: Array<UsualItineraryLeg>, };
+
+/**
+ * One leg of a [`UsualItinerary`]. A train leg (`kind` absent or `train`)
+ * has a train UID, its stations and its booked departure; an untracked
+ * leg (`kind: "untracked"`) its mode, places and minutes.
+ */
+export type UsualItineraryLeg = { 
+/**
+ * `train` or `untracked`.
+ */
+kind: JourneyLegKind, trainUid?: string | null, 
+/**
+ * The planned date the train was picked on. Request only: the
+ * train's calls are checked against that day's timetable, and it is
+ * not stored.
+ */
+serviceDate?: string | null, 
+/**
+ * The operator's two-character code.
+ */
+atocCode?: string | null, originCrs?: string | null, destinationCrs?: string | null, 
+/**
+ * London clock time of the booked departure from the leg's origin.
+ */
+departs?: string | null, 
+/**
+ * Days after the service date `departs` falls on (0 or 1).
+ */
+departsDayOffset: number, arrives?: string | null, arrivesDayOffset: number, transitMode?: TransitMode | null, originName?: string | null, destinationName?: string | null, lineName?: string | null, 
+/**
+ * An untracked leg's length.
+ */
+minutes?: number | null, };
 
 /**
  * A status's validity window, times RFC 3339 (`+00:00`).

@@ -66,13 +66,13 @@ The inactive-account sweep (below) uses the same function.
 | `tracked_train_tickets` | Ticket records: operator, ticket type, origin and destination, source | Cascade | Attached to a tracked train: deleted with it. Standalone: deleted 548 days after the departure date (or the creation date if there is no departure date). | `tickets` |
 | `train_notification_state` | Last push sent per tracked train | Cascade | Deleted with its tracked train | `notificationState.trains` |
 | `line_notification_state` | Last push sent per pinned line | Cascade | Life of the account | `notificationState.lines` |
-| `journeys`, `journey_legs` | Journeys and their legs: stations, dates, time windows | Cascade | A journey with no leg dated in the last 548 days is deleted, with its share link | `journeys` (legs nested) |
+| `journeys`, `journey_legs` | Journeys and their legs: stations, dates, time windows | Cascade | A journey with no leg dated in the last 548 days is deleted, with its share link. A journey made from a regular journey goes sooner: `REGULAR_JOURNEY_RETENTION_DAYS` (off at 0 by default; the chart sets 90) after its last leg, unless one of its trains has a ticket or is known to have been cancelled or at least 15 minutes late (the lowest Delay Repay band). Its trains go with it. A train's live state is kept about 30 days; after that a 15-minute delay is known only if a push reported it. | `journeys` (legs nested) |
 | `journey_revisions`, `journey_revision_legs` | Each journey's booked plan and every change since: trains, stations, booked times, ticket ids, what happened to each leg | Cascade (via the journey) | Deleted with the journey | `journeys[].revisions` (legs nested) |
 | `journey_breaks` | Times a journey stopped working (cancellation, missed connection, a train marked missed), the alternatives suggested and what was done | Cascade | Deleted with the journey | `journeyBreaks` |
 | `notification_preferences` | Which kinds of push to send, the delay threshold and the quiet hours (time zone included) | Cascade | Life of the account | `notificationPreferences` |
 | `notification_holds` | Line and train pushes held for the user's quiet hours: the push text, the line or tracked train, its status and when it was decided | Cascade | Deleted once sent, or dropped when no longer news; at most a day | `notificationState.held` |
 | `journey_leg_notification_state` | Last push sent per journey leg | Cascade | Deleted with its leg | `notificationState.journeyLegs` |
-| `journey_templates`, `journey_template_legs` | Recurring journey definitions | Cascade | Life of the account (never pruned by age) | `journeyTemplates` (legs nested) |
+| `journey_templates`, `journey_template_legs` | Regular journey definitions: stations, target time, plan options, the usual train, the paired return journey | Cascade | Life of the account (never pruned by age) | `journeyTemplates` (legs nested) |
 | `journey_template_skipped_dates` | "Not this date" markers | Cascade (via the template) | Markers dated more than 548 days ago are deleted | `journeyTemplates[].skipped_dates` |
 | `groups` | Group name. `created_by` is the creator. | The group survives for other members, and `created_by` becomes NULL. A group the user owned alone is deleted. | Life of the group | `groupMemberships` (name, role, `group_created_by_you`) |
 | `group_members` | The user's membership and role | Cascade, after ownership hand-over | Life of the membership | `groupMemberships` |
@@ -90,13 +90,14 @@ Ticket uploads (PDF, pkpass, zip) are parsed in memory and never stored.
 
 ## Settings
 
-All three are on the api (`crates/api/src/data/config.rs`), and are set in the chart as `api.*` in `values.yaml`. The sweep runs hourly, in `session_cleanup_sweep_loop`, every `SESSION_CLEANUP_INTERVAL_SECS`. Setting a value to 0 disables that limit.
+All four are on the api (`crates/api/src/data/config.rs`), and are set in the chart as `api.*` in `values.yaml`. The sweep runs hourly, in `session_cleanup_sweep_loop`, every `SESSION_CLEANUP_INTERVAL_SECS`. Setting a value to 0 disables that limit.
 
 | Env var | Chart value | Default | Effect |
 |---|---|---|---|
 | `PAST_TRAVEL_RETENTION_DAYS` | `api.pastTravelRetentionDays` | 548 | Deletes these after the given number of days: tracked trains, standalone tickets, journeys and template skip markers. |
 | `STALE_PUSH_SUBSCRIPTION_DAYS` | `api.stalePushSubscriptionDays` | 365 | Deletes push subscriptions of users who have been absent this long. |
 | `INACTIVE_ACCOUNT_RETENTION_DAYS` | `api.inactiveAccountRetentionDays` | **0 (off)** | Deletes whole accounts with no login and no live session for this long, at most 100 per run. |
+| `REGULAR_JOURNEY_RETENTION_DAYS` | `api.regularJourneyRetentionDays` | **0 (off)** | Deletes journeys made from a regular journey this many days after their last leg, unless they matter for Delay Repay (see `journeys` above), at most 500 per run. The chart sets 90 once the privacy page says so. |
 
 `INACTIVE_ACCOUNT_RETENTION_DAYS` is off by default because the app holds no email addresses, so a user cannot be warned first. Before enabling it (the audit suggests 730), state it in the privacy notice.
 
