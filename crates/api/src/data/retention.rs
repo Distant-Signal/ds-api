@@ -176,8 +176,10 @@ const MAX_REGULAR_OCCURRENCES_PER_RUN: i64 = 500;
 /// set) with no leg dated on or after `date`, when nothing on them matters
 /// for Delay Repay:
 ///
-/// - no leg's train has a ticket (`tracked_train_tickets`), now or when a
-///   plan was recorded (`journey_revision_legs.ticket_ids`);
+/// - no leg has ticket details (`data::leg_tickets`: a
+///   `tracked_train_tickets` row on its train), on the current plan or on
+///   a recorded plan's leg whose details are still kept
+///   (`journey_revision_legs.ticket_ids`);
 /// - no plan recorded a leg as cancelled, part cancelled or missed;
 /// - no leg's train is known to have been cancelled or at least
 ///   [`REGULAR_JOURNEY_KEEP_DELAY_MINUTES`] late at the leg's destination,
@@ -221,7 +223,8 @@ pub async fn prune_regular_occurrences(pool: &PgPool, date: NaiveDate) -> Result
                SELECT 1 FROM journey_revisions r \
                JOIN journey_revision_legs rl ON rl.revision_id = r.id \
                WHERE r.journey_id = j.id \
-                 AND (cardinality(rl.ticket_ids) > 0 \
+                 AND (EXISTS (SELECT 1 FROM tracked_train_tickets t \
+                              WHERE t.id = ANY(rl.ticket_ids)) \
                       OR rl.fate IN ('cancelled', 'part_cancelled', 'missed'))) \
          ORDER BY j.id \
          LIMIT $3",
@@ -757,13 +760,34 @@ mod db_tests {
 
         let (plain, plain_train) = seed_regular_occurrence(&pool, user, Some(template), 100).await;
         let (recent, _) = seed_regular_occurrence(&pool, user, Some(template), 60).await;
+        // Ticket details saved on its leg (`leg_tickets`): kept.
         let (ticketed, ticketed_train) =
             seed_regular_occurrence(&pool, user, Some(template), 100).await;
-        sqlx::query(
-            "INSERT INTO tracked_train_tickets (tracked_train_id, user_id) VALUES ($1, $2)",
+        crate::data::leg_tickets::set_for_subscription(
+            &pool,
+            user,
+            ticketed_train,
+            &crate::data::leg_tickets::TicketDetails {
+                ticket_type: crate::data::leg_tickets::TicketType::Return,
+                operator_code: None,
+                name: None,
+                source: crate::data::leg_tickets::TicketSource::Manual,
+                departure_date: None,
+            },
         )
-        .bind(ticketed_train)
-        .bind(user)
+        .await
+        .unwrap();
+        // A recorded plan named ticket details since removed: they no
+        // longer keep it.
+        let (cleared_ticket, _) = seed_regular_occurrence(&pool, user, Some(template), 100).await;
+        sqlx::query(
+            "WITH r AS (INSERT INTO journey_revisions \
+                            (journey_id, revision_no, reason, actor, is_compensation_baseline) \
+                        VALUES ($1, 1, 'booked', 'owner', TRUE) RETURNING id) \
+             INSERT INTO journey_revision_legs (revision_id, position, kind, service_date, ticket_ids) \
+             SELECT id, 1, 'train', CURRENT_DATE - 100, ARRAY[-1]::bigint[] FROM r",
+        )
+        .bind(cleared_ticket)
         .execute(&pool)
         .await
         .unwrap();
@@ -864,6 +888,10 @@ mod db_tests {
             }
         };
         assert!(!exists(plain).await, "a plain old occurrence goes");
+        assert!(
+            !exists(cleared_ticket).await,
+            "ticket details since removed don't keep it"
+        );
         assert!(!exists(slightly_late).await, "10 minutes late goes");
         assert!(
             !exists(recorded_on_time).await,

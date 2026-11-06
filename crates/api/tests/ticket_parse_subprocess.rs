@@ -44,21 +44,6 @@ async fn a_pkpass_parsed_in_the_child_matches_the_in_process_parse() {
 }
 
 #[tokio::test]
-async fn a_pdf_parsed_in_the_child_matches_the_in_process_parse() {
-    let bytes = fixtures::train_pdf();
-    let expected = ticket_extraction::parse_pdf(&bytes).expect("in-process parse");
-    assert_eq!(
-        expected.ticket_type.as_deref(),
-        Some("Super Off-Peak Return")
-    );
-    let got = default_parser()
-        .parse(TicketKind::Pdf, bytes)
-        .await
-        .expect("child parse");
-    assert_eq!(got, expected);
-}
-
-#[tokio::test]
 async fn a_parser_error_in_the_child_comes_back_as_unparseable() {
     let bytes = fixtures::zip_with(&[(
         "pass.json",
@@ -244,10 +229,7 @@ async fn the_child_refuses_test_modes_without_the_hook_variable() {
 async fn report_subprocess_latency_overhead() {
     const ROUNDS: u32 = 50;
     let parser = default_parser();
-    for (name, kind, bytes) in [
-        ("pkpass", TicketKind::Pkpass, fixtures::train_pkpass()),
-        ("pdf", TicketKind::Pdf, fixtures::train_pdf()),
-    ] {
+    for (name, kind, bytes) in [("pkpass", TicketKind::Pkpass, fixtures::train_pkpass())] {
         // Warm the page cache and the parser's own statics.
         parser.parse(kind, bytes.clone()).await.unwrap();
 
@@ -255,7 +237,6 @@ async fn report_subprocess_latency_overhead() {
         for _ in 0..ROUNDS {
             match kind {
                 TicketKind::Pkpass => ticket_extraction::parse_pkpass(&bytes).map(drop).unwrap(),
-                TicketKind::Pdf => ticket_extraction::parse_pdf(&bytes).map(drop).unwrap(),
             }
         }
         let in_process = started.elapsed() / ROUNDS;

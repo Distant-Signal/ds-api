@@ -99,6 +99,7 @@ impl Scope {
 pub const DELEGATED_ROUTES: &[(Method, &str, Scope)] = &[
     (Method::GET, "/Journeys/mine", Scope::JourneysRead),
     (Method::GET, "/Journeys/{journey_id}", Scope::JourneysRead),
+    (Method::GET, "/Journeys/reliability", Scope::JourneysRead),
     (Method::POST, "/Journeys/itinerary", Scope::JourneysWrite),
     (Method::POST, "/Journeys/irish-train", Scope::JourneysWrite),
     (
@@ -1461,6 +1462,7 @@ mod tests {
                 [
                     "GET /Journeys/mine journeys:read",
                     "GET /Journeys/{journey_id} journeys:read",
+                    "GET /Journeys/reliability journeys:read",
                     "POST /Journeys/itinerary journeys:write",
                     "POST /Journeys/irish-train journeys:write",
                     "DELETE /Journeys/{journey_id} journeys:delete",
@@ -1506,6 +1508,7 @@ mod tests {
                     // (`personal_tokens::TOKEN_ROUTES`); not delegated.
                     "routes/preferences.rs PreferencesReadScope",
                     "routes/preferences.rs PreferencesReadScope",
+                    "routes/reliability.rs ReadScope",
                 ],
                 "the handlers taking DelegatedOrSessionUser changed; update DELEGATED_ROUTES, \
                  the spec's §5.8 and this list together"

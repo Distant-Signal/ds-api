@@ -110,10 +110,6 @@ export type AffectedRoute = { from: string, to: string, };
  */
 export type AlternativesCause = "missed" | "cancelled" | "connection" | "choice";
 
-export type AttachTicketRequest = { trackingId: number, };
-
-export type AttachTicketResponse = { ticketId: number, trackedTrainId: number, };
-
 /**
  * `journey_templates.auto_commit_rule` (its CHECK constraint).
  */
@@ -606,71 +602,10 @@ thresholdMinutes: number | null,
  */
 provisional: boolean, disclaimer: string, };
 
-export type DelayRepayEstimateResponse = { 
 /**
- * Why there is no delay at all, when that is known up front: a bus or
- * ferry is never reported live, so its delay cannot be measured.
- * `None` for a train.
- */
-unmeasurableReason: string | null, 
-/**
- * The delay against the PUBLIC arrival at `measured_at_crs` (design
- * doc §9 decision 3): measured once the train has arrived (or, at a
- * departure-only station, departed), projected before then
- * (`provisional`). `None` when `outcome` is `notReached`.
- */
-delayMinutes: number | null, 
-/**
- * `true` while `delay_minutes` (and `estimate`) are a projection.
- */
-provisional: boolean, 
-/**
- * See `common::public_delay::DelayBasis`; `None` exactly when
- * `delay_minutes` is.
- */
-delayBasis: DelayBasis | null, 
-/**
- * Where the delay was measured: the ticket's destination, else the
- * pin destination, else the terminus. Set when `delay_minutes` is, and
- * when `outcome` is `notReached` (the destination not reached).
- */
-measuredAtCrs: string | null, 
-/**
- * `measured_at_crs`'s station name, when known.
- */
-measuredAtName: string | null, 
-/**
- * See [`Outcome`]; `None` while not known yet.
- */
-outcome: Outcome | null, 
-/**
- * `true` for an operator running its own compensation scheme: no
- * percentage, just the claim link.
- */
-ownScheme: boolean, 
-/**
- * The scheme's operator, when it is one in [`OPERATORS`] (else `None`:
- * the ticket's own `operator` text is the best name).
- */
-schemeOperator: string | null, estimate: DelayRepayEstimate | null, 
-/**
- * Always populated, independent of `estimate`: no caller is ever left
- * with nowhere real to go.
- */
-claimUrl: string, 
-/**
- * Always populated, independent of `estimate`.
- */
-disclaimer: string, 
-/**
- * [`RULES_CHECKED_ON`].
- */
-rulesCheckedOn: string, serviceMode: ServiceMode, liveTracking: boolean, };
-
-/**
- * The Delay Repay fields both `GET .../delay-repay` and
- * `GET /Train/tickets/mine` serve (flattened into each), so the two can
- * never disagree.
+ * The Delay Repay fields both a leg's `delayRepay` (`GET /Journeys/{id}`)
+ * and `GET /Journeys/reliability` serve (flattened into each), so the two
+ * can never disagree.
  */
 export type DelayRepayFields = { 
 /**
@@ -690,8 +625,9 @@ provisional: boolean,
  */
 delayBasis: DelayBasis | null, 
 /**
- * Where the delay was measured: the ticket's destination, else the
- * pin destination, else the terminus. Set when `delay_minutes` is, and
+ * Where the delay was measured: the leg's destination, else the pin
+ * destination, else the terminus (a journey's: its booked final
+ * station). Set when `delay_minutes` is, and
  * when `outcome` is `notReached` (the destination not reached).
  */
 measuredAtCrs: string | null, 
@@ -1472,33 +1408,24 @@ transitNetwork: string | null, transitLineId: string | null, headsign: string | 
  * (`data::timetabled_legs::LegTimetable`): scheduled times only,
  * never live. Absent on other legs, and when it couldn't be read.
  */
-timetable?: LegTimetable, };
+timetable?: LegTimetable, 
+/**
+ * The leg's ticket details (`data::leg_tickets`, additive 2026-11-06):
+ * the owner's train legs only; `null` with none saved, on any other
+ * leg and for anyone else.
+ */
+ticket: LegTicket | null, 
+/**
+ * The leg's Delay Repay estimate (additive 2026-11-06), with or
+ * without a ticket: the owner's tracked GB train legs only; `null` on
+ * any other leg and for anyone else.
+ */
+delayRepay: LegDelayRepay | null, };
 
 /**
  * `journey_legs.kind` (its CHECK constraint).
  */
 export type JourneyLegKind = "train" | "untracked";
-
-/**
- * A proposed window-mode journey leg -- the read side's flattened
- * `depart_after`/`depart_before` shape, matching
- * `routes::journeys::JourneyLegDetailResponse`'s own established
- * read-side convention (see `common::TimeWindow`'s doc comment for why
- * that convention exists) rather than introducing a nested-object shape
- * only this one response would use. No `arrive_after`/`arrive_before`:
- * a ticket's `current_departure_date` only ever tells us when the
- * traveller meant to LEAVE, never when they'd arrive, so there is nothing
- * non-guessed to propose for an arrival window (see this module's own
- * "never guessed at" posture, shared with `ticket_extraction`).
- */
-export type JourneyLegProposal = { originCrs: string | null, destinationCrs: string | null, 
-/**
- * `None` whenever the ticket has no `current_departure_date` at all --
- * there is no honest calendar day to propose without it. The caller's
- * own `/track` form already defaults an empty `serviceDate` to today,
- * same as every other visit to that page.
- */
-serviceDate: string | null, departAfter: string | null, departBefore: string | null, };
 
 /**
  * One row of `GET /Journeys/mine` -- deliberately lighter than the full
@@ -2097,6 +2024,78 @@ reliesOnLateDeparture?: LateDepartureReliance<string>,
 nextTimetabled?: TimetabledRide, };
 
 /**
+ * A train leg's Delay Repay estimate, as `GET /Journeys/{id}` serves it
+ * on each of the owner's tracked GB train legs (`delayRepay`). The same
+ * fields the per-ticket route served until 2026-11.
+ */
+export type LegDelayRepay = { 
+/**
+ * Why there is no delay at all, when that is known up front: a bus or
+ * ferry is never reported live, so its delay cannot be measured.
+ * `None` for a train.
+ */
+unmeasurableReason: string | null, 
+/**
+ * Whether the leg's ticket details say single or return; `false`
+ * means the 120-minute band shows both readings.
+ */
+ticketKnown: boolean, 
+/**
+ * The delay against the PUBLIC arrival at `measured_at_crs` (design
+ * doc §9 decision 3): measured once the train has arrived (or, at a
+ * departure-only station, departed), projected before then
+ * (`provisional`). `None` when `outcome` is `notReached`.
+ */
+delayMinutes: number | null, 
+/**
+ * `true` while `delay_minutes` (and `estimate`) are a projection.
+ */
+provisional: boolean, 
+/**
+ * See `common::public_delay::DelayBasis`; `None` exactly when
+ * `delay_minutes` is.
+ */
+delayBasis: DelayBasis | null, 
+/**
+ * Where the delay was measured: the leg's destination, else the pin
+ * destination, else the terminus (a journey's: its booked final
+ * station). Set when `delay_minutes` is, and
+ * when `outcome` is `notReached` (the destination not reached).
+ */
+measuredAtCrs: string | null, 
+/**
+ * `measured_at_crs`'s station name, when known.
+ */
+measuredAtName: string | null, 
+/**
+ * See [`Outcome`]; `None` while not known yet.
+ */
+outcome: Outcome | null, 
+/**
+ * `true` for an operator running its own compensation scheme: no
+ * percentage, just the claim link.
+ */
+ownScheme: boolean, 
+/**
+ * The scheme's operator, when it is one in [`OPERATORS`] (else `None`:
+ * the ticket's own `operator` text is the best name).
+ */
+schemeOperator: string | null, estimate: DelayRepayEstimate | null, 
+/**
+ * Always populated, independent of `estimate`: no caller is ever left
+ * with nowhere real to go.
+ */
+claimUrl: string, 
+/**
+ * Always populated, independent of `estimate`.
+ */
+disclaimer: string, 
+/**
+ * [`RULES_CHECKED_ON`].
+ */
+rulesCheckedOn: string, serviceMode: ServiceMode, liveTracking: boolean, };
+
+/**
  * A train leg's live status, served as the leg's `live`.
  */
 export type LegLive = { 
@@ -2165,6 +2164,80 @@ export type LegLiveStatus = "Cancelled" | "Departed" | "Delayed" | "Late" | "OnT
 export type LegSearchFilters = { operator?: string, startsAt?: string, terminatesAt?: string, previouslyCallsAt?: string, previouslyStopsAt?: string, callsAt?: string, via?: string, avoid?: string, avoidStop?: string, };
 
 export type LegSkipResponse = { originSkipped: boolean, destinationSkipped: boolean, };
+
+/**
+ * A leg's ticket details, as `GET /Journeys/{id}` serves them on each of
+ * the owner's train legs and `PUT .../ticket` answers.
+ */
+export type LegTicket = { ticketType: LegTicketType, 
+/**
+ * Valid on [`Self::operator_code`]'s trains only.
+ */
+operatorOnly: boolean, 
+/**
+ * The train company it is limited to (an ATOC code), set exactly when
+ * `operator_only` is.
+ */
+operatorCode: string | null, name: string | null, source: LegTicketSource, 
+/**
+ * The departure the Wallet pass gave, when it gave one.
+ */
+departureDate: string | null, };
+
+/**
+ * What a Wallet pass says, for the leg's ticket form to show before the
+ * owner saves it. Nothing is stored.
+ */
+export type LegTicketPrefill = { ticketType: LegTicketType, 
+/**
+ * The pass's ticket type says it is for one company only.
+ */
+operatorOnly: boolean, 
+/**
+ * The ticket type as the pass printed it.
+ */
+ticketTypeText: string | null, 
+/**
+ * The departure the pass gives, when it gives one.
+ */
+departureDate: string | null, 
+/**
+ * Whether that departure is on the leg's own date (London); `null`
+ * when the pass gives none.
+ */
+departureDateMatchesLeg: boolean | null, };
+
+/**
+ * `PUT /Journeys/{id}/legs/{legId}/ticket`'s body.
+ */
+export type LegTicketRequest = { ticketType: LegTicketType, 
+/**
+ * Valid on the leg's train company's trains only.
+ */
+operatorOnly: boolean, 
+/**
+ * Absent, `null` or blank: no name.
+ */
+name?: string | null, 
+/**
+ * `wallet` when the details came from a Wallet pass prefill;
+ * `manual` when absent.
+ */
+source?: LegTicketSource | null, 
+/**
+ * The prefill's departure, kept with a `wallet` source only.
+ */
+departureDate?: string | null, };
+
+/**
+ * Where a leg's ticket details came from.
+ */
+export type LegTicketSource = "manual" | "wallet";
+
+/**
+ * The kind of ticket, as far as Delay Repay and the alternatives care.
+ */
+export type LegTicketType = "single" | "return" | "advance" | "offPeak" | "season" | "unknown";
 
 /**
  * A leg's `timetable` on `GET /Journeys/{id}`: what the network's active
@@ -2628,55 +2701,6 @@ operators: Array<string>, };
  * TRUST and Darwin (`data::delay_repay_outcome`).
  */
 export type Outcome = "arrived" | "departedOnly" | "notReached";
-
-/**
- * What a `.pkpass`/PDF parse could recover -- the same fillable fields as
- * `common::TicketEntryRequest`, minus a user-chosen `source` (this is
- * fixed per parse path) plus a fixed `source` describing which one
- * produced it. `None` means "not found in this file, leave for the user
- * to fill in" -- never guessed at. This is exactly what a human sees on a
- * review-before-save form pre-filled from an upload; nothing here is ever
- * written to `tracked_train_tickets` directly -- see this module's own
- * doc comment.
- *
- * `Deserialize` exists only for `data::ticket_subprocess`, whose parent
- * process reads this back from the parse child's JSON reply.
- */
-export type PartialTicket = { operator: string | null, ticketType: string | null, 
-/**
- * Best-effort station identifier -- almost never a real CRS code in
- * practice (neither `.pkpass` nor PDF extraction publishes one; both
- * give station NAMES, e.g. "Kings Cross"). Deliberately NOT
- * normalized here: `train_tracking::validate_ticket_entry`'s existing
- * CRS-format check is what actually forces a human to correct this
- * into a real code before it can be saved -- see this plan's Global
- * Constraints.
- */
-originCrs: string | null, destinationCrs: string | null, 
-/**
- * The ticket's own claimed departure INSTANT, when the source format
- * carries one -- currently only ever populated from a `.pkpass`'s
- * `semantics.currentDepartureDate` (Apple's standardised key for
- * exactly this, an ISO 8601 date-time string), and only `Some` when
- * that key parses as a real `DateTime`. `None` for every PDF-sourced
- * ticket (no PDF date/time extraction exists in this module -- neither
- * tier's ticket-type/route regexes attempt one, and adding one would
- * be a new, separate false-positive surface against unstructured
- * text); also `None` for a `.pkpass` whose `semantics` dictionary is
- * absent, or present but missing this one key, or a `primaryFields`
- * heuristic match (that positional fallback is names only, per
- * `primary_fields_origin_destination`'s own doc comment -- it has
- * nothing dateable to read either).
- *
- * This is deliberately a best-effort HINT for a journey-leg search
- * window (`data::journey_leg_proposal::propose_window_leg`), never a
- * hard pin: a ticket's booked departure can genuinely differ from the
- * train the traveller actually catches (an earlier/later service on
- * the same ticket, a rebooked journey, ...), so nothing in this
- * codebase ever treats this field as an exact scheduled-departure
- * match target the way `TrackPinRequest::scheduled_departure` is.
- */
-currentDepartureDate?: string, source: TicketSource, };
 
 /**
  * A scope the page can offer.
@@ -3300,6 +3324,128 @@ export type RegularPlanReason = "usual" | "same_operator" | "best";
  * journey's day stands (`data::regular_plan`).
  */
 export type RegularPlanStatus = "pending" | "suggested" | "committed" | "no_service";
+
+/**
+ * One finished journey's Delay Repay estimate.
+ */
+export type ReliabilityJourney = { journeyId: number, customName: string | null, 
+/**
+ * The last train leg's date.
+ */
+serviceDate: string, 
+/**
+ * Where the delay is measured: the booked plan's final station.
+ */
+destinationCrs: string | null, destinationName: string | null, 
+/**
+ * The baseline's booked (public) arrival there, when known.
+ */
+bookedArrival: string | null, 
+/**
+ * The arrival there on the current plan, when known.
+ */
+actualArrival: string | null, 
+/**
+ * Measured against the booked plan after the railway changed it.
+ */
+againstBookedPlan: boolean, 
+/**
+ * The current plan ends somewhere else: no percentage.
+ */
+differentDestination: boolean, 
+/**
+ * The delay against the PUBLIC arrival at `measured_at_crs` (design
+ * doc §9 decision 3): measured once the train has arrived (or, at a
+ * departure-only station, departed), projected before then
+ * (`provisional`). `None` when `outcome` is `notReached`.
+ */
+delayMinutes: number | null, 
+/**
+ * `true` while `delay_minutes` (and `estimate`) are a projection.
+ */
+provisional: boolean, 
+/**
+ * See `common::public_delay::DelayBasis`; `None` exactly when
+ * `delay_minutes` is.
+ */
+delayBasis: DelayBasis | null, 
+/**
+ * Where the delay was measured: the leg's destination, else the pin
+ * destination, else the terminus (a journey's: its booked final
+ * station). Set when `delay_minutes` is, and
+ * when `outcome` is `notReached` (the destination not reached).
+ */
+measuredAtCrs: string | null, 
+/**
+ * `measured_at_crs`'s station name, when known.
+ */
+measuredAtName: string | null, 
+/**
+ * See [`Outcome`]; `None` while not known yet.
+ */
+outcome: Outcome | null, 
+/**
+ * `true` for an operator running its own compensation scheme: no
+ * percentage, just the claim link.
+ */
+ownScheme: boolean, 
+/**
+ * The scheme's operator, when it is one in [`OPERATORS`] (else `None`:
+ * the ticket's own `operator` text is the best name).
+ */
+schemeOperator: string | null, estimate: DelayRepayEstimate | null, 
+/**
+ * Always populated, independent of `estimate`: no caller is ever left
+ * with nowhere real to go.
+ */
+claimUrl: string, 
+/**
+ * Always populated, independent of `estimate`.
+ */
+disclaimer: string, 
+/**
+ * [`RULES_CHECKED_ON`].
+ */
+rulesCheckedOn: string, };
+
+/**
+ * `GET /Journeys/reliability`'s body.
+ */
+export type ReliabilityResponse = { 
+/**
+ * Newest first.
+ */
+trains: Array<ReliabilityTrain>, 
+/**
+ * One per finished journey whose arrival is known, newest first.
+ */
+journeys: Array<ReliabilityJourney>, };
+
+/**
+ * One train the caller took, or was booked on until the railway let
+ * them down.
+ */
+export type ReliabilityTrain = { journeyId: number, 
+/**
+ * The current plan's leg; `null` for a replaced booked train.
+ */
+legId: number | null, trainUid: string | null, serviceDate: string, originCrs: string | null, destinationCrs: string | null, destinationName: string | null, 
+/**
+ * The public delay at the leg's destination, in minutes; `null` when
+ * not known, or for a cancellation.
+ */
+delayMinutes: number | null, cancelled: boolean, 
+/**
+ * `true` when this is the leg's recorded outcome; `false` when it was
+ * read from the train's live state (not recorded yet).
+ */
+recorded: boolean, 
+/**
+ * Set for a booked train the railway's fault replaced: the cause of
+ * the change (`cancelled`, `part_cancelled`, `connection_missed` or
+ * `skipped_stop`). It counts as a cancellation.
+ */
+replacedBecause: RevisionCause | null, };
 
 export type RenameRequest = { 
 /**
@@ -4139,129 +4285,11 @@ name: string,
  */
 modes: Array<string>, lines: Array<TflStopLine>, };
 
-export type TicketCreatedResponse = { ticketId: number, };
-
-/**
- * Manual ticket-entry payload for `POST /Train/{trackingId}/tickets`
- * (`crates/api/src/routes/train.rs`) -- the durable v1 backbone every
- * ingestion tier ultimately funnels through (see
- * docs/superpowers/specs/2026-08-29-journey-ticket-tracking-design.md).
- * `source` defaults to "manual"; a `.pkpass`/PDF
- * upload preview (Tasks 6-9) is turned into a saved row by the client
- * re-submitting this same request shape with `source` set to whichever
- * tier produced the reviewed data ("pkpass-semantics" / "pkpass-heuristic"
- * / "pdf-heuristic") -- there is no separate "confirm upload" endpoint;
- * this is the only write path, deliberately.
- */
-export type TicketEntryRequest = { operator?: string | null, ticket_type?: string | null, origin_crs?: string | null, destination_crs?: string | null, 
-/**
- * See `ticket_extraction::PartialTicket::current_departure_date`'s own
- * doc comment -- this is that same value, carried through unedited by
- * `TicketEntryForm.tsx`'s save step (there is no separate "confirm
- * upload" endpoint; see this struct's own doc comment). A best-effort
- * HINT for a later journey-leg-proposal search window
- * (`data::journey_leg_proposal`), never a hard pin -- persisted
- * verbatim, never validated against anything, same posture as
- * `operator`/`ticket_type` above.
- */
-current_departure_date?: string | null, source?: TicketSource, };
-
 /**
  * Whether a ticket is a single or a return, as far as its free-text
  * `ticket_type` clearly says.
  */
 export type TicketKind = "single" | "return" | "unknown";
-
-/**
- * A user's own tickets, across every tracked train they have -- the
- * cross-train counterpart to `TrackedTrainTicket` (which is scoped to one
- * tracked train). Carries the ticket's own six fields (unchanged from
- * `TrackedTrainTicket`) plus enough of the owning tracked train's context
- * (route, date, live delay) to make a row useful without clicking
- * through, plus a Delay Repay estimate computed inline -- see
- * `build_ticket_list_item` for why that's a pure computation, not a
- * second query per row. The last four fields are deliberately named and
- * shaped to match `DelayRepayEstimateResponse` exactly, field-for-field,
- * so the frontend can pass a `TicketListItem` straight into the
- * already-reviewed `<DelayRepayEstimate>` component with no adapter.
- *
- * `tracked_train_id` and every train-context field
- * (`serviceDate`/`pinOriginCrs`/.../`status`) are `Option` -- all `None`
- * together for a standalone ticket with no tracked train attached yet
- * (see `create_ticket`'s doc comment). `estimate`/`delayMinutes` are
- * already `None` in that case too, by construction: `build_ticket_list_item`
- * only ever computes a real estimate from a `(operator, delay_minutes)`
- * pair, and a standalone row has no `delay_minutes` to pair with. This is
- * the same "graceful `None`, never a crash" behavior
- * `get_delay_repay_estimate`'s route already guarantees for an attached
- * ticket whose train hasn't resolved/reported a delay yet -- a standalone
- * ticket is just the same case with `None` for one more reason. `claimUrl`
- * and `disclaimer` are still always populated, per that same route's
- * invariant.
- */
-export type TicketListItem = { id: number, trackedTrainId: number | null, operator: string | null, ticketType: string | null, originCrs: string | null, destinationCrs: string | null, 
-/**
- * See `TicketListRow::origin_name`'s doc comment.
- */
-originName: string | null, destinationName: string | null, source: TicketSource, createdAt: string, serviceDate: string | null, pinOriginCrs: string | null, pinDestinationCrs: string | null, pinScheduledDeparture: string | null, resolutionStatus: ResolutionStatus | null, trainUid: string | null, status: JourneyStatus | null, customName: string | null, 
-/**
- * The delay against the PUBLIC arrival at `measured_at_crs` (design
- * doc §9 decision 3): measured once the train has arrived (or, at a
- * departure-only station, departed), projected before then
- * (`provisional`). `None` when `outcome` is `notReached`.
- */
-delayMinutes: number | null, 
-/**
- * `true` while `delay_minutes` (and `estimate`) are a projection.
- */
-provisional: boolean, 
-/**
- * See `common::public_delay::DelayBasis`; `None` exactly when
- * `delay_minutes` is.
- */
-delayBasis: DelayBasis | null, 
-/**
- * Where the delay was measured: the ticket's destination, else the
- * pin destination, else the terminus. Set when `delay_minutes` is, and
- * when `outcome` is `notReached` (the destination not reached).
- */
-measuredAtCrs: string | null, 
-/**
- * `measured_at_crs`'s station name, when known.
- */
-measuredAtName: string | null, 
-/**
- * See [`Outcome`]; `None` while not known yet.
- */
-outcome: Outcome | null, 
-/**
- * `true` for an operator running its own compensation scheme: no
- * percentage, just the claim link.
- */
-ownScheme: boolean, 
-/**
- * The scheme's operator, when it is one in [`OPERATORS`] (else `None`:
- * the ticket's own `operator` text is the best name).
- */
-schemeOperator: string | null, estimate: DelayRepayEstimate | null, 
-/**
- * Always populated, independent of `estimate`: no caller is ever left
- * with nowhere real to go.
- */
-claimUrl: string, 
-/**
- * Always populated, independent of `estimate`.
- */
-disclaimer: string, 
-/**
- * [`RULES_CHECKED_ON`].
- */
-rulesCheckedOn: string, };
-
-/**
- * `tracked_train_tickets.source` (its CHECK constraint).
- */
-export type TicketSource = "manual" | "pkpass-semantics" | "pkpass-heuristic" | "pdf-heuristic";
 
 /**
  * A reusable, named "after/before" bound pair on a `NaiveTime` --
@@ -4738,37 +4766,6 @@ firstReportExpectedAt: string | null,
  * (2026-11-06).
  */
 irishTrain: IrishTrain | null, serviceMode: ServiceMode, liveTracking: boolean, };
-
-/**
- * The public read-model for a ticket, returned directly as JSON by
- * `GET /Train/{trackingId}/tickets` (Task 3). Never leaks `user_id` --
- * same posture as `TrackedTrainState`. `tracked_train_id` is `Option<i64>`
- * -- `None` for a standalone ticket that hasn't been attached to a tracked
- * train yet (see `create_ticket`'s doc comment); every row this struct's
- * own `list_tickets_for_tracked_train` returns is guaranteed non-null by
- * that query's own `WHERE tracked_train_id = $1` filter (a NULL column
- * value can never equal a bound `i64`), but `get_ticket_owned` (used by
- * the Delay Repay route and the attach route) has no such filter and can
- * legitimately return `None` here.
- */
-export type TrackedTrainTicket = { id: number, trackedTrainId: number | null, operator: string | null, ticketType: string | null, originCrs: string | null, destinationCrs: string | null, 
-/**
- * See `TrackedTrainState::pin_origin_name`'s doc comment -- same
- * `LEFT JOIN stations` mechanism, joined here on the TICKET's own
- * `origin_crs`/`destination_crs`, not the pin route (which
- * `TrackedTrainListItem` already covers).
- */
-originName: string | null, destinationName: string | null, 
-/**
- * See `ticket_extraction::PartialTicket::current_departure_date`'s own
- * doc comment -- this is that same best-effort HINT, persisted
- * verbatim by `create_ticket`. `GET /Train/tickets/{ticketId}/journey-leg-proposal`
- * (`data::journey_leg_proposal::propose_window_leg`) is the one reader
- * that does anything with it; every other existing reader of this
- * struct (`TicketPanel.tsx`'s rendering, the Delay Repay route) simply
- * ignores it, same as any other field it doesn't need.
- */
-currentDepartureDate: string | null, source: TicketSource, createdAt: string, customName: string | null, };
 
 /**
  * The traveller-facing phase of a tracked train (spec §4.3), evaluated in

@@ -447,10 +447,20 @@ pub(crate) async fn plan_suggestions(
         .into_iter()
         .map(|(ticket_type, operator)| TicketInfo {
             ticket_type,
-            operator_atoc: operator
+            // A leg's ticket details keep the one company's ATOC code
+            // there (`leg_tickets`); older free text names one.
+            operator_atoc: operator.as_deref().and_then(|text| {
+                crate::data::delay_repay_rules::atoc_for_operator_text(text)
+                    .map(str::to_string)
+                    .or_else(|| {
+                        let code = text.trim();
+                        (code.len() == 2 && code.chars().all(|c| c.is_ascii_alphanumeric()))
+                            .then(|| code.to_ascii_uppercase())
+                    })
+            }),
+            operator_only: operator
                 .as_deref()
-                .and_then(crate::data::delay_repay_rules::atoc_for_operator_text)
-                .map(str::to_string),
+                .is_some_and(|text| !text.trim().is_empty()),
         })
         .collect();
 

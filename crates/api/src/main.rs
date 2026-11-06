@@ -129,7 +129,7 @@ fn unmatched_route_endpoint_label(_exact_path: &str) -> String {
 }
 
 fn main() -> std::process::ExitCode {
-    // `api parse-ticket <pdf|pkpass>`: the ticket-parse child process
+    // `api parse-ticket pkpass`: the ticket-parse child process
     // (M13; see `data::ticket_subprocess`). Checked before anything else so
     // the child never starts a tokio runtime, reads `.env`, or parses the
     // server's own arguments.

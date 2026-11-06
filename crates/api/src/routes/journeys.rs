@@ -128,6 +128,10 @@ pub fn router() -> Router {
         .merge(super::journey_replan::router())
         // Regular journeys: the day's train (spec 2026-11-06 §6.4).
         .merge(super::regular_plan::router())
+        // A leg's ticket details (2026-11-06), cookie-only.
+        .merge(super::journey_tickets::router())
+        // Reliability across the caller's journeys (2026-11-06).
+        .merge(super::reliability::router())
 }
 
 /// Three mutually-exclusive leg-creation shapes, discriminated by an
@@ -1729,6 +1733,14 @@ pub(crate) struct JourneyLegDetailResponse {
     #[serde(skip_serializing_if = "Option::is_none")]
     #[ts(optional)]
     timetable: Option<crate::data::timetabled_legs::LegTimetable>,
+    /// The leg's ticket details (`data::leg_tickets`, additive 2026-11-06):
+    /// the owner's train legs only; `null` with none saved, on any other
+    /// leg and for anyone else.
+    ticket: Option<crate::data::leg_tickets::LegTicket>,
+    /// The leg's Delay Repay estimate (additive 2026-11-06), with or
+    /// without a ticket: the owner's tracked GB train legs only; `null` on
+    /// any other leg and for anyone else.
+    delay_repay: Option<super::journey_tickets::LegDelayRepay>,
 }
 
 #[derive(Debug, Serialize, ts_rs::TS, schemars::JsonSchema)]
@@ -2079,6 +2091,76 @@ async fn journey_by_share_token(
     ))
 }
 
+/// Each of the owner's train legs' ticket details and Delay Repay estimate
+/// (`routes::journey_tickets`). Best effort: a failed read leaves them
+/// `null`, never fails the journey.
+async fn attach_tickets_and_delay_repay(
+    app: &App,
+    user_id: &str,
+    legs: &mut [JourneyLegDetailResponse],
+) {
+    let subscription_ids: Vec<i64> = legs
+        .iter()
+        .filter_map(|leg| leg.tracked_train_state.as_ref().map(|state| state.id))
+        .collect();
+    let tickets =
+        crate::data::leg_tickets::for_subscriptions(&app.database, user_id, &subscription_ids)
+            .await
+            .unwrap_or_else(|err| {
+                tracing::warn!(error = ?err, "could not read leg ticket details");
+                std::collections::HashMap::new()
+            });
+    for leg in legs.iter_mut() {
+        if let Some(state) = &leg.tracked_train_state {
+            leg.ticket = tickets.get(&state.id).cloned();
+        }
+    }
+    // Each leg's recorded outcome (`leg_outcomes`), for a train whose live
+    // data is gone.
+    let leg_ids: Vec<i64> = legs.iter().map(|leg| leg.id).collect();
+    let recorded: std::collections::HashMap<i64, (Option<i32>, Option<bool>)> =
+        sqlx::query_as::<_, (i64, Option<i32>, Option<bool>)>(
+            "SELECT id, final_arrival_delay_minutes, final_train_cancelled FROM journey_legs \
+             WHERE id = ANY($1) AND final_recorded_at IS NOT NULL",
+        )
+        .bind(&leg_ids)
+        .fetch_all(&app.database)
+        .await
+        .unwrap_or_else(|err| {
+            tracing::warn!(error = ?err, "could not read leg outcomes for Delay Repay");
+            Vec::new()
+        })
+        .into_iter()
+        .map(|(id, delay, cancelled)| (id, (delay, cancelled)))
+        .collect();
+    let inputs: Vec<(usize, super::journey_tickets::LegDelayRepayInput<'_>)> = legs
+        .iter()
+        .enumerate()
+        .filter(|(_, leg)| leg.kind == journeys::LEG_KIND_TRAIN)
+        .filter_map(|(index, leg)| {
+            let state = leg.tracked_train_state.as_ref()?;
+            Some((
+                index,
+                super::journey_tickets::LegDelayRepayInput {
+                    state,
+                    destination: (
+                        leg.destination_crs.as_deref(),
+                        leg.destination_name.as_deref(),
+                    ),
+                    ticket: leg.ticket.as_ref(),
+                    recorded: recorded.get(&leg.id).copied(),
+                },
+            ))
+        })
+        .collect();
+    let (indexes, inputs): (Vec<usize>, Vec<_>) = inputs.into_iter().unzip();
+    let estimates = super::journey_tickets::leg_delay_repays(app, &inputs).await;
+    drop(inputs);
+    for (index, estimate) in indexes.into_iter().zip(estimates) {
+        legs[index].delay_repay = estimate;
+    }
+}
+
 /// The body of `GET /Journeys/{journeyId}` and `GET /Journeys/shared/{token}`
 /// alike, extracted so both handlers -- one authenticated and
 /// ownership/readability-checked, one genuinely public -- share one
@@ -2337,7 +2419,14 @@ async fn build_journey_detail_response(
             transit_line_id: leg.transit_line_id,
             headsign: leg.headsign,
             timetable,
+            ticket: None,
+            delay_repay: None,
         });
+    }
+
+    // The owner's ticket details and Delay Repay estimates (2026-11-06).
+    if is_owner {
+        attach_tickets_and_delay_repay(app, &summary.user_id, &mut legs).await;
     }
 
     // Mid-journey changes: the open break (opened or ended here for the
