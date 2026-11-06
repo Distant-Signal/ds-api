@@ -81,6 +81,136 @@ pub struct JourneyTemplateListItem {
     pub last_destination_name: Option<String>,
     pub active: bool,
     pub days_of_week: Option<i16>,
+    /// `"manual"` or `"auto"`, as `GET /JourneyTemplates/{id}` serves it.
+    #[ts(as = "crate::ts_values::TemplateMatchMode")]
+    pub default_match_mode: String,
+    /// The next London date the sweep will add this template's journey on:
+    /// `None` when it is paused, not recurring, past its `endsOn`, or has
+    /// no matching day left. See `next_run_on`.
+    pub next_run_on: Option<NaiveDate>,
+    /// Whether any leg has no departure or arrival time at all. Such a leg
+    /// gets no reminder and can't be picked for automatically, so the list
+    /// asks for times.
+    pub has_open_legs: bool,
+}
+
+/// [`list_templates_for_user`]'s row, before [`next_run_on`] is worked out.
+#[derive(Debug, sqlx::FromRow)]
+struct JourneyTemplateListRow {
+    id: i64,
+    custom_name: Option<String>,
+    created_at: DateTime<Utc>,
+    leg_count: i64,
+    first_origin_crs: Option<String>,
+    first_origin_name: Option<String>,
+    last_destination_crs: Option<String>,
+    last_destination_name: Option<String>,
+    active: bool,
+    days_of_week: Option<i16>,
+    default_match_mode: String,
+    starts_on: Option<NaiveDate>,
+    ends_on: Option<NaiveDate>,
+    has_open_legs: bool,
+    /// Whether today's journey was already added (the sweep's own
+    /// "already materialized" guard).
+    ran_today: bool,
+    /// Skipped dates (`journey_template_skipped_dates`) from today on.
+    skipped_dates: Vec<NaiveDate>,
+}
+
+/// How far either side of a train's booked departure the departure window
+/// of a template leg promoted from that train reaches
+/// ([`window_around_departure`]). Five minutes keeps a routine retiming of
+/// a minute or two inside the window, while a window of ten minutes in all
+/// holds at most one train on a route with a train every ten minutes or
+/// more. That matters because the sweep's auto pick, run two hours ahead,
+/// takes the first train still to come inside the window: a wider window on
+/// a busy route would pick an earlier train than the one the user took.
+pub const PROMOTED_DEPARTURE_SLACK_MINUTES: i64 = 5;
+
+/// The departure window `(after, before)` for a template leg promoted from
+/// a train booked to leave at `departs`: [`PROMOTED_DEPARTURE_SLACK_MINUTES`]
+/// either side, clamped to the same day so the window never wraps past
+/// midnight (a wrapped window would have `after > before` and match
+/// nothing).
+pub fn window_around_departure(departs: NaiveTime) -> (NaiveTime, NaiveTime) {
+    let slack = chrono::Duration::minutes(PROMOTED_DEPARTURE_SLACK_MINUTES);
+    let (after, wrapped_back) = departs.overflowing_sub_signed(slack);
+    let (before, wrapped_forward) = departs.overflowing_add_signed(slack);
+    let after = if wrapped_back == 0 {
+        after
+    } else {
+        NaiveTime::MIN
+    };
+    let before = if wrapped_forward == 0 {
+        before
+    } else {
+        NaiveTime::from_hms_opt(23, 59, 59).unwrap_or(departs)
+    };
+    (after, before)
+}
+
+/// Whether a template leg has none of its four time bounds. The sweep has
+/// no window to remind or pick for on such a leg, so `"auto"` is refused
+/// for a template with one ([`validate_auto_mode_legs`]).
+pub fn leg_is_fully_open(leg: &TemplateLegInput) -> bool {
+    leg.depart_after.is_none()
+        && leg.depart_before.is_none()
+        && leg.arrive_after.is_none()
+        && leg.arrive_before.is_none()
+}
+
+/// The error for `"auto"` mode on a template with a leg that has no time:
+/// without one, the sweep would pick the first train of the day.
+pub const AUTO_NEEDS_TIMES_MESSAGE: &str =
+    "Add a departure or arrival time to each leg so we can pick your train.";
+
+/// Refuses `default_match_mode = "auto"` when any leg is fully open
+/// ([`leg_is_fully_open`]). `"manual"` accepts any legs.
+pub fn validate_auto_mode_legs(
+    default_match_mode: &str,
+    legs: &[TemplateLegInput],
+) -> Result<(), String> {
+    if default_match_mode == "auto" && legs.iter().any(leg_is_fully_open) {
+        return Err(AUTO_NEEDS_TIMES_MESSAGE.to_string());
+    }
+    Ok(())
+}
+
+/// The next date on or after `today` the sweep will add a template's
+/// journey on: an active template whose `days_of_week` (Monday bit 0)
+/// includes the day, inside `starts_on..=ends_on`, not a skipped date, and
+/// not today when today's journey was already added. The sweep's own
+/// rule (`notifier`'s `due_templates_for` plus its idempotency and
+/// skipped-date guards). `None` when there is no such date.
+pub fn next_run_on(
+    active: bool,
+    days_of_week: Option<i16>,
+    starts_on: Option<NaiveDate>,
+    ends_on: Option<NaiveDate>,
+    today: NaiveDate,
+    ran_today: bool,
+    skipped_dates: &[NaiveDate],
+) -> Option<NaiveDate> {
+    use chrono::Datelike;
+
+    let days = days_of_week.filter(|_| active)?;
+    let mut date = starts_on.map_or(today, |start| start.max(today));
+    // Each week has a matching day, so a week plus one day per skipped
+    // date is enough to find one.
+    for _ in 0..=(7 + skipped_dates.len()) {
+        if ends_on.is_some_and(|end| date > end) {
+            return None;
+        }
+        let bit = 1_i16 << date.weekday().num_days_from_monday();
+        let runs =
+            days & bit != 0 && !skipped_dates.contains(&date) && !(date == today && ran_today);
+        if runs {
+            return Some(date);
+        }
+        date = date.succ_opt()?;
+    }
+    None
 }
 
 /// User-facing validation for a manually-entered template leg's
@@ -404,15 +534,31 @@ where
 pub async fn list_templates_for_user(
     pool: &PgPool,
     user_id: &str,
+    today: NaiveDate,
 ) -> anyhow::Result<Vec<JourneyTemplateListItem>> {
-    let rows = sqlx::query_as::<_, JourneyTemplateListItem>(
+    let rows = sqlx::query_as::<_, JourneyTemplateListRow>(
         "SELECT jt.id, jt.custom_name, jt.created_at, jt.active, jt.days_of_week, \
+                jt.default_match_mode, jt.starts_on, jt.ends_on, \
                 COALESCE(leg_counts.leg_count, 0) AS leg_count, \
+                COALESCE(leg_counts.open_legs, 0) > 0 AS has_open_legs, \
                 first_leg.origin_crs AS first_origin_crs, so.name AS first_origin_name, \
-                last_leg.destination_crs AS last_destination_crs, sd.name AS last_destination_name \
+                last_leg.destination_crs AS last_destination_crs, sd.name AS last_destination_name, \
+                EXISTS ( \
+                    SELECT 1 FROM journeys j JOIN journey_legs jl ON jl.journey_id = j.id \
+                    WHERE j.source_template_id = jt.id AND jl.service_date = $3 \
+                ) AS ran_today, \
+                ARRAY( \
+                    SELECT s.service_date FROM journey_template_skipped_dates s \
+                    WHERE s.template_id = jt.id AND s.service_date >= $3 \
+                    ORDER BY s.service_date \
+                ) AS skipped_dates \
          FROM journey_templates jt \
          LEFT JOIN ( \
              SELECT template_id, COUNT(*) AS leg_count, \
+                    COUNT(*) FILTER ( \
+                        WHERE depart_after IS NULL AND depart_before IS NULL \
+                          AND arrive_after IS NULL AND arrive_before IS NULL \
+                    ) AS open_legs, \
                     MIN(leg_order) AS min_order, MAX(leg_order) AS max_order \
              FROM journey_template_legs GROUP BY template_id \
          ) leg_counts ON leg_counts.template_id = jt.id \
@@ -428,10 +574,80 @@ pub async fn list_templates_for_user(
     )
     .bind(user_id)
     .bind(crate::data::train_tracking::MINE_LIST_LIMIT)
+    .bind(today)
     .fetch_all(pool)
     .await?;
-    Ok(rows)
+    Ok(rows
+        .into_iter()
+        .map(|row| JourneyTemplateListItem {
+            next_run_on: next_run_on(
+                row.active,
+                row.days_of_week,
+                row.starts_on,
+                row.ends_on,
+                today,
+                row.ran_today,
+                &row.skipped_dates,
+            ),
+            id: row.id,
+            custom_name: row.custom_name,
+            created_at: row.created_at,
+            leg_count: row.leg_count,
+            first_origin_crs: row.first_origin_crs,
+            first_origin_name: row.first_origin_name,
+            last_destination_crs: row.last_destination_crs,
+            last_destination_name: row.last_destination_name,
+            active: row.active,
+            days_of_week: row.days_of_week,
+            default_match_mode: row.default_match_mode,
+            has_open_legs: row.has_open_legs,
+        })
+        .collect())
 }
+
+/// The London-local booked departure of each train leg of journey
+/// `journey_id` from that leg's own origin, by leg id: the timetable's
+/// public (else working) time there (`travel_order::scheduled_departure_sql`),
+/// else the subscription's pinned departure when the leg boards where the
+/// pin does. A leg with no train, or whose time isn't known, is absent.
+/// Promoting a journey to a template turns these into departure windows
+/// ([`window_around_departure`]), so a leg made by tracking a train or
+/// saving a plan doesn't become a leg with no time.
+pub async fn booked_departures_for_journey(
+    pool: &PgPool,
+    journey_id: i64,
+) -> anyhow::Result<std::collections::HashMap<i64, NaiveTime>> {
+    let rows: Vec<(i64, Option<DateTime<Utc>>)> = sqlx::query_as(BOOKED_DEPARTURES_SQL.as_str())
+        .bind(journey_id)
+        .fetch_all(pool)
+        .await?;
+    Ok(rows
+        .into_iter()
+        .filter_map(|(leg_id, departs)| {
+            departs.map(|at| (leg_id, at.with_timezone(&chrono_tz::Europe::London).time()))
+        })
+        .collect())
+}
+
+/// [`booked_departures_for_journey`]'s query.
+static BOOKED_DEPARTURES_SQL: std::sync::LazyLock<String> = std::sync::LazyLock::new(|| {
+    use crate::data::journeys::{LegEnd, leg_crs_sql};
+    let origin = leg_crs_sql(LegEnd::Origin, "jl", "ts", "tr");
+    let timetabled = crate::data::travel_order::scheduled_departure_sql(
+        "tr.train_uid",
+        "tr.service_date",
+        &origin,
+    );
+    format!(
+        "SELECT jl.id, COALESCE({timetabled}, \
+                CASE WHEN UPPER({origin}) = UPPER(COALESCE(ts.pin_origin_crs, tr.origin_crs)) \
+                     THEN COALESCE(ts.pin_scheduled_departure, tr.scheduled_departure) END) \
+         FROM journey_legs jl \
+         JOIN train_subscriptions ts ON ts.id = jl.train_subscription_id \
+         JOIN trains tr ON tr.id = ts.trains_id \
+         WHERE jl.journey_id = $1"
+    )
+});
 
 /// Full-resource replace: updates `custom_name`, the six recurrence
 /// fields, and wholesale replaces every leg, ownership-scoped, one
@@ -704,6 +920,157 @@ pub async fn materialize_template(
 #[cfg(test)]
 mod validate_template_leg_tests {
     use super::*;
+
+    fn time(text: &str) -> NaiveTime {
+        text.parse().unwrap()
+    }
+
+    fn date(text: &str) -> NaiveDate {
+        text.parse().unwrap()
+    }
+
+    #[test]
+    fn a_departure_window_reaches_five_minutes_either_side() {
+        assert_eq!(
+            window_around_departure(time("07:32:00")),
+            (time("07:27:00"), time("07:37:00"))
+        );
+    }
+
+    #[test]
+    fn a_departure_window_never_wraps_past_midnight() {
+        assert_eq!(
+            window_around_departure(time("00:02:00")),
+            (time("00:00:00"), time("00:07:00"))
+        );
+        assert_eq!(
+            window_around_departure(time("23:58:00")),
+            (time("23:53:00"), time("23:59:59"))
+        );
+    }
+
+    fn leg_with(
+        depart_after: Option<&str>,
+        depart_before: Option<&str>,
+        arrive_after: Option<&str>,
+        arrive_before: Option<&str>,
+    ) -> TemplateLegInput {
+        TemplateLegInput {
+            origin_crs: Some("WAT".to_string()),
+            destination_crs: Some("RDG".to_string()),
+            depart_after: depart_after.map(time),
+            depart_before: depart_before.map(time),
+            arrive_after: arrive_after.map(time),
+            arrive_before: arrive_before.map(time),
+        }
+    }
+
+    #[test]
+    fn any_one_bound_makes_a_leg_not_fully_open() {
+        assert!(leg_is_fully_open(&leg_with(None, None, None, None)));
+        assert!(!leg_is_fully_open(&leg_with(
+            Some("08:00"),
+            None,
+            None,
+            None
+        )));
+        assert!(!leg_is_fully_open(&leg_with(
+            None,
+            Some("08:00"),
+            None,
+            None
+        )));
+        assert!(!leg_is_fully_open(&leg_with(
+            None,
+            None,
+            Some("08:00"),
+            None
+        )));
+        assert!(!leg_is_fully_open(&leg_with(
+            None,
+            None,
+            None,
+            Some("08:00")
+        )));
+    }
+
+    #[test]
+    fn auto_mode_refuses_a_fully_open_leg_and_manual_does_not() {
+        let legs = [
+            leg_with(Some("08:00"), None, None, None),
+            leg_with(None, None, None, None),
+        ];
+        assert_eq!(
+            validate_auto_mode_legs("auto", &legs),
+            Err(AUTO_NEEDS_TIMES_MESSAGE.to_string())
+        );
+        assert_eq!(validate_auto_mode_legs("manual", &legs), Ok(()));
+        assert_eq!(validate_auto_mode_legs("auto", &legs[..1]), Ok(()));
+    }
+
+    // 2026-11-06 is a Friday.
+    const WEEKDAYS: Option<i16> = Some(0b001_1111);
+
+    #[test]
+    fn next_run_is_today_until_today_has_run() {
+        let friday = date("2026-11-06");
+        assert_eq!(
+            next_run_on(true, WEEKDAYS, None, None, friday, false, &[]),
+            Some(friday)
+        );
+        assert_eq!(
+            next_run_on(true, WEEKDAYS, None, None, friday, true, &[]),
+            Some(date("2026-11-09")),
+            "the weekend is skipped"
+        );
+    }
+
+    #[test]
+    fn next_run_honours_skipped_dates_and_the_date_range() {
+        let friday = date("2026-11-06");
+        assert_eq!(
+            next_run_on(
+                true,
+                WEEKDAYS,
+                None,
+                None,
+                friday,
+                false,
+                &[friday, date("2026-11-09")]
+            ),
+            Some(date("2026-11-10"))
+        );
+        assert_eq!(
+            next_run_on(
+                true,
+                WEEKDAYS,
+                Some(date("2026-12-01")),
+                None,
+                friday,
+                false,
+                &[]
+            ),
+            Some(date("2026-12-01"))
+        );
+        assert_eq!(
+            next_run_on(true, WEEKDAYS, None, Some(friday), friday, true, &[]),
+            None,
+            "past its end date"
+        );
+    }
+
+    #[test]
+    fn a_paused_or_one_off_template_has_no_next_run() {
+        let friday = date("2026-11-06");
+        assert_eq!(
+            next_run_on(false, WEEKDAYS, None, None, friday, false, &[]),
+            None
+        );
+        assert_eq!(
+            next_run_on(true, None, None, None, friday, false, &[]),
+            None
+        );
+    }
 
     #[test]
     fn a_well_formed_leg_is_accepted() {

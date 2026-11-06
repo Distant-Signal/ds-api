@@ -88,8 +88,11 @@ pub(crate) enum CreateJourneyTemplateRequest {
     /// group-shared-with -- see this plan's Judgment Call 3) into a
     /// durable template. Reads the journey's own legs
     /// (`journeys::list_legs_for_journey`) and copies each one's
-    /// origin/destination/window verbatim, no `service_date`, no train
-    /// binding. This is §6 item 2's "Make this a template" button.
+    /// origin/destination/window, no `service_date`, no train binding. A
+    /// leg with a train and no window (tracked from a known train or saved
+    /// from a plan) takes a departure window around that train's booked
+    /// departure instead (`journey_templates::window_around_departure`).
+    /// This is §6 item 2's "Make this a template" button.
     FromJourney {
         #[serde(default)]
         custom_name: Option<String>,
@@ -100,6 +103,9 @@ pub(crate) enum CreateJourneyTemplateRequest {
 /// `PUT /JourneyTemplates/{id}`'s body -- full-resource replace (Judgment
 /// Calls 1 and 4). Same `TemplateLegRequest` shape as the `Manual` create
 /// variant; no `mode` tag needed since there's only one shape for an edit.
+///
+/// `defaultMatchMode: "auto"` is refused (400) while any leg has no time at
+/// all (`journey_templates::validate_auto_mode_legs`).
 ///
 /// The six recurrence fields (`days_of_week` through `auto_commit_rule`)
 /// are deliberately REQUIRED here, unlike `custom_name`'s
@@ -227,6 +233,35 @@ fn to_template_leg_input(
     })
 }
 
+/// One leg of a journey being promoted to a template: its stations and
+/// window. A leg made by tracking a train or saving a plan has no window
+/// of its own; copied verbatim it would become a leg with no time, which
+/// the sweep has no window to remind or pick for, so it takes a departure
+/// window around its train's booked departure (`booked`, by leg id, from
+/// `journey_templates::booked_departures_for_journey`) instead. A leg with
+/// a window keeps it.
+fn promoted_leg_input(
+    leg: journeys::JourneyLegWithNamesRow,
+    booked: &std::collections::HashMap<i64, NaiveTime>,
+) -> TemplateLegInput {
+    let mut input = TemplateLegInput {
+        origin_crs: leg.origin_crs,
+        destination_crs: leg.destination_crs,
+        depart_after: leg.depart_after,
+        depart_before: leg.depart_before,
+        arrive_after: leg.arrive_after,
+        arrive_before: leg.arrive_before,
+    };
+    if journey_templates::leg_is_fully_open(&input)
+        && let Some(departs) = booked.get(&leg.id)
+    {
+        let (after, before) = journey_templates::window_around_departure(*departs);
+        input.depart_after = Some(after);
+        input.depart_before = Some(before);
+    }
+    input
+}
+
 /// `POST /JourneyTemplates` -- create (`Manual`) or promote-from-journey
 /// (`FromJourney`). Rejects an empty `legs` array with 400 for `Manual`
 /// mode (see `data::journey_templates::create_template`'s own
@@ -342,16 +377,13 @@ async fn post_journey_template(
                         .to_string(),
                 ));
             }
+            let booked =
+                journey_templates::booked_departures_for_journey(&app.database, journey_id)
+                    .await
+                    .map_err(internal_error("read booked departures"))?;
             let leg_inputs: Vec<TemplateLegInput> = source_legs
                 .into_iter()
-                .map(|leg| TemplateLegInput {
-                    origin_crs: leg.origin_crs,
-                    destination_crs: leg.destination_crs,
-                    depart_after: leg.depart_after,
-                    depart_before: leg.depart_before,
-                    arrive_after: leg.arrive_after,
-                    arrive_before: leg.arrive_before,
-                })
+                .map(|leg| promoted_leg_input(leg, &booked))
                 .collect();
 
             let template_id = journey_templates::create_template(
@@ -371,9 +403,10 @@ async fn get_my_journey_templates(
     State(app): State<App>,
     user: AuthenticatedUser,
 ) -> Result<Json<Vec<journey_templates::JourneyTemplateListItem>>, (StatusCode, String)> {
-    let rows = journey_templates::list_templates_for_user(&app.database, &user.id)
-        .await
-        .map_err(internal_error("list journey templates"))?;
+    let rows =
+        journey_templates::list_templates_for_user(&app.database, &user.id, super::london_today())
+            .await
+            .map_err(internal_error("list journey templates"))?;
     Ok(Json(rows))
 }
 
@@ -452,6 +485,8 @@ async fn put_journey_template(
         .into_iter()
         .map(to_template_leg_input)
         .collect::<Result<Vec<_>, _>>()?;
+    journey_templates::validate_auto_mode_legs(&body.default_match_mode, &leg_inputs)
+        .map_err(|msg| (StatusCode::BAD_REQUEST, msg))?;
     let replaced = journey_templates::replace_template(
         &app.database,
         template_id,
@@ -1333,7 +1368,11 @@ mod db_tests {
             Some(&token),
             serde_json::json!({
                 "customName": "Weekday commute",
-                "legs": [{"originCrs": "EUS", "destinationCrs": "MAN"}],
+                "legs": [{
+                    "originCrs": "EUS",
+                    "destinationCrs": "MAN",
+                    "departWindow": {"after": "07:30:00", "before": null}
+                }],
                 "daysOfWeek": 31,
                 "active": false,
                 "startsOn": "2026-10-01",
@@ -1606,6 +1645,252 @@ mod db_tests {
                 .await
                 .expect("count templates");
         assert_eq!(count, MAX_JOURNEY_TEMPLATES_PER_USER);
+
+        cleanup_user(&pool, user_id).await;
+    }
+
+    /// A leg made by tracking a train has no window; promoted, it takes one
+    /// around the train's booked departure from the leg's own origin: the
+    /// timetable's time when held, else the pin's.
+    #[tokio::test]
+    #[ignore = "requires a live database: DATABASE_URL=... cargo test -p api \
+                post_journey_template_from_journey_derives_a_window_from_the_train -- --ignored --test-threads=1"]
+    async fn post_journey_template_from_journey_derives_a_window_from_the_train() {
+        let pool = connect().await;
+        let user_id = "TEST-ROUTE-TEMPLATE-PROMOTE-TRAIN";
+        cleanup_user(&pool, user_id).await;
+        let token = seed_session(&pool, user_id).await;
+        let date: chrono::NaiveDate = "2099-01-15".parse().unwrap();
+        sqlx::query("DELETE FROM schedule_destination_departures WHERE train_uid = 'TPROMO1'")
+            .execute(&pool)
+            .await
+            .unwrap();
+        sqlx::query("DELETE FROM trains WHERE train_uid = 'TPROMO1'")
+            .execute(&pool)
+            .await
+            .unwrap();
+        // January: London is on UTC, so 07:00Z is 07:00 local.
+        let (trains_id,): (i64,) = sqlx::query_as(
+            "INSERT INTO trains (train_uid, service_date, origin_crs, destination_crs, \
+                                 scheduled_departure) \
+             VALUES ('TPROMO1', $1, 'ZTA', 'ZTC', '2099-01-15T07:00:00Z') RETURNING id",
+        )
+        .bind(date)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        // The timetable has it leaving ZTB, mid-route, at 07:20.
+        sqlx::query(
+            "INSERT INTO schedule_destination_departures \
+                 (service_date, destination_crs, scheduled, train_uid, origin_crs, public_departure) \
+             VALUES ($1, 'ZTC', '07:20', 'TPROMO1', 'ZTB', '07:20')",
+        )
+        .bind(date)
+        .execute(&pool)
+        .await
+        .unwrap();
+
+        let router = test_router(test_app(pool.clone()));
+        let mut windows = Vec::new();
+        for origin in [None, Some("ZTB")] {
+            let (journey_id, _, _) = crate::data::journeys::create_journey_with_known_train_leg(
+                &pool, user_id, None, trains_id, date, origin, None,
+            )
+            .await
+            .expect("track the train");
+            let (status, created) = post_json(
+                router.clone(),
+                "/JourneyTemplates".to_string(),
+                Some(&token),
+                serde_json::json!({ "mode": "fromJourney", "journeyId": journey_id }),
+            )
+            .await;
+            assert_eq!(status, StatusCode::OK, "{created:?}");
+            let template_id = created["templateId"].as_i64().unwrap();
+            let (_, body) = request(
+                router.clone(),
+                format!("/JourneyTemplates/{template_id}"),
+                Some(&token),
+            )
+            .await;
+            let leg = &body["legs"][0];
+            windows.push((
+                leg["departAfter"].clone(),
+                leg["departBefore"].clone(),
+                leg["arriveAfter"].clone(),
+            ));
+        }
+        assert_eq!(
+            windows,
+            vec![
+                (
+                    Value::from("06:55:00"),
+                    Value::from("07:05:00"),
+                    Value::Null
+                ),
+                (
+                    Value::from("07:15:00"),
+                    Value::from("07:25:00"),
+                    Value::Null
+                ),
+            ]
+        );
+
+        cleanup_user(&pool, user_id).await;
+        sqlx::query("DELETE FROM schedule_destination_departures WHERE train_uid = 'TPROMO1'")
+            .execute(&pool)
+            .await
+            .unwrap();
+        sqlx::query("DELETE FROM trains WHERE train_uid = 'TPROMO1'")
+            .execute(&pool)
+            .await
+            .unwrap();
+    }
+
+    /// `"auto"` is refused while a leg has no time at all; `"manual"` is not.
+    #[tokio::test]
+    #[ignore = "requires a live database: DATABASE_URL=... cargo test -p api \
+                put_journey_template_auto_needs_a_time_on_every_leg -- --ignored --test-threads=1"]
+    async fn put_journey_template_auto_needs_a_time_on_every_leg() {
+        let pool = connect().await;
+        let user_id = "TEST-ROUTE-TEMPLATE-PUT-AUTO-OPEN";
+        cleanup_user(&pool, user_id).await;
+        let token = seed_session(&pool, user_id).await;
+        let router = test_router(test_app(pool.clone()));
+        let (_status, created) = post_json(
+            router.clone(),
+            "/JourneyTemplates".to_string(),
+            Some(&token),
+            serde_json::json!({
+                "mode": "manual",
+                "legs": [{"originCrs": "WAT", "destinationCrs": "RDG"}]
+            }),
+        )
+        .await;
+        let template_id = created["templateId"].as_i64().expect("templateId present");
+        let put = |mode: &str, legs: Value| {
+            serde_json::json!({
+                "legs": legs,
+                "daysOfWeek": 31,
+                "active": true,
+                "startsOn": null,
+                "endsOn": null,
+                "defaultMatchMode": mode,
+                "autoCommitRule": if mode == "auto" { Value::from("nearest_to_now") } else { Value::Null }
+            })
+        };
+        let open_and_timed = serde_json::json!([
+            {"originCrs": "WAT", "destinationCrs": "RDG",
+             "departWindow": {"after": "08:00:00", "before": null}},
+            {"originCrs": "RDG", "destinationCrs": "OXF"}
+        ]);
+
+        let (status, body) = put_json(
+            router.clone(),
+            format!("/JourneyTemplates/{template_id}"),
+            Some(&token),
+            put("auto", open_and_timed.clone()),
+        )
+        .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert_eq!(
+            body,
+            Value::String(crate::data::journey_templates::AUTO_NEEDS_TIMES_MESSAGE.to_string())
+        );
+
+        let (status, _) = put_json(
+            router.clone(),
+            format!("/JourneyTemplates/{template_id}"),
+            Some(&token),
+            put("manual", open_and_timed),
+        )
+        .await;
+        assert_eq!(status, StatusCode::NO_CONTENT);
+
+        // An arrival-only bound is a time too.
+        let (status, _) = put_json(
+            router,
+            format!("/JourneyTemplates/{template_id}"),
+            Some(&token),
+            put(
+                "auto",
+                serde_json::json!([
+                    {"originCrs": "WAT", "destinationCrs": "RDG",
+                     "arriveWindow": {"after": null, "before": "09:00:00"}}
+                ]),
+            ),
+        )
+        .await;
+        assert_eq!(status, StatusCode::NO_CONTENT);
+
+        cleanup_user(&pool, user_id).await;
+    }
+
+    /// The list serves each template's mode, next run date and whether a
+    /// leg has no time.
+    #[tokio::test]
+    #[ignore = "requires a live database: DATABASE_URL=... cargo test -p api \
+                get_my_journey_templates_serves_the_next_run_and_open_legs -- --ignored --test-threads=1"]
+    async fn get_my_journey_templates_serves_the_next_run_and_open_legs() {
+        let pool = connect().await;
+        let user_id = "TEST-ROUTE-TEMPLATE-LIST-NEXT";
+        cleanup_user(&pool, user_id).await;
+        let token = seed_session(&pool, user_id).await;
+        let router = test_router(test_app(pool.clone()));
+        let today = crate::routes::london_today();
+        // Every day, starting tomorrow: the next run is tomorrow.
+        let (active_id,): (i64,) = sqlx::query_as(
+            "INSERT INTO journey_templates (user_id, custom_name, days_of_week, active, starts_on) \
+             VALUES ($1, 'Every day', 127, TRUE, $2) RETURNING id",
+        )
+        .bind(user_id)
+        .bind(today + chrono::Duration::days(1))
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        sqlx::query(
+            "INSERT INTO journey_template_legs (template_id, leg_order, origin_crs, destination_crs) \
+             VALUES ($1, 1, 'WAT', 'RDG')",
+        )
+        .bind(active_id)
+        .execute(&pool)
+        .await
+        .unwrap();
+        let (paused_id,): (i64,) = sqlx::query_as(
+            "INSERT INTO journey_templates (user_id, custom_name, days_of_week, active, \
+                                            default_match_mode, auto_commit_rule) \
+             VALUES ($1, 'Paused', 127, FALSE, 'auto', 'nearest_to_now') RETURNING id",
+        )
+        .bind(user_id)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        sqlx::query(
+            "INSERT INTO journey_template_legs \
+                 (template_id, leg_order, origin_crs, destination_crs, depart_after) \
+             VALUES ($1, 1, 'WAT', 'RDG', '08:00')",
+        )
+        .bind(paused_id)
+        .execute(&pool)
+        .await
+        .unwrap();
+
+        let (status, body) =
+            request(router, "/JourneyTemplates/mine".to_string(), Some(&token)).await;
+        assert_eq!(status, StatusCode::OK);
+        let rows = body.as_array().unwrap();
+        let row = |id: i64| rows.iter().find(|r| r["id"] == id).unwrap().clone();
+        let active = row(active_id);
+        assert_eq!(
+            active["nextRunOn"],
+            Value::from((today + chrono::Duration::days(1)).to_string())
+        );
+        assert_eq!(active["hasOpenLegs"], true);
+        assert_eq!(active["defaultMatchMode"], "manual");
+        let paused = row(paused_id);
+        assert_eq!(paused["nextRunOn"], Value::Null);
+        assert_eq!(paused["hasOpenLegs"], false);
+        assert_eq!(paused["defaultMatchMode"], "auto");
 
         cleanup_user(&pool, user_id).await;
     }
