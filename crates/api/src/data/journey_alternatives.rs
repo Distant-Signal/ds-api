@@ -405,7 +405,7 @@ pub async fn operator_names(pool: &PgPool, codes: &[String]) -> HashMap<String, 
     clippy::too_many_lines,
     reason = "one match over the two leg kinds, each mapped field by field"
 )]
-fn suggestion_legs(
+pub(crate) fn suggestion_legs(
     planned: &Planned,
     names: &HashMap<String, String>,
     operator_names: &HashMap<String, String>,

@@ -46,6 +46,31 @@ pub struct Replacement<'a> {
     /// An `Idempotency-Key` and the request's hash: a repeat answers with
     /// the first response (`journey_idempotency_keys`).
     pub idempotency: Option<(&'a str, &'a str)>,
+    /// A regular journey's day planned by the plan sweep, or picked by its
+    /// accept route: written in the same transaction (see [`RegularWrite`]).
+    pub regular: Option<RegularWrite<'a>>,
+}
+
+/// What a regular journey's plan (regular journeys spec 2026-11-06 §6.2)
+/// writes with a replacement. The replacement is refused
+/// ([`Replaced::Changed`]) when `journeys.regular_planned_at` is no longer
+/// `read_planned_at` (the plan changed since it was read), when the
+/// journey is no longer still being planned (a break, a later revision, or
+/// it has started), or, for the sweep (`sweep`), when the owner picked a
+/// train since (a train leg `manual`).
+#[derive(Debug, Clone)]
+pub struct RegularWrite<'a> {
+    /// The plan to store; with `sweep`, its `sweepLegIds` become the new
+    /// train legs.
+    pub plan: &'a crate::data::regular_plan::StoredPlan,
+    /// `journeys.regular_plan_status` afterwards.
+    pub status: &'a str,
+    /// `journeys.regular_plan_marker` afterwards; `None` keeps it.
+    pub marker: Option<&'a str>,
+    pub read_planned_at: Option<DateTime<Utc>>,
+    /// The sweep committed it: the new train legs are `auto`, as a
+    /// sweep-committed leg always is.
+    pub sweep: bool,
 }
 
 /// What a replacement answers (`POST .../replan/accept`, `.../replace`,
@@ -77,6 +102,10 @@ pub enum Replaced {
     IdempotencyConflict,
     /// The same `Idempotency-Key` and request: its first response.
     Replay(serde_json::Value),
+    /// A regular journey's plan changed since it was read, the journey is
+    /// no longer being planned, or (for the sweep) its owner picked a
+    /// train ([`RegularWrite`]). Nothing was changed.
+    Changed,
     Done {
         /// The revision written; `None` when revision 1 was refreshed.
         revision_id: Option<i64>,
@@ -108,6 +137,7 @@ pub async fn replace(pool: &PgPool, replacement: &Replacement<'_>) -> anyhow::Re
         trigger_fate,
         now,
         idempotency,
+        ref regular,
     } = *replacement;
     let mut tx = pool.begin().await?;
     if let Some((key, hash)) = idempotency {
@@ -129,6 +159,19 @@ pub async fn replace(pool: &PgPool, replacement: &Replacement<'_>) -> anyhow::Re
             .await?;
     if owned.is_none() {
         return Ok(Replaced::NotFound);
+    }
+    if let Some(regular) = regular {
+        let (planned_at, picked): (Option<DateTime<Utc>>, bool) = sqlx::query_as(
+            "SELECT regular_planned_at, EXISTS (SELECT 1 FROM journey_legs \
+                     WHERE journey_id = $1 AND kind = 'train' AND match_mode = 'manual') \
+             FROM journeys WHERE id = $1",
+        )
+        .bind(journey_id)
+        .fetch_one(&mut *tx)
+        .await?;
+        if planned_at != regular.read_planned_at || (regular.sweep && picked) {
+            return Ok(Replaced::Changed);
+        }
     }
     let current: Vec<LegRow> = sqlx::query_as(
         "SELECT id, leg_order, train_subscription_id FROM journey_legs \
@@ -169,6 +212,9 @@ pub async fn replace(pool: &PgPool, replacement: &Replacement<'_>) -> anyhow::Re
     let planning = meta.break_id.is_none()
         && meta.cause != "user_missed"
         && journey_revisions::still_planning(&mut tx, journey_id, now).await?;
+    if regular.is_some() && !planning {
+        return Ok(Replaced::Changed);
+    }
     let trigger_position = if planning {
         None
     } else {
@@ -214,6 +260,7 @@ pub async fn replace(pool: &PgPool, replacement: &Replacement<'_>) -> anyhow::Re
         .await?;
     }
     let mut new_leg_ids = Vec::with_capacity(legs.len());
+    let mut new_train_leg_ids = Vec::new();
     let mut new_subscriptions: Vec<i64> = Vec::new();
     for (offset, leg) in legs.iter().enumerate() {
         let (leg_id, tracking_id) = journeys::insert_itinerary_leg(
@@ -225,7 +272,31 @@ pub async fn replace(pool: &PgPool, replacement: &Replacement<'_>) -> anyhow::Re
         )
         .await?;
         new_leg_ids.push(leg_id);
+        if tracking_id.is_some() {
+            new_train_leg_ids.push(leg_id);
+        }
         new_subscriptions.extend(tracking_id);
+    }
+    if let Some(regular) = regular {
+        let mut plan = regular.plan.clone();
+        if regular.sweep {
+            sqlx::query("UPDATE journey_legs SET match_mode = 'auto' WHERE id = ANY($1)")
+                .bind(&new_train_leg_ids)
+                .execute(&mut *tx)
+                .await?;
+            plan.sweep_leg_ids.clone_from(&new_train_leg_ids);
+        } else {
+            plan.sweep_leg_ids.clear();
+        }
+        crate::data::regular_plan::write(
+            &mut tx,
+            journey_id,
+            &plan,
+            regular.status,
+            regular.marker,
+            now,
+        )
+        .await?;
     }
 
     // Each replaced train's subscription is released; its tickets go to

@@ -264,6 +264,18 @@ pub enum TemplateTargetKind {
     ArriveBy,
 }
 
+/// `journeys.regular_plan_status` (its CHECK constraint): where a regular
+/// journey's day stands (`data::regular_plan`).
+#[derive(TS, schemars::JsonSchema)]
+#[ts(rename_all = "snake_case")]
+#[schemars(rename_all = "snake_case")]
+pub enum RegularPlanStatus {
+    Pending,
+    Suggested,
+    Committed,
+    NoService,
+}
+
 /// `journey_templates.auto_commit_rule` (its CHECK constraint).
 #[derive(TS)]
 #[ts(rename_all = "snake_case")]

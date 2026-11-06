@@ -98,11 +98,11 @@ pub fn router() -> Router {
 const UNDO_WINDOW: Duration = Duration::minutes(2);
 
 /// Now, as every route here judges it: `london_now`, which a test can pin.
-fn now_utc() -> DateTime<Utc> {
+pub(crate) fn now_utc() -> DateTime<Utc> {
     crate::routes::london_now().with_timezone(&Utc)
 }
 
-fn internal(operation: &'static str) -> impl Fn(anyhow::Error) -> RouteError {
+pub(crate) fn internal(operation: &'static str) -> impl Fn(anyhow::Error) -> RouteError {
     move |err| {
         if let Some((status, body)) = crate::unavailable::response_for(&err) {
             return RouteError::Legacy(status, body);
@@ -124,12 +124,16 @@ fn not_found() -> RouteError {
     )
 }
 
-fn render(result: Result<Response, RouteError>) -> Response {
+pub(crate) fn render(result: Result<Response, RouteError>) -> Response {
     result.unwrap_or_else(|err| err.render(false, "bad_request"))
 }
 
 /// The caller's journey, else 404.
-async fn require_owner(app: &App, journey_id: i64, user_id: &str) -> Result<(), RouteError> {
+pub(crate) async fn require_owner(
+    app: &App,
+    journey_id: i64,
+    user_id: &str,
+) -> Result<(), RouteError> {
     match journeys::journey_owner(&app.database, journey_id)
         .await
         .map_err(internal("read journey owner"))?
@@ -328,10 +332,10 @@ async fn next_departures(
         if first_uid.is_none() || first_uid != skip_uid {
             found.push(first);
         }
-        if found.len() >= count || next_min <= query.depart_after_min {
+        if found.len() >= count || query.depart_after_min().is_none_or(|from| next_min <= from) {
             break;
         }
-        query.depart_after_min = next_min;
+        query.time = crate::data::trip_planning_itinerary::TimeBound::DepartAfter(next_min);
     }
     Ok(found)
 }
@@ -361,6 +365,7 @@ pub(crate) async fn plan_suggestions(
     let trigger_label = match slot {
         ReplanSlot::Request => "request",
         ReplanSlot::Sweep => "sweep",
+        ReplanSlot::Regular => "regular",
     };
     let now = analysis.now;
     let legs = &analysis.legs;
@@ -453,15 +458,15 @@ pub(crate) async fn plan_suggestions(
     let mut plans: Vec<Planned> = Vec::new();
     let main = crate::routes::trips::plan_for_journey(
         app,
-        &ReplanQuery {
-            origin: origin.clone(),
-            destination: destination.clone(),
+        &ReplanQuery::depart_after(
+            origin.clone(),
+            destination.clone(),
             date,
             depart_after_min,
-            results: "options",
+            "options",
             max_changes,
-            operator_rule: filter_rule.clone(),
-        },
+            filter_rule.clone(),
+        ),
         slot,
     )
     .await
@@ -477,15 +482,15 @@ pub(crate) async fn plan_suggestions(
     let excluded_uid = timing.map(|t| t.uid.clone());
     let next = next_departures(
         app,
-        ReplanQuery {
-            origin: origin.clone(),
-            destination: destination.clone(),
+        ReplanQuery::depart_after(
+            origin.clone(),
+            destination.clone(),
             date,
             depart_after_min,
-            results: "fastest",
+            "fastest",
             max_changes,
-            operator_rule: filter_rule.clone(),
-        },
+            filter_rule.clone(),
+        ),
         NEXT_DEPARTURES,
         excluded_uid.as_deref(),
         slot,
@@ -512,15 +517,15 @@ pub(crate) async fn plan_suggestions(
         let deadline = next_timing.live_dep - Duration::minutes(i64::from(change));
         let rejoin = crate::routes::trips::plan_for_journey(
             app,
-            &ReplanQuery {
-                origin: origin.clone(),
-                destination: next_board,
+            &ReplanQuery::depart_after(
+                origin.clone(),
+                next_board,
                 date,
                 depart_after_min,
-                results: "fastest",
+                "fastest",
                 max_changes,
-                operator_rule: filter_rule.clone(),
-            },
+                filter_rule.clone(),
+            ),
             slot,
         )
         .await
@@ -559,17 +564,15 @@ pub(crate) async fn plan_suggestions(
     if !same_operators.is_empty() {
         let same = next_departures(
             app,
-            ReplanQuery {
-                origin: origin.clone(),
-                destination: destination.clone(),
+            ReplanQuery::depart_after(
+                origin.clone(),
+                destination.clone(),
                 date,
                 depart_after_min,
-                results: "fastest",
+                "fastest",
                 max_changes,
-                operator_rule: Some(
-                    trip_planner::OperatorRule::only(same_operators).cif_trains_only(),
-                ),
-            },
+                Some(trip_planner::OperatorRule::only(same_operators).cif_trains_only()),
+            ),
             2,
             excluded_uid.as_deref(),
             slot,
@@ -591,15 +594,15 @@ pub(crate) async fn plan_suggestions(
     if let Some(filter) = operator_filter.as_ref().filter(|f| f.mode == "prefer") {
         let preferred = next_departures(
             app,
-            ReplanQuery {
-                origin: origin.clone(),
-                destination: destination.clone(),
+            ReplanQuery::depart_after(
+                origin.clone(),
+                destination.clone(),
                 date,
                 depart_after_min,
-                results: "fastest",
+                "fastest",
                 max_changes,
-                operator_rule: Some(trip_planner::OperatorRule::only(filter.mask())),
-            },
+                Some(trip_planner::OperatorRule::only(filter.mask())),
+            ),
             1,
             excluded_uid.as_deref(),
             slot,
@@ -636,15 +639,15 @@ pub(crate) async fn plan_suggestions(
     if filter_rule.is_some() && plans.is_empty() {
         let fallback = next_departures(
             app,
-            ReplanQuery {
-                origin: origin.clone(),
-                destination: destination.clone(),
+            ReplanQuery::depart_after(
+                origin.clone(),
+                destination.clone(),
                 date,
                 depart_after_min,
-                results: "fastest",
+                "fastest",
                 max_changes,
-                operator_rule: None,
-            },
+                None,
+            ),
             1,
             excluded_uid.as_deref(),
             slot,
@@ -1344,7 +1347,7 @@ fn idempotency(
 
 /// The answer to a replacement: 200 with a `ReplaceResponse`, or the
 /// errors every replacement shares.
-fn replaced_response(outcome: Replaced) -> Result<Response, RouteError> {
+pub(crate) fn replaced_response(outcome: Replaced) -> Result<Response, RouteError> {
     match outcome {
         Replaced::Done { response, .. } => Ok(Json(response).into_response()),
         Replaced::Replay(value) => Ok(Json(value).into_response()),
@@ -1367,6 +1370,11 @@ fn replaced_response(outcome: Replaced) -> Result<Response, RouteError> {
             StatusCode::CONFLICT,
             "idempotency_conflict",
             "This Idempotency-Key was already used for a different request.",
+        )),
+        Replaced::Changed => Err(RouteError::coded(
+            StatusCode::CONFLICT,
+            "plan_changed",
+            "This journey's plan changed; reload the journey.",
         )),
     }
 }
@@ -1544,6 +1552,7 @@ async fn post_accept(
                     idempotency: idempotency
                         .as_ref()
                         .map(|(key, hash)| (key.as_str(), hash.as_str())),
+                    regular: None,
                 },
             )
             .await
@@ -1591,6 +1600,10 @@ pub(crate) struct ReplaceBody {
 /// open on the leg, it is taken as that break's alternative; otherwise it
 /// is the traveller's own choice (§4.2's `user_choice`), which before the
 /// journey starts just updates the booked plan (§4.3).
+#[expect(
+    clippy::too_many_lines,
+    reason = "long but linear: read, check, replace, answer"
+)]
 async fn post_replace(
     State(app): State<App>,
     user: AuthenticatedUser,
@@ -1693,6 +1706,7 @@ async fn post_replace(
                     idempotency: idempotency
                         .as_ref()
                         .map(|(key, hash)| (key.as_str(), hash.as_str())),
+                    regular: None,
                 },
             )
             .await
@@ -1907,6 +1921,7 @@ async fn post_revert(
                     idempotency: idempotency
                         .as_ref()
                         .map(|(key, hash)| (key.as_str(), hash.as_str())),
+                    regular: None,
                 },
             )
             .await

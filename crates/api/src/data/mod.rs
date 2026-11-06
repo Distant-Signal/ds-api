@@ -48,6 +48,7 @@ pub mod recently_cleared;
 pub mod reconciliation;
 pub mod reference;
 pub mod regular_journeys;
+pub mod regular_plan;
 pub mod retention;
 pub mod schedule_matching;
 pub mod schedule_services;

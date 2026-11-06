@@ -121,6 +121,8 @@ pub fn router() -> Router {
         )
         // Mid-journey changes (spec 2026-10-22 §7), cookie-only.
         .merge(super::journey_replan::router())
+        // Regular journeys: the day's train (spec 2026-11-06 §6.4).
+        .merge(super::regular_plan::router())
 }
 
 /// Three mutually-exclusive leg-creation shapes, discriminated by an
@@ -1549,6 +1551,11 @@ pub(crate) struct JourneyDetailResponse {
     /// for anyone else, when it wasn't made from one, or when that was
     /// deleted. Additive (2026-11-06).
     source_template_id: Option<i64>,
+    /// The day's train the regular journeys plan sweep chose for this
+    /// occurrence: the choice, up to two alternatives and where it stands.
+    /// Owner only; `null` for anyone else and when it was never planned.
+    /// Additive (2026-11-06).
+    regular_plan: Option<crate::data::regular_plan::RegularPlanResponse>,
 }
 
 /// The unlisted share link `unlisted_links::UnlistedLink` mapped onto the
@@ -2307,6 +2314,14 @@ async fn build_journey_detail_response(
         }
     }
 
+    let regular_plan = if is_owner && summary.source_template_id.is_some() {
+        crate::data::regular_plan::read_response(&app.database, journey_id)
+            .await
+            .map_err(internal_error("read regular plan"))?
+    } else {
+        None
+    };
+
     // Only an owner ever sees a live, usable token here -- a non-owner
     // (including a group member, and including a share-token viewer)
     // always gets `None`, regardless of whether an active link exists.
@@ -2338,6 +2353,7 @@ async fn build_journey_detail_response(
         followed_from: None,
         can_follow: false,
         source_template_id: summary.source_template_id.filter(|_| is_owner),
+        regular_plan,
     })
 }
 

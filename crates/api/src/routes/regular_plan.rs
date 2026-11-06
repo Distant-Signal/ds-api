@@ -1,0 +1,156 @@
+//! `POST /Journeys/{id}/regular-plan/accept` (regular journeys spec
+//! 2026-11-06 §6.4): the one-tap pick of a regular journey's day. The plan
+//! sweep (`regular_plan_sweep`) stores the choice and up to two
+//! alternatives on the occurrence (`GET /Journeys/{id}`'s `regularPlan`);
+//! this replaces every leg of the journey with the one picked, as auto mode
+//! would, in one transaction (`journey_replace::replace`). The legs it
+//! saves are the owner's pick (`manual`), so the sweep never replaces them.
+//!
+//! Cookie-only and owner-only (another user's journey is a 404), and not a
+//! delegated route.
+
+use std::collections::HashMap;
+
+use axum::Json;
+use axum::extract::{Path, State};
+use axum::http::StatusCode;
+use axum::response::Response;
+use chrono::{DateTime, Duration, Utc};
+use serde::{Deserialize, Serialize};
+
+use crate::app::{App, Router};
+use crate::auth::AuthenticatedUser;
+use crate::data::journey_replace::{self, RegularWrite, Replacement};
+use crate::data::journey_revisions::RevisionMeta;
+use crate::data::regular_plan::{self, StoredPlan};
+use crate::routes::journey_itinerary::RouteError;
+use crate::routes::journey_replan::{internal, now_utc, render, replaced_response, require_owner};
+
+pub fn router() -> Router {
+    Router::new().route(
+        "/Journeys/{journey_id}/regular-plan/accept",
+        axum::routing::post(post_accept),
+    )
+}
+
+/// `POST /Journeys/{id}/regular-plan/accept`'s body.
+#[derive(Debug, Deserialize, Serialize, ts_rs::TS)]
+#[ts(rename = "RegularPlanAcceptRequest")]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub(crate) struct AcceptBody {
+    /// 0: the choice; 1 and 2: the alternatives, in order.
+    index: u8,
+    /// `regularPlan.plannedAt` as read: a 409 when the plan changed since.
+    planned_at: DateTime<Utc>,
+}
+
+fn conflict(code: &'static str, message: &'static str) -> RouteError {
+    RouteError::coded(StatusCode::CONFLICT, code, message)
+}
+
+/// `POST /Journeys/{id}/regular-plan/accept` `{index, plannedAt}`:
+/// replaces the journey's legs with option `index` of its regular plan.
+/// 404 when the journey isn't the caller's, has no plan with options, or
+/// has no such option; 409 `plan_changed` when the plan changed since it
+/// was read (or the journey has started or has a break), 409
+/// `option_departed` when the option's first leg has left. Answers as
+/// `POST .../replan/accept` does (`ReplaceResponse`).
+async fn post_accept(
+    State(app): State<App>,
+    user: AuthenticatedUser,
+    Path(journey_id): Path<i64>,
+    Json(body): Json<AcceptBody>,
+) -> Response {
+    render(
+        async {
+            require_owner(&app, journey_id, &user.id).await?;
+            let now = now_utc();
+            let (plan, status, _, planned_at) =
+                regular_plan::read_stored(&app.database, journey_id)
+                    .await
+                    .map_err(internal("read regular plan"))?;
+            let no_plan = || {
+                RouteError::coded(
+                    StatusCode::NOT_FOUND,
+                    "not_found",
+                    "This journey has no train to pick; reload the journey.",
+                )
+            };
+            let plan: StoredPlan = plan
+                .filter(|_| matches!(status.as_deref(), Some("suggested" | "committed")))
+                .ok_or_else(no_plan)?;
+            if planned_at != Some(body.planned_at) {
+                return Err(conflict(
+                    "plan_changed",
+                    "This journey's plan changed; reload the journey.",
+                ));
+            }
+            let option = plan
+                .option(usize::from(body.index))
+                .cloned()
+                .ok_or_else(no_plan)?;
+            if option.departure < now - Duration::minutes(1) {
+                return Err(conflict(
+                    "option_departed",
+                    "That train has already left; pick another.",
+                ));
+            }
+            let mut trains = HashMap::new();
+            for (uid, date) in option.train_key() {
+                let id = crate::data::trains::find_or_create_train(&app.database, &uid, date)
+                    .await
+                    .map_err(internal("find or create train"))?;
+                trains.insert((uid, date), id);
+            }
+            let legs = option.itinerary_legs(&trains).ok_or_else(|| {
+                internal("resolve regular plan legs")(anyhow::anyhow!("a train was not resolved"))
+            })?;
+            let leg_ids: Vec<(i64,)> = sqlx::query_as(
+                "SELECT id FROM journey_legs WHERE journey_id = $1 ORDER BY leg_order",
+            )
+            .bind(journey_id)
+            .fetch_all(&app.database)
+            .await
+            .map_err(|err| internal("read journey legs")(err.into()))?;
+            let (Some((first,)), Some((last,))) = (leg_ids.first(), leg_ids.last()) else {
+                return Err(no_plan());
+            };
+            let accepted = StoredPlan {
+                accepted_index: Some(body.index),
+                ..plan
+            };
+            let outcome = journey_replace::replace(
+                &app.database,
+                &Replacement {
+                    journey_id,
+                    user_id: &user.id,
+                    from_leg_id: *first,
+                    through_leg_id: Some(*last),
+                    legs: &legs,
+                    meta: RevisionMeta::user_choice(),
+                    trigger_fate: "not_used",
+                    now,
+                    idempotency: None,
+                    regular: Some(RegularWrite {
+                        plan: &accepted,
+                        status: "committed",
+                        marker: None,
+                        read_planned_at: planned_at,
+                        sweep: false,
+                    }),
+                },
+            )
+            .await
+            .map_err(internal("replace legs"))?;
+            if matches!(outcome, journey_replace::Replaced::Done { .. }) {
+                metrics::counter!(
+                    ds_runtime::metrics::metric_name("api_regular_plan_accepted_total"),
+                    "index" => match body.index { 0 => "0", 1 => "1", _ => "2" }
+                )
+                .increment(1);
+            }
+            replaced_response(outcome)
+        }
+        .await,
+    )
+}

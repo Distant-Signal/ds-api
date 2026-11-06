@@ -76,15 +76,15 @@ async fn seed(pool: &PgPool) {
 async fn first_uids(app: &App, rule: Option<trip_planner::OperatorRule>) -> Vec<String> {
     let itineraries = plan_for_journey(
         app,
-        &ReplanQuery {
-            origin: "ZOA".to_string(),
-            destination: "ZOB".to_string(),
-            date: date(),
-            depart_after_min: 9 * 60 + 50,
-            results: "options",
-            max_changes: 2,
-            operator_rule: rule,
-        },
+        &ReplanQuery::depart_after(
+            "ZOA".to_string(),
+            "ZOB".to_string(),
+            date(),
+            9 * 60 + 50,
+            "options",
+            2,
+            rule,
+        ),
         ReplanSlot::Request,
     )
     .await

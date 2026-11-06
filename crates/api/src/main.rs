@@ -148,6 +148,7 @@ fn config_defaults() -> ds_runtime::service_args::ConfigDefaults {
     use clap::CommandFactory as _;
     let live = data::trip_plan_live::LiveConfig::default();
     let sweep = api::journey_break_sweep::SweepConfig::default();
+    let plan_sweep = api::regular_plan_sweep::SweepConfig::default();
     ds_runtime::service_args::ConfigDefaults::for_config::<data::config::ServiceArguments>("api")
         .args(&api::edge::EdgeSettings::command())
         .args(&api::rate_limit::RateLimitSettings::command())
@@ -222,6 +223,22 @@ fn config_defaults() -> ds_runtime::service_args::ConfigDefaults {
             Some(&sweep.max_journeys_per_tick.to_string()),
         )
         .env("JOURNEY_BREAKS_SUGGESTIONS_MAX_AGE_SECS", None)
+        .env(
+            "REGULAR_PLAN_SWEEP_ENABLED",
+            Some(&plan_sweep.enabled.to_string()),
+        )
+        .env(
+            "REGULAR_PLAN_SWEEP_INTERVAL_SECS",
+            Some(&plan_sweep.interval_secs.to_string()),
+        )
+        .env(
+            "REGULAR_PLAN_SWEEP_MAX_OCCURRENCES_PER_TICK",
+            Some(&plan_sweep.max_occurrences_per_tick.to_string()),
+        )
+        .env(
+            "REGULAR_PLAN_SWEEP_MORNING_CHECK_HOUR",
+            Some(&plan_sweep.morning_check_hour.to_string()),
+        )
 }
 
 #[tokio::main]
@@ -770,6 +787,9 @@ fn spawn_background_loops(app: &App, shutdown: &api::shutdown::ShutdownSignal) -
     // runs here whatever API_BACKGROUND_LOOPS says (the ingest-writer
     // cannot run it).
     let break_sweep = spawn_journey_break_sweep(app, shutdown);
+    // The regular journeys plan sweep plans with the same graph cache, so
+    // it too runs here whatever API_BACKGROUND_LOOPS says.
+    let plan_sweep = spawn_regular_plan_sweep(app, shutdown);
     // Today's and tomorrow's trip-plan graphs, built ahead of requests in
     // this process's own cache (DS-225), whatever API_BACKGROUND_LOOPS says.
     let prewarm = tokio::spawn(routes::trips::prewarm_graphs(
@@ -778,6 +798,7 @@ fn spawn_background_loops(app: &App, shutdown: &api::shutdown::ShutdownSignal) -
     ));
     let break_sweep: Vec<tokio::task::JoinHandle<()>> = break_sweep
         .into_iter()
+        .chain(plan_sweep)
         .chain(std::iter::once(prewarm))
         .collect();
     if !app.config.background_loops {
@@ -857,6 +878,38 @@ fn spawn_journey_break_sweep(
     );
     if let Err(err) = runner.register(api::journey_break_sweep::loop_spec(app.clone(), &config)) {
         tracing::error!(error = ?err, "journey break sweep not started");
+        return None;
+    }
+    Some(tokio::spawn(
+        runner
+            .spawn(BACKGROUND_LOOP_STALL_AFTER)
+            .run_until(shutdown.triggered()),
+    ))
+}
+
+/// The regular journeys plan sweep (`api::regular_plan_sweep`), when
+/// `REGULAR_PLAN_SWEEP_ENABLED`: its own runner and lock session, as the
+/// break sweep has.
+fn spawn_regular_plan_sweep(
+    app: &App,
+    shutdown: &api::shutdown::ShutdownSignal,
+) -> Option<tokio::task::JoinHandle<()>> {
+    let config = api::regular_plan_sweep::SweepConfig::from_env();
+    tracing::info!(
+        enabled = config.enabled,
+        interval_secs = config.interval_secs,
+        "regular plan sweep (REGULAR_PLAN_SWEEP_ENABLED)"
+    );
+    if !config.enabled {
+        return None;
+    }
+    let pool = app.database.clone();
+    let mut runner = ds_store::loops::LoopRunner::new(
+        pool.clone(),
+        ds_store::loops::LockSession::from_pool(pool),
+    );
+    if let Err(err) = runner.register(api::regular_plan_sweep::loop_spec(app.clone(), &config)) {
+        tracing::error!(error = ?err, "regular plan sweep not started");
         return None;
     }
     Some(tokio::spawn(
