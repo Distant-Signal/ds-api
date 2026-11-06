@@ -3,6 +3,16 @@
 Changes to the Distant Signal (DS) HTTP API that a client such as DS-MCP
 needs to know about. Newest first. Field names are as served (camelCase).
 
+## 2026-11-06: usage events for the regular journeys pages
+
+`POST /public/events` takes the regular journeys pages' templates in place
+of the journey templates pages': `/journeys/regular`,
+`/journeys/regular/[id]` and `/journeys/regular/new`, instead of
+`/journeys/templates` and `/journeys/templates/[id]`. The website's
+templates pages moved there, and the old paths now redirect. Until the new
+website is deployed, a view of the old pages is dropped like any unknown
+route. DS-MCP: no change needed.
+
 ## 2026-11-06: Regular journeys: targets, pairs and skip next
 
 Phase 1 of regular journeys (distant-signal's
