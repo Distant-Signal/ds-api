@@ -178,6 +178,7 @@ async fn occurrence(
             },
             plan_options: None,
             usual_itinerary,
+            station_buffer_minutes: None,
         },
         None,
     )

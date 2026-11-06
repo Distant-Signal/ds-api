@@ -31,6 +31,11 @@ pub fn router() -> Router {
             "/JourneyTemplates/mine",
             axum::routing::get(get_my_journey_templates),
         )
+        // A literal segment, resolved ahead of `{template_id}` by matchit.
+        .route(
+            "/JourneyTemplates/station-buffer",
+            axum::routing::get(get_station_buffer_prefill),
+        )
         .route(
             "/JourneyTemplates/{template_id}",
             axum::routing::get(get_journey_template)
@@ -147,6 +152,10 @@ pub(crate) enum CreateJourneyTemplateRequest {
         default_match_mode: Option<String>,
         #[serde(default, rename = "return")]
         return_journey: Option<ReturnJourneyRequest>,
+        /// Minutes to get to `originCrs` (0 to 120), margin included: the
+        /// leave-by is the first departure less this. `null` for none.
+        #[serde(default)]
+        station_buffer_minutes: Option<i16>,
     },
 }
 
@@ -162,6 +171,9 @@ pub(crate) struct ReturnJourneyRequest {
     #[serde(default)]
     plan_options: Option<PlanOptions>,
     usual_itinerary: UsualItinerary,
+    /// Minutes to get to the return journey's origin (0 to 120).
+    #[serde(default)]
+    station_buffer_minutes: Option<i16>,
 }
 
 /// `PUT /JourneyTemplates/{id}`'s body -- full-resource replace (Judgment
@@ -181,6 +193,10 @@ pub(crate) struct ReturnJourneyRequest {
 /// submitting.
 #[derive(Debug, Deserialize, ts_rs::TS)]
 #[serde(rename_all = "camelCase")]
+#[expect(
+    clippy::option_option,
+    reason = "absent (unchanged) and null (cleared) are different requests"
+)]
 pub(crate) struct PutJourneyTemplateRequest {
     #[serde(default)]
     #[ts(optional = nullable)]
@@ -213,6 +229,11 @@ pub(crate) struct PutJourneyTemplateRequest {
     #[serde(default)]
     #[ts(optional)]
     usual_itinerary: Option<UsualItinerary>,
+    /// Minutes to get to the station (0 to 120); `null` clears it, absent
+    /// keeps it (additive, leave by).
+    #[serde(default, deserialize_with = "crate::routes::present")]
+    #[ts(optional)]
+    station_buffer_minutes: Option<Option<i16>>,
 }
 
 #[derive(Debug, Deserialize, ts_rs::TS)]
@@ -331,6 +352,9 @@ pub(crate) struct JourneyTemplateDetailResponse {
     paired_template_id: Option<i64>,
     next_date: Option<NaiveDate>,
     skipped_dates: Vec<NaiveDate>,
+    /// Minutes to get to the station, for the leave-by (additive); `null`
+    /// for none.
+    station_buffer_minutes: Option<i16>,
 }
 
 fn internal_error(operation: &'static str) -> impl Fn(anyhow::Error) -> (StatusCode, String) {
@@ -552,6 +576,7 @@ async fn post_journey_template(
             ends_on,
             default_match_mode,
             return_journey,
+            station_buffer_minutes,
         } => {
             let default_match_mode = default_match_mode.unwrap_or_else(|| "manual".to_string());
             let auto_commit_rule = (default_match_mode == "auto").then_some("nearest_to_now");
@@ -571,6 +596,7 @@ async fn post_journey_template(
                 target,
                 plan_options,
                 &usual_itinerary,
+                station_buffer_minutes,
             )
             .await?;
             let return_input = match return_journey {
@@ -583,6 +609,7 @@ async fn post_journey_template(
                         ret.target,
                         ret.plan_options,
                         &ret.usual_itinerary,
+                        ret.station_buffer_minutes,
                     )
                     .await
                     .map_err(|(status, message)| (status, format!("Return journey: {message}")))?,
@@ -624,6 +651,35 @@ async fn post_journey_template(
     }
 }
 
+#[derive(Debug, Deserialize)]
+pub(crate) struct StationBufferQuery {
+    crs: String,
+}
+
+/// `GET /JourneyTemplates/station-buffer`'s response.
+#[derive(Debug, Serialize, ts_rs::TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(rename = "StationBufferPrefill")]
+pub(crate) struct StationBufferPrefillResponse {
+    minutes: Option<i16>,
+}
+
+/// `GET /JourneyTemplates/station-buffer?crs=WOK` `{minutes | null}`: the
+/// buffer the caller last used from that station, to pre-fill the regular
+/// journey form (decision 6): their most recently updated template from
+/// there, else their most recently updated journey from there.
+async fn get_station_buffer_prefill(
+    State(app): State<App>,
+    user: AuthenticatedUser,
+    axum::extract::Query(query): axum::extract::Query<StationBufferQuery>,
+) -> Result<Json<StationBufferPrefillResponse>, (StatusCode, String)> {
+    let crs = regular_journeys::normalize_crs(&query.crs, "station").map_err(bad_request)?;
+    let minutes = crate::data::leave_by::prefill_for_station(&app.database, &user.id, &crs)
+        .await
+        .map_err(internal_error("read the station buffer"))?;
+    Ok(Json(StationBufferPrefillResponse { minutes }))
+}
+
 fn bad_request(message: String) -> (StatusCode, String) {
     (StatusCode::BAD_REQUEST, message)
 }
@@ -632,6 +688,10 @@ fn bad_request(message: String) -> (StatusCode, String) {
 /// (different from each other), the target, the plan options and the usual
 /// itinerary, whose trains must call at their stations on the date they
 /// were planned for (`422` otherwise, as `POST /Journeys/itinerary`).
+#[expect(
+    clippy::too_many_arguments,
+    reason = "one template's fields of the create body, moved in one by one"
+)]
 async fn plan_template_input(
     app: &App,
     custom_name: Option<&str>,
@@ -640,8 +700,10 @@ async fn plan_template_input(
     target: TemplateTarget,
     plan_options: Option<PlanOptions>,
     usual_itinerary: &UsualItinerary,
+    station_buffer_minutes: Option<i16>,
 ) -> Result<regular_journeys::PlanTemplateInput, (StatusCode, String)> {
     let custom_name = train_tracking::validate_custom_name(custom_name).map_err(bad_request)?;
+    crate::data::leave_by::validate_station_buffer(station_buffer_minutes).map_err(bad_request)?;
     let origin_crs = regular_journeys::normalize_crs(origin_crs, "origin").map_err(bad_request)?;
     let destination_crs =
         regular_journeys::normalize_crs(destination_crs, "destination").map_err(bad_request)?;
@@ -675,6 +737,7 @@ async fn plan_template_input(
         target,
         plan_options,
         usual_itinerary,
+        station_buffer_minutes,
     })
 }
 
@@ -734,6 +797,7 @@ async fn get_journey_template(
         paired_template_id: template.paired_template_id,
         next_date,
         skipped_dates,
+        station_buffer_minutes: template.station_buffer_minutes,
         id: template.id,
         custom_name: template.custom_name,
         created_at: template.created_at,
@@ -803,6 +867,7 @@ async fn put_journey_template(
         body.target,
         body.plan_options,
         body.usual_itinerary,
+        body.station_buffer_minutes,
     )
     .await?;
     let replaced = journey_templates::replace_template(
@@ -836,7 +901,11 @@ async fn put_journey_template(
 /// given or stored. `404` when the template isn't the caller's.
 #[expect(
     clippy::too_many_arguments,
-    reason = "the PUT body's five optional fields, moved in one by one"
+    reason = "the PUT body's six optional fields, moved in one by one"
+)]
+#[expect(
+    clippy::option_option,
+    reason = "absent (unchanged) and null (cleared) are different requests"
 )]
 async fn put_target_update(
     app: &App,
@@ -847,14 +916,21 @@ async fn put_target_update(
     target: Option<TemplateTarget>,
     plan_options: Option<PlanOptions>,
     usual_itinerary: Option<UsualItinerary>,
+    station_buffer_minutes: Option<Option<i16>>,
 ) -> Result<journey_templates::TargetUpdate, (StatusCode, String)> {
+    if let Some(minutes) = station_buffer_minutes {
+        crate::data::leave_by::validate_station_buffer(minutes).map_err(bad_request)?;
+    }
     if origin_crs.is_none()
         && destination_crs.is_none()
         && target.is_none()
         && plan_options.is_none()
         && usual_itinerary.is_none()
     {
-        return Ok(journey_templates::TargetUpdate::default());
+        return Ok(journey_templates::TargetUpdate {
+            station_buffer_minutes,
+            ..Default::default()
+        });
     }
     let stored = journey_templates::get_owned_template(&app.database, template_id, user_id)
         .await
@@ -925,6 +1001,7 @@ async fn put_target_update(
         target,
         plan_options,
         usual_itinerary,
+        station_buffer_minutes,
     })
 }
 

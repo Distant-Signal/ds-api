@@ -40,6 +40,8 @@ pub mod journey_templates;
 mod journey_timetable_db_tests;
 pub mod journeys;
 #[cfg(test)]
+mod leave_by_db_tests;
+#[cfg(test)]
 mod leg_validation_db_tests;
 pub mod line_status;
 pub mod line_timetable;
@@ -72,6 +74,19 @@ pub mod transit;
 pub mod trips;
 pub mod usage;
 pub mod version;
+
+/// A field that is present, `null` or not: `Some(None)` for `null`.
+#[expect(
+    clippy::option_option,
+    reason = "absent (unchanged) and null (cleared) are different requests"
+)]
+pub(crate) fn present<'de, D, T>(deserializer: D) -> Result<Option<Option<T>>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+    T: serde::Deserialize<'de>,
+{
+    <Option<T> as serde::Deserialize>::deserialize(deserializer).map(Some)
+}
 
 /// The current instant on the Europe/London wall clock.
 ///

@@ -306,6 +306,7 @@ async fn the_owner_turns_a_tracked_trains_pushes_off_and_on() {
 
 #[tokio::test]
 #[ignore = "requires DATABASE_URL (a migrated database)"]
+#[expect(clippy::too_many_lines, reason = "one walk through every preference")]
 async fn notification_preferences_read_as_defaults_and_change_only_what_is_sent() {
     const USER: &str = "TEST-NOTIFSET-PREFS";
     const URI: &str = "/public/preferences/notifications";
@@ -326,6 +327,10 @@ async fn notification_preferences_read_as_defaults_and_change_only_what_is_sent(
         "predictedStart": true,
         "stationSkip": true,
         "templateAttention": true,
+        "leaveBy": true,
+        "leaveByQuietHours": true,
+        "leaveByLeadMinutes": 0,
+        "morningSummary": false,
         "delayThresholdMinutes": null,
         "quietHours": null,
         "snoozedUntil": null,
@@ -356,6 +361,9 @@ async fn notification_preferences_read_as_defaults_and_change_only_what_is_sent(
             "trainDelay": false,
             "delayThresholdMinutes": 10,
             "quietHours": { "start": "22:30", "end": "06:45", "timezone": "Europe/London" },
+            "leaveByQuietHours": false,
+            "leaveByLeadMinutes": 3,
+            "morningSummary": true,
         })),
     )
     .await;
@@ -365,6 +373,10 @@ async fn notification_preferences_read_as_defaults_and_change_only_what_is_sent(
     assert_eq!(read["journeySuggestions"], json!(false), "kept");
     assert_eq!(read["trainDelay"], json!(false));
     assert_eq!(read["delayThresholdMinutes"], json!(10));
+    assert_eq!(read["leaveBy"], json!(true), "kept");
+    assert_eq!(read["leaveByQuietHours"], json!(false));
+    assert_eq!(read["leaveByLeadMinutes"], json!(3));
+    assert_eq!(read["morningSummary"], json!(true));
     assert_eq!(
         read["quietHours"],
         json!({ "start": "22:30", "end": "06:45", "timezone": "Europe/London" })
@@ -384,6 +396,8 @@ async fn notification_preferences_read_as_defaults_and_change_only_what_is_sent(
             json!({ "quietHours": { "start": "22:00", "end": "07:00", "timezone": "Nowhere/Here" } }),
             StatusCode::BAD_REQUEST,
         ),
+        (json!({ "leaveByLeadMinutes": 6 }), StatusCode::BAD_REQUEST),
+        (json!({ "leaveByLeadMinutes": -1 }), StatusCode::BAD_REQUEST),
         (json!({ "allOff": true }), StatusCode::UNPROCESSABLE_ENTITY),
     ] {
         let (status, body) = call(&router, "PUT", URI, Some(&token), Some(bad.clone())).await;

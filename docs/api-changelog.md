@@ -3,6 +3,46 @@
 Changes to the Distant Signal (DS) HTTP API that a client such as DS-MCP
 needs to know about. Newest first. Field names are as served (camelCase).
 
+## 2026-11-06: Leave by
+
+Phase 2 of regular journeys (distant-signal's
+`docs/superpowers/specs/2026-11-06-regular-journeys-design.md` §5.2).
+Everything here is additive.
+
+- `JourneyListItem` (`GET /Journeys/mine`) and `GET /Journeys/{id}` gain:
+  - `stationBufferMinutes`: the minutes to get to the station, margin
+    included, or `null` for none.
+  - `leaveBy: {at, departure, basis} | null`. `departure` is the first leg
+    with a time (a train leg's booked departure, or an untracked leg's
+    planned one); `at` is `departure` less the buffer. Lateness never moves
+    it. `basis` is `booked`, or `suggestion` when the first train is
+    cancelled and the open break's best suggestion is covered by the
+    ticket; then `departure` is that suggestion's. It is `null` with no
+    buffer, no timed leg, or a cancelled first train with nothing
+    suggested. The detail still serves it after departure.
+  - Both are the owner's only: `null` on a followed, shared or share-link
+    journey. DS-MCP reads them on the caller's own journeys and can ignore
+    them.
+- `PUT /Journeys/{id}/station-buffer` `{minutes}` (0 to 120, or `null`)
+  sets one journey's buffer and answers with `{stationBufferMinutes,
+  leaveBy}`. 400 out of range, 404 if not the caller's. Cookie only.
+- `POST /JourneyTemplates` `mode: "plan"` (and its `return`) and
+  `PUT /JourneyTemplates/{id}` take `stationBufferMinutes` (0 to 120). In
+  the PUT an absent field keeps it and `null` clears it. `GET
+  /JourneyTemplates/{id}` serves it. A journey made from a template (the
+  evening mint, "Add a date") copies it, so a later change to the template
+  doesn't move a day already made.
+- `GET /JourneyTemplates/station-buffer?crs=WOK` `{minutes}`: the buffer
+  the caller last used from that station (their most recently updated
+  template from there, else their most recently updated journey), to
+  pre-fill the form. 400 for an invalid code.
+- `GET`/`PUT /preferences/notifications` gain `leaveBy` (default true),
+  `leaveByQuietHours` (default true: leave-by pushes still come in quiet
+  hours; a snooze always stops them), `leaveByLeadMinutes` (0 to 5,
+  default 0) and `morningSummary` (default false). The PUT takes each
+  optionally, as before; a lead outside 0 to 5 is a 400.
+- The account export's `notificationState` gains `leaveBy` and
+  `morningSummaries`.
 ## 2026-11-06: Regular journeys: the day's train
 
 Phase 3 of regular journeys (distant-signal's
