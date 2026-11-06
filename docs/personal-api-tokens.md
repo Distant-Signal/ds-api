@@ -107,7 +107,7 @@ in step with the chart's `api.personalTokens.rateLimit` defaults.
 |---|---|
 | `journeys:read` | `/v1/Journeys/mine`, `/v1/Journeys/{journeyId}` (the user's own journeys only) |
 | `lines:read` | `/v1/Line/Mode/{mode}/Status`, `/v1/Line/{ids}/Status`, `/v1/StopPoint/{crs}/Disruption` |
-| `trains:read` | `/v1/Train/by-uid/{trainUid}/{date}`, `/v1/stations/{crs}/departures` |
+| `trains:read` | `/v1/Train/by-uid/{trainUid}/{date}`, `/v1/stations/{crs}/departures`, `/v1/island-of-ireland/trains/{trainCode}/{date}` (an Iarnród Éireann train, credited to Iarnród Éireann) |
 | `preferences:read` | `/v1/preferences`, `/v1/preferences/notifications` |
 | any | `/v1/me` |
 

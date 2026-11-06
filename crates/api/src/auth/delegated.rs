@@ -100,6 +100,7 @@ pub const DELEGATED_ROUTES: &[(Method, &str, Scope)] = &[
     (Method::GET, "/Journeys/mine", Scope::JourneysRead),
     (Method::GET, "/Journeys/{journey_id}", Scope::JourneysRead),
     (Method::POST, "/Journeys/itinerary", Scope::JourneysWrite),
+    (Method::POST, "/Journeys/irish-train", Scope::JourneysWrite),
     (
         Method::DELETE,
         "/Journeys/{journey_id}",
@@ -1165,6 +1166,10 @@ mod tests {
             Some(Scope::JourneysWrite)
         );
         assert_eq!(
+            route_scope(&Method::POST, "/Journeys/irish-train"),
+            Some(Scope::JourneysWrite)
+        );
+        assert_eq!(
             route_scope(&Method::DELETE, "/Journeys/{journey_id}"),
             Some(Scope::JourneysDelete)
         );
@@ -1457,6 +1462,7 @@ mod tests {
                     "GET /Journeys/mine journeys:read",
                     "GET /Journeys/{journey_id} journeys:read",
                     "POST /Journeys/itinerary journeys:write",
+                    "POST /Journeys/irish-train journeys:write",
                     "DELETE /Journeys/{journey_id} journeys:delete",
                     "GET /public/preferences/notifications preferences:read",
                 ]
@@ -1491,6 +1497,7 @@ mod tests {
             assert_eq!(
                 found,
                 [
+                    "routes/journey_irish_train.rs WriteScope",
                     "routes/journey_itinerary.rs WriteScope",
                     "routes/journeys.rs DeleteScope",
                     "routes/journeys.rs ReadScope",

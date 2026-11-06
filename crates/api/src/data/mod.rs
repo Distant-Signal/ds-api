@@ -18,6 +18,7 @@ pub mod full_coverage_window;
 pub mod full_coverage_window_report;
 pub mod groups;
 pub mod incident_removal;
+pub mod irish_trains;
 pub mod island_of_ireland;
 pub mod journey;
 pub mod journey_alternatives;

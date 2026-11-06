@@ -27,17 +27,28 @@ use sqlx::PgPool;
 pub(crate) use ds_store::trains::{LegEnd, leg_crs_sql};
 
 /// SQL for a leg's effective place name at `end`: an untracked leg's own
-/// place, else the name of the `TfL` stop it was picked from (DS-144). The
-/// write path already names a blank place after its stop; this keeps a
-/// read honest if one ever reaches the table without.
+/// place, else the name of the `TfL` stop it was picked from (DS-144), else
+/// its train's own end name (`trains.origin_name`/`destination_name`, set
+/// only for an Iarnród Éireann train, which has no CRS to name it by;
+/// 2026-11-06). The write path already names a blank place after its stop;
+/// this keeps a read honest if one ever reaches the table without. Every
+/// read names a leg `COALESCE(<station by CRS>, <this>)`, so a GB leg's
+/// station name always wins.
 pub(crate) fn leg_place_sql(end: LegEnd, leg: &str) -> String {
-    let (place, stop) = match end {
-        LegEnd::Origin => ("origin_place", "origin_stop_id"),
-        LegEnd::Destination => ("destination_place", "destination_stop_id"),
+    let (place, stop, train_name) = match end {
+        LegEnd::Origin => ("origin_place", "origin_stop_id", "origin_name"),
+        LegEnd::Destination => (
+            "destination_place",
+            "destination_stop_id",
+            "destination_name",
+        ),
     };
     format!(
         "COALESCE({leg}.{place}, \
-         (SELECT tfs.name FROM tfl_stops tfs WHERE tfs.stop_id = {leg}.{stop}))"
+         (SELECT tfs.name FROM tfl_stops tfs WHERE tfs.stop_id = {leg}.{stop}), \
+         (SELECT trn.{train_name} FROM train_subscriptions tsn \
+          JOIN trains trn ON trn.id = tsn.trains_id \
+          WHERE tsn.id = {leg}.train_subscription_id))"
     )
 }
 
@@ -765,6 +776,133 @@ pub async fn track_known_train_on_its_own(
     let (journey_id, _, tracking_id) =
         insert_known_train_journey(&mut tx, user_id, None, trains_id, service_date, None, None)
             .await?;
+    tx.commit().await?;
+    Ok(TrainTrackedOnItsOwn {
+        journey_id,
+        tracking_id,
+        created: true,
+    })
+}
+
+/// What `POST /Journeys/irish-train` tracks: an Iarnród Éireann train a
+/// board has shown, as the route resolved it from the history.
+#[derive(Debug, Clone)]
+pub struct IrishTrainToTrack<'a> {
+    /// `ie:<CODE>`, built by `common::island_of_ireland::tracking::train_uid`.
+    pub train_uid: &'a str,
+    /// The train's `Traindate`.
+    pub service_date: NaiveDate,
+    /// The boards' `Origin` and `Destination`.
+    pub origin_name: &'a str,
+    pub destination_name: &'a str,
+    /// `Origintime` on `service_date`, Europe/Dublin; `None` when the boards
+    /// didn't say.
+    pub scheduled_departure: Option<DateTime<Utc>>,
+    /// The board it was tracked from, `ie:<StationCode>`.
+    pub pin_origin_ref: Option<&'a str>,
+}
+
+/// "Track this train" for an Iarnród Éireann train (distant-signal's
+/// docs/superpowers/specs/2026-11-05-irish-rail-train-tracking-design.md
+/// §5.3), in one transaction:
+///
+/// 1. its shared `trains` row (`find_or_create_train`), with its end names
+///    and origin departure;
+/// 2. the caller's subscription, bound to that row at once
+///    (`resolution_status = 'resolved'`), with no CRS pins and
+///    `pin_origin_ref`;
+/// 3. a one-leg journey with no station codes, and its revision.
+///
+/// No CIF, backlog or schedule match: the train has none. Like
+/// [`track_known_train_on_its_own`], a train one of the caller's journeys
+/// already tracks hands back that subscription and journey and makes
+/// nothing (`created: false`), under the same `(user_id, trains_id)` lock.
+pub async fn track_irish_train_on_its_own(
+    pool: &PgPool,
+    user_id: &str,
+    train: &IrishTrainToTrack<'_>,
+) -> anyhow::Result<TrainTrackedOnItsOwn> {
+    let mut tx = pool.begin().await?;
+    let trains_id =
+        ds_store::trains::find_or_create_train(&mut *tx, train.train_uid, train.service_date)
+            .await?;
+    sqlx::query(
+        "UPDATE trains SET origin_name = $2, destination_name = $3, \
+                scheduled_departure = COALESCE($4, scheduled_departure) \
+         WHERE id = $1 \
+           AND (origin_name, destination_name, scheduled_departure) \
+               IS DISTINCT FROM ($2, $3, COALESCE($4, scheduled_departure))",
+    )
+    .bind(trains_id)
+    .bind(train.origin_name)
+    .bind(train.destination_name)
+    .bind(train.scheduled_departure)
+    .execute(&mut *tx)
+    .await?;
+    ds_runtime::pg::lock_user_train_subscription(&mut tx, user_id, trains_id).await?;
+    let existing: Option<(i64, i64)> = sqlx::query_as(
+        "SELECT ts.id, MIN(jl.journey_id) \
+         FROM train_subscriptions ts \
+         JOIN journey_legs jl ON jl.train_subscription_id = ts.id \
+         JOIN journeys j ON j.id = jl.journey_id AND j.user_id = ts.user_id \
+         WHERE ts.user_id = $1 AND ts.trains_id = $2 \
+         GROUP BY ts.id ORDER BY ts.id LIMIT 1",
+    )
+    .bind(user_id)
+    .bind(trains_id)
+    .fetch_optional(&mut *tx)
+    .await?;
+    if let Some((tracking_id, journey_id)) = existing {
+        tx.commit().await?;
+        return Ok(TrainTrackedOnItsOwn {
+            journey_id,
+            tracking_id,
+            created: false,
+        });
+    }
+    // A subscription no journey uses (none is made that way any more, but
+    // an older one may exist) is reused rather than doubled.
+    let tracking_id: i64 = sqlx::query_scalar(
+        "WITH existing AS ( \
+             UPDATE train_subscriptions \
+             SET pin_origin_ref = COALESCE(pin_origin_ref, $4), \
+                 resolution_status = 'resolved' \
+             WHERE id = (SELECT id FROM train_subscriptions \
+                         WHERE user_id = $1 AND trains_id = $2 ORDER BY id LIMIT 1) \
+             RETURNING id \
+         ), inserted AS ( \
+             INSERT INTO train_subscriptions \
+                 (user_id, trains_id, service_date, resolution_status, pin_origin_ref) \
+             SELECT $1, $2, $3, 'resolved', $4 \
+             WHERE NOT EXISTS (SELECT 1 FROM existing) \
+             RETURNING id \
+         ) \
+         SELECT id FROM existing UNION ALL SELECT id FROM inserted",
+    )
+    .bind(user_id)
+    .bind(trains_id)
+    .bind(train.service_date)
+    .bind(train.pin_origin_ref)
+    .fetch_one(&mut *tx)
+    .await?;
+    let journey_id = insert_journey(&mut *tx, user_id, None).await?;
+    insert_leg(
+        &mut *tx,
+        journey_id,
+        1,
+        None,
+        None,
+        train.service_date,
+        Some(tracking_id),
+        "manual",
+        None,
+        None,
+        None,
+        None,
+        false,
+    )
+    .await?;
+    crate::data::journey_revisions::record_plan_change(&mut tx, journey_id, Utc::now()).await?;
     tx.commit().await?;
     Ok(TrainTrackedOnItsOwn {
         journey_id,
@@ -2929,6 +3067,11 @@ pub struct JourneyListItem {
     #[serde(skip_serializing_if = "Vec::is_empty")]
     #[ts(optional = nullable)]
     pub shared_via: Vec<crate::data::groups::SharedVia>,
+    /// Set when this row's leg is an Iarnród Éireann train (an `ie:`
+    /// uid): its code and service date, for the Irish train page; `null`
+    /// otherwise (`data::irish_trains`). Additive (2026-11-06).
+    #[sqlx(skip)]
+    pub irish_train: Option<crate::data::irish_trains::IrishTrain>,
 }
 
 /// What `GET /Journeys/mine` lists besides the caller's own journeys.
@@ -3020,7 +3163,9 @@ impl crate::data::tracking_phase::PhaseRow for JourneyListItem {
 
     fn phase_signals(&self) -> crate::data::tracking_phase::PhaseSignals<'_> {
         crate::data::tracking_phase::PhaseSignals {
-            applies: self.kind == LEG_KIND_TRAIN && self.train_subscription_id.is_some(),
+            applies: self.kind == LEG_KIND_TRAIN
+                && self.train_subscription_id.is_some()
+                && self.irish_train.is_none(),
             activated: self.resolution_status.as_deref() == Some("resolved"),
             status: self.status.as_deref(),
             timetable_on_row: self.timetable_on_row,
@@ -3034,6 +3179,32 @@ impl crate::data::tracking_phase::PhaseRow for JourneyListItem {
     ) {
         self.tracking_phase = Some(phase);
         self.first_report_expected_at = expected;
+    }
+}
+
+impl crate::data::irish_trains::IrishTrainRow for JourneyListItem {
+    fn train_key(&self) -> Option<(&str, NaiveDate)> {
+        self.train_uid
+            .as_deref()
+            .map(|uid| (uid, self.service_date))
+    }
+
+    fn set_irish_train(&mut self, train: crate::data::irish_trains::IrishTrain) {
+        self.irish_train = Some(train);
+    }
+
+    fn lacks_state(&self) -> bool {
+        self.status.is_none()
+    }
+
+    fn set_board_state(&mut self, state: common::island_of_ireland::train_state::CurrentState) {
+        self.status = Some(state.status.to_owned());
+        self.working_delay_minutes = state.delay_minutes;
+        self.delay_minutes = state.delay_minutes;
+        self.delay_basis = state
+            .delay_minutes
+            .map(|_| crate::data::stop_delay::DelayBasis::Working);
+        self.delay_provisional = false;
     }
 }
 
@@ -3378,6 +3549,7 @@ pub(crate) async fn list_journeys_for_user_capped(
     crate::data::stop_delay::apply_public_delays(pool, &mut rows).await?;
     apply_final_arrival_delays(pool, &mut rows).await?;
     let now = Utc::now();
+    crate::data::irish_trains::attach(pool, &mut rows, now).await;
     for row in &mut rows {
         if let (Some(departure), Some(arrival)) = (row.planned_departure, row.planned_arrival) {
             row.untracked_status = Some(untracked_status(departure, arrival, now));
@@ -3526,15 +3698,18 @@ pub async fn list_legs_for_journey(
 
 /// [`list_legs_for_journey`]'s query: each leg's station codes and places
 /// through [`leg_crs_sql`] and [`leg_place_sql`], so a train leg saved
-/// without codes is named by its train's route.
+/// without codes is named by its train's route, and an Iarnród Éireann
+/// train's leg by its train's end names.
 static LIST_LEGS_SQL: std::sync::LazyLock<String> = std::sync::LazyLock::new(|| {
     let origin_crs = leg_crs_sql(LegEnd::Origin, "jl", "ts", "tr");
     let destination_crs = leg_crs_sql(LegEnd::Destination, "jl", "ts", "tr");
     let origin_place = leg_place_sql(LegEnd::Origin, "jl");
     let destination_place = leg_place_sql(LegEnd::Destination, "jl");
     format!(
-        "SELECT jl.id, jl.journey_id, {origin_crs} AS origin_crs, so.name AS origin_name, \
-                {destination_crs} AS destination_crs, sd.name AS destination_name, \
+        "SELECT jl.id, jl.journey_id, {origin_crs} AS origin_crs, \
+                COALESCE(so.name, tr.origin_name) AS origin_name, \
+                {destination_crs} AS destination_crs, \
+                COALESCE(sd.name, tr.destination_name) AS destination_name, \
                 jl.service_date, \
                 jl.depart_after, jl.depart_before, jl.arrive_after, jl.arrive_before, \
                 jl.train_subscription_id, jl.match_mode, jl.window_searched, jl.kind, \
@@ -4124,6 +4299,16 @@ mod db_tests {
     #[test]
     fn validate_train_uid_accepts_a_well_formed_six_character_uid() {
         assert!(validate_train_uid("C21373").is_ok());
+    }
+
+    /// The GB track routes (`knownTrain`, `POST /Train/by-uid/.../track`)
+    /// never take an Iarnród Éireann uid, in any case: only
+    /// `POST /Journeys/irish-train` makes one, and never upper-cases it.
+    #[test]
+    fn validate_train_uid_refuses_an_irish_uid() {
+        for uid in ["ie:A12", "IE:A12", "ie:A120"] {
+            assert!(validate_train_uid(uid).is_err(), "{uid}");
+        }
     }
 
     #[test]

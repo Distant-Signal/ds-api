@@ -17,6 +17,8 @@ pub mod groups;
 pub mod health;
 pub mod history_retention;
 pub mod incidents;
+#[cfg(test)]
+mod irish_train_db_tests;
 pub mod island_of_ireland;
 #[cfg(test)]
 #[expect(
@@ -30,6 +32,7 @@ mod journey_follows_db_tests;
     reason = "test code: scenario tests read top to bottom"
 )]
 mod journey_history_order_db_tests;
+pub mod journey_irish_train;
 pub mod journey_itinerary;
 pub mod journey_replan;
 pub mod journey_templates;

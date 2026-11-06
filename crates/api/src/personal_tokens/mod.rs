@@ -135,6 +135,13 @@ pub const RSP: Source = Source {
     notice: "Source: RSP",
     url: None,
 };
+/// Iarnród Éireann's realtime service (the Irish train pages' courtesy
+/// credit, distant-signal's `irish-rail-realtime`).
+pub const IRISH_RAIL_REALTIME: Source = Source {
+    name: "Iarnród Éireann",
+    notice: "Live Irish Rail data from Iarnród Éireann, provided \"as is\".",
+    url: Some("https://api.irishrail.ie/realtime/"),
+};
 pub const TFL: Source = Source {
     name: "Transport for London",
     notice: crate::render::TFL_CREDIT,
@@ -149,6 +156,7 @@ const LINE_SOURCES: &[Source] = &[NATIONAL_RAIL, RAIL_DELIVERY_GROUP, TFL];
 const TRAIN_SOURCES: &[Source] = &[NATIONAL_RAIL, NETWORK_RAIL, RSP, RAIL_DELIVERY_GROUP];
 const DEPARTURE_SOURCES: &[Source] = &[NATIONAL_RAIL, NETWORK_RAIL, RSP];
 const JOURNEY_SOURCES: &[Source] = &[NATIONAL_RAIL, NETWORK_RAIL, RSP, RAIL_DELIVERY_GROUP, TFL];
+const IRISH_TRAIN_SOURCES: &[Source] = &[IRISH_RAIL_REALTIME];
 
 /// One `/v1` route a personal token may reach (spec §5.1).
 #[derive(Debug, Clone, Copy)]
@@ -228,6 +236,13 @@ pub const TOKEN_ROUTES: &[TokenRoute] = &[
         class: RouteClass::Train,
         max_age_secs: 30,
         sources: TRAIN_SOURCES,
+    },
+    TokenRoute {
+        path: "/v1/island-of-ireland/trains/{train_code}/{date}",
+        scope: Some(PersonalScope::TrainsRead),
+        class: RouteClass::Train,
+        max_age_secs: 30,
+        sources: IRISH_TRAIN_SOURCES,
     },
     TokenRoute {
         path: "/v1/stations/{crs}/departures",
@@ -541,7 +556,7 @@ async fn me(axum::Extension(auth): axum::Extension<PersonalTokenAuth>) -> axum::
 pub fn router(app: &App, edge: &crate::edge::EdgeSettings) -> Router {
     use axum::routing::get;
 
-    use crate::routes::{departures, journeys, line_status, preferences, train};
+    use crate::routes::{departures, island_of_ireland, journeys, line_status, preferences, train};
     let v1 = Router::new()
         .route("/status", get(status))
         .route("/openapi.json", get(openapi::serve))
@@ -560,6 +575,10 @@ pub fn router(app: &App, edge: &crate::edge::EdgeSettings) -> Router {
         .route(
             "/Train/by-uid/{train_uid}/{date}",
             get(train::get_by_uid_and_date),
+        )
+        .route(
+            "/island-of-ireland/trains/{train_code}/{date}",
+            get(island_of_ireland::get_train),
         )
         .route(
             "/stations/{crs}/departures",

@@ -868,7 +868,13 @@ untrackedStatus: UntrackedStatus | null,
  * Whether the CALLER follows this journey (DS-146,
  * `journey_follows`); set by the route, `false` here.
  */
-following: boolean, serviceMode?: ServiceMode, liveTracking?: boolean, };
+following: boolean, 
+/**
+ * Set for an Iarnród Éireann train (`data::irish_trains`): its code
+ * and service date, for the Irish train page; `null` otherwise.
+ * Additive (2026-11-06).
+ */
+irishTrain: IrishTrain | null, serviceMode?: ServiceMode, liveTracking?: boolean, };
 
 /**
  * Deliberately no `email` field, and `display_name` is deliberately never
@@ -949,7 +955,13 @@ trackingPhase: TrackingPhase | null,
 /**
  * See `TrackedTrainState::first_report_expected_at`.
  */
-firstReportExpectedAt: string | null, serviceMode: ServiceMode, liveTracking: boolean, };
+firstReportExpectedAt: string | null, 
+/**
+ * Set for an Iarnród Éireann train (`data::irish_trains`): its code
+ * and service date, for the Irish train page; `null` otherwise.
+ * Additive (2026-11-06).
+ */
+irishTrain: IrishTrain | null, serviceMode: ServiceMode, liveTracking: boolean, };
 
 /**
  * One half hour of a line's full-coverage stats.
@@ -1045,6 +1057,20 @@ export type InviteLink = {
  * link is active and when it expires, but can never recover its token.
  */
 token: string | null, expiresAt: string, };
+
+/**
+ * `irishTrain` on a tracked train, a journey or a group row: which Irish
+ * train page it is (`/island-of-ireland/iarnrod-eireann/trains/{trainCode}/{serviceDate}`).
+ */
+export type IrishTrain = { 
+/**
+ * The train code, like `A120`.
+ */
+trainCode: string, 
+/**
+ * The day the train started (`Traindate`), `YYYY-MM-DD`.
+ */
+serviceDate: string, };
 
 /**
  * One row of `GET /public/island-of-ireland/stations/{id}/departures`:
@@ -1556,7 +1582,13 @@ followedFrom?: FollowedFrom,
  * caller's own journeys; a followed journey that is also shared into
  * one of their groups carries both.
  */
-sharedVia?: Array<SharedVia>, };
+sharedVia?: Array<SharedVia>, 
+/**
+ * Set when this row's leg is an Iarnród Éireann train (an `ie:`
+ * uid): its code and service date, for the Irish train page; `null`
+ * otherwise (`data::irish_trains`). Additive (2026-11-06).
+ */
+irishTrain: IrishTrain | null, };
 
 /**
  * A stored filter, as `GET /Journeys/{id}` serves it.
@@ -3327,7 +3359,13 @@ untrackedStatus: UntrackedStatus | null,
  * Whether the CALLER follows this journey (DS-146,
  * `journey_follows`); set by the route, `false` here.
  */
-following: boolean, serviceMode?: ServiceMode, liveTracking?: boolean, };
+following: boolean, 
+/**
+ * Set for an Iarnród Éireann train (`data::irish_trains`): its code
+ * and service date, for the Irish train page; `null` otherwise.
+ * Additive (2026-11-06).
+ */
+irishTrain: IrishTrain | null, serviceMode?: ServiceMode, liveTracking?: boolean, };
 
 /**
  * One train shared into one group the CALLER is a member of -- `GroupTrain`
@@ -3371,7 +3409,13 @@ trackingPhase: TrackingPhase | null,
 /**
  * See `TrackedTrainState::first_report_expected_at`.
  */
-firstReportExpectedAt: string | null, serviceMode: ServiceMode, liveTracking: boolean, };
+firstReportExpectedAt: string | null, 
+/**
+ * Set for an Iarnród Éireann train (`data::irish_trains`): its code
+ * and service date, for the Irish train page; `null` otherwise.
+ * Additive (2026-11-06).
+ */
+irishTrain: IrishTrain | null, serviceMode: ServiceMode, liveTracking: boolean, };
 
 /**
  * One group a journey reached the caller through (`GET /Journeys/mine`'s
@@ -3913,6 +3957,31 @@ scheduledDeparture: string | null, };
 export type TimetabledRide = { departure: string, arrival: string, };
 
 /**
+ * `POST /Journeys/irish-train`'s body.
+ */
+export type TrackIrishTrainRequest = { 
+/**
+ * The train code, like `A120` (trimmed and upper-cased).
+ */
+trainCode: string, 
+/**
+ * The day the train started, `YYYY-MM-DD`: Dublin's today or
+ * yesterday.
+ */
+serviceDate: string, 
+/**
+ * The live `StationCode` of the board it was tracked from, like
+ * `CNLLY`: one the train was seen at. Optional.
+ */
+fromStation?: string, };
+
+/**
+ * `POST /Journeys/irish-train`'s response: the one-leg journey and the
+ * tracked train (`GET /Train/{trackingId}`).
+ */
+export type TrackIrishTrainResponse = { journeyId: number, trackingId: number, };
+
+/**
  * Pin-creation payload for `POST /Train/track` (`crates/api/src/routes/train.rs`).
  * Deliberately does NOT include `train_uid` -- per the design doc's
  * Tracking semantics, the pinned service is only ever known by what a
@@ -4067,7 +4136,11 @@ departsAt: string,
  * form): full or partial, where it now starts or terminates, and why.
  * `null` when no part of its run is cancelled. Additive (2026-10-27).
  */
-cancellation: CancellationSummary | null, serviceMode: ServiceMode, liveTracking: boolean, };
+cancellation: CancellationSummary | null, 
+/**
+ * See `TrackedTrainState::irish_train`. Additive (2026-11-06).
+ */
+irishTrain: IrishTrain | null, serviceMode: ServiceMode, liveTracking: boolean, };
 
 /**
  * The public read-model for a tracked train, returned directly as JSON by
@@ -4304,7 +4377,14 @@ trackingPhase: TrackingPhase | null,
  * Activation before it is activated, the origin departure after.
  * `None` once live, or when the origin departure is unknown.
  */
-firstReportExpectedAt: string | null, serviceMode: ServiceMode, liveTracking: boolean, };
+firstReportExpectedAt: string | null, 
+/**
+ * Set for an Iarnród Éireann train (an `ie:` uid): its code and
+ * service date, for the Irish train page. `null` for every GB train.
+ * Filled after the read by `data::irish_trains::attach`. Additive
+ * (2026-11-06).
+ */
+irishTrain: IrishTrain | null, serviceMode: ServiceMode, liveTracking: boolean, };
 
 /**
  * The public read-model for a ticket, returned directly as JSON by
@@ -5398,6 +5478,11 @@ export type WindowBound = { time: string, dayOffset: number, };
  * website's own words (personal API tokens spec §5.2).
  */
 export const ATTRIBUTION_SOURCES = {
+  "irishRailRealtime": {
+    "name": "Iarnród Éireann",
+    "notice": "Live Irish Rail data from Iarnród Éireann, provided \"as is\".",
+    "url": "https://api.irishrail.ie/realtime/"
+  },
   "nationalRail": {
     "name": "National Rail",
     "notice": "powered by NationalRail (Train Information Services Ltd)",

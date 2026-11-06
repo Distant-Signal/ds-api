@@ -451,3 +451,13 @@ pub enum NoResultConstraint {
     Operator,
     AvoidOperator,
 }
+
+/// `common::island_of_ireland::IslandOfIrelandNetwork` as served (kebab
+/// case): for the `OpenAPI` document only (the TypeScript spells it out
+/// with `#[ts(type = ...)]`).
+#[derive(schemars::JsonSchema)]
+#[schemars(rename_all = "kebab-case")]
+pub enum IslandOfIrelandNetworkWire {
+    NorthernIreland,
+    RepublicOfIreland,
+}

@@ -1070,6 +1070,12 @@ pub struct TrackedTrainState {
     /// `None` once live, or when the origin departure is unknown.
     #[sqlx(skip)]
     pub first_report_expected_at: Option<DateTime<Utc>>,
+    /// Set for an Iarnród Éireann train (an `ie:` uid): its code and
+    /// service date, for the Irish train page. `null` for every GB train.
+    /// Filled after the read by `data::irish_trains::attach`. Additive
+    /// (2026-11-06).
+    #[sqlx(skip)]
+    pub irish_train: Option<crate::data::irish_trains::IrishTrain>,
 }
 
 impl crate::data::tracking_phase::PhaseRow for TrackedTrainState {
@@ -1081,7 +1087,9 @@ impl crate::data::tracking_phase::PhaseRow for TrackedTrainState {
 
     fn phase_signals(&self) -> crate::data::tracking_phase::PhaseSignals<'_> {
         crate::data::tracking_phase::PhaseSignals {
-            applies: true,
+            // An Irish train has no timetable or TRUST activation to wait
+            // for: no phase.
+            applies: self.irish_train.is_none(),
             activated: self.resolution_status == "resolved",
             status: self.status.as_deref(),
             timetable_on_row: self.schedule_calling_points.is_some()
@@ -1145,9 +1153,11 @@ const TRACKED_TRAIN_STATE_SELECT: &str = concat!(
            COALESCE(tt.pin_origin_crs, tr.origin_crs) AS pin_origin_crs, \
            COALESCE(tt.pin_destination_crs, tr.destination_crs) AS pin_destination_crs, \
            COALESCE(tt.pin_scheduled_departure, tr.scheduled_departure) AS pin_scheduled_departure, \
-           so.name AS pin_origin_name, sd.name AS pin_destination_name, \
+           COALESCE(so.name, tr.origin_name) AS pin_origin_name, \
+           COALESCE(sd.name, tr.destination_name) AS pin_destination_name, \
            tt.resolution_status, tr.train_uid, tr.train_id, \
-           tr.destination_crs AS schedule_destination_crs, ssd.name AS schedule_destination_name, \
+           tr.destination_crs AS schedule_destination_crs, \
+           COALESCE(ssd.name, tr.destination_name) AS schedule_destination_name, \
            tr.calling_points AS schedule_calling_points, \
            COALESCE(tr.skipped_stations, '{}') AS schedule_skipped_stations, \
            tr.platform AS schedule_platform, tr.planned_platform AS schedule_planned_platform, \
@@ -1282,6 +1292,9 @@ pub struct TrackedTrainListItem {
     /// `null` when no part of its run is cancelled. Additive (2026-10-27).
     #[sqlx(skip)]
     pub cancellation: Option<crate::data::cancellation::CancellationSummary>,
+    /// See `TrackedTrainState::irish_train`. Additive (2026-11-06).
+    #[sqlx(skip)]
+    pub irish_train: Option<crate::data::irish_trains::IrishTrain>,
 }
 
 impl crate::data::tracking_phase::PhaseRow for TrackedTrainListItem {
@@ -1293,7 +1306,7 @@ impl crate::data::tracking_phase::PhaseRow for TrackedTrainListItem {
 
     fn phase_signals(&self) -> crate::data::tracking_phase::PhaseSignals<'_> {
         crate::data::tracking_phase::PhaseSignals {
-            applies: true,
+            applies: self.irish_train.is_none(),
             activated: self.resolution_status == "resolved",
             status: self.status.as_deref(),
             timetable_on_row: self.timetable_on_row,
@@ -1307,6 +1320,62 @@ impl crate::data::tracking_phase::PhaseRow for TrackedTrainListItem {
     ) {
         self.tracking_phase = Some(phase);
         self.first_report_expected_at = expected;
+    }
+}
+
+impl crate::data::irish_trains::IrishTrainRow for TrackedTrainState {
+    fn train_key(&self) -> Option<(&str, chrono::NaiveDate)> {
+        self.train_uid
+            .as_deref()
+            .map(|uid| (uid, self.service_date))
+    }
+
+    fn set_irish_train(&mut self, train: crate::data::irish_trains::IrishTrain) {
+        self.irish_train = Some(train);
+        self.operator_code = None;
+        self.operator_name = Some(common::island_of_ireland::tracking::OPERATOR_NAME.to_owned());
+    }
+
+    fn lacks_state(&self) -> bool {
+        self.status.is_none()
+    }
+
+    fn set_board_state(&mut self, state: common::island_of_ireland::train_state::CurrentState) {
+        self.status = Some(state.status.to_owned());
+        self.last_reported_location = state.last_reported_location;
+        self.last_event_type = state.last_event_type.map(str::to_owned);
+        self.working_delay_minutes = state.delay_minutes;
+        self.delay_minutes = state.delay_minutes;
+        self.delay_basis = state
+            .delay_minutes
+            .map(|_| crate::data::stop_delay::DelayBasis::Working);
+        self.delay_provisional = false;
+    }
+}
+
+impl crate::data::irish_trains::IrishTrainRow for TrackedTrainListItem {
+    fn train_key(&self) -> Option<(&str, chrono::NaiveDate)> {
+        self.train_uid
+            .as_deref()
+            .map(|uid| (uid, self.service_date))
+    }
+
+    fn set_irish_train(&mut self, train: crate::data::irish_trains::IrishTrain) {
+        self.irish_train = Some(train);
+    }
+
+    fn lacks_state(&self) -> bool {
+        self.status.is_none()
+    }
+
+    fn set_board_state(&mut self, state: common::island_of_ireland::train_state::CurrentState) {
+        self.status = Some(state.status.to_owned());
+        self.working_delay_minutes = state.delay_minutes;
+        self.delay_minutes = state.delay_minutes;
+        self.delay_basis = state
+            .delay_minutes
+            .map(|_| crate::data::stop_delay::DelayBasis::Working);
+        self.delay_provisional = false;
     }
 }
 
@@ -1357,7 +1426,8 @@ static LIST_TRACKED_TRAINS_SQL: std::sync::LazyLock<String> = std::sync::LazyLoc
         "SELECT tt.id, tt.service_date, \
                 COALESCE(tt.pin_origin_crs, tr.origin_crs) AS pin_origin_crs, \
                 COALESCE(tt.pin_destination_crs, tr.destination_crs) AS pin_destination_crs, \
-                so.name AS pin_origin_name, sd.name AS pin_destination_name, \
+                COALESCE(so.name, tr.origin_name) AS pin_origin_name, \
+                COALESCE(sd.name, tr.destination_name) AS pin_destination_name, \
                 COALESCE(tt.pin_scheduled_departure, tr.scheduled_departure) \
                     AS pin_scheduled_departure, \
                 tt.resolution_status, tr.train_uid, \
@@ -1447,6 +1517,7 @@ pub async fn list_tracked_trains_for_user(
         .await?;
     let mut rows = rows;
     crate::data::stop_delay::apply_public_delays(pool, &mut rows).await?;
+    crate::data::irish_trains::attach(pool, &mut rows, Utc::now()).await;
     crate::data::schedule_services::attach(pool, &mut rows).await;
     crate::data::tracking_phase::attach(pool, &mut rows, Utc::now()).await;
     crate::data::cancellation::attach_summaries(
@@ -1471,6 +1542,7 @@ pub async fn get_by_tracking_id(
     .await?;
     let mut rows: Vec<TrackedTrainState> = row.into_iter().collect();
     crate::data::stop_delay::apply_public_delays(pool, &mut rows).await?;
+    crate::data::irish_trains::attach(pool, &mut rows, Utc::now()).await;
     Ok(rows.pop())
 }
 
@@ -1493,6 +1565,7 @@ pub async fn get_by_tracking_ids(
     .await?;
     let mut rows = rows;
     crate::data::stop_delay::apply_public_delays(pool, &mut rows).await?;
+    crate::data::irish_trains::attach(pool, &mut rows, Utc::now()).await;
     Ok(rows.into_iter().map(|row| (row.id, row)).collect())
 }
 
