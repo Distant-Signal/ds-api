@@ -3,6 +3,17 @@
 Changes to the Distant Signal (DS) HTTP API that a client such as DS-MCP
 needs to know about. Newest first. Field names are as served (camelCase).
 
+## 2026-11-06: each train leg's final arrival is recorded
+
+No route changes. Each retention pass (the api's hourly loop or the
+`api-maintenance` CronJob) now first records, on the leg, a train leg's
+final arrival delay at its destination and whether its train was
+cancelled, once the train is over (`data::leg_outcomes`, DS-379; ds-core
+v0.8.0's `journey_legs.final_*` columns). The regular-journey retention
+rule (`REGULAR_JOURNEY_RETENTION_DAYS`, still off at 0) reads them instead
+of the train's live state, which ds-workers prunes after about 30 days. The
+account export's journey legs gain the three columns. DS-MCP: no change
+needed.
 ## 2026-11-06: Leave by
 
 Phase 2 of regular journeys (distant-signal's

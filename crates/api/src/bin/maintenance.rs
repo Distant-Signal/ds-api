@@ -13,8 +13,10 @@
 //! 2. `data::unlisted_links::prune_dead_links`;
 //! 3. `data::retention::prune_personal_data`, with the retention limits
 //!    from the api's own variables (`PAST_TRAVEL_RETENTION_DAYS`,
-//!    `STALE_PUSH_SUBSCRIPTION_DAYS`, `INACTIVE_ACCOUNT_RETENTION_DAYS`,
-//!    same defaults);
+//!    `REGULAR_JOURNEY_RETENTION_DAYS`, `STALE_PUSH_SUBSCRIPTION_DAYS`,
+//!    `INACTIVE_ACCOUNT_RETENTION_DAYS`, same defaults), which first
+//!    records the final arrival of every train leg whose train is over
+//!    (`data::leg_outcomes`);
 //! 4. `data::delegated::run_sweep`: delegated-access grants unused for 90
 //!    days, `delegated_deletions` past 30 days, expired idempotency keys
 //!    and consent confirmation tokens;

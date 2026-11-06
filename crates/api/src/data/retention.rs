@@ -56,6 +56,10 @@ pub struct RetentionOutcome {
     /// `usage_daily` rows older than 13 months (opt-in usage analytics,
     /// DS-190). Not personal data, but kept no longer than it is useful.
     pub usage_daily_rows: u64,
+    /// Train legs whose final arrival was recorded this run
+    /// (`leg_outcomes::record_final_arrivals`). Not a deletion, so not in
+    /// [`Self::total`].
+    pub recorded_leg_outcomes: u64,
 }
 
 impl RetentionOutcome {
@@ -85,12 +89,24 @@ fn cutoff_date(now: DateTime<Utc>, days: i64) -> NaiveDate {
 /// Applies `policy` as of `now`. Each part runs as its own statement(s);
 /// one failing aborts the rest of this run, and the next hourly run
 /// retries everything (every part is idempotent).
+///
+/// First, whatever the policy, it records the final arrival of every train
+/// leg whose train is over (`leg_outcomes`, DS-379), while the train's data
+/// is still held: the regular-journey rule reads it. Nothing is deleted
+/// when that fails.
 pub async fn prune_personal_data(
     pool: &PgPool,
     policy: RetentionPolicy,
     now: DateTime<Utc>,
 ) -> Result<RetentionOutcome> {
-    let mut outcome = RetentionOutcome::default();
+    let mut outcome = RetentionOutcome {
+        recorded_leg_outcomes: crate::data::leg_outcomes::record_final_arrivals(
+            pool,
+            cutoff_date(now, 0),
+        )
+        .await?,
+        ..RetentionOutcome::default()
+    };
 
     if policy.past_travel_days > 0 {
         let date = cutoff_date(now, policy.past_travel_days);
@@ -164,9 +180,12 @@ const MAX_REGULAR_OCCURRENCES_PER_RUN: i64 = 500;
 ///   plan was recorded (`journey_revision_legs.ticket_ids`);
 /// - no plan recorded a leg as cancelled, part cancelled or missed;
 /// - no leg's train is known to have been cancelled or at least
-///   [`REGULAR_JOURNEY_KEEP_DELAY_MINUTES`] late: its live state
-///   (`train_current_state`) while the train is still held, else the last
-///   push sent for it (`train_notification_state`).
+///   [`REGULAR_JOURNEY_KEEP_DELAY_MINUTES`] late at the leg's destination,
+///   as recorded on the leg (`final_train_cancelled`,
+///   `final_arrival_delay_minutes`; `leg_outcomes`, DS-379), or by the
+///   last push sent for it (`train_notification_state`);
+/// - no leg is still waiting for its outcome to be recorded while its
+///   train's data is held (the next pass records it first).
 ///
 /// The rest wait for the 548-day rule, as does an occurrence whose
 /// template was deleted (its `source_template_id` is then null). Each
@@ -174,10 +193,11 @@ const MAX_REGULAR_OCCURRENCES_PER_RUN: i64 = 500;
 /// (`journeys::delete_journey_row_releasing_trains`, DS-93), with its share
 /// links.
 ///
-/// Limitation: a tracked train's live state is pruned after about 30 days
-/// (ds-workers' `trainsRetentionDays`). After that, a delay of 15 minutes
-/// or more is only known if a push recorded it, which needs the owner's
-/// delay threshold to be 15 minutes or less.
+/// A tracked train's live state is pruned after about 30 days (ds-workers'
+/// `trainsRetentionDays`), which is why the outcome is recorded on the leg
+/// first. Only a leg whose train was gone before the columns existed
+/// (2026-11) has no recorded outcome; for those the push is the only
+/// record.
 pub async fn prune_regular_occurrences(pool: &PgPool, date: NaiveDate) -> Result<u64> {
     let doomed: Vec<(i64, String)> = sqlx::query_as(
         "SELECT j.id, j.user_id FROM journeys j \
@@ -187,13 +207,14 @@ pub async fn prune_regular_occurrences(pool: &PgPool, date: NaiveDate) -> Result
                            WHERE l.journey_id = j.id AND l.service_date >= $1) \
            AND NOT EXISTS ( \
                SELECT 1 FROM journey_legs l \
-               JOIN train_subscriptions ts ON ts.id = l.train_subscription_id \
-               LEFT JOIN train_current_state cs ON cs.trains_id = ts.trains_id \
+               LEFT JOIN train_subscriptions ts ON ts.id = l.train_subscription_id \
                LEFT JOIN train_notification_state ns ON ns.tracked_train_id = ts.id \
                WHERE l.journey_id = j.id \
-                 AND (EXISTS (SELECT 1 FROM tracked_train_tickets t \
-                              WHERE t.tracked_train_id = ts.id) \
-                      OR cs.status = 'cancelled' OR cs.delay_minutes >= $2 \
+                 AND (l.final_train_cancelled \
+                      OR l.final_arrival_delay_minutes >= $2 \
+                      OR (l.final_recorded_at IS NULL AND ts.trains_id IS NOT NULL) \
+                      OR EXISTS (SELECT 1 FROM tracked_train_tickets t \
+                                 WHERE t.tracked_train_id = ts.id) \
                       OR ns.last_notified_status = 'cancelled' \
                       OR ns.last_notified_delay_minutes >= $2)) \
            AND NOT EXISTS ( \
@@ -341,8 +362,9 @@ mod tests {
             accounts: 6,
             lapsed_follows: 7,
             usage_daily_rows: 8,
+            recorded_leg_outcomes: 100,
         };
-        assert_eq!(outcome.total(), 45);
+        assert_eq!(outcome.total(), 45, "recording an outcome deletes nothing");
     }
 }
 
@@ -795,6 +817,31 @@ mod db_tests {
             .unwrap();
         // Not from a template (or its template was deleted): the long rule.
         let (hand_built, _) = seed_regular_occurrence(&pool, user, None, 100).await;
+        // Outcomes recorded on the leg while the train was held (DS-379);
+        // the train itself is long gone.
+        let record = |journey: i64, delay: Option<i32>, cancelled: bool| {
+            let pool = pool.clone();
+            async move {
+                sqlx::query(
+                    "UPDATE journey_legs SET final_arrival_delay_minutes = $2, \
+                         final_train_cancelled = $3, final_recorded_at = now() \
+                     WHERE journey_id = $1",
+                )
+                .bind(journey)
+                .bind(delay)
+                .bind(cancelled)
+                .execute(&pool)
+                .await
+                .unwrap();
+            }
+        };
+        let (recorded_late, _) = seed_regular_occurrence(&pool, user, Some(template), 100).await;
+        record(recorded_late, Some(15), false).await;
+        let (recorded_on_time, _) = seed_regular_occurrence(&pool, user, Some(template), 100).await;
+        record(recorded_on_time, Some(14), false).await;
+        let (recorded_cancelled, _) =
+            seed_regular_occurrence(&pool, user, Some(template), 100).await;
+        record(recorded_cancelled, None, true).await;
 
         let policy = RetentionPolicy {
             regular_journey_days: 90,
@@ -818,7 +865,19 @@ mod db_tests {
         };
         assert!(!exists(plain).await, "a plain old occurrence goes");
         assert!(!exists(slightly_late).await, "10 minutes late goes");
-        for kept in [recent, ticketed, late, cancelled, hand_built] {
+        assert!(
+            !exists(recorded_on_time).await,
+            "recorded 14 minutes late goes"
+        );
+        for kept in [
+            recent,
+            ticketed,
+            late,
+            cancelled,
+            hand_built,
+            recorded_late,
+            recorded_cancelled,
+        ] {
             assert!(exists(kept).await, "{kept} is kept");
         }
         // Its train is released with it (DS-93).
@@ -841,5 +900,60 @@ mod db_tests {
             .await
             .unwrap();
         cleanup(&pool, "ret-regular-").await;
+    }
+
+    /// A leg whose train is still held but whose outcome is not recorded
+    /// yet keeps its journey: the next pass records it first (DS-379).
+    #[tokio::test]
+    #[ignore = "requires a live database; run with `cargo test -p api -- --ignored --test-threads=1`"]
+    async fn a_regular_occurrence_waits_for_its_outcome_to_be_recorded() {
+        let pool = connect().await;
+        let user = "ret-unrecorded-user";
+        cleanup(&pool, "ret-unrecorded-").await;
+        seed_user(&pool, user).await;
+        let template: i64 = sqlx::query_scalar(
+            "INSERT INTO journey_templates (user_id, days_of_week) VALUES ($1, 31) RETURNING id",
+        )
+        .bind(user)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        let (held, held_train) = seed_regular_occurrence(&pool, user, Some(template), 100).await;
+        let trains_id: i64 = sqlx::query_scalar(
+            "INSERT INTO trains (train_uid, service_date) \
+             VALUES ('RETUNR1', CURRENT_DATE - 100) RETURNING id",
+        )
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        sqlx::query("UPDATE train_subscriptions SET trains_id = $2 WHERE id = $1")
+            .bind(held_train)
+            .bind(trains_id)
+            .execute(&pool)
+            .await
+            .unwrap();
+        let date = cutoff_date(Utc::now(), 90);
+        prune_regular_occurrences(&pool, date).await.unwrap();
+        let exists = || async {
+            sqlx::query_scalar::<_, bool>("SELECT EXISTS (SELECT 1 FROM journeys WHERE id = $1)")
+                .bind(held)
+                .fetch_one(&pool)
+                .await
+                .unwrap()
+        };
+        assert!(exists().await, "kept until its outcome is recorded");
+        // Recorded on time (no activation, two days on: not known): it goes.
+        crate::data::leg_outcomes::record_final_arrivals(&pool, cutoff_date(Utc::now(), 0))
+            .await
+            .unwrap();
+        prune_regular_occurrences(&pool, date).await.unwrap();
+        assert!(!exists().await, "goes once recorded with nothing to keep");
+
+        sqlx::query("DELETE FROM trains WHERE id = $1")
+            .bind(trains_id)
+            .execute(&pool)
+            .await
+            .unwrap();
+        cleanup(&pool, "ret-unrecorded-").await;
     }
 }
