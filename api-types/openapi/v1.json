@@ -367,6 +367,77 @@
           }
         ]
       },
+      "DelayRepayEstimate": {
+        "description": "A rough eligibility estimate for a Delay Repay claim -- never a\nguarantee, never proof of travel, never a claim itself. `disclaimer` is\nintentionally NOT optional: every estimate carries its own caveat text\nbaked in, so a caller serializing this type cannot accidentally display\na bare percentage with no caveat attached.\n\nThe delay it is computed from is the train's delay against the PUBLIC\narrival at the ticket's destination (design doc §9 decision 3), which\nis what operators pay Delay Repay on. Before the train has arrived there\nthat delay is a projection, and the estimate says so: `provisional` is\n`true` and `disclaimer` is [`PROVISIONAL_DISCLAIMER`]. It becomes final\n(`provisional: false`, [`DISCLAIMER`]) once the train has arrived.",
+        "properties": {
+          "bandMinutes": {
+            "description": "The band the delay fell into: 15, 30, 60 or 120 (`HX`: 30 or 60,\nmeaning \"more than\").",
+            "format": "int32",
+            "type": "integer"
+          },
+          "borderline": {
+            "description": "`true` while provisional and the projection is less than\n[`BORDERLINE_MINUTES`] above `threshold_minutes`.",
+            "type": "boolean"
+          },
+          "disclaimer": {
+            "type": "string"
+          },
+          "fareBasis": {
+            "description": "Which fare `percentage` is of: `single` (the single fare, or half a\nreturn) below 120 minutes and for a single at 120+; `return` (the\nwhole return fare) at 120+ for a return or an unknown ticket (see\n`ticket_kind`); `ticket` (the ticket price) for Heathrow Express.",
+            "type": "string"
+          },
+          "percentage": {
+            "description": "Rough percentage of `fare_basis`. `None` exactly when `borderline`:\nthe band could go either way, so no figure is shown.",
+            "format": "uint8",
+            "maximum": 255,
+            "minimum": 0,
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "provisional": {
+            "description": "`true` while the train has not reached the ticket's destination yet.",
+            "type": "boolean"
+          },
+          "roomSupplementPercentage": {
+            "description": "Caledonian Sleeper only: the percentage of the room supplement\n(50 at 30-59 minutes, 100 at 60+). `None` otherwise, and when\n`borderline`.",
+            "format": "uint8",
+            "maximum": 255,
+            "minimum": 0,
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "scheme": {
+            "description": "`DR15`, `DR30` or `HX` (Heathrow Express's own scheme).",
+            "type": "string"
+          },
+          "thresholdMinutes": {
+            "description": "The band threshold a `borderline` projection is just above; `None`\nwhen not borderline.",
+            "format": "int32",
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "ticketKind": {
+            "$ref": "#/components/schemas/TicketKind",
+            "description": "What the ticket's type says it is; the 120-minute band's wording\ndepends on it."
+          }
+        },
+        "required": [
+          "scheme",
+          "bandMinutes",
+          "fareBasis",
+          "ticketKind",
+          "borderline",
+          "provisional",
+          "disclaimer"
+        ],
+        "type": "object"
+      },
       "ErrorBody": {
         "properties": {
           "error": {
@@ -795,6 +866,17 @@
             ],
             "description": "The change onto this leg from the one before, judged server-side on\nlive times with the station's minimum change time (spec 2026-10-22\n§5.1, `data::journey_feasibility`). `null` on the first leg; absent\naltogether when it couldn't be worked out (the frontend then falls\nback to its own gap check). Additive, 2026-10-22."
           },
+          "delayRepay": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/LegDelayRepay"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "The leg's Delay Repay estimate (additive 2026-11-06), with or\nwithout a ticket: the owner's tracked GB train legs only; `null` on\nany other leg and for anyone else."
+          },
           "departAfter": {
             "format": "partial-time",
             "type": [
@@ -918,6 +1000,17 @@
           "serviceDate": {
             "format": "date",
             "type": "string"
+          },
+          "ticket": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/LegTicket"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "The leg's ticket details (`data::leg_tickets`, additive 2026-11-06):\nthe owner's train legs only; `null` with none saved, on any other\nleg and for anyone else."
           },
           "timetable": {
             "anyOf": [
@@ -1909,6 +2002,120 @@
         ],
         "type": "object"
       },
+      "LegDelayRepay": {
+        "description": "A train leg's Delay Repay estimate, as `GET /Journeys/{id}` serves it\non each of the owner's tracked GB train legs (`delayRepay`). The same\nfields the per-ticket route served until 2026-11.",
+        "properties": {
+          "claimUrl": {
+            "description": "Always populated, independent of `estimate`: no caller is ever left\nwith nowhere real to go.",
+            "type": "string"
+          },
+          "delayBasis": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/DelayBasis"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "See `common::public_delay::DelayBasis`; `None` exactly when\n`delay_minutes` is."
+          },
+          "delayMinutes": {
+            "description": "The delay against the PUBLIC arrival at `measured_at_crs` (design\ndoc §9 decision 3): measured once the train has arrived (or, at a\ndeparture-only station, departed), projected before then\n(`provisional`). `None` when `outcome` is `notReached`.",
+            "format": "int32",
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "disclaimer": {
+            "description": "Always populated, independent of `estimate`.",
+            "type": "string"
+          },
+          "estimate": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/DelayRepayEstimate"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "liveTracking": {
+            "type": "boolean"
+          },
+          "measuredAtCrs": {
+            "description": "Where the delay was measured: the leg's destination, else the pin\ndestination, else the terminus (a journey's: its booked final\nstation). Set when `delay_minutes` is, and\nwhen `outcome` is `notReached` (the destination not reached).",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "measuredAtName": {
+            "description": "`measured_at_crs`'s station name, when known.",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "outcome": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/Outcome"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "See [`Outcome`]; `None` while not known yet."
+          },
+          "ownScheme": {
+            "description": "`true` for an operator running its own compensation scheme: no\npercentage, just the claim link.",
+            "type": "boolean"
+          },
+          "provisional": {
+            "description": "`true` while `delay_minutes` (and `estimate`) are a projection.",
+            "type": "boolean"
+          },
+          "rulesCheckedOn": {
+            "description": "[`RULES_CHECKED_ON`].",
+            "type": "string"
+          },
+          "schemeOperator": {
+            "description": "The scheme's operator, when it is one in [`OPERATORS`] (else `None`:\nthe ticket's own `operator` text is the best name).",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "serviceMode": {
+            "$ref": "#/components/schemas/ServiceMode"
+          },
+          "ticketKnown": {
+            "description": "Whether the leg's ticket details say single or return; `false`\nmeans the 120-minute band shows both readings.",
+            "type": "boolean"
+          },
+          "unmeasurableReason": {
+            "description": "Why there is no delay at all, when that is known up front: a bus or\nferry is never reported live, so its delay cannot be measured.\n`None` for a train.",
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        },
+        "required": [
+          "provisional",
+          "ownScheme",
+          "claimUrl",
+          "disclaimer",
+          "rulesCheckedOn",
+          "serviceMode",
+          "liveTracking",
+          "ticketKnown"
+        ],
+        "type": "object"
+      },
       "LegSearchFilters": {
         "additionalProperties": false,
         "description": "A window leg's search filters (DS-215): the Trains section's Between\nstations filters, saved with the leg's window so its candidates list\nonly the trains they allow. Each value is the text\n`GET /public/trains/search` takes for the same filter (`operator`,\n`origin` as `startsAt`, `terminates_at`, `previously_calls_at`,\n`previously_stops_at`, `calls_at`, `via`, `avoid`, `avoid_stop`), so the\nsame parsers check it (`routes::trains::leg_filters`). `startsAt` is\nthat search's `origin`, renamed here because a leg's `origin` is where\nthe traveller boards. The wire shape and the\n`journey_legs.search_filters` column's JSON are both this struct.",
@@ -1984,6 +2191,87 @@
           "destinationSkipped"
         ],
         "type": "object"
+      },
+      "LegTicket": {
+        "description": "A leg's ticket details, as `GET /Journeys/{id}` serves them on each of\nthe owner's train legs and `PUT .../ticket` answers.",
+        "properties": {
+          "departureDate": {
+            "description": "The departure the Wallet pass gave, when it gave one.",
+            "format": "date-time",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "name": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "operatorCode": {
+            "description": "The train company it is limited to (an ATOC code), set exactly when\n`operator_only` is.",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "operatorOnly": {
+            "description": "Valid on [`Self::operator_code`]'s trains only.",
+            "type": "boolean"
+          },
+          "source": {
+            "$ref": "#/components/schemas/LegTicketSource"
+          },
+          "ticketType": {
+            "$ref": "#/components/schemas/LegTicketType"
+          }
+        },
+        "required": [
+          "ticketType",
+          "operatorOnly",
+          "source"
+        ],
+        "type": "object"
+      },
+      "LegTicketSource": {
+        "description": "Where a leg's ticket details came from.",
+        "oneOf": [
+          {
+            "const": "manual",
+            "description": "Typed in.",
+            "type": "string"
+          },
+          {
+            "const": "wallet",
+            "description": "Prefilled from an Apple Wallet pass, then saved.",
+            "type": "string"
+          }
+        ]
+      },
+      "LegTicketType": {
+        "description": "The kind of ticket, as far as Delay Repay and the alternatives care.",
+        "oneOf": [
+          {
+            "enum": [
+              "single",
+              "return",
+              "season",
+              "unknown"
+            ],
+            "type": "string"
+          },
+          {
+            "const": "advance",
+            "description": "Always a single, valid on the booked train only.",
+            "type": "string"
+          },
+          {
+            "const": "offPeak",
+            "description": "An Off-Peak or Super Off-Peak ticket that doesn't say single or\nreturn.",
+            "type": "string"
+          }
+        ]
       },
       "LegTimetable": {
         "description": "A leg's `timetable` on `GET /Journeys/{id}`: what the network's active\ntimetable says about it now. Scheduled times only.",
@@ -2407,6 +2695,26 @@
           "prefer"
         ],
         "type": "string"
+      },
+      "Outcome": {
+        "description": "Whether the train got the passenger to the ticket's destination, from\nTRUST and Darwin (`data::delay_repay_outcome`).",
+        "oneOf": [
+          {
+            "const": "arrived",
+            "description": "TRUST reported its arrival there: the delay is final.",
+            "type": "string"
+          },
+          {
+            "const": "departedOnly",
+            "description": "TRUST reported only a departure there (a station that reports\ndepartures only): the delay is final, measured on that departure.",
+            "type": "string"
+          },
+          {
+            "const": "notReached",
+            "description": "It was cancelled before the destination, terminated short of it,\nor ran through it without calling. No percentage: eligibility\ndepends on the replacement journey.",
+            "type": "string"
+          }
+        ]
       },
       "PlanLeg": {
         "description": "One leg of a planned option: a train to track, or a Tube ride, bus or\nwalk saved as an untracked leg (as `POST /Journeys/itinerary` takes\nit). Times are the timetable's (the booked plan).",
@@ -3278,6 +3586,23 @@
           {
             "const": "Skipped",
             "description": "A booked calling point the train did NOT call at today. See\n`JourneyStop::skip_source` for which signal(s) say so.",
+            "type": "string"
+          }
+        ]
+      },
+      "TicketKind": {
+        "description": "Whether a ticket is a single or a return, as far as its free-text\n`ticket_type` clearly says.",
+        "oneOf": [
+          {
+            "enum": [
+              "single",
+              "return"
+            ],
+            "type": "string"
+          },
+          {
+            "const": "unknown",
+            "description": "Neither, both, or no ticket type: the 120-minute band shows both\nreadings.",
             "type": "string"
           }
         ]

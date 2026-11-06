@@ -1,26 +1,24 @@
 //! Cheap structural pre-checks on an uploaded ticket file, run BEFORE any
-//! real parser (`zip`, `pdf_extract`/`lopdf`) sees the bytes (M13,
-//! 2026-09-27).
+//! real parser (`zip`) sees the bytes (M13, 2026-09-27). Only Apple
+//! Wallet `.pkpass` files are read; the PDF upload was removed in 2026-11.
 //!
 //! These checks never decompress anything and never build an object graph.
 //! They read fixed-size headers, walk a zip central directory whose entry
 //! count is capped first, and run linear byte scans over an input that is
 //! already size-capped. The whole pass takes well under a few milliseconds
-//! on the largest input either route accepts, so it runs inline on the
+//! on the largest input the route accepts, so it runs inline on the
 //! request's own task, ahead of acquiring a parse slot.
 //!
 //! What this is NOT: a guarantee that the real parse will be well behaved.
 //! Every figure checked here is one the file itself *declares* (a zip entry's
-//! uncompressed size, an `N G obj` header), and a hostile file can lie about
+//! uncompressed size), and a hostile file can lie about
 //! them. The real parse therefore still runs in a killable, resource-limited
 //! child process (`data::ticket_subprocess`); these checks exist to turn the
-//! common pathological shapes (zip bombs, nested archives, a PDF with no
-//! trailer or a million objects) into a prompt, specific 4xx instead of a
+//! common pathological shapes (zip bombs, nested archives) into a prompt,
+//! specific 4xx instead of a
 //! child that burns its whole budget first.
 
-use std::sync::LazyLock;
-
-use super::ticket_extraction::{MAX_ENTRY_BYTES, MAX_PDF_UPLOAD_BYTES};
+use super::ticket_extraction::MAX_ENTRY_BYTES;
 
 /// Why an upload was refused before parsing. Each variant maps to one HTTP
 /// status in `routes::train` (413 / 415 / 422), and `message` is written to
@@ -101,19 +99,6 @@ const NESTED_ARCHIVE_EXTENSIONS: &[&str] = &[
     ".tar",
 ];
 
-/// Indirect objects (`N G obj`) visible in the raw bytes. A one or two page
-/// e-ticket has tens to a few hundred.
-pub const MAX_PDF_OBJECTS: usize = 20_000;
-
-/// `/Type /Page` dictionaries visible in the raw bytes. E-tickets are one or
-/// two pages; a long itinerary might run to a dozen.
-pub const MAX_PDF_PAGES: usize = 100;
-
-/// How far from the end of the file `%%EOF` and `startxref` must appear.
-/// ISO 32000 puts them in the last few lines; generators that append
-/// trailing garbage stay well inside this.
-const PDF_TRAILER_WINDOW: usize = 1024;
-
 /// Pre-checks a `.pkpass` upload: size, zip magic, then a walk of the
 /// central directory (entry count, multi-disk and ZIP64 refusal,
 /// encryption, compression method, total declared uncompressed size,
@@ -133,7 +118,7 @@ pub fn precheck_pkpass(bytes: &[u8]) -> Result<(), Rejection> {
     }
     if bytes.starts_with(PDF_MAGIC) {
         return Err(Rejection::WrongType(
-            "this file is a PDF, not a .pkpass; upload it as a PDF e-ticket instead".to_string(),
+            "this file is a PDF, not a .pkpass; only Apple Wallet passes can be read".to_string(),
         ));
     }
     if !bytes.starts_with(ZIP_LOCAL_HEADER) {
@@ -268,95 +253,6 @@ pub fn precheck_pkpass(bytes: &[u8]) -> Result<(), Rejection> {
     }
 }
 
-/// Pre-checks a PDF upload: size, `%PDF-` magic with a known version, a
-/// trailer (`startxref` and `%%EOF`) near the end of the file, and caps on
-/// the number of indirect objects and page dictionaries visible in the raw
-/// bytes.
-pub fn precheck_pdf(bytes: &[u8]) -> Result<(), Rejection> {
-    if bytes.len() > MAX_PDF_UPLOAD_BYTES {
-        return Err(Rejection::TooLarge(format!(
-            "this PDF is too large ({} bytes; the limit for a PDF e-ticket is {} bytes)",
-            bytes.len(),
-            MAX_PDF_UPLOAD_BYTES
-        )));
-    }
-    if bytes.starts_with(ZIP_LOCAL_HEADER) {
-        return Err(Rejection::WrongType(
-            "this file is a zip archive (probably a .pkpass), not a PDF; upload it as a .pkpass \
-             instead"
-                .to_string(),
-        ));
-    }
-    if !bytes.starts_with(PDF_MAGIC) {
-        return Err(Rejection::WrongType(
-            "this is not a PDF file (it doesn't start with %PDF-)".to_string(),
-        ));
-    }
-
-    let unacceptable = |msg: &str| Rejection::Unacceptable(format!("this PDF {msg}"));
-
-    if !PDF_VERSION.is_match(bytes) {
-        return Err(unacceptable("has an unrecognised version header"));
-    }
-    let tail = &bytes[bytes.len().saturating_sub(PDF_TRAILER_WINDOW)..];
-    if find(tail, b"%%EOF").is_none() || find(tail, b"startxref").is_none() {
-        return Err(unacceptable(
-            "is truncated or damaged (no trailer at the end of the file)",
-        ));
-    }
-
-    let objects = PDF_OBJECT_HEADER
-        .find_iter(bytes)
-        .take(MAX_PDF_OBJECTS + 1)
-        .count();
-    if objects > MAX_PDF_OBJECTS {
-        return Err(unacceptable(&format!(
-            "has more than {MAX_PDF_OBJECTS} objects, far more than any e-ticket"
-        )));
-    }
-    let pages = PDF_PAGE_TYPE
-        .find_iter(bytes)
-        .take(MAX_PDF_PAGES + 1)
-        .count();
-    if pages > MAX_PDF_PAGES {
-        return Err(unacceptable(&format!(
-            "has more than {MAX_PDF_PAGES} pages, far more than any e-ticket"
-        )));
-    }
-    Ok(())
-}
-
-/// `%PDF-1.0` ... `%PDF-1.7` and `%PDF-2.0`, anchored at the start.
-#[expect(
-    clippy::expect_used,
-    reason = "a constant regex literal, compiled by the tests"
-)]
-static PDF_VERSION: LazyLock<regex::bytes::Regex> =
-    LazyLock::new(|| regex::bytes::Regex::new(r"\A%PDF-(?:1\.[0-7]|2\.0)").expect("valid regex"));
-
-/// An indirect object header, `<num> <gen> obj`, with PDF whitespace
-/// between the tokens. `(?-u)` so `\b` and the classes are byte-oriented.
-#[expect(
-    clippy::expect_used,
-    reason = "a constant regex literal, compiled by the tests"
-)]
-static PDF_OBJECT_HEADER: LazyLock<regex::bytes::Regex> = LazyLock::new(|| {
-    regex::bytes::Regex::new(
-        r"(?-u)(?:^|[^0-9])[0-9]{1,10}[ \t\r\n\x0c\x00]+[0-9]{1,5}[ \t\r\n\x0c\x00]+obj\b",
-    )
-    .expect("valid regex")
-});
-
-/// A page dictionary's `/Type /Page` (not `/Pages`).
-#[expect(
-    clippy::expect_used,
-    reason = "a constant regex literal, compiled by the tests"
-)]
-static PDF_PAGE_TYPE: LazyLock<regex::bytes::Regex> = LazyLock::new(|| {
-    regex::bytes::Regex::new(r"(?-u)/Type[ \t\r\n\x0c\x00]*/Page(?:[^A-Za-z0-9]|$)")
-        .expect("valid regex")
-});
-
 /// The end-of-central-directory record is 22 bytes plus a comment of up to
 /// 65535 bytes, so it starts somewhere in the last 65557 bytes. Scans
 /// backwards for its signature and accepts the first candidate whose
@@ -380,6 +276,7 @@ fn le_u32(bytes: &[u8], at: usize) -> u32 {
     u32::from_le_bytes([bytes[at], bytes[at + 1], bytes[at + 2], bytes[at + 3]])
 }
 
+#[cfg(test)]
 fn find(haystack: &[u8], needle: &[u8]) -> Option<usize> {
     haystack
         .windows(needle.len())
@@ -387,8 +284,7 @@ fn find(haystack: &[u8], needle: &[u8]) -> Option<usize> {
 }
 
 /// Test fixtures shared with `data::ticket_subprocess` and the
-/// `ticket_parse_subprocess` integration test: a real pkpass and a minimal
-/// but genuine PDF that `pdf_extract` can read.
+/// `ticket_parse_subprocess` integration test: a real pkpass.
 #[doc(hidden)]
 pub mod fixtures {
     use std::io::Write;
@@ -432,70 +328,6 @@ pub mod fixtures {
             ("pass.json", &train_pass_json()),
             ("manifest.json", b"{}"),
             ("en.lproj/pass.strings", b"\"a\" = \"b\";"),
-        ])
-    }
-
-    /// A one-page PDF 1.4 whose content stream draws each line of `lines`
-    /// in Helvetica, with a correct xref table, so `pdf_extract` reads the
-    /// text back.
-    #[expect(
-        clippy::format_push_string,
-        reason = "short strings off the hot path; format! reads clearer"
-    )]
-    pub fn pdf_with_text(lines: &[&str]) -> Vec<u8> {
-        let mut content = String::from("BT /F1 12 Tf 72 720 Td 14 TL\n");
-        for line in lines {
-            let escaped = line
-                .replace('\\', "\\\\")
-                .replace('(', "\\(")
-                .replace(')', "\\)");
-            content.push_str(&format!("({escaped}) Tj T*\n"));
-        }
-        content.push_str("ET\n");
-
-        let objects = [
-            "<< /Type /Catalog /Pages 2 0 R >>".to_string(),
-            "<< /Type /Pages /Kids [3 0 R] /Count 1 >>".to_string(),
-            "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Contents 4 0 R \
-             /Resources << /Font << /F1 5 0 R >> >> >>"
-                .to_string(),
-            format!(
-                "<< /Length {} >>\nstream\n{}endstream",
-                content.len(),
-                content
-            ),
-            "<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica /Encoding /WinAnsiEncoding >>"
-                .to_string(),
-        ];
-
-        let mut out = b"%PDF-1.4\n".to_vec();
-        let mut offsets = Vec::new();
-        for (i, body) in objects.iter().enumerate() {
-            offsets.push(out.len());
-            out.extend_from_slice(format!("{} 0 obj\n{}\nendobj\n", i + 1, body).as_bytes());
-        }
-        let xref_at = out.len();
-        out.extend_from_slice(format!("xref\n0 {}\n", objects.len() + 1).as_bytes());
-        out.extend_from_slice(b"0000000000 65535 f \n");
-        for offset in offsets {
-            out.extend_from_slice(format!("{offset:010} 00000 n \n").as_bytes());
-        }
-        out.extend_from_slice(
-            format!(
-                "trailer\n<< /Size {} /Root 1 0 R >>\nstartxref\n{}\n%%EOF\n",
-                objects.len() + 1,
-                xref_at
-            )
-            .as_bytes(),
-        );
-        out
-    }
-
-    pub fn train_pdf() -> Vec<u8> {
-        pdf_with_text(&[
-            "Southern e-ticket",
-            "Out: Brighton - London Victoria",
-            "Super Off-Peak Return",
         ])
     }
 }
@@ -556,11 +388,6 @@ mod tests {
     }
 
     #[test]
-    fn a_real_pdf_passes() {
-        assert_eq!(precheck_pdf(&train_pdf()), Ok(()));
-    }
-
-    #[test]
     fn an_oversized_pkpass_is_too_large() {
         let mut bytes = train_pkpass();
         bytes.resize(MAX_PKPASS_UPLOAD_BYTES + 1, 0);
@@ -571,33 +398,17 @@ mod tests {
     }
 
     #[test]
-    fn an_oversized_pdf_is_too_large() {
-        let mut bytes = train_pdf();
-        bytes.resize(MAX_PDF_UPLOAD_BYTES + 1, b' ');
-        assert!(matches!(precheck_pdf(&bytes), Err(Rejection::TooLarge(_))));
-    }
-
-    #[test]
     fn a_pdf_sent_to_the_pkpass_route_is_the_wrong_type_and_says_so() {
-        match precheck_pkpass(&train_pdf()) {
+        match precheck_pkpass(b"%PDF-1.4\n1 0 obj null endobj\nstartxref\n0\n%%EOF\n") {
             Err(Rejection::WrongType(msg)) => assert!(msg.contains("PDF"), "{msg}"),
             other => panic!("{other:?}"),
         }
     }
 
     #[test]
-    fn a_pkpass_sent_to_the_pdf_route_is_the_wrong_type_and_says_so() {
-        match precheck_pdf(&train_pkpass()) {
-            Err(Rejection::WrongType(msg)) => assert!(msg.contains(".pkpass"), "{msg}"),
-            other => panic!("{other:?}"),
-        }
-    }
-
-    #[test]
-    fn arbitrary_bytes_are_the_wrong_type_for_both_routes() {
+    fn arbitrary_bytes_are_the_wrong_type() {
         let png = b"\x89PNG\r\n\x1a\n not a ticket";
         assert!(matches!(precheck_pkpass(png), Err(Rejection::WrongType(_))));
-        assert!(matches!(precheck_pdf(png), Err(Rejection::WrongType(_))));
     }
 
     #[test]
@@ -692,49 +503,5 @@ mod tests {
         let at = central_entry(&zip, "manifest.json");
         zip[at + 24..at + 28].copy_from_slice(&u32::MAX.to_le_bytes());
         assert_unacceptable(precheck_pkpass(&zip), "ZIP64");
-    }
-
-    #[test]
-    fn an_unknown_pdf_version_is_rejected() {
-        let mut pdf = train_pdf();
-        pdf[5..8].copy_from_slice(b"9.9");
-        assert_unacceptable(precheck_pdf(&pdf), "version header");
-    }
-
-    #[test]
-    fn a_pdf_with_no_trailer_is_rejected() {
-        let pdf = train_pdf();
-        let cut = find(&pdf, b"startxref").unwrap();
-        assert_unacceptable(precheck_pdf(&pdf[..cut]), "no trailer");
-    }
-
-    #[test]
-    fn a_pdf_with_too_many_objects_is_rejected() {
-        let mut pdf = b"%PDF-1.4\n".to_vec();
-        for i in 0..=MAX_PDF_OBJECTS {
-            pdf.extend_from_slice(format!("{i} 0 obj null endobj\n").as_bytes());
-        }
-        pdf.extend_from_slice(b"startxref\n0\n%%EOF\n");
-        assert_unacceptable(precheck_pdf(&pdf), "objects");
-    }
-
-    #[test]
-    fn a_pdf_with_too_many_pages_is_rejected() {
-        let mut pdf = b"%PDF-1.4\n".to_vec();
-        for i in 0..=MAX_PDF_PAGES {
-            pdf.extend_from_slice(format!("{i} 0 obj << /Type /Page >> endobj\n").as_bytes());
-        }
-        pdf.extend_from_slice(b"1000 0 obj << /Type /Pages >> endobj\nstartxref\n0\n%%EOF\n");
-        assert_unacceptable(precheck_pdf(&pdf), "pages");
-    }
-
-    #[test]
-    fn the_pages_tree_node_is_not_counted_as_a_page() {
-        let mut pdf = b"%PDF-1.4\n".to_vec();
-        for i in 0..=MAX_PDF_PAGES {
-            pdf.extend_from_slice(format!("{i} 0 obj << /Type /Pages >> endobj\n").as_bytes());
-        }
-        pdf.extend_from_slice(b"startxref\n0\n%%EOF\n");
-        assert_eq!(precheck_pdf(&pdf), Ok(()));
     }
 }

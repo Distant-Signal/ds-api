@@ -68,16 +68,14 @@ fn visit_roots(v: &mut Collector) {
     v.visit::<crate::data::groups::GroupCustomLine>();
     v.visit::<crate::data::groups::SharedCustomLine>();
     v.visit::<crate::data::groups::LineGroupRef>();
-    // Tickets and Delay Repay.
-    v.visit::<crate::data::train_tracking::TrackedTrainTicket>();
-    v.visit::<crate::data::train_tracking::TicketListItem>();
-    v.visit::<crate::routes::train::TicketCreatedResponse>();
-    v.visit::<crate::routes::train::AttachTicketResponse>();
+    // Leg tickets, Delay Repay and reliability.
     v.visit::<crate::routes::train::RenameResponse>();
-    v.visit::<crate::routes::train::DelayRepayEstimateResponse>();
+    v.visit::<crate::routes::journey_tickets::LegDelayRepay>();
     v.visit::<crate::data::delay_repay_rules::DelayRepayFields>();
-    v.visit::<crate::data::ticket_extraction::PartialTicket>();
-    v.visit::<crate::data::journey_leg_proposal::JourneyLegProposal>();
+    v.visit::<crate::data::leg_tickets::LegTicket>();
+    v.visit::<crate::routes::journey_tickets::LegTicketBody>();
+    v.visit::<crate::routes::journey_tickets::LegTicketPrefill>();
+    v.visit::<crate::data::reliability::ReliabilityResponse>();
     // Journey templates.
     v.visit::<crate::data::journey_templates::JourneyTemplateListItem>();
     v.visit::<crate::routes::journey_templates::JourneyTemplateDetailResponse>();
@@ -191,8 +189,6 @@ fn visit_roots(v: &mut Collector) {
     // Train and ticket writes.
     v.visit::<common::TrackPinRequest>();
     v.visit::<crate::routes::train::TrackPinResponse>();
-    v.visit::<common::TicketEntryRequest>();
-    v.visit::<crate::routes::train::AttachTicketRequest>();
     v.visit::<crate::routes::train::RenameRequest>();
     // Personal API tokens (Connected apps).
     v.visit::<crate::routes::personal_tokens::PersonalTokensResponse>();

@@ -2,8 +2,8 @@
 
 A registered client, today only the Distant-Signal-MCP (ds-mcp), can act
 for a Distant Signal (DS) user who connected it on the Connected apps page:
-list and read their journeys, save an itinerary, and delete journeys it
-saved itself. Design and threat model:
+list and read their journeys and their reliability, save an itinerary,
+and delete journeys it saved itself. Design and threat model:
 [the delegated-access spec](https://github.com/Distant-Signal/distant-signal/blob/main/docs/superpowers/specs/2026-10-14-ds-mcp-delegated-access-design.md).
 Client-facing contract: [api-changelog.md](api-changelog.md), 2026-10-15.
 
@@ -35,7 +35,7 @@ and every delegated bearer is refused.
    `aud`, then verifies it with that client's own verifier (signature
    against the provider's JWKS, exact `iss`, `aud`, `exp`, `nbf`, a required
    `iat`, not a logout token). It refuses a cookie and a bearer together,
-   and any route other than the four delegated ones.
+   and any route other than the delegated ones (`DELEGATED_ROUTES`).
 4. The rate limiter charges the user's and the client's delegated buckets.
 5. The handler's extractor loads the user's active grant for the client,
    refuses a token issued before the grant or before the user's last "log

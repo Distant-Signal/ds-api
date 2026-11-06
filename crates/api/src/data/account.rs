@@ -479,8 +479,8 @@ pub async fn export_account(pool: &PgPool, user_id: &str) -> Result<Option<Accou
         notes: vec![
             "Your login identity (name, username, email) comes from the single sign-on provider; \
              it holds its own copy, which this export does not include.",
-            "Uploaded tickets are read in memory and never stored; only the ticket details listed \
-             under `tickets` are kept.",
+            "Apple Wallet passes are read in memory and never stored; only the ticket details \
+             listed under `tickets` are kept, each on a journey leg's train (`trackedTrainId`).",
             "Database backups are encrypted and kept for 7 days.",
         ],
     }))

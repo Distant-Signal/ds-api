@@ -3,7 +3,7 @@
 //!
 //! ## Why a process, not a thread
 //!
-//! `pdf_extract`/`lopdf` and the `zip` crate are synchronous and expose no
+//! The `zip` crate is synchronous and exposes no
 //! cancellation hook. On a `spawn_blocking` thread, a `tokio::time::timeout`
 //! only stops the request from waiting; the thread keeps running the
 //! abandoned parse, and an allocation failure inside it aborts the whole
@@ -13,7 +13,7 @@
 //! ## How
 //!
 //! The parent re-executes its own binary (`std::env::current_exe()`, which
-//! is `/usr/local/bin/api` in the image) as `api parse-ticket <pdf|pkpass>`.
+//! is `/usr/local/bin/api` in the image) as `api parse-ticket pkpass`.
 //! `main.rs` intercepts that argument before clap, the tokio runtime, or any
 //! configuration is touched, and calls [`child_main`]. So the image needs no
 //! second binary, and the child starts single-threaded with nothing but the
@@ -43,7 +43,7 @@
 //!   on drop, `SIGKILLed`), so it now counts live processes, and a slot can no
 //!   longer be held forever by a stuck parse.
 //! - **Panics:** the child still wraps the parse in `catch_unwind` (and
-//!   `parse_pdf` keeps its own), so a parser panic comes back as an
+//!   so a parser panic comes back as an
 //!   ordinary parse error rather than a crash.
 
 use std::ffi::OsString;
@@ -68,8 +68,8 @@ pub const SUBCOMMAND: &str = "parse-ticket";
 /// [`TicketParser`] only does so after [`TicketParser::with_test_hooks`].
 pub const TEST_HOOKS_ENV: &str = "DISTANT_SIGNAL_PARSE_TICKET_TEST_HOOKS";
 
-/// Largest stdin the child accepts: the larger of the two per-kind upload
-/// caps. The parent's pre-checks already enforce the per-kind cap.
+/// Largest stdin the child accepts: the `.pkpass` upload cap, which the
+/// parent's pre-checks already enforce.
 const MAX_CHILD_INPUT_BYTES: usize = ticket_precheck::MAX_PKPASS_UPLOAD_BYTES;
 
 /// A `PartialTicket` as JSON is a few hundred bytes. Anything past this is
@@ -82,14 +82,12 @@ const MAX_STDERR_BYTES: u64 = 8 * 1024;
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TicketKind {
     Pkpass,
-    Pdf,
 }
 
 impl TicketKind {
     fn arg(self) -> &'static str {
         match self {
             Self::Pkpass => "pkpass",
-            Self::Pdf => "pdf",
         }
     }
 }
@@ -125,7 +123,6 @@ impl ChildMode {
         let args: Vec<&str> = args.iter().map(|a| a.to_str()).collect::<Option<_>>()?;
         match args.as_slice() {
             ["pkpass"] => Some(Self::Parse(TicketKind::Pkpass)),
-            ["pdf"] => Some(Self::Parse(TicketKind::Pdf)),
             ["test-hang"] => Some(Self::TestHang),
             ["test-spin"] => Some(Self::TestSpin),
             ["test-alloc", n] => n.parse().ok().map(Self::TestAlloc),
@@ -472,7 +469,7 @@ pub fn maybe_run_child() -> Option<i32> {
 /// the command line was wrong.
 pub fn child_main(args: &[OsString]) -> i32 {
     let Some(mode) = ChildMode::from_args(args) else {
-        eprintln!("usage: api {SUBCOMMAND} <pdf|pkpass>  (file on stdin, JSON on stdout)");
+        eprintln!("usage: api {SUBCOMMAND} pkpass  (file on stdin, JSON on stdout)");
         return 2;
     };
     if mode.is_test_hook() && std::env::var_os(TEST_HOOKS_ENV).as_deref() != Some("1".as_ref()) {
@@ -514,10 +511,6 @@ fn run_mode(mode: ChildMode, bytes: &[u8]) -> ChildReply {
                     ticket_precheck::precheck_pkpass(bytes)?;
                     ticket_extraction::parse_pkpass(bytes)
                 }
-                ChildMode::Parse(TicketKind::Pdf) => {
-                    ticket_precheck::precheck_pdf(bytes)?;
-                    ticket_extraction::parse_pdf(bytes)
-                }
                 ChildMode::TestHang => loop {
                     std::thread::sleep(Duration::from_secs(3600));
                 },
@@ -550,7 +543,6 @@ mod tests {
     #[test]
     fn child_modes_round_trip_through_their_arguments() {
         for mode in [
-            ChildMode::Parse(TicketKind::Pdf),
             ChildMode::Parse(TicketKind::Pkpass),
             ChildMode::TestHang,
             ChildMode::TestSpin,
@@ -581,8 +573,8 @@ mod tests {
 
     #[test]
     fn the_child_reruns_the_prechecks() {
-        match run_mode(ChildMode::Parse(TicketKind::Pdf), b"not a pdf") {
-            ChildReply::Err(msg) => assert!(msg.contains("not a PDF"), "{msg}"),
+        match run_mode(ChildMode::Parse(TicketKind::Pkpass), b"not a pkpass") {
+            ChildReply::Err(msg) => assert!(msg.contains("pkpass"), "{msg}"),
             ChildReply::Ok(ticket) => panic!("{ticket:?}"),
         }
     }

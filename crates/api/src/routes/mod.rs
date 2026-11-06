@@ -36,6 +36,7 @@ pub mod journey_irish_train;
 pub mod journey_itinerary;
 pub mod journey_replan;
 pub mod journey_templates;
+pub mod journey_tickets;
 #[cfg(test)]
 mod journey_timetable_db_tests;
 pub mod journeys;
@@ -63,6 +64,7 @@ pub mod preferences;
 pub mod provisional;
 pub mod reference;
 pub mod regular_plan;
+pub mod reliability;
 pub mod schedule_rows;
 pub mod stanox_crs;
 pub mod station_stats;

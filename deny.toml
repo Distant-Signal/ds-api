@@ -22,10 +22,6 @@ ignore = [
     # api's openidconnect only verifies RS256 ID-token signatures with the
     # IdP's public keys, so no RSA private key is ever used.
     { id = "RUSTSEC-2023-0071", reason = "no RSA private-key operations: OIDC verifies with public keys" },
-    # ttf-parser is unmaintained (no fix), pulled in by pdf-extract via
-    # lopdf. PDF tickets are parsed in api's resource-limited child process
-    # (data::ticket_subprocess), so a parser bug can't take the server down.
-    { id = "RUSTSEC-2026-0192", reason = "only via pdf-extract, which runs in the sandboxed ticket-parse child" },
 ]
 
 [licenses]

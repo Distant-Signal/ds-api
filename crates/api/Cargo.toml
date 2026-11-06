@@ -25,11 +25,7 @@ dotenvy = "0.15.7"
 # The shared data access (ingest architecture phase 1A): `data::*` keeps
 # `pub use ds_store::...` shims as functions move there.
 ds-store = { workspace = true, features = ["ts"] }
-# Explicit, not merely transitive-via-`pdf-extract`/`lopdf`/`zip`: used
-# directly by `ticket_extraction::reject_pdf_compression_bombs` to run our
-# OWN bounded zlib decompression pass over a candidate PDF, ahead of
-# `pdf_extract`'s/`lopdf`'s own completely unbounded one -- see that
-# function's doc comment.
+# The planner snapshot's gzip (`data::planner_snapshot`).
 flate2 = "1"
 glob = "0.3.3"
 # `edge::serve`: the listener loop, so the HTTP/1 header-read timeout and
@@ -51,7 +47,6 @@ log = "0.4"
 metrics = "0.24"
 oauth2 = "5.0"
 openidconnect = "4.1"
-pdf-extract = "0.12"
 rand = "0.8"
 regex = "1"
 # PINNED TO 0.12 ON PURPOSE, not merely "not upgraded yet": oauth2 5.0 (via

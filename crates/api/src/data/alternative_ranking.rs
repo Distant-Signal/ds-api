@@ -66,6 +66,9 @@ pub struct TicketInfo {
     /// The ticket's own operator as an ATOC code, when its free text names
     /// a known one.
     pub operator_atoc: Option<String>,
+    /// The leg's ticket details say it is valid on one company only
+    /// (`leg_tickets::LegTicket::operator_only`).
+    pub operator_only: bool,
 }
 
 /// What a journey's tickets allow (§17.3), most restrictive first.
@@ -92,10 +95,11 @@ pub fn ticket_constraint(tickets: &[TicketInfo], booked_operators: &[String]) ->
             Some(code) => vec![code.clone()],
             None => booked_operators.to_vec(),
         };
-        let only = ticket
-            .ticket_type
-            .as_deref()
-            .is_some_and(|t| t.to_lowercase().split_whitespace().any(|w| w == "only"));
+        let only = ticket.operator_only
+            || ticket
+                .ticket_type
+                .as_deref()
+                .is_some_and(|t| t.to_lowercase().split_whitespace().any(|w| w == "only"));
         let constraint = match class {
             FareClass::Advance => TicketConstraint::TrainSpecific { operators },
             _ if only && !operators.is_empty() => TicketConstraint::OperatorOnly { operators },
@@ -725,10 +729,12 @@ mod tests {
             TicketInfo {
                 ticket_type: Some("Anytime Return".to_string()),
                 operator_atoc: None,
+                operator_only: false,
             },
             TicketInfo {
                 ticket_type: Some("Advance Single".to_string()),
                 operator_atoc: None,
+                operator_only: false,
             },
         ];
         assert_eq!(
@@ -740,11 +746,34 @@ mod tests {
         let only = [TicketInfo {
             ticket_type: Some("Off-Peak Return LNER only".to_string()),
             operator_atoc: Some("GR".to_string()),
+            operator_only: false,
         }];
         assert_eq!(
             ticket_constraint(&only, &[]),
             TicketConstraint::OperatorOnly {
                 operators: vec!["GR".to_string()]
+            }
+        );
+        // A leg's ticket details: a stored type and the one-company flag.
+        let leg = [TicketInfo {
+            ticket_type: Some("off_peak".to_string()),
+            operator_atoc: Some("GR".to_string()),
+            operator_only: true,
+        }];
+        assert_eq!(
+            ticket_constraint(&leg, &[]),
+            TicketConstraint::OperatorOnly {
+                operators: vec!["GR".to_string()]
+            }
+        );
+        let advance = [TicketInfo {
+            ticket_type: Some("advance".to_string()),
+            ..TicketInfo::default()
+        }];
+        assert_eq!(
+            ticket_constraint(&advance, &["SW".to_string()]),
+            TicketConstraint::TrainSpecific {
+                operators: vec!["SW".to_string()]
             }
         );
         assert_eq!(ticket_constraint(&[], &[]), TicketConstraint::Unknown);

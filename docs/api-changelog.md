@@ -3,6 +3,82 @@
 Changes to the Distant Signal (DS) HTTP API that a client such as DS-MCP
 needs to know about. Newest first. Field names are as served (camelCase).
 
+## 2026-11-06: reliability and Delay Repay on journey legs; tickets simplified
+
+Reliability now counts the trains the caller actually took, Delay Repay is
+estimated on every tracked GB train leg with no ticket needed, and a
+ticket is a few optional details on a leg. distant-signal's
+`docs/superpowers/specs/2026-10-22-mid-journey-changes-design.md` §9.
+
+- `GET /Journeys/reliability` (new): `{trains, journeys}` for the
+  caller's own journeys (never a followed or shared one), finished legs
+  only (dated before today in London, or with their outcome recorded),
+  newest first, up to 400 journeys. A session, or a delegated client with
+  `journeys:read`.
+  - `trains[]`: one per train leg of each journey's current plan:
+    `{journeyId, legId, trainUid, serviceDate, originCrs, destinationCrs,
+    destinationName, delayMinutes, cancelled, recorded, replacedBecause}`.
+    `recorded` is `true` for the leg's recorded outcome, `false` when read
+    from the train's live state. A booked train replaced after a railway
+    fault (a revision with cause `cancelled`, `part_cancelled`,
+    `connection_missed` or `skipped_stop`) is its own entry with `legId:
+    null`, `cancelled: true` and `replacedBecause` set to that cause. A
+    train left by choice (`user_choice`), missed through the traveller's
+    own fault (`user_missed`) or swapped while still planning is not
+    counted. A leg with nothing known is left out.
+  - `journeys[]`: once per finished journey, the Delay Repay fields
+    (`DelayRepayFields`, flattened: `delayMinutes`, `provisional`,
+    `outcome`, `estimate`, `claimUrl`, `disclaimer`...) plus `{journeyId,
+    customName, serviceDate, destinationCrs, destinationName,
+    bookedArrival, actualArrival, againstBookedPlan,
+    differentDestination}`. After a railway-fault change the delay is the
+    end-to-end delay at the booked final station against the booked
+    arrival (`againstBookedPlan: true`); otherwise the last train leg's
+    own delay. A re-route ending elsewhere has `differentDestination:
+    true` and no estimate.
+- `GET /Journeys/{id}`: each leg gains, for the owner only (`null` for
+  anyone else and on untracked legs):
+  - `delayRepay`: `DelayRepayFields` plus `serviceMode`, `liveTracking`,
+    `unmeasurableReason` and `ticketKnown` (whether the leg's ticket says
+    single or return; when `false` the 120-minute band shows both
+    readings). On every tracked GB train leg, with or without a ticket;
+    `null` on an Iarnród Éireann train.
+  - `ticket`: `{ticketType, operatorOnly, operatorCode, name, source,
+    departureDate} | null`. `ticketType` is `single`, `return`,
+    `advance`, `offPeak`, `season` or `unknown`; `operatorCode` is the
+    ATOC code of the one company it is valid on, set exactly when
+    `operatorOnly` is; `source` is `manual` or `wallet`.
+- `PUT /Journeys/{id}/legs/{legId}/ticket` `{ticketType, operatorOnly?,
+  name?, source?, departureDate?}` saves a leg's ticket details and
+  answers with them; `DELETE` removes them (204). 404 if not the caller's
+  leg, 409 for a leg with no train yet, 400 for `operatorOnly` on a train
+  whose company isn't known. Two legs on one train share them. Cookie
+  only.
+- `POST /Journeys/{id}/legs/{legId}/ticket/pkpass` (multipart `file`, up
+  to 8 MiB): reads an Apple Wallet pass and answers `{ticketType,
+  operatorOnly, ticketTypeText, departureDate,
+  departureDateMatchesLeg}`. Nothing is saved. Same 413/415/422/503/504
+  answers as the old upload. Cookie only.
+- **Removed, 410 Gone for one release:** every `/Train/tickets...` and
+  `/Train/{trackingId}/tickets...` route: `POST /Train/tickets`, `GET
+  /Train/tickets/mine`, `POST /Train/tickets/pkpass`, `POST
+  /Train/tickets/pdf`, `DELETE /Train/tickets/{ticketId}`, `POST
+  /Train/tickets/{ticketId}/attach`, `POST /Train/tickets/{ticketId}/name`,
+  `GET /Train/tickets/{ticketId}/journey-leg-proposal`, `GET` and `POST
+  /Train/{trackingId}/tickets`, `POST /Train/{trackingId}/tickets/pkpass`,
+  `POST /Train/{trackingId}/tickets/pdf` and `GET
+  /Train/{trackingId}/tickets/{ticketId}/delay-repay`. PDF tickets are no
+  longer read at all.
+- The account export keeps `tickets` (each a leg's ticket details, on its
+  `trackedTrainId`).
+- Regular journeys' retention: "a leg's train has a ticket" is now "a leg
+  has ticket details"; a recorded plan's ticket ids keep an occurrence
+  only while those details still exist.
+- The alternatives' ticket fit reads a leg's one-company flag.
+
+DS-MCP: can add a reliability tool on `GET /Journeys/reliability`
+(`journeys:read`); nothing it calls was removed.
+
 ## 2026-11-06: Bank holidays
 
 Phase 5 of regular journeys (distant-signal's

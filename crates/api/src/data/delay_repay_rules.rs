@@ -34,9 +34,9 @@
 //!
 //! STRUCTURAL SAFETY NOTE, not just a comment: every function in this file
 //! is pure (no `PgPool`, no I/O of any kind) and is called only from
-//! read-only paths -- `GET /Train/{trackingId}/tickets/{ticketId}/delay-repay`
-//! (crates/api/src/routes/train.rs) and `GET /Train/tickets/mine`
-//! (`train_tracking::list_tickets_for_user`). This file must never gain a
+//! read-only paths -- each leg's `delayRepay` on `GET /Journeys/{id}`
+//! (`crates/api/src/routes/journey_tickets.rs`) and `GET /Journeys/reliability`
+//! (`data::reliability`). This file must never gain a
 //! function that writes anywhere, and no future change anywhere in this
 //! codebase may wire any function below into a write path without a fresh
 //! design-doc pass. This app estimates eligibility and links out; it never
@@ -297,7 +297,7 @@ pub fn scheme_for(operator: Option<&str>, atoc_code: Option<&str>) -> Option<Ope
 
 /// Whether a ticket is a single or a return, as far as its free-text
 /// `ticket_type` clearly says.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, ts_rs::TS)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, ts_rs::TS, schemars::JsonSchema)]
 #[serde(rename_all = "camelCase")]
 pub enum TicketKind {
     Single,
@@ -308,7 +308,8 @@ pub enum TicketKind {
 }
 
 /// [`TicketKind`] from `ticket_type`, by whole words: `return`/`rtn` or
-/// `single`/`sgl`/`sngl`. Anything else (a season, a rover, a fare code, or
+/// `single`/`sgl`/`sngl`/`advance` (an Advance is always a single). Anything
+/// else (a season, an Off-Peak that doesn't say, a rover, a fare code, or
 /// text naming both) is `Unknown`, never a guess.
 pub fn ticket_kind(ticket_type: Option<&str>) -> TicketKind {
     let Some(text) = ticket_type else {
@@ -320,7 +321,10 @@ pub fn ticket_kind(ticket_type: Option<&str>) -> TicketKind {
         .filter(|w| !w.is_empty())
         .collect();
     let has = |options: &[&str]| words.iter().any(|w| options.contains(w));
-    match (has(&["return", "rtn"]), has(&["single", "sgl", "sngl"])) {
+    match (
+        has(&["return", "rtn"]),
+        has(&["single", "sgl", "sngl", "advance"]),
+    ) {
         (true, false) => TicketKind::Return,
         (false, true) => TicketKind::Single,
         _ => TicketKind::Unknown,
@@ -339,7 +343,7 @@ pub fn ticket_kind(ticket_type: Option<&str>) -> TicketKind {
 /// that delay is a projection, and the estimate says so: `provisional` is
 /// `true` and `disclaimer` is [`PROVISIONAL_DISCLAIMER`]. It becomes final
 /// (`provisional: false`, [`DISCLAIMER`]) once the train has arrived.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, ts_rs::TS)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, ts_rs::TS, schemars::JsonSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct DelayRepayEstimate {
     /// `DR15`, `DR30` or `HX` (Heathrow Express's own scheme).
@@ -441,7 +445,7 @@ pub fn estimate_delay_repay(
 
 /// Whether the train got the passenger to the ticket's destination, from
 /// TRUST and Darwin (`data::delay_repay_outcome`).
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, ts_rs::TS)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, ts_rs::TS, schemars::JsonSchema)]
 #[serde(rename_all = "camelCase")]
 pub enum Outcome {
     /// TRUST reported its arrival there: the delay is final.
@@ -535,10 +539,10 @@ pub struct AssessInputs<'a> {
     pub measured_at_name: Option<&'a str>,
 }
 
-/// The Delay Repay fields both `GET .../delay-repay` and
-/// `GET /Train/tickets/mine` serve (flattened into each), so the two can
-/// never disagree.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, ts_rs::TS)]
+/// The Delay Repay fields both a leg's `delayRepay` (`GET /Journeys/{id}`)
+/// and `GET /Journeys/reliability` serve (flattened into each), so the two
+/// can never disagree.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, ts_rs::TS, schemars::JsonSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct DelayRepayFields {
     /// The delay against the PUBLIC arrival at `measured_at_crs` (design
@@ -551,8 +555,9 @@ pub struct DelayRepayFields {
     /// See `common::public_delay::DelayBasis`; `None` exactly when
     /// `delay_minutes` is.
     pub delay_basis: Option<crate::data::stop_delay::DelayBasis>,
-    /// Where the delay was measured: the ticket's destination, else the
-    /// pin destination, else the terminus. Set when `delay_minutes` is, and
+    /// Where the delay was measured: the leg's destination, else the pin
+    /// destination, else the terminus (a journey's: its booked final
+    /// station). Set when `delay_minutes` is, and
     /// when `outcome` is `notReached` (the destination not reached).
     pub measured_at_crs: Option<String>,
     /// `measured_at_crs`'s station name, when known.
@@ -826,6 +831,13 @@ mod tests {
             ("Advance Single", TicketKind::Single),
             ("Anytime Day Single", TicketKind::Single),
             ("SGL", TicketKind::Single),
+            // The leg's stored ticket types (`leg_tickets::TicketType`).
+            ("advance", TicketKind::Single),
+            ("single", TicketKind::Single),
+            ("return", TicketKind::Return),
+            ("off_peak", TicketKind::Unknown),
+            ("season", TicketKind::Unknown),
+            ("unknown", TicketKind::Unknown),
             ("single/return", TicketKind::Unknown),
             ("Weekly Season", TicketKind::Unknown),
             ("SOR", TicketKind::Unknown),
