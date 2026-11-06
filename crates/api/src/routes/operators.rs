@@ -210,6 +210,7 @@ mod db_tests {
             session_cleanup_interval_secs: 3600,
             background_loops: true,
             past_travel_retention_days: 548,
+            regular_journey_retention_days: 0,
             stale_push_subscription_days: 365,
             inactive_account_retention_days: 0,
         };

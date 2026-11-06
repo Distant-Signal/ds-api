@@ -54,6 +54,8 @@ struct Args {
     database_url: Secret,
     #[arg(long, env, default_value_t = 548)]
     past_travel_retention_days: i64,
+    #[arg(long, env, default_value_t = 0)]
+    regular_journey_retention_days: i64,
     #[arg(long, env, default_value_t = 365)]
     stale_push_subscription_days: i64,
     #[arg(long, env, default_value_t = 0)]
@@ -72,6 +74,7 @@ impl Args {
     fn retention_policy(&self) -> RetentionPolicy {
         RetentionPolicy {
             past_travel_days: self.past_travel_retention_days,
+            regular_journey_days: self.regular_journey_retention_days,
             stale_push_subscription_days: self.stale_push_subscription_days,
             inactive_account_days: self.inactive_account_retention_days,
         }
@@ -216,6 +219,7 @@ mod tests {
         for id in [
             "database_url",
             "past_travel_retention_days",
+            "regular_journey_retention_days",
             "stale_push_subscription_days",
             "inactive_account_retention_days",
         ] {
@@ -369,6 +373,7 @@ mod tests {
             past_travel_days: 548,
             stale_push_subscription_days: 0,
             inactive_account_days: 0,
+            regular_journey_days: 0,
         };
         let report = run_pass(&pool, policy, 365, chrono::Utc::now()).await;
         assert!(report.failed.is_empty(), "{report:?}");
@@ -460,6 +465,7 @@ mod tests {
             past_travel_days: 548,
             stale_push_subscription_days: 0,
             inactive_account_days: 0,
+            regular_journey_days: 0,
         };
         let report = run_pass(&pool, policy, 365, chrono::Utc::now()).await;
         assert!(report.failed.is_empty(), "{report:?}");

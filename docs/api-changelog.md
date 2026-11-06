@@ -3,6 +3,87 @@
 Changes to the Distant Signal (DS) HTTP API that a client such as DS-MCP
 needs to know about. Newest first. Field names are as served (camelCase).
 
+## 2026-11-06: Regular journeys: targets, pairs and skip next
+
+Phase 1 of regular journeys (distant-signal's
+`docs/superpowers/specs/2026-11-06-regular-journeys-design.md` §4.2). The
+website calls journey templates "regular journeys"; the API keeps
+`JourneyTemplate`. Everything here is additive. Templates stay out of the
+delegated routes, so DS-MCP sees none of it.
+
+- `POST /JourneyTemplates` gains `mode: "plan"`, a regular journey made
+  from a trip plan:
+  - The body has `originCrs` and `destinationCrs`, and `target: {kind, time,
+    dayOffset}`. `kind` is `depart_after` or `arrive_by`, `time` is
+    `HH:MM`, and `dayOffset` is 0 or 1 (absent is 0).
+  - Optional `planOptions` holds `/Trips/plan`'s `waypoints`, `via`,
+    `avoid`, `avoidStop`, `avoidChange`, `maxChanges`, `transit`,
+    `operator`, `avoidOperator` and `preferOperator`.
+  - `usualItinerary: {legs}` is the itinerary picked as the usual train. A
+    train leg has `trainUid`, `originCrs`, `destinationCrs`, `departs`
+    (`HH:MM`), and optionally `atocCode`, `arrives`, the day offsets and a
+    `serviceDate`. The `serviceDate` is the planned date; it is checked
+    against the timetable (422, as `POST /Journeys/itinerary`) and not
+    stored. An untracked leg has `kind: "untracked"`, `transitMode`,
+    optional place names, `lineName` and `minutes`.
+  - `daysOfWeek` is required. `startsOn`, `endsOn` and `defaultMatchMode`
+    (`manual` by default) are optional.
+  - An optional `return` has its own `target`, `usualItinerary`,
+    `planOptions` and `customName`. The return template runs from
+    `destinationCrs` back to `originCrs` on the same days, and the two are
+    linked as a pair in one transaction. The 50-template cap counts both.
+  - The template's legs are the itinerary's train legs, each with a
+    departure window 5 minutes either side of its departure.
+  - The response gains `returnTemplateId` (`null` without `return`, and
+    for the other modes).
+- `GET /JourneyTemplates/mine` rows and `GET /JourneyTemplates/{id}` gain:
+  - `originCrs`, `originName`, `destinationCrs`, `destinationName`,
+    `target` and `pairedTemplateId`. These are `null` for a template
+    without a target.
+  - `nextDate`: the next due date on or after London's today that isn't
+    skipped, and isn't today once today's journey has started. It is
+    `null` when paused, not recurring or past `endsOn`. This is the date
+    "Skip next" skips; `nextRunOn` is unchanged.
+  - `skippedDates`: skipped dates from today on.
+  - The list also gains `startsOn` and `endsOn`. The detail also gains
+    `planOptions` and `usualItinerary`.
+- `PUT /JourneyTemplates/{id}` takes optional `originCrs`,
+  `destinationCrs`, `target`, `planOptions` and `usualItinerary`. An absent
+  one keeps its stored value, so a client that doesn't know them changes
+  nothing. A target needs both stations unless the template already has
+  one, and the options and itinerary need a target (400 otherwise).
+- `PUT /JourneyTemplates/{id}/active` takes `{active}`. It pauses or
+  resumes the template and its pair in one transaction.
+  - Pausing also deletes their journeys dated today or later that haven't
+    started and that the owner hasn't touched. Untouched means every train
+    leg is still unmatched or was picked by the sweep, and no train has a
+    ticket. No skip markers are written.
+  - The response is `{templateIds, deletedJourneyIds}`.
+- `POST /JourneyTemplates/{id}/skip` takes `{serviceDate?, pair?}`. It
+  skips `serviceDate` (default: `nextDate`), and with `pair: true` the
+  pair's date too.
+  - A journey already added for that date is deleted, as deleting it by
+    hand would be.
+  - It answers 409 once that journey has started or when there is no next
+    date, and 400 for a past date or one more than a year ahead.
+  - The response is `{serviceDate, templateIds, deletedJourneyIds}`.
+- `DELETE /JourneyTemplates/{id}/skip/{date}` undoes a skip. The next
+  sweep adds the journey again if it is still due.
+- `DELETE /JourneyTemplates/{id}/pair` unlinks a pair, both sides.
+- `GET /Journeys/mine` rows and `GET /Journeys/{id}` gain
+  `sourceTemplateId`: the regular journey the journey was made from. It is
+  only set on the caller's own journeys, and is `null` otherwise.
+- Retention: `REGULAR_JOURNEY_RETENTION_DAYS` (off at 0 by default; the
+  chart will set 90) deletes a journey made from a regular journey this
+  many days after its last leg. It does so only when no train on it has a
+  ticket, was cancelled or was at least 15 minutes late. The rest keep the
+  548-day rule. See `docs/personal-data-retention.md`.
+
+Types: `api-types/api.ts` gains `TemplateTarget`, `PlanOptions`,
+`UsualItinerary`, `UsualItineraryLeg`, `ReturnJourneyRequest`, and the
+active and skip request and response types. The personal-token OpenAPI
+document gains `sourceTemplateId`.
+
 ## 2026-11-06: journey template times and next run
 
 Additive, except that one request a template could make before is now

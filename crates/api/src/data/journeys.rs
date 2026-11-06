@@ -3058,6 +3058,12 @@ pub struct JourneyListItem {
     #[serde(skip_serializing_if = "Option::is_none")]
     #[ts(optional)]
     pub followed_from: Option<crate::data::journey_follows::FollowedFrom>,
+    /// The regular journey (`journey_templates.id`) this journey was made
+    /// from, so the card can link to it and offer "Skip". Only on the
+    /// caller's own journeys: `null` on a followed or shared one, and when
+    /// it wasn't made from one or that was deleted. Additive (2026-11-06).
+    #[sqlx(skip)]
+    pub source_template_id: Option<i64>,
     /// Set on a journey another member shared into one or more of the
     /// caller's groups (DS-178, `include=shared` only): one entry per such
     /// group, newest share first. Such a row is read-only. Absent on the
@@ -3571,8 +3577,18 @@ pub(crate) async fn list_journeys_for_user_capped(
     .fetch_all(pool)
     .await?;
     let open: std::collections::HashMap<i64, i64> = open.into_iter().collect();
+    let templates: Vec<(i64, i64)> = sqlx::query_as(
+        "SELECT id, source_template_id FROM journeys \
+         WHERE id = ANY($1) AND user_id = $2 AND source_template_id IS NOT NULL",
+    )
+    .bind(&ids)
+    .bind(user_id)
+    .fetch_all(pool)
+    .await?;
+    let templates: std::collections::HashMap<i64, i64> = templates.into_iter().collect();
     for row in &mut rows {
         row.open_break_id = open.get(&row.id).copied();
+        row.source_template_id = templates.get(&row.id).copied();
         let followed_from = followed.remove(&row.id);
         let shared_via = shared.remove(&row.id).unwrap_or_default();
         if followed_from.is_some() || !shared_via.is_empty() {
@@ -3594,6 +3610,8 @@ pub struct JourneySummaryRow {
     /// `'web'`, or the delegated client that saved it
     /// (`crate::auth::delegated`, migration `20261015010000`).
     pub created_via: String,
+    /// The template (regular journey) it was made from, if any.
+    pub source_template_id: Option<i64>,
 }
 
 /// Unscoped journey summary fetch -- `journey_id` alone, no `user_id`
@@ -3611,7 +3629,8 @@ pub async fn get_journey_summary(
     journey_id: i64,
 ) -> anyhow::Result<Option<JourneySummaryRow>> {
     let row = sqlx::query_as::<_, JourneySummaryRow>(
-        "SELECT id, custom_name, created_at, user_id, created_via FROM journeys WHERE id = $1",
+        "SELECT id, custom_name, created_at, user_id, created_via, source_template_id \
+         FROM journeys WHERE id = $1",
     )
     .bind(journey_id)
     .fetch_optional(pool)

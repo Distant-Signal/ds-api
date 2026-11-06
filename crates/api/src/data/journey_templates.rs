@@ -40,6 +40,30 @@ pub struct JourneyTemplateRow {
     pub auto_commit_rule: Option<String>,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
+    /// Regular journeys (phase 1): the target's stations, with names.
+    pub origin_crs: Option<String>,
+    pub origin_name: Option<String>,
+    pub destination_crs: Option<String>,
+    pub destination_name: Option<String>,
+    /// `depart_after` or `arrive_by`; `None` for a template without a
+    /// target (made before phase 1, or with the per-leg editor).
+    pub target_kind: Option<String>,
+    pub target_time: Option<NaiveTime>,
+    pub target_day_offset: i16,
+    pub plan_options: Option<sqlx::types::Json<serde_json::Value>>,
+    pub usual_itinerary: Option<sqlx::types::Json<serde_json::Value>>,
+    pub paired_template_id: Option<i64>,
+}
+
+impl JourneyTemplateRow {
+    /// The target, when the template has one.
+    pub fn target(&self) -> Option<crate::data::regular_journeys::TemplateTarget> {
+        Some(crate::data::regular_journeys::TemplateTarget {
+            kind: self.target_kind.clone()?,
+            time: self.target_time?,
+            day_offset: self.target_day_offset,
+        })
+    }
 }
 
 /// One `journey_template_legs` row plus resolved station names -- same
@@ -92,10 +116,32 @@ pub struct JourneyTemplateListItem {
     /// gets no reminder and can't be picked for automatically, so the list
     /// asks for times.
     pub has_open_legs: bool,
+    /// Regular journeys (phase 1, additive): the target's stations (with
+    /// names), the target, the paired return template, the recurrence
+    /// window, the next date and the skipped dates. The target fields are
+    /// `null` for a template without a target.
+    pub origin_crs: Option<String>,
+    pub origin_name: Option<String>,
+    pub destination_crs: Option<String>,
+    pub destination_name: Option<String>,
+    pub target: Option<crate::data::regular_journeys::TemplateTarget>,
+    pub paired_template_id: Option<i64>,
+    pub starts_on: Option<NaiveDate>,
+    pub ends_on: Option<NaiveDate>,
+    /// The next due date on or after London's today that isn't skipped,
+    /// and isn't today once today's journey has started: the date "Skip
+    /// next" skips. `None` when paused, not recurring or past `endsOn`.
+    pub next_date: Option<NaiveDate>,
+    /// Skipped dates from today on, ascending.
+    pub skipped_dates: Vec<NaiveDate>,
 }
 
 /// [`list_templates_for_user`]'s row, before [`next_run_on`] is worked out.
 #[derive(Debug, sqlx::FromRow)]
+#[expect(
+    clippy::struct_excessive_bools,
+    reason = "a SQL row: each flag is an independent column"
+)]
 struct JourneyTemplateListRow {
     id: i64,
     custom_name: Option<String>,
@@ -114,8 +160,19 @@ struct JourneyTemplateListRow {
     /// Whether today's journey was already added (the sweep's own
     /// "already materialized" guard).
     ran_today: bool,
+    /// Whether today's journey was added and has started
+    /// (`regular_journeys::occurrence_started_sql`).
+    today_started: bool,
     /// Skipped dates (`journey_template_skipped_dates`) from today on.
     skipped_dates: Vec<NaiveDate>,
+    origin_crs: Option<String>,
+    origin_name: Option<String>,
+    destination_crs: Option<String>,
+    destination_name: Option<String>,
+    target_kind: Option<String>,
+    target_time: Option<NaiveTime>,
+    target_day_offset: i16,
+    paired_template_id: Option<i64>,
 }
 
 /// How far either side of a train's booked departure the departure window
@@ -410,7 +467,7 @@ pub struct TemplateLegInput {
     pub arrive_before: Option<NaiveTime>,
 }
 
-async fn insert_template_leg(
+pub(crate) async fn insert_template_leg(
     pool: &mut sqlx::PgConnection,
     template_id: i64,
     leg_order: i32,
@@ -485,9 +542,15 @@ where
     E: sqlx::PgExecutor<'c>,
 {
     let row = sqlx::query_as::<_, JourneyTemplateRow>(
-        "SELECT id, user_id, custom_name, days_of_week, active, starts_on, ends_on, \
-                default_match_mode, auto_commit_rule, created_at, updated_at \
-         FROM journey_templates WHERE id = $1 AND user_id = $2",
+        "SELECT jt.id, jt.user_id, jt.custom_name, jt.days_of_week, jt.active, jt.starts_on, \
+                jt.ends_on, jt.default_match_mode, jt.auto_commit_rule, jt.created_at, \
+                jt.updated_at, jt.origin_crs, so.name AS origin_name, jt.destination_crs, \
+                sd.name AS destination_name, jt.target_kind, jt.target_time, \
+                jt.target_day_offset, jt.plan_options, jt.usual_itinerary, jt.paired_template_id \
+         FROM journey_templates jt \
+         LEFT JOIN stations so ON so.crs = UPPER(jt.origin_crs)::bpchar \
+         LEFT JOIN stations sd ON sd.crs = UPPER(jt.destination_crs)::bpchar \
+         WHERE jt.id = $1 AND jt.user_id = $2",
     )
     .bind(template_id)
     .bind(user_id)
@@ -531,14 +594,26 @@ where
 /// never happen given `create_template`'s own non-empty-legs invariant,
 /// but defensively possible if a row is ever hand-edited) renders with
 /// `leg_count = 0` and every origin/destination field `NULL`, not an error.
+#[expect(clippy::too_many_lines, reason = "one query and its row mapping")]
 pub async fn list_templates_for_user(
     pool: &PgPool,
     user_id: &str,
-    today: NaiveDate,
+    now: DateTime<Utc>,
 ) -> anyhow::Result<Vec<JourneyTemplateListItem>> {
-    let rows = sqlx::query_as::<_, JourneyTemplateListRow>(
+    let today = crate::data::regular_journeys::london_date(now);
+    let rows = sqlx::query_as::<_, JourneyTemplateListRow>(&format!(
         "SELECT jt.id, jt.custom_name, jt.created_at, jt.active, jt.days_of_week, \
                 jt.default_match_mode, jt.starts_on, jt.ends_on, \
+                jt.origin_crs, sto.name AS origin_name, jt.destination_crs, \
+                std.name AS destination_name, jt.target_kind, jt.target_time, \
+                jt.target_day_offset, jt.paired_template_id, \
+                EXISTS ( \
+                    SELECT 1 FROM journeys j \
+                    WHERE j.source_template_id = jt.id \
+                      AND EXISTS (SELECT 1 FROM journey_legs dl \
+                                  WHERE dl.journey_id = j.id AND dl.service_date = $3) \
+                      AND {started} \
+                ) AS today_started, \
                 COALESCE(leg_counts.leg_count, 0) AS leg_count, \
                 COALESCE(leg_counts.open_legs, 0) > 0 AS has_open_legs, \
                 first_leg.origin_crs AS first_origin_crs, so.name AS first_origin_name, \
@@ -568,18 +643,42 @@ pub async fn list_templates_for_user(
              ON last_leg.template_id = jt.id AND last_leg.leg_order = leg_counts.max_order \
          LEFT JOIN stations so ON so.crs = UPPER(first_leg.origin_crs)::bpchar \
          LEFT JOIN stations sd ON sd.crs = UPPER(last_leg.destination_crs)::bpchar \
+         LEFT JOIN stations sto ON sto.crs = UPPER(jt.origin_crs)::bpchar \
+         LEFT JOIN stations std ON std.crs = UPPER(jt.destination_crs)::bpchar \
          WHERE jt.user_id = $1 \
          ORDER BY jt.created_at DESC \
          LIMIT $2",
-    )
+        started = crate::data::regular_journeys::occurrence_started_sql("j", "$4", "$3"),
+    ))
     .bind(user_id)
     .bind(crate::data::train_tracking::MINE_LIST_LIMIT)
     .bind(today)
+    .bind(now)
     .fetch_all(pool)
     .await?;
     Ok(rows
         .into_iter()
         .map(|row| JourneyTemplateListItem {
+            next_date: next_run_on(
+                row.active,
+                row.days_of_week,
+                row.starts_on,
+                row.ends_on,
+                today,
+                row.today_started,
+                &row.skipped_dates,
+            ),
+            target: row
+                .target_kind
+                .clone()
+                .zip(row.target_time)
+                .map(
+                    |(kind, time)| crate::data::regular_journeys::TemplateTarget {
+                        kind,
+                        time,
+                        day_offset: row.target_day_offset,
+                    },
+                ),
             next_run_on: next_run_on(
                 row.active,
                 row.days_of_week,
@@ -601,6 +700,14 @@ pub async fn list_templates_for_user(
             days_of_week: row.days_of_week,
             default_match_mode: row.default_match_mode,
             has_open_legs: row.has_open_legs,
+            origin_crs: row.origin_crs,
+            origin_name: row.origin_name,
+            destination_crs: row.destination_crs,
+            destination_name: row.destination_name,
+            paired_template_id: row.paired_template_id,
+            starts_on: row.starts_on,
+            ends_on: row.ends_on,
+            skipped_dates: row.skipped_dates,
         })
         .collect())
 }
@@ -678,11 +785,22 @@ pub async fn replace_template(
     ends_on: Option<NaiveDate>,
     default_match_mode: &str,
     auto_commit_rule: Option<&str>,
+    target: &TargetUpdate,
 ) -> anyhow::Result<bool> {
     let mut tx = pool.begin().await?;
+    // Each target field is optional and an absent one keeps its value
+    // (regular journeys design §4.2): a client from before targets
+    // existed must not wipe one out.
     let result = sqlx::query(
         "UPDATE journey_templates SET custom_name = $1, days_of_week = $2, active = $3, \
                 starts_on = $4, ends_on = $5, default_match_mode = $6, auto_commit_rule = $7, \
+                origin_crs = COALESCE($10, origin_crs), \
+                destination_crs = COALESCE($11, destination_crs), \
+                target_kind = COALESCE($12, target_kind), \
+                target_time = COALESCE($13, target_time), \
+                target_day_offset = COALESCE($14, target_day_offset), \
+                plan_options = COALESCE($15, plan_options), \
+                usual_itinerary = COALESCE($16, usual_itinerary), \
                 updated_at = NOW() \
          WHERE id = $8 AND user_id = $9",
     )
@@ -695,6 +813,13 @@ pub async fn replace_template(
     .bind(auto_commit_rule)
     .bind(template_id)
     .bind(user_id)
+    .bind(target.origin_crs.as_deref())
+    .bind(target.destination_crs.as_deref())
+    .bind(target.target.as_ref().map(|t| t.kind.as_str()))
+    .bind(target.target.as_ref().map(|t| t.time))
+    .bind(target.target.as_ref().map(|t| t.day_offset))
+    .bind(target.plan_options.as_ref().map(sqlx::types::Json))
+    .bind(target.usual_itinerary.as_ref().map(sqlx::types::Json))
     .execute(&mut *tx)
     .await?;
     if result.rows_affected() == 0 {
@@ -713,6 +838,17 @@ pub async fn replace_template(
     }
     tx.commit().await?;
     Ok(true)
+}
+
+/// The regular-journey fields of a `PUT /JourneyTemplates/{id}`, each
+/// `None` to keep the stored value. Validated by the route.
+#[derive(Debug, Default)]
+pub struct TargetUpdate {
+    pub origin_crs: Option<String>,
+    pub destination_crs: Option<String>,
+    pub target: Option<crate::data::regular_journeys::TemplateTarget>,
+    pub plan_options: Option<crate::data::regular_journeys::PlanOptions>,
+    pub usual_itinerary: Option<crate::data::regular_journeys::UsualItinerary>,
 }
 
 /// Deletes a template the caller owns. Cascades into
@@ -1453,6 +1589,7 @@ mod db_tests {
             None,
             "manual",
             None,
+            &TargetUpdate::default(),
         )
         .await
         .expect("replace template");
@@ -1498,6 +1635,7 @@ mod db_tests {
             None,
             "manual",
             None,
+            &TargetUpdate::default(),
         )
         .await
         .expect("attempt replace as non-owner");
@@ -1881,6 +2019,7 @@ mod db_tests {
         let new_legs = vec![fixture_leg("EUS", "MAN")];
         let pool_a = pool.clone();
         let pool_b = pool.clone();
+        let no_target = TargetUpdate::default();
         let (materialize_result, replace_result) = tokio::join!(
             materialize_template(&pool_a, template_id, user_id, "2026-09-22".parse().unwrap()),
             replace_template(
@@ -1895,6 +2034,7 @@ mod db_tests {
                 None,
                 "manual",
                 None,
+                &no_target,
             ),
         );
 

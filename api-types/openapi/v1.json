@@ -681,6 +681,14 @@
             ],
             "description": "The journey's currently-active unlisted share link, if any --\n`Some` only when `is_owner` is `true` (see `build_journey_detail_response`).\nA non-owner (a fellow group member, or a visitor who reached this\njourney via the share link itself) never sees a live, usable token\nthis way -- design doc §4."
           },
+          "sourceTemplateId": {
+            "description": "The regular journey (`journey_templates.id`) this journey was made\nfrom: the page links to it and offers \"Skip\". Owner only; `null`\nfor anyone else, when it wasn't made from one, or when that was\ndeleted. Additive (2026-11-06).",
+            "format": "int64",
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
           "suggestionsMuted": {
             "description": "Suggestion pushes muted for this journey (owner only).",
             "type": [
@@ -1206,6 +1214,14 @@
               "$ref": "#/components/schemas/SharedVia"
             },
             "type": "array"
+          },
+          "sourceTemplateId": {
+            "description": "The regular journey (`journey_templates.id`) this journey was made\nfrom, so the card can link to it and offer \"Skip\". Only on the\ncaller's own journeys: `null` on a followed or shared one, and when\nit wasn't made from one or that was deleted. Additive (2026-11-06).",
+            "format": "int64",
+            "type": [
+              "integer",
+              "null"
+            ]
           },
           "startedLegCount": {
             "format": "int64",
