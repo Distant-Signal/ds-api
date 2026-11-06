@@ -457,6 +457,12 @@ pub fn retain_allowed_groups(groups: &[String], allowlist: &[String]) -> Vec<Str
     kept
 }
 
+/// Suffix of `distant_signal_api_login_missing_name_claims_total`: one per
+/// login (new or returning user) whose claims gave neither a name nor a
+/// username ([`upsert_user_in`]). Registered at 0 by
+/// `routes::auth::register_user_metrics`.
+pub const MISSING_NAME_CLAIMS_METRIC: &str = "api_login_missing_name_claims_total";
+
 /// Creates the user on first login, or updates `name`/`username`/`groups`/
 /// `last_login_at` on every return visit -- design doc: "upserted, not
 /// just inserted once." `groups` is overwritten wholesale, never merged
@@ -466,15 +472,25 @@ pub fn retain_allowed_groups(groups: &[String], allowlist: &[String]) -> Vec<Str
 /// user's very next login.
 ///
 /// `name`/`username` are normalized through `non_blank` on the way in, so a
-/// blank claim is stored as SQL `NULL` rather than as an empty string --
-/// the read side (`display_label`, and the session shape's own
-/// name-else-username fallback) then needs no special case for a value
-/// this app never writes. The read side normalizes too, for rows written
-/// before this normalization existed.
+/// blank claim is never stored as an empty string -- the read side
+/// (`display_label`, and the session shape's own name-else-username
+/// fallback) then needs no special case for a value this app never writes.
+/// The read side normalizes too, for rows written before this
+/// normalization existed.
 ///
-/// `username` (the `preferred_username` claim) is overwritten on every
-/// login for the same reason `name` is: this table mirrors what the `IdP`
-/// currently asserts, it is not an independent record.
+/// `name` and `username` (the `preferred_username` claim) mirror what the
+/// `IdP` asserts: a present value overwrites the stored one on every login,
+/// so a rename at the `IdP` reaches DS at the next login. A MISSING (or
+/// blank) claim keeps the last asserted value instead
+/// (`COALESCE(EXCLUDED.name, users.name)`): on 2026-11-06 `ds-sso` briefly
+/// sent no name claims at all, and the unconditional overwrite this
+/// replaced set every returning user's name and username to NULL, so they
+/// showed as "A member". A first login without them still stores NULL. The
+/// cost is that a name removed at the `IdP` stays here until it sends a
+/// new one. A login with neither claim
+/// logs a WARN (the user id only) and counts
+/// `distant_signal_api_login_missing_name_claims_total`
+/// ([`MISSING_NAME_CLAIMS_METRIC`]), which an alert watches.
 ///
 /// No email (2026-09-30: the app stopped requesting the `email` scope).
 /// This statement no longer clears the legacy `users.email` column either,
@@ -498,12 +514,23 @@ pub async fn upsert_user_in(
 ) -> Result<User> {
     let name = non_blank(identity.name.as_deref());
     let username = non_blank(identity.preferred_username.as_deref());
+    if name.is_none() && username.is_none() {
+        // The user id only: the point is to see the IdP stop sending the
+        // claims, and their values would be personal data in the logs.
+        tracing::warn!(
+            user_id = %identity.sub,
+            "login carried no name or username claim; keeping the stored ones"
+        );
+        metrics::counter!(ds_runtime::metrics::metric_name(MISSING_NAME_CLAIMS_METRIC))
+            .increment(1);
+    }
     let row = sqlx::query_as::<_, User>(
         "INSERT INTO users (id, name, username, groups, discord_id, created_at, last_login_at) \
          VALUES ($1, $2, $3, $4, $5, NOW(), NOW()) \
          ON CONFLICT (id) DO UPDATE SET \
-            name = EXCLUDED.name, \
-            username = EXCLUDED.username, groups = EXCLUDED.groups, \
+            name = COALESCE(EXCLUDED.name, users.name), \
+            username = COALESCE(EXCLUDED.username, users.username), \
+            groups = EXCLUDED.groups, \
             discord_id = COALESCE(EXCLUDED.discord_id, users.discord_id), \
             last_login_at = NOW() \
          RETURNING id, name, username, (xmax = 0) AS created",
@@ -1308,6 +1335,200 @@ mod login_state_db_tests {
 mod db_tests {
     use super::*;
 
+    async fn name_test_pool(ids: &[&str]) -> PgPool {
+        let database_url =
+            std::env::var("DATABASE_URL").expect("DATABASE_URL must be set to run this test");
+        let pool = sqlx::postgres::PgPoolOptions::new()
+            .connect(&database_url)
+            .await
+            .expect("connect to postgres");
+        clear_name_test_users(&pool, ids).await;
+        pool
+    }
+
+    async fn clear_name_test_users(pool: &PgPool, ids: &[&str]) {
+        sqlx::query("DELETE FROM users WHERE id = ANY($1)")
+            .bind(ids)
+            .execute(pool)
+            .await
+            .expect("clear fixture users");
+    }
+
+    fn named(sub: &str, name: Option<&str>, username: Option<&str>) -> OidcIdentity {
+        OidcIdentity {
+            sub: sub.to_string(),
+            name: name.map(str::to_string),
+            preferred_username: username.map(str::to_string),
+            groups: Vec::new(),
+        }
+    }
+
+    async fn stored_names(pool: &PgPool, id: &str) -> (Option<String>, Option<String>) {
+        sqlx::query_as("SELECT name, username FROM users WHERE id = $1")
+            .bind(id)
+            .fetch_one(pool)
+            .await
+            .expect("read the stored names")
+    }
+
+    /// Everything a `tracing` subscriber writes, for asserting on log lines.
+    #[derive(Clone, Default)]
+    struct CapturedLogs(std::sync::Arc<std::sync::Mutex<Vec<u8>>>);
+
+    impl CapturedLogs {
+        fn text(&self) -> String {
+            String::from_utf8(self.0.lock().unwrap().clone()).expect("utf-8 logs")
+        }
+    }
+
+    impl std::io::Write for CapturedLogs {
+        fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+            self.0.lock().unwrap().extend_from_slice(buf);
+            Ok(buf.len())
+        }
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
+    impl<'a> tracing_subscriber::fmt::MakeWriter<'a> for CapturedLogs {
+        type Writer = CapturedLogs;
+        fn make_writer(&'a self) -> Self::Writer {
+            self.clone()
+        }
+    }
+
+    /// 2026-11-06: `ds-sso` briefly sent no name claims, and every login
+    /// set the user's name and username to NULL. A login without them now
+    /// keeps both, logs a WARN naming only the user id, and counts
+    /// `distant_signal_api_login_missing_name_claims_total`. A login with
+    /// one of the two keeps the missing one and is not counted.
+    #[tokio::test]
+    #[ignore = "requires a live database; run with `cargo test -p api \
+                a_login_without_name_claims_keeps_the_stored_names -- --ignored`"]
+    async fn a_login_without_name_claims_keeps_the_stored_names() {
+        const ID: &str = "TEST-USER-NAMES-KEPT";
+        let pool = name_test_pool(&[ID]).await;
+        upsert_user(&pool, &named(ID, Some("Kept Rider"), Some("kept-rider")))
+            .await
+            .expect("first login");
+
+        let logs = CapturedLogs::default();
+        let subscriber = tracing_subscriber::fmt()
+            .with_max_level(tracing::Level::TRACE)
+            .with_writer(logs.clone())
+            .with_ansi(false)
+            .finish();
+        let _log_guard = tracing::subscriber::set_default(subscriber);
+        let recorder = metrics_exporter_prometheus::PrometheusBuilder::new().build_recorder();
+        let handle = recorder.handle();
+        let _metrics_guard = metrics::set_default_local_recorder(&recorder);
+
+        let user = upsert_user(&pool, &named(ID, None, None))
+            .await
+            .expect("claimless login");
+        assert!(!user.created);
+        assert_eq!(user.name.as_deref(), Some("Kept Rider"));
+        assert_eq!(user.username.as_deref(), Some("kept-rider"));
+        assert_eq!(
+            stored_names(&pool, ID).await,
+            (
+                Some("Kept Rider".to_string()),
+                Some("kept-rider".to_string())
+            )
+        );
+        // Blank claims are the same as none.
+        let user = upsert_user(&pool, &named(ID, Some(" "), Some("")))
+            .await
+            .expect("blank-claims login");
+        assert_eq!(user.name.as_deref(), Some("Kept Rider"));
+        assert_eq!(user.username.as_deref(), Some("kept-rider"));
+
+        let rendered = handle.render();
+        assert!(
+            rendered.contains("distant_signal_api_login_missing_name_claims_total 2"),
+            "{rendered}"
+        );
+        let text = logs.text();
+        assert!(text.contains("WARN"), "{text}");
+        assert!(text.contains(ID), "{text}");
+        assert!(!text.contains("Kept Rider"), "{text}");
+        assert!(!text.contains("kept-rider"), "{text}");
+
+        // One claim present: it is stored, the missing one is kept, and
+        // nothing is counted.
+        let user = upsert_user(&pool, &named(ID, None, Some("renamed-rider")))
+            .await
+            .expect("username-only login");
+        assert_eq!(user.name.as_deref(), Some("Kept Rider"));
+        assert_eq!(user.username.as_deref(), Some("renamed-rider"));
+        let user = upsert_user(&pool, &named(ID, Some("Renamed Rider"), None))
+            .await
+            .expect("name-only login");
+        assert_eq!(user.name.as_deref(), Some("Renamed Rider"));
+        assert_eq!(user.username.as_deref(), Some("renamed-rider"));
+        let rendered = handle.render();
+        assert!(
+            rendered.contains("distant_signal_api_login_missing_name_claims_total 2"),
+            "{rendered}"
+        );
+
+        clear_name_test_users(&pool, &[ID]).await;
+    }
+
+    /// Present claims still overwrite: a rename at the `IdP` reaches DS at
+    /// the next login.
+    #[tokio::test]
+    #[ignore = "requires a live database; run with `cargo test -p api \
+                a_login_with_new_names_overwrites_the_stored_ones -- --ignored`"]
+    async fn a_login_with_new_names_overwrites_the_stored_ones() {
+        const ID: &str = "TEST-USER-NAMES-RENAMED";
+        let pool = name_test_pool(&[ID]).await;
+        upsert_user(&pool, &named(ID, Some("Old Rider"), Some("old-rider")))
+            .await
+            .expect("first login");
+        let user = upsert_user(&pool, &named(ID, Some("New Rider"), Some("new-rider")))
+            .await
+            .expect("renamed login");
+        assert_eq!(user.name.as_deref(), Some("New Rider"));
+        assert_eq!(user.username.as_deref(), Some("new-rider"));
+        assert_eq!(
+            stored_names(&pool, ID).await,
+            (Some("New Rider".to_string()), Some("new-rider".to_string()))
+        );
+        clear_name_test_users(&pool, &[ID]).await;
+    }
+
+    /// A first login without name claims (absent or blank) creates the
+    /// user with NULLs, never `''`, and is counted like any other.
+    #[tokio::test]
+    #[ignore = "requires a live database; run with `cargo test -p api \
+                a_first_login_without_name_claims_stores_null -- --ignored`"]
+    async fn a_first_login_without_name_claims_stores_null() {
+        const ABSENT: &str = "TEST-USER-NAMES-NEW-ABSENT";
+        const BLANK: &str = "TEST-USER-NAMES-NEW-BLANK";
+        let pool = name_test_pool(&[ABSENT, BLANK]).await;
+        let recorder = metrics_exporter_prometheus::PrometheusBuilder::new().build_recorder();
+        let handle = recorder.handle();
+        let _metrics_guard = metrics::set_default_local_recorder(&recorder);
+
+        for (id, identity) in [
+            (ABSENT, named(ABSENT, None, None)),
+            (BLANK, named(BLANK, Some("   "), Some(""))),
+        ] {
+            let user = upsert_user(&pool, &identity).await.expect("first login");
+            assert!(user.created, "{id}");
+            assert_eq!((user.name, user.username), (None, None), "{id}");
+            assert_eq!(stored_names(&pool, id).await, (None, None), "{id}");
+        }
+        let rendered = handle.render();
+        assert!(
+            rendered.contains("distant_signal_api_login_missing_name_claims_total 2"),
+            "{rendered}"
+        );
+        clear_name_test_users(&pool, &[ABSENT, BLANK]).await;
+    }
+
     #[tokio::test]
     #[ignore = "requires a live database; see the plan's Global Constraints for the \
                 DATABASE_URL incantation, then run with `cargo test -p api \
@@ -1344,20 +1565,21 @@ mod db_tests {
         assert!(!user.created, "a return visit updates the existing row");
 
         // A blank `name` claim -- what an IdP with no name on file for the
-        // user actually sends -- must be stored as NULL, not as `''`.
-        // Storing `''` is what made `display_label`'s fallback (and the
-        // frontend's own placeholder) fail to fire, rendering a member row
-        // with an empty label. Same for a blank `preferred_username`, and
-        // for the padding around an otherwise-real value.
+        // user actually sends -- is never stored as `''` (which made
+        // `display_label`'s fallback, and the frontend's own placeholder,
+        // fail to fire). On a returning user it counts as no claim, so the
+        // stored name stays; a new user gets NULL
+        // (`a_first_login_without_name_claims_stores_null`). The padding
+        // around an otherwise-real value is trimmed.
         identity.name = Some("   ".to_string());
         identity.preferred_username = Some("  test-rider  ".to_string());
         let user = upsert_user(&pool, &identity).await.expect("re-upsert user");
-        assert_eq!(user.name, None);
+        assert_eq!(user.name.as_deref(), Some("Test Rider"));
         assert_eq!(user.username.as_deref(), Some("test-rider"));
 
         identity.preferred_username = Some(String::new());
         let user = upsert_user(&pool, &identity).await.expect("re-upsert user");
-        assert_eq!(user.username, None);
+        assert_eq!(user.username.as_deref(), Some("test-rider"));
 
         identity.name = Some("Test Rider".to_string());
 

@@ -23,6 +23,10 @@ pub(crate) const USERS_CREATED_METRIC: &str = "api_users_created_total";
 /// `increase()` sees the first sign-up after a restart.
 pub fn register_user_metrics() {
     metrics::counter!(ds_runtime::metrics::metric_name(USERS_CREATED_METRIC)).increment(0);
+    metrics::counter!(ds_runtime::metrics::metric_name(
+        users::MISSING_NAME_CLAIMS_METRIC
+    ))
+    .increment(0);
     crate::data::account_continuity::register_metrics();
 }
 
@@ -760,18 +764,24 @@ async fn session(
 mod tests {
     use super::*;
 
-    /// The sign-up counter exists at 0 from startup, under its full name.
+    /// The sign-up and missing-name-claims counters exist at 0 from
+    /// startup, under their full names.
     #[test]
-    fn the_users_created_counter_is_registered_at_zero() {
+    fn the_login_counters_are_registered_at_zero() {
         let recorder = metrics_exporter_prometheus::PrometheusBuilder::new().build_recorder();
         let handle = recorder.handle();
         let _guard = metrics::set_default_local_recorder(&recorder);
         register_user_metrics();
         let rendered = handle.render();
-        assert!(
-            rendered.contains("distant_signal_api_users_created_total 0"),
-            "{rendered}"
-        );
+        for series in [
+            "distant_signal_api_users_created_total 0",
+            "distant_signal_api_login_missing_name_claims_total 0",
+        ] {
+            assert!(
+                rendered.contains(series),
+                "{series} missing from {rendered}"
+            );
+        }
     }
 
     /// DB2-23: a failed session delete keeps the cookie and says so.

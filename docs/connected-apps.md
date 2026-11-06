@@ -214,7 +214,9 @@ On a login whose `sub` has no account, in one transaction:
 
 A login whose `sub` has an account is the ordinary upsert. Every login
 stores the Discord id claim in `users.discord_id` when it is present (a
-login without it keeps the stored one).
+login without it keeps the stored one). Name and username follow the same
+rule on every login, re-keyed or not: a present claim overwrites, a missing
+one keeps the stored value.
 
 Conflicts are never resolved automatically; an operator merges the
 accounts by hand:
