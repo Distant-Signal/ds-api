@@ -284,6 +284,26 @@
         ],
         "type": "object"
       },
+      "ChoiceReason": {
+        "description": "Why the choice was made.",
+        "oneOf": [
+          {
+            "const": "usual",
+            "description": "The usual itinerary's trains.",
+            "type": "string"
+          },
+          {
+            "const": "same_operator",
+            "description": "The usual operator, within 5 minutes of the usual departure.",
+            "type": "string"
+          },
+          {
+            "const": "best",
+            "description": "The target's own best: the usual train doesn't run that day.",
+            "type": "string"
+          }
+        ]
+      },
       "Confidence": {
         "description": "How sure the prediction is. Ordered: `Low < Medium < High`.",
         "enum": [
@@ -664,6 +684,17 @@
               }
             ],
             "description": "The `/plan` operator filter the journey keeps (owner only; additive,\n2026-10-31). Absent when it has none."
+          },
+          "regularPlan": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/RegularPlanResponse"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "The day's train the regular journeys plan sweep chose for this\noccurrence: the choice, up to two alternatives and where it stands.\nOwner only; `null` for anyone else and when it was never planned.\nAdditive (2026-11-06)."
           },
           "revisionCount": {
             "description": "How many plans the journey has had (1: only the booked one).",
@@ -2268,6 +2299,165 @@
         ],
         "type": "string"
       },
+      "PlanLeg": {
+        "description": "One leg of a planned option: a train to track, or a Tube ride, bus or\nwalk saved as an untracked leg (as `POST /Journeys/itinerary` takes\nit). Times are the timetable's (the booked plan).",
+        "oneOf": [
+          {
+            "properties": {
+              "arrival": {
+                "format": "date-time",
+                "type": "string"
+              },
+              "departure": {
+                "format": "date-time",
+                "type": "string"
+              },
+              "destinationCrs": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "destinationName": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "kind": {
+                "const": "train",
+                "type": "string"
+              },
+              "operator": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "operatorName": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "originCrs": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "originName": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "serviceDate": {
+                "format": "date",
+                "type": "string"
+              },
+              "trainUid": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind",
+              "trainUid",
+              "serviceDate",
+              "departure",
+              "arrival"
+            ],
+            "type": "object"
+          },
+          {
+            "properties": {
+              "destinationName": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "destinationStopId": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "kind": {
+                "const": "untracked",
+                "type": "string"
+              },
+              "lineName": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "originName": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "originStopId": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "plannedArrival": {
+                "format": "date-time",
+                "type": "string"
+              },
+              "plannedDeparture": {
+                "format": "date-time",
+                "type": "string"
+              },
+              "transitMode": {
+                "$ref": "#/components/schemas/TransitMode"
+              }
+            },
+            "required": [
+              "kind",
+              "transitMode",
+              "plannedDeparture",
+              "plannedArrival"
+            ],
+            "type": "object"
+          }
+        ]
+      },
+      "PlanOption": {
+        "description": "One way to make the day's journey.",
+        "properties": {
+          "arrival": {
+            "format": "date-time",
+            "type": "string"
+          },
+          "changeCount": {
+            "format": "uint32",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "departure": {
+            "format": "date-time",
+            "type": "string"
+          },
+          "legs": {
+            "items": {
+              "$ref": "#/components/schemas/PlanLeg"
+            },
+            "type": "array"
+          }
+        },
+        "required": [
+          "departure",
+          "arrival",
+          "changeCount",
+          "legs"
+        ],
+        "type": "object"
+      },
       "PlatformBasis": {
         "description": "`JourneyStop.platformBasis` (DS-127): what the stop's `displayPlatform`\nrests on. Serialized lowercase; `null` when there is no platform at\nall. Clients must treat an unknown value as `board`.",
         "oneOf": [
@@ -2748,6 +2938,75 @@
             "type": "string"
           }
         ]
+      },
+      "RegularPlanResponse": {
+        "description": "`GET /Journeys/{id}`'s `regularPlan` (owner only): the day's train for\na regular journey's occurrence.",
+        "properties": {
+          "acceptedIndex": {
+            "description": "The option the owner accepted (0: the choice), `null` until then.",
+            "format": "uint8",
+            "maximum": 255,
+            "minimum": 0,
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "alternatives": {
+            "items": {
+              "$ref": "#/components/schemas/PlanOption"
+            },
+            "type": "array"
+          },
+          "choice": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/PlanOption"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "plannedAt": {
+            "description": "When it was planned: what `POST .../regular-plan/accept` echoes\nback.",
+            "format": "date-time",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "reason": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/ChoiceReason"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "`null` while `pending` or `no_service`."
+          },
+          "status": {
+            "$ref": "#/components/schemas/RegularPlanStatus",
+            "description": "`pending`, `suggested`, `committed` or `no_service`."
+          }
+        },
+        "required": [
+          "status",
+          "alternatives"
+        ],
+        "type": "object"
+      },
+      "RegularPlanStatus": {
+        "description": "`journeys.regular_plan_status` (its CHECK constraint): where a regular\njourney's day stands (`data::regular_plan`).",
+        "enum": [
+          "pending",
+          "suggested",
+          "committed",
+          "no_service"
+        ],
+        "type": "string"
       },
       "ResolutionStatus": {
         "description": "`train_subscriptions.resolution_status` (its CHECK constraint).",

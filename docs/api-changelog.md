@@ -3,6 +3,49 @@
 Changes to the Distant Signal (DS) HTTP API that a client such as DS-MCP
 needs to know about. Newest first. Field names are as served (camelCase).
 
+## 2026-11-06: Regular journeys: the day's train
+
+Phase 3 of regular journeys (distant-signal's
+`docs/superpowers/specs/2026-11-06-regular-journeys-design.md` §6). A
+background sweep in the api (off unless `REGULAR_PLAN_SWEEP_ENABLED`)
+plans the target of each regular journey with one for its journeys dated
+today and tomorrow, and chooses the day's train: the usual trains, else the
+usual operator within 5 minutes of the usual departure, else the target's
+best (earliest arrival for `depart_after`, latest departure for
+`arrive_by`). In remind mode it only suggests; in auto mode it saves the
+choice over the journey's legs (as `auto` legs). It never touches a journey
+that has started, has had a break, or has a train its owner picked. All
+additive.
+
+- `GET /Journeys/{id}` gains `regularPlan`, owner only, `null` for anyone
+  else and for a journey the sweep never planned: `{status, plannedAt,
+  reason, choice, alternatives, acceptedIndex}`.
+  - `status`: `pending` (nothing decided yet: no timetable for the day, or
+    the target has passed), `suggested`, `committed` or `no_service` (no
+    way there on a published day).
+  - `reason`: `usual`, `same_operator` or `best` (the usual train doesn't
+    run that day); `null` while `pending` or `no_service`.
+  - `choice` and up to two `alternatives`: `{departure, arrival,
+    changeCount, legs}`. A leg is `kind: "train"` (`trainUid`,
+    `serviceDate`, stations and names, booked `departure` and `arrival`,
+    `operator`, `operatorName`) or `kind: "untracked"` (as a replan
+    suggestion's untracked leg).
+  - `acceptedIndex`: the option the owner accepted (0 is the choice).
+- `POST /Journeys/{id}/regular-plan/accept` `{index, plannedAt}`
+  (cookie-only, owner-only): replaces every leg of the journey with option
+  `index` (0 is the choice, then the alternatives), saved as the owner's
+  own pick, and sets `status` to `committed`. While the journey is still
+  being planned this refreshes the booked plan (revision 1). Answers as
+  `POST .../replan/accept` does. 404 when there is nothing to pick or no
+  such option; 409 when `plannedAt` isn't the plan's (it changed since it
+  was read), when the journey has started or has a break, or when the
+  option's first leg has left.
+
+New types: `RegularPlan`, `RegularPlanOption`, `RegularPlanLeg`,
+`RegularPlanReason`, `RegularPlanStatus` and `RegularPlanAcceptRequest`.
+The personal-token OpenAPI document gains `regularPlan`. The accept route
+isn't a delegated route; DS-MCP needs no change.
+
 ## 2026-11-06: usage events for the regular journeys pages
 
 `POST /public/events` takes the regular journeys pages' templates in place

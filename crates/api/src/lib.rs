@@ -42,6 +42,7 @@ pub mod personal_tokens;
 pub use ds_store::migrate;
 pub mod rate_limit;
 pub mod readiness;
+pub mod regular_plan_sweep;
 pub mod render;
 pub mod route_metrics;
 pub mod routes;

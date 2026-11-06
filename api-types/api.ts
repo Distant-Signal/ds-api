@@ -1323,6 +1323,13 @@ canFollow?: boolean,
  */
 sourceTemplateId: number | null, 
 /**
+ * The day's train the regular journeys plan sweep chose for this
+ * occurrence: the choice, up to two alternatives and where it stands.
+ * Owner only; `null` for anyone else and when it was never planned.
+ * Additive (2026-11-06).
+ */
+regularPlan: RegularPlan | null, 
+/**
  * The open break, `null` when the journey works.
  */
 openBreak: OpenBreakSummary | null, 
@@ -3116,6 +3123,65 @@ expectedUntilEndOfDay: boolean, };
  * `GET /public/incidents/recently-cleared`'s body.
  */
 export type RecentlyClearedResponse = { results: Array<RecentlyClearedIncident>, };
+
+/**
+ * `GET /Journeys/{id}`'s `regularPlan` (owner only): the day's train for
+ * a regular journey's occurrence.
+ */
+export type RegularPlan = { 
+/**
+ * `pending`, `suggested`, `committed` or `no_service`.
+ */
+status: RegularPlanStatus, 
+/**
+ * When it was planned: what `POST .../regular-plan/accept` echoes
+ * back.
+ */
+plannedAt: string | null, 
+/**
+ * `null` while `pending` or `no_service`.
+ */
+reason: RegularPlanReason | null, choice: RegularPlanOption | null, alternatives: Array<RegularPlanOption>, 
+/**
+ * The option the owner accepted (0: the choice), `null` until then.
+ */
+acceptedIndex: number | null, };
+
+/**
+ * `POST /Journeys/{id}/regular-plan/accept`'s body.
+ */
+export type RegularPlanAcceptRequest = { 
+/**
+ * 0: the choice; 1 and 2: the alternatives, in order.
+ */
+index: number, 
+/**
+ * `regularPlan.plannedAt` as read: a 409 when the plan changed since.
+ */
+plannedAt: string, };
+
+/**
+ * One leg of a planned option: a train to track, or a Tube ride, bus or
+ * walk saved as an untracked leg (as `POST /Journeys/itinerary` takes
+ * it). Times are the timetable's (the booked plan).
+ */
+export type RegularPlanLeg = { "kind": "train", trainUid: string, serviceDate: string, originCrs: string | null, originName: string | null, destinationCrs: string | null, destinationName: string | null, departure: string, arrival: string, operator: string | null, operatorName: string | null, } | { "kind": "untracked", transitMode: TransitMode, originName: string | null, destinationName: string | null, lineName: string | null, originStopId: string | null, destinationStopId: string | null, plannedDeparture: string, plannedArrival: string, };
+
+/**
+ * One way to make the day's journey.
+ */
+export type RegularPlanOption = { departure: string, arrival: string, changeCount: number, legs: Array<RegularPlanLeg>, };
+
+/**
+ * Why the choice was made.
+ */
+export type RegularPlanReason = "usual" | "same_operator" | "best";
+
+/**
+ * `journeys.regular_plan_status` (its CHECK constraint): where a regular
+ * journey's day stands (`data::regular_plan`).
+ */
+export type RegularPlanStatus = "pending" | "suggested" | "committed" | "no_service";
 
 export type RenameRequest = { 
 /**

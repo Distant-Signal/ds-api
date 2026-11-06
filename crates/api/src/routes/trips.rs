@@ -2503,6 +2503,13 @@ async fn plan_live(
 static SWEEP_PLAN_SLOTS: LazyLock<tokio::sync::Semaphore> =
     LazyLock::new(|| tokio::sync::Semaphore::new(1));
 
+/// The regular journeys plan sweep's own planning slot (regular journeys
+/// spec 2026-11-06 §6.2): one search at a time, waited for, and separate
+/// from both [`PLAN_SLOTS`] and [`SWEEP_PLAN_SLOTS`], so the sweep never
+/// takes a user's slot or the break sweep's.
+static REGULAR_PLAN_SLOTS: LazyLock<tokio::sync::Semaphore> =
+    LazyLock::new(|| tokio::sync::Semaphore::new(1));
+
 /// Whose slot a journey re-plan holds.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum ReplanSlot {
@@ -2510,21 +2517,201 @@ pub(crate) enum ReplanSlot {
     Request,
     /// The break sweep: [`SWEEP_PLAN_SLOTS`], waited for.
     Sweep,
+    /// The regular journeys plan sweep: [`REGULAR_PLAN_SLOTS`], waited for.
+    Regular,
 }
 
-/// One search for a journey's alternatives (`plan_for_journey`).
+/// One search for a journey's alternatives, or a regular journey's day
+/// (`plan_for_journey`).
 #[derive(Debug, Clone)]
 pub(crate) struct ReplanQuery {
     pub origin: String,
     pub destination: String,
     pub date: NaiveDate,
-    /// Minutes from `date`'s midnight (may exceed 1440).
-    pub depart_after_min: u32,
+    /// Leave after, or arrive by, minutes from `date`'s midnight (may
+    /// exceed 1440).
+    pub time: trip_planning_itinerary::TimeBound,
+    /// Days after `date` the time is on (0 or 1), as `/Trips/plan`'s
+    /// `dayOffset`: 1440 minutes each, added to `time`.
+    pub day_offset: u8,
     /// `fastest` (CSA) or `options` (RAPTOR's Pareto set).
     pub results: &'static str,
     pub max_changes: u32,
     /// Ride only what this allows, when set.
     pub operator_rule: Option<trip_planner::OperatorRule>,
+    /// Pass these, in order, as `/Trips/plan`'s `via` (each its label and
+    /// the codes it stands for). Empty for a journey's alternatives.
+    pub vias: Vec<StationChoice>,
+    /// `/Trips/plan`'s `avoid`, `avoidStop` and `avoidChange`, as applied.
+    pub avoid: trip_planning_itinerary::AvoidLists,
+}
+
+impl ReplanQuery {
+    /// A departure-time search from `depart_after_min` on `date`, with no
+    /// vias or avoids: what a journey's alternatives ask.
+    pub(crate) fn depart_after(
+        origin: String,
+        destination: String,
+        date: NaiveDate,
+        depart_after_min: u32,
+        results: &'static str,
+        max_changes: u32,
+        operator_rule: Option<trip_planner::OperatorRule>,
+    ) -> Self {
+        Self {
+            origin,
+            destination,
+            date,
+            time: trip_planning_itinerary::TimeBound::DepartAfter(depart_after_min),
+            day_offset: 0,
+            results,
+            max_changes,
+            operator_rule,
+            vias: Vec::new(),
+            avoid: trip_planning_itinerary::AvoidLists::default(),
+        }
+    }
+
+    /// The departure-time bound's minutes, `None` for an arrive-by search.
+    pub(crate) fn depart_after_min(&self) -> Option<u32> {
+        match self.time {
+            trip_planning_itinerary::TimeBound::DepartAfter(minutes) => Some(minutes),
+            trip_planning_itinerary::TimeBound::ArriveBy(_) => None,
+        }
+    }
+
+    /// The bound as searched: `time` moved on by `day_offset` days.
+    fn searched_time(&self) -> trip_planning_itinerary::TimeBound {
+        let days = u32::from(self.day_offset) * 1440;
+        match self.time {
+            trip_planning_itinerary::TimeBound::DepartAfter(m) => {
+                trip_planning_itinerary::TimeBound::DepartAfter(m + days)
+            }
+            trip_planning_itinerary::TimeBound::ArriveBy(m) => {
+                trip_planning_itinerary::TimeBound::ArriveBy(m + days)
+            }
+        }
+    }
+}
+
+/// The search a regular journey's plan options (`journey_templates.plan_options`,
+/// as `/Trips/plan` takes them) ask for, from `origin` to `destination` on
+/// `date` (regular journeys spec 2026-11-06 §6.2): its vias, avoids,
+/// `maxChanges` and `operator` or `avoidOperator`, checked as the route
+/// checks them; a `fastest` search (the sweep repeats it for later or
+/// earlier trains). `preferOperator` only labels an extra option on
+/// `/Trips/plan`, so it is not used; waypoints and transit are refused
+/// (`Err`): the sweep plans one train-only segment.
+pub(crate) async fn regular_plan_query(
+    app: &App,
+    origin: &str,
+    destination: &str,
+    date: NaiveDate,
+    time: trip_planning_itinerary::TimeBound,
+    day_offset: u8,
+    options: &crate::data::regular_journeys::PlanOptions,
+) -> Result<ReplanQuery, String> {
+    let text = |(_, message): (StatusCode, String)| message;
+    if options
+        .waypoints
+        .as_deref()
+        .is_some_and(|w| !w.trim().is_empty())
+    {
+        return Err("waypoints are not planned by the sweep".to_string());
+    }
+    if options
+        .transit
+        .as_deref()
+        .is_some_and(|t| t.trim().eq_ignore_ascii_case("true"))
+    {
+        return Err("transit is not planned by the sweep".to_string());
+    }
+    let avoid_choices = AvoidChoices {
+        avoid: parse_station_list("avoid", options.avoid.as_deref()).map_err(text)?,
+        avoid_stop: parse_station_list("avoidStop", options.avoid_stop.as_deref()).map_err(text)?,
+        avoid_change: parse_station_list("avoidChange", options.avoid_change.as_deref())
+            .map_err(text)?,
+    };
+    check_avoid_conflicts(&avoid_choices, origin, &[], destination).map_err(text)?;
+    let avoid = avoid_choices.applied();
+    let vias = parse_vias(options.via.as_deref()).map_err(text)?;
+    check_via_conflicts(&vias, &avoid, origin, destination).map_err(text)?;
+    let max_changes = match options.max_changes {
+        Some(value) => u32::try_from(value)
+            .ok()
+            .filter(|value| *value <= trip_planning_itinerary::MAX_CHANGES_LIMIT)
+            .ok_or_else(|| "maxChanges is out of range".to_string())?,
+        None => default_max_changes("options", 0, vias.len(), *OPTIONS_SEARCH_SIZE_LIMIT),
+    };
+    check_options_search_size(
+        "options",
+        0,
+        vias.len(),
+        max_changes,
+        *OPTIONS_SEARCH_SIZE_LIMIT,
+    )
+    .map_err(text)?;
+    let params = TripPlanParams {
+        origin: origin.to_string(),
+        destination: destination.to_string(),
+        waypoints: None,
+        date,
+        depart_after: None,
+        arrive_by: None,
+        day_offset: None,
+        across_midnight: None,
+        avoid: None,
+        avoid_stop: None,
+        avoid_change: None,
+        via: None,
+        results: "options".to_string(),
+        alternatives: None,
+        max_changes: None,
+        live: None,
+        transit: None,
+        operator: options.operator.clone(),
+        avoid_operator: options.avoid_operator.clone(),
+        prefer_operator: None,
+    };
+    let operator_rule = parse_operator_filter(app, &params, &[date])
+        .await
+        .map_err(text)?
+        .as_ref()
+        .and_then(OperatorFilter::rule);
+    Ok(ReplanQuery {
+        origin: origin.to_string(),
+        destination: destination.to_string(),
+        date,
+        time,
+        day_offset,
+        results: "fastest",
+        max_changes,
+        operator_rule,
+        vias,
+        avoid,
+    })
+}
+
+/// The schedule publish part of the trip planner's graph marker (what a
+/// regular journey's plan records, `journeys.regular_plan_marker`): the
+/// latest completed schedule publish, `none` before the first.
+pub(crate) async fn schedule_marker(pool: &sqlx::PgPool) -> anyhow::Result<String> {
+    Ok(trip_planning::latest_schedule_publish(pool)
+        .await?
+        .map_or_else(|| "none".to_string(), |at| at.to_rfc3339()))
+}
+
+/// Holds the break sweep's planning slot, for a test that checks another
+/// slot isn't blocked by it.
+#[cfg(test)]
+pub(crate) async fn hold_break_sweep_slot() -> tokio::sync::SemaphorePermit<'static> {
+    SWEEP_PLAN_SLOTS.acquire().await.expect("break sweep slot")
+}
+
+/// Holds every user's planning slot, for the same kind of test.
+#[cfg(test)]
+pub(crate) async fn hold_request_slots() -> tokio::sync::SemaphorePermit<'static> {
+    PLAN_SLOTS.acquire_many(4).await.expect("request slots")
 }
 
 /// Plans one of a journey's alternative searches exactly as
@@ -2551,6 +2738,12 @@ pub(crate) async fn plan_for_journey(
                 "the sweep's planning slot is closed".to_string(),
             )
         })?,
+        ReplanSlot::Regular => REGULAR_PLAN_SLOTS.acquire().await.map_err(|_| {
+            (
+                StatusCode::SERVICE_UNAVAILABLE,
+                "the regular plan sweep's planning slot is closed".to_string(),
+            )
+        })?,
     };
     let permit = Arc::new(permit);
     let marker = graph_marker(app, &transit_planning::enabled_networks()).await?;
@@ -2563,9 +2756,9 @@ pub(crate) async fn plan_for_journey(
         destination: query.destination.clone(),
         waypoints: Vec::new(),
         waypoint_codes: None,
-        avoid: trip_planning_itinerary::AvoidLists::default(),
-        vias: Vec::new(),
-        via_codes: Vec::new(),
+        avoid: query.avoid.clone(),
+        vias: query.vias.iter().map(|via| via.label.clone()).collect(),
+        via_codes: query.vias.iter().map(|via| via.codes.clone()).collect(),
         results: query.results.to_string(),
         // A journey's alternatives keep the bare Pareto set (DS-196).
         alternatives: false,
@@ -2583,7 +2776,7 @@ pub(crate) async fn plan_for_journey(
         &graph,
         &inputs,
         query.date,
-        trip_planning_itinerary::TimeBound::DepartAfter(query.depart_after_min),
+        query.searched_time(),
         &permit,
     )
     .await?;

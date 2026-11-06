@@ -60,6 +60,7 @@ mod personal_tokens_db_tests;
 pub mod preferences;
 pub mod provisional;
 pub mod reference;
+pub mod regular_plan;
 pub mod schedule_rows;
 pub mod stanox_crs;
 pub mod station_stats;
