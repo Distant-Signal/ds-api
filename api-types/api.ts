@@ -1828,7 +1828,23 @@ export type JourneyTemplateLegDetailResponse = { id: number, originCrs: string |
  * for a journey with no `customName` -- computed server-side here instead
  * since a list row has no per-leg detail to compute it from client-side.
  */
-export type JourneyTemplateListItem = { id: number, customName: string | null, createdAt: string, legCount: number, firstOriginCrs: string | null, firstOriginName: string | null, lastDestinationCrs: string | null, lastDestinationName: string | null, active: boolean, daysOfWeek: number | null, };
+export type JourneyTemplateListItem = { id: number, customName: string | null, createdAt: string, legCount: number, firstOriginCrs: string | null, firstOriginName: string | null, lastDestinationCrs: string | null, lastDestinationName: string | null, active: boolean, daysOfWeek: number | null, 
+/**
+ * `"manual"` or `"auto"`, as `GET /JourneyTemplates/{id}` serves it.
+ */
+defaultMatchMode: TemplateMatchMode, 
+/**
+ * The next London date the sweep will add this template's journey on:
+ * `None` when it is paused, not recurring, past its `endsOn`, or has
+ * no matching day left. See `next_run_on`.
+ */
+nextRunOn: string | null, 
+/**
+ * Whether any leg has no departure or arrival time at all. Such a leg
+ * gets no reminder and can't be picked for automatically, so the list
+ * asks for times.
+ */
+hasOpenLegs: boolean, };
 
 export type JsonValue = number | string | boolean | Array<JsonValue> | { [key in string]: JsonValue } | null;
 
@@ -2995,6 +3011,9 @@ endpointSha256: string, };
  * `PUT /JourneyTemplates/{id}`'s body -- full-resource replace (Judgment
  * Calls 1 and 4). Same `TemplateLegRequest` shape as the `Manual` create
  * variant; no `mode` tag needed since there's only one shape for an edit.
+ *
+ * `defaultMatchMode: "auto"` is refused (400) while any leg has no time at
+ * all (`journey_templates::validate_auto_mode_legs`).
  *
  * The six recurrence fields (`days_of_week` through `auto_commit_rule`)
  * are deliberately REQUIRED here, unlike `custom_name`'s

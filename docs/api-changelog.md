@@ -3,6 +3,39 @@
 Changes to the Distant Signal (DS) HTTP API that a client such as DS-MCP
 needs to know about. Newest first. Field names are as served (camelCase).
 
+## 2026-11-06: journey template times and next run
+
+Additive, except that one request a template could make before is now
+refused (below).
+
+- `GET /JourneyTemplates/mine` rows gain:
+  - `defaultMatchMode` (`"manual"` or `"auto"`, as the detail serves it);
+  - `nextRunOn` (`YYYY-MM-DD` or `null`): the next London date the
+    recurring sweep will add the template's journey on. `null` when the
+    template is paused, not recurring (`daysOfWeek` `null`), past its
+    `endsOn`, or has no matching day left. Today counts until today's
+    journey has been added; skipped dates (a deleted occurrence) don't;
+  - `hasOpenLegs`: whether any leg has none of its four time bounds.
+- `POST /JourneyTemplates` with `mode: "fromJourney"`: a train leg with no
+  time window (one made by tracking a known train, or saved from a trip
+  plan) now becomes a template leg with a departure window of 5 minutes
+  either side of its train's booked departure from the leg's origin (the
+  timetable's public time, else the working one, else the tracked train's
+  pinned departure when the leg boards there). Previously it became a leg
+  with no time, which `"auto"` mode committed to the first train of the
+  day. A leg whose train's departure isn't known is still copied with no
+  time; a leg with a window keeps it.
+- `PUT /JourneyTemplates/{id}` refuses `defaultMatchMode: "auto"` while any
+  leg has no departure or arrival time, with 400 and the body "Add a
+  departure or arrival time to each leg so we can pick your train."
+  `"manual"` still accepts such legs. Existing `"auto"` templates with such
+  a leg are left as they are; the notifier no longer picks a train for
+  that leg (it treats it as `"manual"`, with no reminder, until it has a
+  time).
+
+Types: `JourneyTemplateListItem` gains the three fields in
+`api-types/api.ts`. DS-MCP: no change needed.
+
 ## 2026-11-06: Iarnród Éireann trains in groups, delegated and token APIs
 
 Additive; existing keys keep their names and values' meaning.
