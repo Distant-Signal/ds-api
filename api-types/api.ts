@@ -384,7 +384,12 @@ daysOfWeek: number, startsOn?: string | null, endsOn?: string | null,
 /**
  * `manual` (the default: remind me to pick) or `auto`.
  */
-defaultMatchMode?: TemplateMatchMode | null, return?: ReturnJourneyRequest | null, };
+defaultMatchMode?: TemplateMatchMode | null, return?: ReturnJourneyRequest | null, 
+/**
+ * Minutes to get to `originCrs` (0 to 120), margin included: the
+ * leave-by is the first departure less this. `null` for none.
+ */
+stationBufferMinutes?: number | null, };
 
 export type CreateJourneyTemplateResponse = { templateId: number, 
 /**
@@ -1330,6 +1335,17 @@ sourceTemplateId: number | null,
  */
 regularPlan: RegularPlan | null, 
 /**
+ * Minutes to get to the station, for the leave-by. Owner only; `null`
+ * for anyone else or with none set. Additive (2026-11-06).
+ */
+stationBufferMinutes: number | null, 
+/**
+ * When to leave (see `JourneyListItem.leaveBy`). Owner only; still
+ * served after the first train has left (the page hides it).
+ * Additive (2026-11-06).
+ */
+leaveBy: LeaveBy | null, 
+/**
  * The open break, `null` when the journey works.
  */
 openBreak: OpenBreakSummary | null, 
@@ -1610,6 +1626,19 @@ followedFrom?: FollowedFrom,
  */
 sourceTemplateId: number | null, 
 /**
+ * Minutes to get to the station (regular journeys' leave-by). Only on
+ * the caller's own journeys; `null` otherwise. Additive (2026-11-06).
+ */
+stationBufferMinutes: number | null, 
+/**
+ * When to leave: the first timed leg's booked departure (or, with the
+ * first train cancelled, the break's covered suggestion) less
+ * `stationBufferMinutes`. `null` with no buffer, no timed leg, a
+ * cancelled first train with nothing suggested, or on a journey the
+ * caller doesn't own. Additive (2026-11-06).
+ */
+leaveBy: LeaveBy | null, 
+/**
  * Set on a journey another member shared into one or more of the
  * caller's groups (DS-178, `include=shared` only): one entry per such
  * group, newest share first. Such a row is read-only. Absent on the
@@ -1855,7 +1884,12 @@ export type JourneyTemplateDetailResponse = { id: number, customName: string | n
  * target. See `JourneyTemplateListItem` for `nextDate` and
  * `skippedDates`.
  */
-originCrs: string | null, originName: string | null, destinationCrs: string | null, destinationName: string | null, target: TemplateTarget | null, planOptions: PlanOptions | null, usualItinerary: UsualItinerary | null, pairedTemplateId: number | null, nextDate: string | null, skippedDates: Array<string>, };
+originCrs: string | null, originName: string | null, destinationCrs: string | null, destinationName: string | null, target: TemplateTarget | null, planOptions: PlanOptions | null, usualItinerary: UsualItinerary | null, pairedTemplateId: number | null, nextDate: string | null, skippedDates: Array<string>, 
+/**
+ * Minutes to get to the station, for the leave-by (additive); `null`
+ * for none.
+ */
+stationBufferMinutes: number | null, };
 
 export type JourneyTemplateLegDetailResponse = { id: number, originCrs: string | null, originName: string | null, destinationCrs: string | null, destinationName: string | null, departAfter: string | null, departBefore: string | null, arriveAfter: string | null, arriveBefore: string | null, };
 
@@ -1945,6 +1979,25 @@ delayMinutes: number,
  * minutes short).
  */
 slackIfOnTimeMinutes: number, };
+
+/**
+ * When to leave for a journey.
+ */
+export type LeaveBy = { 
+/**
+ * `departure` less the station buffer.
+ */
+at: string, 
+/**
+ * The departure it is timed from: the first timed leg's booked
+ * departure, or the suggestion's.
+ */
+departure: string, basis: LeaveByBasis, };
+
+/**
+ * What a leave-by is timed from.
+ */
+export type LeaveByBasis = "booked" | "suggestion";
 
 /**
  * One row of `GET .../legs/{legId}/candidates`: the shared calling-point
@@ -2461,16 +2514,19 @@ linkOperators?: Array<string>, };
  * 15 or 30; `null` for the default, 15); `quietHours` (`{start, end,
  * timezone}`, `HH:MM` local times and an IANA zone, or `null` for none);
  * `snoozedUntil` (pushes held until then as in quiet hours, at most a
- * week ahead; `null` when not snoozed).
+ * week ahead; `null` when not snoozed). Regular journeys (additive,
+ * 2026-11-06): `leaveBy` (the leave-by push, on), `leaveByQuietHours`
+ * (it still comes in quiet hours, on), `leaveByLeadMinutes` (0 to 5
+ * minutes early, 0) and `morningSummary` (off).
  */
-export type NotificationPreferences = { journeySuggestions: boolean, lineStatus: boolean, trainDelay: boolean, trainCancel: boolean, predictedStart: boolean, stationSkip: boolean, templateAttention: boolean, delayThresholdMinutes: 5 | 10 | 15 | 30 | null, quietHours: QuietHours | null, snoozedUntil: string | null, };
+export type NotificationPreferences = { journeySuggestions: boolean, lineStatus: boolean, trainDelay: boolean, trainCancel: boolean, predictedStart: boolean, stationSkip: boolean, templateAttention: boolean, leaveBy: boolean, leaveByQuietHours: boolean, leaveByLeadMinutes: 0 | 1 | 2 | 3 | 4 | 5, morningSummary: boolean, delayThresholdMinutes: 5 | 10 | 15 | 30 | null, quietHours: QuietHours | null, snoozedUntil: string | null, };
 
 /**
  * A `PUT` body: only the fields present change, so a client that knows
  * only `journeySuggestions` keeps working. `null` clears the threshold
  * (back to the default) or the quiet hours. Unknown fields are refused.
  */
-export type NotificationPreferencesUpdate = { journeySuggestions?: boolean, lineStatus?: boolean, trainDelay?: boolean, trainCancel?: boolean, predictedStart?: boolean, stationSkip?: boolean, templateAttention?: boolean, delayThresholdMinutes?: 5 | 10 | 15 | 30 | null, quietHours?: QuietHours | null, snoozedUntil?: string | null, };
+export type NotificationPreferencesUpdate = { journeySuggestions?: boolean, lineStatus?: boolean, trainDelay?: boolean, trainCancel?: boolean, predictedStart?: boolean, stationSkip?: boolean, templateAttention?: boolean, leaveBy?: boolean, leaveByQuietHours?: boolean, leaveByLeadMinutes?: 0 | 1 | 2 | 3 | 4 | 5, morningSummary?: boolean, delayThresholdMinutes?: 5 | 10 | 15 | 30 | null, quietHours?: QuietHours | null, snoozedUntil?: string | null, };
 
 /**
  * The open break as `GET /Journeys/{id}` serves it.
@@ -3095,7 +3151,12 @@ export type PutJourneyTemplateRequest = { customName?: string | null, legs: Arra
  * unless the template already has a target; `planOptions` and
  * `usualItinerary` need a target.
  */
-originCrs?: string, destinationCrs?: string, target?: TemplateTarget, planOptions?: PlanOptions, usualItinerary?: UsualItinerary, };
+originCrs?: string, destinationCrs?: string, target?: TemplateTarget, planOptions?: PlanOptions, usualItinerary?: UsualItinerary, 
+/**
+ * Minutes to get to the station (0 to 120); `null` clears it, absent
+ * keeps it (additive, leave by).
+ */
+stationBufferMinutes?: number | null, };
 
 export type QuietHours = { start: string, end: string, timezone: string, };
 
@@ -3288,7 +3349,11 @@ export type ResolveMatchedOn = "rsid" | "rsidPrefix" | "timetable";
  * The return journey of a plan-mode create: its own target, options and
  * usual itinerary.
  */
-export type ReturnJourneyRequest = { customName?: string | null, target: TemplateTarget, planOptions?: PlanOptions | null, usualItinerary: UsualItinerary, };
+export type ReturnJourneyRequest = { customName?: string | null, target: TemplateTarget, planOptions?: PlanOptions | null, usualItinerary: UsualItinerary, 
+/**
+ * Minutes to get to the return journey's origin (0 to 120).
+ */
+stationBufferMinutes?: number | null, };
 
 /**
  * `journey_revisions.actor` (its CHECK constraint).
@@ -3657,6 +3722,23 @@ deletedJourneyIds: Array<number>, };
  * feed's own JSON, untouched.
  */
 export type StationAccessibility = { stationAccessibility?: JsonValue, staffAssistance?: JsonValue, toiletsAndChanging?: JsonValue, lifts?: JsonValue, transportLinks?: JsonValue, cycling?: JsonValue, carParks?: JsonValue, dropOffPickUp?: JsonValue, platformFacilities?: JsonValue, stationFacilities?: JsonValue, helpAndSupport?: JsonValue, loungesAndWaiting?: JsonValue, };
+
+/**
+ * `GET /JourneyTemplates/station-buffer`'s response.
+ */
+export type StationBufferPrefill = { minutes: number | null, };
+
+/**
+ * `PUT /Journeys/{id}/station-buffer`'s body: the minutes to get to the
+ * station for this journey only, 0 to 120, or `null` for no leave-by.
+ */
+export type StationBufferRequest = { minutes: number | null, };
+
+/**
+ * `PUT /Journeys/{id}/station-buffer`'s response, and
+ * `GET /JourneyTemplates/station-buffer`'s `minutes`.
+ */
+export type StationBufferResponse = { stationBufferMinutes: number | null, leaveBy: LeaveBy | null, };
 
 /**
  * `GET /public/stations/codes`'s body.

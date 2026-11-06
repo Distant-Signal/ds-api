@@ -3064,6 +3064,17 @@ pub struct JourneyListItem {
     /// it wasn't made from one or that was deleted. Additive (2026-11-06).
     #[sqlx(skip)]
     pub source_template_id: Option<i64>,
+    /// Minutes to get to the station (regular journeys' leave-by). Only on
+    /// the caller's own journeys; `null` otherwise. Additive (2026-11-06).
+    #[sqlx(skip)]
+    pub station_buffer_minutes: Option<i16>,
+    /// When to leave: the first timed leg's booked departure (or, with the
+    /// first train cancelled, the break's covered suggestion) less
+    /// `stationBufferMinutes`. `null` with no buffer, no timed leg, a
+    /// cancelled first train with nothing suggested, or on a journey the
+    /// caller doesn't own. Additive (2026-11-06).
+    #[sqlx(skip)]
+    pub leave_by: Option<crate::data::leave_by::LeaveBy>,
     /// Set on a journey another member shared into one or more of the
     /// caller's groups (DS-178, `include=shared` only): one entry per such
     /// group, newest share first. Such a row is read-only. Absent on the
@@ -3586,9 +3597,13 @@ pub(crate) async fn list_journeys_for_user_capped(
     .fetch_all(pool)
     .await?;
     let templates: std::collections::HashMap<i64, i64> = templates.into_iter().collect();
+    let mut leave_by = crate::data::leave_by::for_journeys(pool, &ids, user_id).await?;
     for row in &mut rows {
         row.open_break_id = open.get(&row.id).copied();
         row.source_template_id = templates.get(&row.id).copied();
+        let own = leave_by.remove(&row.id).unwrap_or_default();
+        row.station_buffer_minutes = own.station_buffer_minutes;
+        row.leave_by = own.leave_by;
         let followed_from = followed.remove(&row.id);
         let shared_via = shared.remove(&row.id).unwrap_or_default();
         if followed_from.is_some() || !shared_via.is_empty() {

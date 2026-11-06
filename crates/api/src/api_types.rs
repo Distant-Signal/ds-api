@@ -85,6 +85,9 @@ fn visit_roots(v: &mut Collector) {
     v.visit::<crate::routes::journey_templates::MaterializeTemplateResponse>();
     v.visit::<crate::routes::journey_templates::SetTemplateActiveResponse>();
     v.visit::<crate::routes::journey_templates::SkipTemplateDateResponse>();
+    v.visit::<crate::routes::journey_templates::StationBufferPrefillResponse>();
+    v.visit::<crate::routes::journeys::StationBufferBody>();
+    v.visit::<crate::routes::journeys::StationBufferResponse>();
     // Breaks, alternatives and replans.
     v.visit::<crate::data::journey_alternatives::SuggestionSet>();
     v.visit::<crate::routes::journey_replan::BreakResponse>();

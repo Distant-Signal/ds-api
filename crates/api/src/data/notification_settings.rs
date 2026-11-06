@@ -1,5 +1,6 @@
 //! A user's push settings (`notification_preferences`, DS-153): a switch
-//! per kind of push, their delay threshold and their quiet hours. No row
+//! per kind of push, their delay threshold, their quiet hours and the
+//! regular journeys' leave-by settings. No row
 //! means every switch on, the notifier's default threshold and no quiet
 //! hours: the behaviour before any of this existed. The notifier reads
 //! the same row in each of its candidate queries.
@@ -14,6 +15,9 @@ pub const MAX_SNOOZE: chrono::TimeDelta = chrono::TimeDelta::days(7);
 /// The thresholds a user may pick, in minutes. `None` is the notifier's
 /// `TRAIN_DELAY_THRESHOLD_MINUTES` (15 unless the operator changed it).
 pub const DELAY_THRESHOLDS: [i16; 4] = [5, 10, 15, 30];
+
+/// The leave-by lead a user may pick, in minutes (and its CHECK).
+pub const LEAVE_BY_LEAD_MINUTES: std::ops::RangeInclusive<i16> = 0..=5;
 
 /// A daily window in which pushes are held (crates/notifier/src/hold.rs).
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -38,6 +42,15 @@ pub struct NotificationSettings {
     pub predicted_start: bool,
     pub station_skip: bool,
     pub template_attention: bool,
+    /// Regular journeys' leave-by push (on by default).
+    pub leave_by: bool,
+    /// Whether a leave-by push still comes in quiet hours (on by default;
+    /// a snooze always stops it).
+    pub leave_by_quiet_hours: bool,
+    /// Minutes before the leave-by time to send it, 0 to 5.
+    pub leave_by_lead_minutes: i16,
+    /// One push an hour before the day's first leave-by (off by default).
+    pub morning_summary: bool,
     pub delay_threshold_minutes: Option<i16>,
     pub quiet_hours: Option<QuietHours>,
     /// Pushes are held until then, as in quiet hours. `None` when not
@@ -55,6 +68,10 @@ impl Default for NotificationSettings {
             predicted_start: true,
             station_skip: true,
             template_attention: true,
+            leave_by: true,
+            leave_by_quiet_hours: true,
+            leave_by_lead_minutes: 0,
+            morning_summary: false,
             delay_threshold_minutes: None,
             quiet_hours: None,
             snoozed_until: None,
@@ -74,6 +91,10 @@ pub struct NotificationSettingsChange {
     pub predicted_start: Option<bool>,
     pub station_skip: Option<bool>,
     pub template_attention: Option<bool>,
+    pub leave_by: Option<bool>,
+    pub leave_by_quiet_hours: Option<bool>,
+    pub leave_by_lead_minutes: Option<i16>,
+    pub morning_summary: Option<bool>,
     pub delay_threshold_minutes: Option<Option<i16>>,
     pub quiet_hours: Option<Option<QuietHours>>,
     pub snoozed_until: Option<Option<chrono::DateTime<chrono::Utc>>>,
@@ -92,6 +113,10 @@ struct SettingsRow {
     predicted_start: bool,
     station_skip: bool,
     template_attention: bool,
+    leave_by: bool,
+    leave_by_quiet_hours: bool,
+    leave_by_lead_minutes: i16,
+    morning_summary: bool,
     delay_threshold_minutes: Option<i16>,
     quiet_hours_start: Option<NaiveTime>,
     quiet_hours_end: Option<NaiveTime>,
@@ -100,7 +125,8 @@ struct SettingsRow {
 }
 
 const SETTINGS_COLUMNS: &str = "journey_suggestions, line_status, train_delay, train_cancel, \
-     predicted_start, station_skip, template_attention, delay_threshold_minutes, \
+     predicted_start, station_skip, template_attention, leave_by, leave_by_quiet_hours, \
+     leave_by_lead_minutes, morning_summary, delay_threshold_minutes, \
      quiet_hours_start, quiet_hours_end, quiet_hours_timezone, \
      CASE WHEN snoozed_until > now() THEN snoozed_until END AS snoozed_until";
 
@@ -126,6 +152,10 @@ impl From<SettingsRow> for NotificationSettings {
             predicted_start: row.predicted_start,
             station_skip: row.station_skip,
             template_attention: row.template_attention,
+            leave_by: row.leave_by,
+            leave_by_quiet_hours: row.leave_by_quiet_hours,
+            leave_by_lead_minutes: row.leave_by_lead_minutes,
+            morning_summary: row.morning_summary,
             delay_threshold_minutes: row.delay_threshold_minutes,
             quiet_hours,
             snoozed_until: row.snoozed_until,
@@ -175,6 +205,10 @@ pub async fn update(
              quiet_hours_end = CASE WHEN $11 THEN $13 ELSE quiet_hours_end END, \
              quiet_hours_timezone = CASE WHEN $11 THEN $14 ELSE quiet_hours_timezone END, \
              snoozed_until = CASE WHEN $15 THEN $16 ELSE snoozed_until END, \
+             leave_by = COALESCE($17, leave_by), \
+             leave_by_quiet_hours = COALESCE($18, leave_by_quiet_hours), \
+             leave_by_lead_minutes = COALESCE($19, leave_by_lead_minutes), \
+             morning_summary = COALESCE($20, morning_summary), \
              updated_at = now() \
          WHERE user_id = $1 \
          RETURNING {SETTINGS_COLUMNS}"
@@ -195,6 +229,10 @@ pub async fn update(
     .bind(quiet_hours.map(|q| q.timezone.clone()))
     .bind(change.snoozed_until.is_some())
     .bind(change.snoozed_until.flatten())
+    .bind(change.leave_by)
+    .bind(change.leave_by_quiet_hours)
+    .bind(change.leave_by_lead_minutes)
+    .bind(change.morning_summary)
     .fetch_one(&mut *tx)
     .await?;
     tx.commit().await?;

@@ -61,6 +61,8 @@ pub const USER_KEYED_TABLES: &[&str] = &[
     "pinned_operators",
     "pinned_stations",
     "push_subscriptions",
+    "regular_journey_push_state",
+    "regular_journey_summaries",
     "sessions",
     "tracked_train_tickets",
     "train_notification_state",
@@ -213,6 +215,10 @@ pub struct NotificationStateExport {
     pub journey_legs: Value,
     /// Pushes held for the user's quiet hours, not sent yet (DS-153).
     pub held: Value,
+    /// Leave-by pushes sent per journey (regular journeys, phase 2).
+    pub leave_by: Value,
+    /// Morning summaries sent, by day (kept 7 days).
+    pub morning_summaries: Value,
 }
 
 /// Runs `inner` (a query yielding one `jsonb` column per row, with `$1`
@@ -447,6 +453,20 @@ pub async fn export_account(pool: &PgPool, user_id: &str) -> Result<Option<Accou
                 user_id,
             )
             .await?,
+            leave_by: rows(
+                pool,
+                "SELECT to_jsonb(s) FROM regular_journey_push_state s WHERE user_id = $1 \
+                 ORDER BY journey_id",
+                user_id,
+            )
+            .await?,
+            morning_summaries: rows(
+                pool,
+                "SELECT to_jsonb(s) FROM regular_journey_summaries s WHERE user_id = $1 \
+                 ORDER BY service_date",
+                user_id,
+            )
+            .await?,
         },
         omitted: vec![
             "sessions.id and sessions.refresh_token: hashed session credentials",
@@ -585,6 +605,9 @@ pub(crate) mod db_tests {
         exec(pool, &format!("INSERT INTO journey_legs (journey_id, leg_order, service_date, train_subscription_id) VALUES ({journey}, 0, CURRENT_DATE, {sub})"), &[]).await;
         let leg = format!("(SELECT id FROM journey_legs WHERE journey_id = {journey} LIMIT 1)");
         exec(pool, &format!("INSERT INTO journey_leg_notification_state (user_id, journey_leg_id, last_notified_skipped, last_notified_at) VALUES ($1, {leg}, false, NOW())"), u).await;
+        // Regular journeys' leave-by bookkeeping and a morning summary.
+        exec(pool, &format!("INSERT INTO regular_journey_push_state (journey_id, user_id, leave_leg_id, leave_by_sent, leave_by_sent_at, pushes) VALUES ({journey}, $1, {leg}, NOW(), NOW(), 1)"), u).await;
+        exec(pool, "INSERT INTO regular_journey_summaries (user_id, service_date, sent_at) VALUES ($1, CURRENT_DATE, NOW())", u).await;
         exec(pool, &format!("INSERT INTO unlisted_links (token_hash, resource_type, resource_id, created_by) VALUES ('tok-' || $1, 'journey', {journey}::text, $1)"), u).await;
         // Mid-journey changes: a booked revision, a break and the opt-out.
         exec(pool, &format!("INSERT INTO journey_revisions (journey_id, revision_no, reason, actor, is_compensation_baseline) VALUES ({journey}, 1, 'booked', 'owner', TRUE)"), &[]).await;
@@ -855,7 +878,13 @@ pub(crate) mod db_tests {
                 .unwrap_or_else(|| panic!("{key} is not an array"));
             assert!(!rows.is_empty(), "export category {key} is empty");
         }
-        for key in ["trains", "lines", "journeyLegs"] {
+        for key in [
+            "trains",
+            "lines",
+            "journeyLegs",
+            "leaveBy",
+            "morningSummaries",
+        ] {
             assert!(
                 !json["notificationState"][key]
                     .as_array()

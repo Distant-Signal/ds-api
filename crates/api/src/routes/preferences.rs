@@ -51,7 +51,10 @@ pub fn router() -> Router {
 /// 15 or 30; `null` for the default, 15); `quietHours` (`{start, end,
 /// timezone}`, `HH:MM` local times and an IANA zone, or `null` for none);
 /// `snoozedUntil` (pushes held until then as in quiet hours, at most a
-/// week ahead; `null` when not snoozed).
+/// week ahead; `null` when not snoozed). Regular journeys (additive,
+/// 2026-11-06): `leaveBy` (the leave-by push, on), `leaveByQuietHours`
+/// (it still comes in quiet hours, on), `leaveByLeadMinutes` (0 to 5
+/// minutes early, 0) and `morningSummary` (off).
 #[derive(Debug, Serialize, schemars::JsonSchema, ts_rs::TS)]
 #[serde(rename_all = "camelCase")]
 #[expect(
@@ -66,6 +69,11 @@ pub(crate) struct NotificationPreferences {
     predicted_start: bool,
     station_skip: bool,
     template_attention: bool,
+    leave_by: bool,
+    leave_by_quiet_hours: bool,
+    #[ts(type = "0 | 1 | 2 | 3 | 4 | 5")]
+    leave_by_lead_minutes: i16,
+    morning_summary: bool,
     // `notification_settings::DELAY_THRESHOLDS` (and its CHECK constraint).
     #[ts(type = "5 | 10 | 15 | 30 | null")]
     delay_threshold_minutes: Option<i16>,
@@ -106,28 +114,23 @@ pub(crate) struct NotificationPreferencesUpdate {
     station_skip: Option<bool>,
     #[ts(optional)]
     template_attention: Option<bool>,
-    #[serde(default, deserialize_with = "present")]
+    #[ts(optional)]
+    leave_by: Option<bool>,
+    #[ts(optional)]
+    leave_by_quiet_hours: Option<bool>,
+    #[ts(optional, type = "0 | 1 | 2 | 3 | 4 | 5")]
+    leave_by_lead_minutes: Option<i16>,
+    #[ts(optional)]
+    morning_summary: Option<bool>,
+    #[serde(default, deserialize_with = "super::present")]
     #[ts(optional, type = "5 | 10 | 15 | 30 | null")]
     delay_threshold_minutes: Option<Option<i16>>,
-    #[serde(default, deserialize_with = "present")]
+    #[serde(default, deserialize_with = "super::present")]
     #[ts(optional)]
     quiet_hours: Option<Option<QuietHoursBody>>,
-    #[serde(default, deserialize_with = "present")]
+    #[serde(default, deserialize_with = "super::present")]
     #[ts(optional)]
     snoozed_until: Option<Option<chrono::DateTime<chrono::Utc>>>,
-}
-
-/// A field that is present, `null` or not: `Some(None)` for `null`.
-#[expect(
-    clippy::option_option,
-    reason = "absent (unchanged) and null (cleared) are different requests"
-)]
-fn present<'de, D, T>(deserializer: D) -> Result<Option<Option<T>>, D::Error>
-where
-    D: serde::Deserializer<'de>,
-    T: serde::Deserialize<'de>,
-{
-    <Option<T> as serde::Deserialize>::deserialize(deserializer).map(Some)
 }
 
 const QUIET_TIME_FORMAT: &str = "%H:%M";
@@ -151,6 +154,11 @@ fn validate_notification_update(
         && !notification_settings::DELAY_THRESHOLDS.contains(&minutes)
     {
         return Err("The delay threshold must be 5, 10, 15 or 30 minutes.".to_string());
+    }
+    if let Some(minutes) = body.leave_by_lead_minutes
+        && !notification_settings::LEAVE_BY_LEAD_MINUTES.contains(&minutes)
+    {
+        return Err("The leave-by reminder can come up to 5 minutes early.".to_string());
     }
     let quiet_hours = match body.quiet_hours {
         None => None,
@@ -183,6 +191,10 @@ fn validate_notification_update(
         predicted_start: body.predicted_start,
         station_skip: body.station_skip,
         template_attention: body.template_attention,
+        leave_by: body.leave_by,
+        leave_by_quiet_hours: body.leave_by_quiet_hours,
+        leave_by_lead_minutes: body.leave_by_lead_minutes,
+        morning_summary: body.morning_summary,
         delay_threshold_minutes: body.delay_threshold_minutes,
         quiet_hours,
         // A time already past is no snooze: stored as such, read as null.
@@ -200,6 +212,10 @@ impl From<notification_settings::NotificationSettings> for NotificationPreferenc
             predicted_start: settings.predicted_start,
             station_skip: settings.station_skip,
             template_attention: settings.template_attention,
+            leave_by: settings.leave_by,
+            leave_by_quiet_hours: settings.leave_by_quiet_hours,
+            leave_by_lead_minutes: settings.leave_by_lead_minutes,
+            morning_summary: settings.morning_summary,
             delay_threshold_minutes: settings.delay_threshold_minutes,
             quiet_hours: settings.quiet_hours.map(|quiet| QuietHoursBody {
                 start: quiet.start.format(QUIET_TIME_FORMAT).to_string(),
@@ -600,6 +616,9 @@ mod tests {
         let check = |json| validate_notification_update(update(json).unwrap(), chrono::Utc::now());
         assert!(check(serde_json::json!({ "delayThresholdMinutes": 30 })).is_ok());
         assert!(check(serde_json::json!({ "delayThresholdMinutes": 20 })).is_err());
+        assert!(check(serde_json::json!({ "leaveByLeadMinutes": 0 })).is_ok());
+        assert!(check(serde_json::json!({ "leaveByLeadMinutes": 5 })).is_ok());
+        assert!(check(serde_json::json!({ "leaveByLeadMinutes": 6 })).is_err());
         let quiet = |start: &str, end: &str, zone: &str| serde_json::json!({ "quietHours": { "start": start, "end": end, "timezone": zone } });
         let ok = check(quiet("22:00", "07:00", "Europe/London")).unwrap();
         assert_eq!(

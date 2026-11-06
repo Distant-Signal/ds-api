@@ -657,6 +657,17 @@
             "description": "Whether the CALLER owns this journey, as opposed to reading it via a\ngroup it's been shared into (`journey_readable_by`). The frontend\ngates every owner-only action (share-to-group button, unmatched-leg\ncandidate picker, matched-leg \"Change train\") on this flag -- the\nbackend still refuses all three regardless for a non-owner, but\nshowing them at all to a fellow group member who can only ever get a\n404 is its own bug. See this plan's final-review findings (I1).",
             "type": "boolean"
           },
+          "leaveBy": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/LeaveBy"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "When to leave (see `JourneyListItem.leaveBy`). Owner only; still\nserved after the first train has left (the page hides it).\nAdditive (2026-11-06)."
+          },
           "legs": {
             "items": {
               "$ref": "#/components/schemas/JourneyLegDetailResponse"
@@ -715,6 +726,16 @@
           "sourceTemplateId": {
             "description": "The regular journey (`journey_templates.id`) this journey was made\nfrom: the page links to it and offers \"Skip\". Owner only; `null`\nfor anyone else, when it wasn't made from one, or when that was\ndeleted. Additive (2026-11-06).",
             "format": "int64",
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "stationBufferMinutes": {
+            "description": "Minutes to get to the station, for the leave-by. Owner only; `null`\nfor anyone else or with none set. Additive (2026-11-06).",
+            "format": "int16",
+            "maximum": 32767,
+            "minimum": -32768,
             "type": [
               "integer",
               "null"
@@ -1171,6 +1192,17 @@
               "null"
             ]
           },
+          "leaveBy": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/LeaveBy"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "When to leave: the first timed leg's booked departure (or, with the\nfirst train cancelled, the break's covered suggestion) less\n`stationBufferMinutes`. `null` with no buffer, no timed leg, a\ncancelled first train with nothing suggested, or on a journey the\ncaller doesn't own. Additive (2026-11-06)."
+          },
           "legCount": {
             "description": "How many legs the journey has.",
             "format": "int64",
@@ -1257,6 +1289,16 @@
           "startedLegCount": {
             "format": "int64",
             "type": "integer"
+          },
+          "stationBufferMinutes": {
+            "description": "Minutes to get to the station (regular journeys' leave-by). Only on\nthe caller's own journeys; `null` otherwise. Additive (2026-11-06).",
+            "format": "int16",
+            "maximum": 32767,
+            "minimum": -32768,
+            "type": [
+              "integer",
+              "null"
+            ]
           },
           "status": {
             "anyOf": [
@@ -1768,6 +1810,45 @@
         ],
         "type": "object"
       },
+      "LeaveBy": {
+        "description": "When to leave for a journey.",
+        "properties": {
+          "at": {
+            "description": "`departure` less the station buffer.",
+            "format": "date-time",
+            "type": "string"
+          },
+          "basis": {
+            "$ref": "#/components/schemas/LeaveByBasis"
+          },
+          "departure": {
+            "description": "The departure it is timed from: the first timed leg's booked\ndeparture, or the suggestion's.",
+            "format": "date-time",
+            "type": "string"
+          }
+        },
+        "required": [
+          "at",
+          "departure",
+          "basis"
+        ],
+        "type": "object"
+      },
+      "LeaveByBasis": {
+        "description": "What a leave-by is timed from.",
+        "oneOf": [
+          {
+            "const": "booked",
+            "description": "The plan's first timed leg (lateness never moves it).",
+            "type": "string"
+          },
+          {
+            "const": "suggestion",
+            "description": "The first train is cancelled: the open break's best covered\nsuggestion.",
+            "type": "string"
+          }
+        ]
+      },
       "LegConnection": {
         "description": "The change onto a leg from the one before it (`connection` on every\nleg of `GET /Journeys/{id}` after the first).",
         "properties": {
@@ -2155,7 +2236,7 @@
         "type": "object"
       },
       "NotificationPreferences": {
-        "description": "`GET`/`PUT /public/preferences/notifications`: the user's push\nsettings beyond the browser's own permission (mid-journey changes spec\n2026-10-22 §6.5; DS-153). A switch per kind of push, each on unless\nturned off: `journeySuggestions` (suggested trains when a journey\nbreaks), `lineStatus`, `trainDelay`, `trainCancel`, `predictedStart`,\n`stationSkip` and `templateAttention`; `delayThresholdMinutes` (5, 10,\n15 or 30; `null` for the default, 15); `quietHours` (`{start, end,\ntimezone}`, `HH:MM` local times and an IANA zone, or `null` for none);\n`snoozedUntil` (pushes held until then as in quiet hours, at most a\nweek ahead; `null` when not snoozed).",
+        "description": "`GET`/`PUT /public/preferences/notifications`: the user's push\nsettings beyond the browser's own permission (mid-journey changes spec\n2026-10-22 §6.5; DS-153). A switch per kind of push, each on unless\nturned off: `journeySuggestions` (suggested trains when a journey\nbreaks), `lineStatus`, `trainDelay`, `trainCancel`, `predictedStart`,\n`stationSkip` and `templateAttention`; `delayThresholdMinutes` (5, 10,\n15 or 30; `null` for the default, 15); `quietHours` (`{start, end,\ntimezone}`, `HH:MM` local times and an IANA zone, or `null` for none);\n`snoozedUntil` (pushes held until then as in quiet hours, at most a\nweek ahead; `null` when not snoozed). Regular journeys (additive,\n2026-11-06): `leaveBy` (the leave-by push, on), `leaveByQuietHours`\n(it still comes in quiet hours, on), `leaveByLeadMinutes` (0 to 5\nminutes early, 0) and `morningSummary` (off).",
         "properties": {
           "delayThresholdMinutes": {
             "format": "int16",
@@ -2169,7 +2250,22 @@
           "journeySuggestions": {
             "type": "boolean"
           },
+          "leaveBy": {
+            "type": "boolean"
+          },
+          "leaveByLeadMinutes": {
+            "format": "int16",
+            "maximum": 32767,
+            "minimum": -32768,
+            "type": "integer"
+          },
+          "leaveByQuietHours": {
+            "type": "boolean"
+          },
           "lineStatus": {
+            "type": "boolean"
+          },
+          "morningSummary": {
             "type": "boolean"
           },
           "predictedStart": {
@@ -2212,7 +2308,11 @@
           "trainCancel",
           "predictedStart",
           "stationSkip",
-          "templateAttention"
+          "templateAttention",
+          "leaveBy",
+          "leaveByQuietHours",
+          "leaveByLeadMinutes",
+          "morningSummary"
         ],
         "type": "object"
       },

@@ -53,6 +53,8 @@ pub struct JourneyTemplateRow {
     pub plan_options: Option<sqlx::types::Json<serde_json::Value>>,
     pub usual_itinerary: Option<sqlx::types::Json<serde_json::Value>>,
     pub paired_template_id: Option<i64>,
+    /// Minutes to get to the station, for the leave-by (phase 2).
+    pub station_buffer_minutes: Option<i16>,
 }
 
 impl JourneyTemplateRow {
@@ -546,7 +548,8 @@ where
                 jt.ends_on, jt.default_match_mode, jt.auto_commit_rule, jt.created_at, \
                 jt.updated_at, jt.origin_crs, so.name AS origin_name, jt.destination_crs, \
                 sd.name AS destination_name, jt.target_kind, jt.target_time, \
-                jt.target_day_offset, jt.plan_options, jt.usual_itinerary, jt.paired_template_id \
+                jt.target_day_offset, jt.plan_options, jt.usual_itinerary, jt.paired_template_id, \
+                jt.station_buffer_minutes \
          FROM journey_templates jt \
          LEFT JOIN stations so ON so.crs = UPPER(jt.origin_crs)::bpchar \
          LEFT JOIN stations sd ON sd.crs = UPPER(jt.destination_crs)::bpchar \
@@ -801,6 +804,7 @@ pub async fn replace_template(
                 target_day_offset = COALESCE($14, target_day_offset), \
                 plan_options = COALESCE($15, plan_options), \
                 usual_itinerary = COALESCE($16, usual_itinerary), \
+                station_buffer_minutes = CASE WHEN $17 THEN $18 ELSE station_buffer_minutes END, \
                 updated_at = NOW() \
          WHERE id = $8 AND user_id = $9",
     )
@@ -820,6 +824,8 @@ pub async fn replace_template(
     .bind(target.target.as_ref().map(|t| t.day_offset))
     .bind(target.plan_options.as_ref().map(sqlx::types::Json))
     .bind(target.usual_itinerary.as_ref().map(sqlx::types::Json))
+    .bind(target.station_buffer_minutes.is_some())
+    .bind(target.station_buffer_minutes.flatten())
     .execute(&mut *tx)
     .await?;
     if result.rows_affected() == 0 {
@@ -849,6 +855,8 @@ pub struct TargetUpdate {
     pub target: Option<crate::data::regular_journeys::TemplateTarget>,
     pub plan_options: Option<crate::data::regular_journeys::PlanOptions>,
     pub usual_itinerary: Option<crate::data::regular_journeys::UsualItinerary>,
+    /// `Some(None)` clears the station buffer.
+    pub station_buffer_minutes: Option<Option<i16>>,
 }
 
 /// Deletes a template the caller owns. Cascades into
@@ -982,12 +990,15 @@ pub async fn materialize_template(
     }
 
     let (journey_id,): (i64,) = sqlx::query_as(
-        "INSERT INTO journeys (user_id, custom_name, source_template_id) \
-         VALUES ($1, $2, $3) RETURNING id",
+        "INSERT INTO journeys (user_id, custom_name, source_template_id, station_buffer_minutes) \
+         VALUES ($1, $2, $3, $4) RETURNING id",
     )
     .bind(user_id)
     .bind(&template.custom_name)
     .bind(template_id)
+    // The occurrence keeps its own copy (regular journeys §5.1): a later
+    // change to the template doesn't move a day already made.
+    .bind(template.station_buffer_minutes)
     .fetch_one(&mut *tx)
     .await?;
 

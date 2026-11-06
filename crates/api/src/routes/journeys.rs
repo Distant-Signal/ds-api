@@ -114,6 +114,11 @@ pub fn router() -> Router {
             "/Journeys/{journey_id}/share-link/extend",
             axum::routing::post(extend_journey_share_link),
         )
+        // Regular journeys' leave-by (design §5.2), cookie-only.
+        .route(
+            "/Journeys/{journey_id}/station-buffer",
+            axum::routing::put(put_station_buffer),
+        )
         // Following a journey shared with the caller (DS-146), cookie-only.
         .route(
             "/Journeys/{journey_id}/follow",
@@ -1556,6 +1561,60 @@ pub(crate) struct JourneyDetailResponse {
     /// Owner only; `null` for anyone else and when it was never planned.
     /// Additive (2026-11-06).
     regular_plan: Option<crate::data::regular_plan::RegularPlanResponse>,
+    /// Minutes to get to the station, for the leave-by. Owner only; `null`
+    /// for anyone else or with none set. Additive (2026-11-06).
+    station_buffer_minutes: Option<i16>,
+    /// When to leave (see `JourneyListItem.leaveBy`). Owner only; still
+    /// served after the first train has left (the page hides it).
+    /// Additive (2026-11-06).
+    leave_by: Option<crate::data::leave_by::LeaveBy>,
+}
+
+/// `PUT /Journeys/{id}/station-buffer`'s body: the minutes to get to the
+/// station for this journey only, 0 to 120, or `null` for no leave-by.
+#[derive(Debug, Deserialize, ts_rs::TS)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+#[ts(rename = "StationBufferRequest")]
+pub(crate) struct StationBufferBody {
+    minutes: Option<i16>,
+}
+
+/// `PUT /Journeys/{id}/station-buffer`'s response, and
+/// `GET /JourneyTemplates/station-buffer`'s `minutes`.
+#[derive(Debug, Serialize, ts_rs::TS)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct StationBufferResponse {
+    station_buffer_minutes: Option<i16>,
+    leave_by: Option<crate::data::leave_by::LeaveBy>,
+}
+
+/// `PUT /Journeys/{id}/station-buffer` `{minutes | null}`: changes the
+/// leave-by's buffer for this one journey (a regular journey's day, or any
+/// journey). Owner only (404 otherwise); 400 outside 0 to 120. Answers with
+/// the buffer and the leave-by it gives.
+async fn put_station_buffer(
+    State(app): State<App>,
+    user: AuthenticatedUser,
+    Path(journey_id): Path<i64>,
+    Json(body): Json<StationBufferBody>,
+) -> Result<Json<StationBufferResponse>, (StatusCode, String)> {
+    crate::data::leave_by::validate_station_buffer(body.minutes)
+        .map_err(|message| (StatusCode::BAD_REQUEST, message))?;
+    if !crate::data::leave_by::set_journey_buffer(&app.database, journey_id, &user.id, body.minutes)
+        .await
+        .map_err(internal_error("set station buffer"))?
+    {
+        return Err((StatusCode::NOT_FOUND, "no journey with that id".to_string()));
+    }
+    let own = crate::data::leave_by::for_journeys(&app.database, &[journey_id], &user.id)
+        .await
+        .map_err(internal_error("read leave-by"))?
+        .remove(&journey_id)
+        .unwrap_or_default();
+    Ok(Json(StationBufferResponse {
+        station_buffer_minutes: own.station_buffer_minutes,
+        leave_by: own.leave_by,
+    }))
 }
 
 /// The unlisted share link `unlisted_links::UnlistedLink` mapped onto the
@@ -2341,6 +2400,16 @@ async fn build_journey_detail_response(
         None
     };
 
+    // The owner's own: a group member or a share-link visitor gets none.
+    let own_leave_by = if is_owner {
+        crate::data::leave_by::for_journeys(&app.database, &[journey_id], &summary.user_id)
+            .await
+            .map_err(internal_error("read leave-by"))?
+            .remove(&journey_id)
+            .unwrap_or_default()
+    } else {
+        crate::data::leave_by::JourneyLeaveBy::default()
+    };
     Ok(JourneyDetailResponse {
         id: summary.id,
         custom_name: summary.custom_name,
@@ -2354,6 +2423,8 @@ async fn build_journey_detail_response(
         can_follow: false,
         source_template_id: summary.source_template_id.filter(|_| is_owner),
         regular_plan,
+        station_buffer_minutes: own_leave_by.station_buffer_minutes,
+        leave_by: own_leave_by.leave_by,
     })
 }
 

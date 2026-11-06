@@ -431,6 +431,9 @@ pub struct PlanTemplateInput {
     pub target: TemplateTarget,
     pub plan_options: Option<PlanOptions>,
     pub usual_itinerary: UsualItinerary,
+    /// Minutes to get to the origin station (0 to 120), for the leave-by
+    /// (regular journeys design §5.1); `None` for no leave-by.
+    pub station_buffer_minutes: Option<i16>,
 }
 
 /// The recurrence a plan-mode create gives both templates.
@@ -516,8 +519,8 @@ async fn insert_plan_template(
         "INSERT INTO journey_templates \
             (user_id, custom_name, days_of_week, active, starts_on, ends_on, default_match_mode, \
              auto_commit_rule, origin_crs, destination_crs, target_kind, target_time, \
-             target_day_offset, plan_options, usual_itinerary) \
-         VALUES ($1, $2, $3, TRUE, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14) \
+             target_day_offset, plan_options, usual_itinerary, station_buffer_minutes) \
+         VALUES ($1, $2, $3, TRUE, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15) \
          RETURNING id",
     )
     .bind(user_id)
@@ -534,6 +537,7 @@ async fn insert_plan_template(
     .bind(input.target.day_offset)
     .bind(input.plan_options.as_ref().map(Json))
     .bind(Json(&input.usual_itinerary))
+    .bind(input.station_buffer_minutes)
     .fetch_one(&mut **tx)
     .await?;
     for (index, leg) in template_legs_from_itinerary(&input.usual_itinerary)
