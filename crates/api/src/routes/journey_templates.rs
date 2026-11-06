@@ -156,6 +156,10 @@ pub(crate) enum CreateJourneyTemplateRequest {
         /// leave-by is the first departure less this. `null` for none.
         #[serde(default)]
         station_buffer_minutes: Option<i16>,
+        /// Skip the bank holidays of the caller's division (phase 5),
+        /// for the return journey too. Default true.
+        #[serde(default)]
+        skip_bank_holidays: Option<bool>,
     },
 }
 
@@ -234,6 +238,11 @@ pub(crate) struct PutJourneyTemplateRequest {
     #[serde(default, deserialize_with = "crate::routes::present")]
     #[ts(optional)]
     station_buffer_minutes: Option<Option<i16>>,
+    /// Whether it skips the bank holidays of the caller's division; absent
+    /// keeps it (additive, bank holidays).
+    #[serde(default)]
+    #[ts(optional)]
+    skip_bank_holidays: Option<bool>,
 }
 
 #[derive(Debug, Deserialize, ts_rs::TS)]
@@ -355,6 +364,9 @@ pub(crate) struct JourneyTemplateDetailResponse {
     /// Minutes to get to the station, for the leave-by (additive); `null`
     /// for none.
     station_buffer_minutes: Option<i16>,
+    /// Bank holidays (additive): see `JourneyTemplateListItem`.
+    skip_bank_holidays: bool,
+    next_skips: Vec<regular_journeys::NextSkip>,
 }
 
 fn internal_error(operation: &'static str) -> impl Fn(anyhow::Error) -> (StatusCode, String) {
@@ -577,6 +589,7 @@ async fn post_journey_template(
             default_match_mode,
             return_journey,
             station_buffer_minutes,
+            skip_bank_holidays,
         } => {
             let default_match_mode = default_match_mode.unwrap_or_else(|| "manual".to_string());
             let auto_commit_rule = (default_match_mode == "auto").then_some("nearest_to_now");
@@ -621,6 +634,7 @@ async fn post_journey_template(
                 starts_on,
                 ends_on,
                 default_match_mode,
+                skip_bank_holidays: skip_bank_holidays.unwrap_or(true),
             };
             let outcome = regular_journeys::create_plan_templates(
                 &app.database,
@@ -771,12 +785,12 @@ async fn get_journey_template(
         .await
         .map_err(internal_error("list journey template legs"))?;
     let now = super::london_now().to_utc();
-    let next_date = regular_journeys::next_dates(&app.database, &[template_id], now)
-        .await
-        .map_err(internal_error("read the next date"))?
-        .get(&template_id)
-        .copied()
-        .flatten();
+    let (next_date, next_skips) =
+        regular_journeys::next_dates_and_skips(&app.database, &[template_id], now)
+            .await
+            .map_err(internal_error("read the next date"))?
+            .remove(&template_id)
+            .unwrap_or_default();
     let skipped_dates = regular_journeys::skipped_dates_from(
         &app.database,
         template_id,
@@ -797,6 +811,8 @@ async fn get_journey_template(
         paired_template_id: template.paired_template_id,
         next_date,
         skipped_dates,
+        skip_bank_holidays: template.skip_bank_holidays,
+        next_skips,
         station_buffer_minutes: template.station_buffer_minutes,
         id: template.id,
         custom_name: template.custom_name,
@@ -858,7 +874,7 @@ async fn put_journey_template(
         .collect::<Result<Vec<_>, _>>()?;
     journey_templates::validate_auto_mode_legs(&body.default_match_mode, &leg_inputs)
         .map_err(|msg| (StatusCode::BAD_REQUEST, msg))?;
-    let target_update = put_target_update(
+    let mut target_update = put_target_update(
         &app,
         template_id,
         &user.id,
@@ -870,6 +886,7 @@ async fn put_journey_template(
         body.station_buffer_minutes,
     )
     .await?;
+    target_update.skip_bank_holidays = body.skip_bank_holidays;
     let replaced = journey_templates::replace_template(
         &app.database,
         template_id,
@@ -1002,6 +1019,7 @@ async fn put_target_update(
         plan_options,
         usual_itinerary,
         station_buffer_minutes,
+        skip_bank_holidays: None,
     })
 }
 

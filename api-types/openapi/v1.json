@@ -38,6 +38,15 @@
         ],
         "type": "object"
       },
+      "BankHolidayDivision": {
+        "description": "`users.bank_holiday_division` and `bank_holidays.division` (their CHECK\nconstraints; `ds_store::bank_holidays::DIVISIONS`).",
+        "enum": [
+          "england-and-wales",
+          "scotland",
+          "northern-ireland"
+        ],
+        "type": "string"
+      },
       "BreakCause": {
         "description": "`journey_breaks.cause` (its CHECK constraint).",
         "enum": [
@@ -2629,6 +2638,17 @@
       },
       "PreferencesResponse": {
         "properties": {
+          "bankHolidayDivision": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/BankHolidayDivision"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Whose bank holidays the caller's regular journeys skip\n(`PUT /preferences/bank-holiday-division`; regular journeys phase\n5). `null` until chosen, when England and Wales's are used. Additive."
+          },
           "pinnedLines": {
             "items": {
               "type": "string"

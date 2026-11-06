@@ -35,6 +35,7 @@ mod api_types;
 pub mod app;
 pub mod atom;
 pub mod auth;
+pub mod bank_holidays_sync;
 pub mod data;
 pub mod edge;
 pub mod journey_break_sweep;

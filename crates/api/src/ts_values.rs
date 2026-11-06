@@ -264,6 +264,26 @@ pub enum TemplateTargetKind {
     ArriveBy,
 }
 
+/// Why a regular journey passes over a date before its next one
+/// (`regular_journeys::next_skips`).
+#[derive(TS)]
+#[ts(rename_all = "snake_case")]
+pub enum NextSkipReason {
+    Skipped,
+    BankHoliday,
+}
+
+/// `users.bank_holiday_division` and `bank_holidays.division` (their CHECK
+/// constraints; `ds_store::bank_holidays::DIVISIONS`).
+#[derive(TS, schemars::JsonSchema)]
+#[ts(rename_all = "kebab-case")]
+#[schemars(rename_all = "kebab-case")]
+pub enum BankHolidayDivision {
+    EnglandAndWales,
+    Scotland,
+    NorthernIreland,
+}
+
 /// `journeys.regular_plan_status` (its CHECK constraint): where a regular
 /// journey's day stands (`data::regular_plan`).
 #[derive(TS, schemars::JsonSchema)]
