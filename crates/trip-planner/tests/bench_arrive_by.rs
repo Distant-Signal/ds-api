@@ -1971,3 +1971,216 @@ fn bench_prefer_cpu() {
     // seventh of what options alone took before.
     assert!(ratio <= 1.30 * 1.10, "prefer {ratio:.3}x");
 }
+
+/// `/Trips/plan?results=fastest&count=8` (DS-398): eight Connection Scans
+/// in a row per pair, each a minute after the last journey left
+/// (depart-after 08:00) or a minute before it arrived (arrive-by 18:00),
+/// against one `results=options` search the same way (RAPTOR over 6
+/// rounds plus `trip_planner::diversify`'s alternatives), over 20 random
+/// pairs, in CPU time (median over `DS_BENCH_REPS`, default 9, the cases
+/// interleaved). Asserted: either series costs at most what one options
+/// search in its direction does, with 10% for CPU-time noise, so
+/// `count`'s ceiling of 8 keeps a request within the cost the route
+/// already allows. Measured (DS-398, release): 0.57x leave after, 0.88x
+/// arrive by.
+#[test]
+#[ignore = "benchmark; see the module doc"]
+#[expect(
+    clippy::too_many_lines,
+    reason = "bench code: one measurement, read top to bottom"
+)]
+fn bench_fastest_series_cpu() {
+    if !bench_requested() {
+        return;
+    }
+    let reps: usize = std::env::var("DS_BENCH_REPS")
+        .ok()
+        .and_then(|value| value.parse().ok())
+        .unwrap_or(9);
+    let (connections, interchange) = network();
+    let date = NaiveDate::from_ymd_opt(2026, 9, 29).unwrap();
+    let mut rng = Rng(0x0b71_0950);
+    let pairs: Vec<(Vec<String>, Vec<String>)> = (0..20)
+        .map(|_| {
+            (
+                vec![tiploc(HUBS + rng.next(STATIONS - HUBS))],
+                vec![tiploc(HUBS + rng.next(STATIONS - HUBS))],
+            )
+        })
+        .collect();
+    let depart_series = || {
+        let mut found = 0;
+        for (from, to) in &pairs {
+            let mut from_min = 480;
+            for _ in 0..8 {
+                let Some(journey) = scan_connections_restricted(
+                    ScanOptions {
+                        connections: &connections,
+                        interchange: &interchange,
+                        from_tiplocs: from,
+                        to_tiplocs: to,
+                        departure_min: from_min,
+                        date,
+                    },
+                    None,
+                    None,
+                ) else {
+                    break;
+                };
+                found += 1;
+                from_min = journey.departure_min.max(from_min) + 1;
+            }
+        }
+        found
+    };
+    let arrive_series = || {
+        let mut found = 0;
+        for (from, to) in &pairs {
+            let mut by = 1080;
+            for _ in 0..8 {
+                let Some(journey) = scan_connections_arrive_by(
+                    ArriveByOptions {
+                        connections: &connections,
+                        interchange: &interchange,
+                        from_tiplocs: from,
+                        waypoints: &[],
+                        to_tiplocs: to,
+                        vias: None,
+                        arrive_by_min: by,
+                        date,
+                    },
+                    None,
+                    None,
+                ) else {
+                    break;
+                };
+                found += 1;
+                let Some(next) = journey.arrival_min.min(by).checked_sub(1) else {
+                    break;
+                };
+                by = next;
+            }
+        }
+        found
+    };
+    let options = || {
+        pairs
+            .iter()
+            .map(|(from, to)| {
+                let base: Vec<_> = raptor_search_restricted(
+                    RaptorOptions {
+                        connections: &connections,
+                        interchange: &interchange,
+                        from_tiplocs: from,
+                        to_tiplocs: to,
+                        departure_min: 480,
+                        date,
+                        max_rounds: 6,
+                    },
+                    None,
+                    None,
+                )
+                .into_iter()
+                .filter(|j| j.changes <= 4)
+                .collect();
+                trip_planner::diversify(
+                    base,
+                    &trip_planner::DiversifyOptions {
+                        connections: &connections,
+                        interchange: &interchange,
+                        restrictions: None,
+                        protected: [from.clone(), to.clone()].concat(),
+                        direction: trip_planner::options::Direction::DepartAfter,
+                        max_changes: 4,
+                    },
+                    |restrictions| {
+                        scan_connections_restricted(
+                            ScanOptions {
+                                connections: &connections,
+                                interchange: &interchange,
+                                from_tiplocs: from,
+                                to_tiplocs: to,
+                                departure_min: 480,
+                                date,
+                            },
+                            None,
+                            Some(restrictions),
+                        )
+                        .map(trip_planner::RaptorJourney::from)
+                    },
+                )
+                .len()
+            })
+            .sum::<usize>()
+    };
+    let arrive_options = || {
+        pairs
+            .iter()
+            .map(|(from, to)| {
+                let arrive = || ArriveByOptions {
+                    connections: &connections,
+                    interchange: &interchange,
+                    from_tiplocs: from,
+                    waypoints: &[],
+                    to_tiplocs: to,
+                    vias: None,
+                    arrive_by_min: 1080,
+                    date,
+                };
+                let base: Vec<_> = raptor_arrive_by(arrive(), None, None, 6)
+                    .into_iter()
+                    .filter(|j| j.changes <= 4)
+                    .collect();
+                trip_planner::diversify(
+                    base,
+                    &trip_planner::DiversifyOptions {
+                        connections: &connections,
+                        interchange: &interchange,
+                        restrictions: None,
+                        protected: [from.clone(), to.clone()].concat(),
+                        direction: trip_planner::options::Direction::ArriveBy,
+                        max_changes: 4,
+                    },
+                    |restrictions| {
+                        scan_connections_arrive_by(arrive(), None, Some(restrictions))
+                            .map(trip_planner::RaptorJourney::from)
+                    },
+                )
+                .len()
+            })
+            .sum::<usize>()
+    };
+    let cases: [&dyn Fn() -> usize; 4] =
+        [&options, &depart_series, &arrive_options, &arrive_series];
+    let mut samples = [Vec::new(), Vec::new(), Vec::new(), Vec::new()];
+    let mut found = [0; 4];
+    for _ in 0..reps {
+        for (case, f) in cases.iter().enumerate() {
+            let started = thread_cpu();
+            found[case] = f();
+            samples[case].push(thread_cpu().saturating_sub(started));
+        }
+    }
+    let [options_cpu, depart_cpu, arrive_options_cpu, arrive_cpu] =
+        samples.map(|mut times: Vec<Duration>| {
+            times.sort();
+            times[times.len() / 2]
+        });
+    let depart_ratio = depart_cpu.as_secs_f64() / options_cpu.as_secs_f64();
+    let arrive_ratio = arrive_cpu.as_secs_f64() / arrive_options_cpu.as_secs_f64();
+    println!(
+        "depart-after 08:00: options {options_cpu:>9.2?} ({} found), count=8 {depart_cpu:>9.2?} \
+         ({} found): {depart_ratio:.3}x",
+        found[0], found[1],
+    );
+    println!(
+        "arrive-by 18:00: options {arrive_options_cpu:>9.2?} ({} found), count=8 \
+         {arrive_cpu:>9.2?} ({} found): {arrive_ratio:.3}x",
+        found[2], found[3],
+    );
+    assert!(
+        depart_ratio <= 1.10,
+        "depart-after series {depart_ratio:.3}x"
+    );
+    assert!(arrive_ratio <= 1.10, "arrive-by series {arrive_ratio:.3}x");
+}

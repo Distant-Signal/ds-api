@@ -329,6 +329,15 @@ async fn a_new_uid_falls_back_to_the_same_operator_and_arrive_by_takes_the_lates
     let (_, plan) = plan_of(&pool, arrive_by).await;
     assert_eq!(plan["reason"], "best", "{plan}");
     assert_eq!(chosen_uid(&plan), "RG0002", "{plan}");
+    // The next latest departures, each arriving a minute before the last
+    // (DS-398: arriving by RG0002's own 08:45 found it twice).
+    let alternatives: Vec<&str> = plan["alternatives"]
+        .as_array()
+        .expect("alternatives")
+        .iter()
+        .filter_map(|option| option["legs"][0]["trainUid"].as_str())
+        .collect();
+    assert_eq!(alternatives, ["RG0003", "RG0001"], "{plan}");
 }
 
 #[tokio::test]

@@ -5953,7 +5953,13 @@ access?: AccessResponse,
  * networks: each network whose timetable does not cover the date, so
  * the plan was made without it.
  */
-transitNotices?: Array<TransitPlanNotice>, provisional: boolean, provisionalFrom: string, };
+transitNotices?: Array<TransitPlanNotice>, 
+/**
+ * Additive (2026-11-07, DS-398), with `count` only: the count asked
+ * for. The segment has at most this many itineraries, in departure
+ * order; fewer when fewer trains run.
+ */
+count?: number, provisional: boolean, provisionalFrom: string, };
 
 /**
  * `GET /Trips/plan`'s `results`, checked by `plan_trip_request`.

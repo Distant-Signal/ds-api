@@ -29,7 +29,7 @@ use crate::data::journey_alternatives;
 use crate::data::journey_replace::{self, RegularWrite, Replacement};
 use crate::data::journey_revisions::RevisionMeta;
 use crate::data::regular_plan::{self, PlanOption, StoredPlan};
-use crate::data::trip_planning_itinerary::{PlannedItinerary, PlannedLeg, TimeBound};
+use crate::data::trip_planning_itinerary::{PlannedItinerary, PlannedLeg};
 use crate::routes::journey_itinerary::RouteError;
 use crate::routes::journey_replan::{internal, now_utc, render, replaced_response, require_owner};
 use crate::routes::trips::{ReplanQuery, ReplanSlot};
@@ -189,19 +189,17 @@ pub(crate) async fn departures(
         let Some(first) = list.into_iter().next() else {
             break;
         };
-        // The minutes found already include the day offset.
+        // The minutes found already include the day offset. A minute
+        // after it left, or before it arrived (DS-398: arriving by its own
+        // arrival found it again).
+        let next = crate::routes::trips::step_clock(query.searched_time(), &first);
         query.day_offset = 0;
-        let next = match query.time {
-            TimeBound::DepartAfter(from) => {
-                let next = first.departure_min + 1;
-                (next > from).then_some(TimeBound::DepartAfter(next))
-            }
-            TimeBound::ArriveBy(by) => {
-                let next = first.arrival_min.min(by.saturating_sub(1));
-                (next < by && next > 0).then_some(TimeBound::ArriveBy(next))
-            }
-        };
-        found.push(first);
+        if !found
+            .iter()
+            .any(|seen| crate::routes::trips::same_journey(seen, &first))
+        {
+            found.push(first);
+        }
         match next {
             Some(time) => query.time = time,
             None => break,

@@ -369,6 +369,13 @@ struct TripPlanParams {
     /// `operator` or `avoidOperator`.
     #[serde(default)]
     prefer_operator: Option<String>,
+    /// `?count=1..8` (2026-11-07, DS-398), `results=fastest` with
+    /// `departAfter` or `arriveBy` and no waypoints: up to this many
+    /// trains, each search starting a minute after the last one found
+    /// left (or, arrive-by, a minute before it arrived), in departure
+    /// order. Kept as a raw string for [`parse_count`]'s own 400.
+    #[serde(default)]
+    count: Option<String>,
 }
 
 /// Which operator parameter a request used.
@@ -634,7 +641,8 @@ fn default_results() -> String {
 
 /// `GET /Trips/plan?origin=&destination=&date=[&waypoints=][&via=]
 /// [&departAfter=|&arriveBy=][&dayOffset=0|1][&acrossMidnight=true][&avoid=][&avoidStop=][&avoidChange=]
-/// [&results=fastest|options][&alternatives=true|false][&maxChanges=0..12][&live=true|false]`.
+/// [&results=fastest|options][&alternatives=true|false][&maxChanges=0..12][&live=true|false]
+/// [&count=1..8]`.
 ///
 /// - `dayOffset=1` (2026-10-19): the `departAfter`/`arriveBy` time is on
 ///   the morning after `date`, still on `date`'s trains -- "arrive by 00:30
@@ -755,6 +763,17 @@ fn default_results() -> String {
 ///   the 400s and `data::planner_operators` for who runs what. The filter
 ///   is one more rule in the searches' `Restrictions`; the options
 ///   search-size guard is unchanged.
+/// - `count=1..8` (2026-11-07, DS-398), with `results=fastest` and
+///   `departAfter` or `arriveBy`, no waypoints and no `acrossMidnight`
+///   (each a 400 otherwise, see [`parse_count`]): up to `count` trains in
+///   one segment, in departure order, for picking one train from several.
+///   The first search is the usual one; each next starts a minute after
+///   the last train found left, or (arrive-by) must arrive a minute before
+///   it did ([`step_clock`]), so each is the fastest from its own time and
+///   a train overtaken by a later, faster one is not listed. One permit
+///   and one rate-limit step for the whole series, which stops early when
+///   a search finds nothing or after [`SERIES_BUDGET`]
+///   ([`plan_trip_series`]). Echoed as `count`.
 ///
 /// **Read this before adding work to this handler.** One request here reads
 /// every `schedule_calling_points_full` row for the requested date (hundreds
@@ -858,6 +877,13 @@ async fn plan_trip_request(
     )?;
     let time = parse_time_bound(params.depart_after, params.arrive_by, day_offset)?;
     let across_midnight = parse_across_midnight(params.across_midnight.as_deref(), day_offset)?;
+    let count = parse_count(
+        params.count.as_deref(),
+        &params.results,
+        params.depart_after.is_some() || params.arrive_by.is_some(),
+        waypoints.len(),
+        across_midnight,
+    )?;
     // A CRS, or a bus stop's or ferry terminal's `tiploc:` code.
     let mut origin = common::location_naming::normalize_location_code(&params.origin);
     let mut destination = common::location_naming::normalize_location_code(&params.destination);
@@ -1052,10 +1078,26 @@ async fn plan_trip_request(
         .await
         .map(Some)
     };
-    let (first, second) = tokio::try_join!(
-        plan_on_date(&app, &graph, &inputs, date, time, &permit),
-        second_plan
-    )?;
+    // `count` (DS-398): that many `fastest` searches in a row, under the
+    // same permit (never with `acrossMidnight`, [`parse_count`]).
+    let first_plan = async {
+        match count {
+            Some(count) => {
+                plan_trip_series(
+                    &app,
+                    &graph,
+                    &inputs,
+                    date,
+                    time,
+                    usize::from(count),
+                    &permit,
+                )
+                .await
+            }
+            None => plan_on_date(&app, &graph, &inputs, date, time, &permit).await,
+        }
+    };
+    let (first, second) = tokio::try_join!(first_plan, second_plan)?;
     drop(permit);
     let request = first.request.clone();
     let transit_skipped: Vec<(String, transit_planning::SkipReason)> = first
@@ -1204,6 +1246,7 @@ async fn plan_trip_request(
         ),
         service_dates,
         results: params.results,
+        count,
     };
     Ok(Json(body))
 }
@@ -1274,6 +1317,12 @@ pub(crate) struct TripPlanResponse {
     #[serde(skip_serializing_if = "Option::is_none")]
     #[ts(optional)]
     transit_notices: Option<Vec<transit_planning::TransitPlanNotice>>,
+    /// Additive (2026-11-07, DS-398), with `count` only: the count asked
+    /// for. The segment has at most this many itineraries, in departure
+    /// order; fewer when fewer trains run.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    count: Option<u8>,
     /// Additive (2026-10-08): whether the timetable is still provisional.
     /// Once per response, not per journey or leg.
     #[serde(flatten)]
@@ -1917,6 +1966,167 @@ async fn plan_on_date(
         live,
         transit_skipped,
     })
+}
+
+/// The most trains `?count=` asks for (DS-398).
+pub(crate) const MAX_COUNT: u8 = 8;
+
+/// The most searches one `count` series runs: the trains asked for, plus
+/// two for a search that finds a train already found (a live-late
+/// arrive-by train, say), so a series always ends.
+const MAX_SERIES_EXTRA_SEARCHES: usize = 2;
+
+/// A `count` series starts no search after this long, and answers with
+/// the trains found so far. Each search is one Connection Scan from its
+/// own time: eight cost about 0.57x (leave after) and 0.88x (arrive by)
+/// of one `results=options` search in the same direction
+/// (`crates/trip-planner/tests/bench_arrive_by.rs`' `bench_fastest_series_cpu`,
+/// asserted at most 1.1x). Each also reads its leg details and, for
+/// today, the live overlay's trains, as a separate request would; this
+/// only bounds a slow database.
+const SERIES_BUDGET: std::time::Duration = std::time::Duration::from_secs(4);
+
+/// `?count=`: absent or empty is `None` (one search, as before);
+/// otherwise a whole number from 1 to [`MAX_COUNT`], with
+/// `results=fastest`, `departAfter` or `arriveBy` (`has_time`), no
+/// waypoints and no `acrossMidnight`. Checked before any database read.
+fn parse_count(
+    raw: Option<&str>,
+    results: &str,
+    has_time: bool,
+    waypoints: usize,
+    across_midnight: bool,
+) -> Result<Option<u8>, (StatusCode, String)> {
+    let raw = raw.map(str::trim).unwrap_or_default();
+    if raw.is_empty() {
+        return Ok(None);
+    }
+    let bad = |message: String| Err((StatusCode::BAD_REQUEST, message));
+    let Some(count) = raw
+        .parse::<u8>()
+        .ok()
+        .filter(|count| (1..=MAX_COUNT).contains(count))
+    else {
+        return bad(format!(
+            "count must be a whole number from 1 to {MAX_COUNT}, not '{raw}'"
+        ));
+    };
+    if results != "fastest" {
+        return bad("count needs results=fastest".to_string());
+    }
+    if !has_time {
+        return bad("count needs departAfter or arriveBy".to_string());
+    }
+    if waypoints > 0 {
+        return bad("count can't be used with waypoints".to_string());
+    }
+    if across_midnight {
+        return bad("count can't be used with acrossMidnight".to_string());
+    }
+    Ok(Some(count))
+}
+
+/// The bound of the search after the one at `bound` found `found`: a
+/// minute after it left (leave after), or a minute before it arrived
+/// (arrive by). Always strictly later, or earlier, than `bound`, so a
+/// series moves on even when a live time is outside it. `None` when an
+/// arrive-by series reaches the start of the day.
+pub(crate) fn step_clock(
+    bound: trip_planning_itinerary::TimeBound,
+    found: &trip_planning_itinerary::PlannedItinerary,
+) -> Option<trip_planning_itinerary::TimeBound> {
+    use trip_planning_itinerary::TimeBound;
+    match bound {
+        TimeBound::DepartAfter(from) => Some(TimeBound::DepartAfter(
+            found.departure_min.max(from).saturating_add(1),
+        )),
+        TimeBound::ArriveBy(by) => found
+            .arrival_min
+            .min(by)
+            .checked_sub(1)
+            .map(TimeBound::ArriveBy),
+    }
+}
+
+/// Whether two itineraries are the same journey: the same departure,
+/// arrival and trains.
+pub(crate) fn same_journey(
+    a: &trip_planning_itinerary::PlannedItinerary,
+    b: &trip_planning_itinerary::PlannedItinerary,
+) -> bool {
+    let trains = |itinerary: &trip_planning_itinerary::PlannedItinerary| -> Vec<String> {
+        itinerary
+            .legs
+            .iter()
+            .filter_map(|leg| match leg {
+                trip_planning_itinerary::PlannedLeg::Train { train_uid, .. } => {
+                    Some(train_uid.clone())
+                }
+                trip_planning_itinerary::PlannedLeg::Transfer { .. } => None,
+            })
+            .collect()
+    };
+    a.departure_min == b.departure_min && a.arrival_min == b.arrival_min && trains(a) == trains(b)
+}
+
+/// `?count=` (DS-398): up to `count` `fastest` plans on `date`, the first
+/// from `time` and each later one from [`step_clock`] of the last train
+/// found, all under `permit` (one slot, one rate-limit step). The first
+/// plan's segment carries every train found, in departure order; its
+/// `departAfter`/`arriveBy` and `noResultReason` stay the first search's.
+/// Stops early when a search finds nothing, at the start of the day, or
+/// after [`SERIES_BUDGET`].
+async fn plan_trip_series(
+    app: &App,
+    graph: &Arc<trip_planning::PlanningGraph>,
+    inputs: &DateInputs,
+    date: NaiveDate,
+    time: trip_planning_itinerary::TimeBound,
+    count: usize,
+    permit: &PlanPermit,
+) -> Result<DatePlan, (StatusCode, String)> {
+    let started = std::time::Instant::now();
+    let mut plan = plan_on_date(app, graph, inputs, date, time, permit).await?;
+    let mut found: Vec<trip_planning_itinerary::PlannedItinerary> = plan
+        .segments
+        .first_mut()
+        .map(|segment| std::mem::take(&mut segment.itineraries))
+        .unwrap_or_default();
+    found.truncate(1);
+    // The train the next search steps on from: the last one found, even
+    // when it was one found already.
+    let mut last = found.first().cloned();
+    let mut bound = time;
+    let mut searches = 1;
+    while found.len() < count
+        && searches < count + MAX_SERIES_EXTRA_SEARCHES
+        && started.elapsed() < SERIES_BUDGET
+    {
+        let Some(next) = last.as_ref().and_then(|last| step_clock(bound, last)) else {
+            break;
+        };
+        searches += 1;
+        bound = next;
+        let more = plan_on_date(app, graph, inputs, date, next, permit).await?;
+        plan.live = combine_live(plan.live.take(), more.live);
+        let Some(itinerary) = more
+            .segments
+            .into_iter()
+            .next()
+            .and_then(|segment| segment.itineraries.into_iter().next())
+        else {
+            break;
+        };
+        if !found.iter().any(|seen| same_journey(seen, &itinerary)) {
+            found.push(itinerary.clone());
+        }
+        last = Some(itinerary);
+    }
+    found.sort_by_key(|itinerary| (itinerary.departure_min, itinerary.arrival_min));
+    if let Some(segment) = plan.segments.first_mut() {
+        segment.itineraries = found;
+    }
+    Ok(plan)
 }
 
 /// The interchange data a request plans on before any `TfL` access links:
@@ -2581,7 +2791,7 @@ impl ReplanQuery {
     }
 
     /// The bound as searched: `time` moved on by `day_offset` days.
-    fn searched_time(&self) -> trip_planning_itinerary::TimeBound {
+    pub(crate) fn searched_time(&self) -> trip_planning_itinerary::TimeBound {
         let days = u32::from(self.day_offset) * 1440;
         match self.time {
             trip_planning_itinerary::TimeBound::DepartAfter(m) => {
@@ -2672,6 +2882,7 @@ pub(crate) async fn regular_plan_query(
         operator: options.operator.clone(),
         avoid_operator: options.avoid_operator.clone(),
         prefer_operator: None,
+        count: None,
     };
     let operator_rule = parse_operator_filter(app, &params, &[date])
         .await
@@ -3366,6 +3577,99 @@ mod transit_db_tests;
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// An itinerary with no legs leaving at `departure_min` and arriving
+    /// at `arrival_min`: all [`step_clock`] reads.
+    fn timed(departure_min: u32, arrival_min: u32) -> trip_planning_itinerary::PlannedItinerary {
+        trip_planning_itinerary::PlannedItinerary {
+            operator_only: false,
+            legs: Vec::new(),
+            change_count: 0,
+            access_change_count: 0,
+            total_duration_minutes: arrival_min - departure_min,
+            exceeds_recommended_changes: None,
+            departure_min,
+            arrival_min,
+            arrival_tiploc: None,
+            departure_tiploc: None,
+            live_feasible: None,
+            continues_previous_train: false,
+            via_satisfied_by: Vec::new(),
+            scheduled_only: None,
+            alternative: None,
+            labels: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn count_is_one_to_eight_with_a_fastest_timed_search_only() {
+        let ok = |raw: &str| parse_count(Some(raw), "fastest", true, 0, false);
+        assert_eq!(ok("").unwrap(), None);
+        assert_eq!(ok("  ").unwrap(), None);
+        assert_eq!(parse_count(None, "options", false, 3, true).unwrap(), None);
+        assert_eq!(ok("1").unwrap(), Some(1));
+        assert_eq!(ok(" 5 ").unwrap(), Some(5));
+        assert_eq!(ok("8").unwrap(), Some(MAX_COUNT));
+        for bad in ["0", "9", "-1", "2.5", "five", "256"] {
+            let (status, message) = ok(bad).unwrap_err();
+            assert_eq!(status, StatusCode::BAD_REQUEST);
+            assert!(message.contains("from 1 to 8"), "{bad}: {message}");
+        }
+        let refused = |results: &str, has_time: bool, waypoints: usize, across: bool| {
+            parse_count(Some("5"), results, has_time, waypoints, across)
+                .unwrap_err()
+                .1
+        };
+        assert_eq!(
+            refused("options", true, 0, false),
+            "count needs results=fastest"
+        );
+        assert_eq!(
+            refused("fastest", false, 0, false),
+            "count needs departAfter or arriveBy"
+        );
+        assert_eq!(
+            refused("fastest", true, 1, false),
+            "count can't be used with waypoints"
+        );
+        assert_eq!(
+            refused("fastest", true, 0, true),
+            "count can't be used with acrossMidnight"
+        );
+    }
+
+    #[test]
+    fn a_series_steps_a_minute_past_the_train_it_found() {
+        use trip_planning_itinerary::TimeBound;
+        // Leave after 08:00, found 08:12-08:45: next from 08:13.
+        assert_eq!(
+            step_clock(TimeBound::DepartAfter(480), &timed(492, 525)),
+            Some(TimeBound::DepartAfter(493))
+        );
+        // A departure before the bound (a live time, say) still moves on.
+        assert_eq!(
+            step_clock(TimeBound::DepartAfter(500), &timed(492, 525)),
+            Some(TimeBound::DepartAfter(501))
+        );
+        // Arrive by 08:46, found 08:12-08:45: next by 08:44, so the same
+        // train isn't found again.
+        assert_eq!(
+            step_clock(TimeBound::ArriveBy(526), &timed(492, 525)),
+            Some(TimeBound::ArriveBy(524))
+        );
+        // A live arrival after the deadline steps from the deadline.
+        assert_eq!(
+            step_clock(TimeBound::ArriveBy(526), &timed(492, 540)),
+            Some(TimeBound::ArriveBy(525))
+        );
+        // After midnight on the service date's clock.
+        assert_eq!(
+            step_clock(TimeBound::DepartAfter(1445), &timed(1450, 1500)),
+            Some(TimeBound::DepartAfter(1451))
+        );
+        // The start of the day ends an arrive-by series.
+        assert_eq!(step_clock(TimeBound::ArriveBy(30), &timed(0, 0)), None);
+    }
 
     /// Every build reason and trigger is registered at 0, and each phase of
     /// the build timing, before any build (DS-225).
@@ -4078,6 +4382,7 @@ mod tests {
     reason = "test code: casts of small known test values"
 )]
 mod db_tests {
+    mod count_series;
     mod live_in_search;
     mod operator_filter;
     mod operator_rule;

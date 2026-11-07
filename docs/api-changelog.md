@@ -3,6 +3,35 @@
 Changes to the Distant Signal (DS) HTTP API that a client such as DS-MCP
 needs to know about. Newest first. Field names are as served (camelCase).
 
+## 2026-11-07: `/Trips/plan` lists several trains with `count`
+
+`GET /Trips/plan` takes `count=1..8` (DS-398). Additive: without it
+nothing changes.
+
+- With `results=fastest` and `departAfter` or `arriveBy`: up to `count`
+  trains in the one segment's `itineraries` (and `journeys`), in
+  departure order. The first is the usual `fastest` answer; each next
+  search starts a minute after the last train found left, or, arrive-by,
+  must arrive a minute before it did. So each train is the fastest from
+  its own time, and one overtaken by a later, faster train isn't listed.
+  Fewer come back when fewer run; none is not an error.
+- Page with the same searches: "later" is `departAfter` a minute after
+  the last departure shown, "earlier" `arriveBy` a minute before the
+  first arrival shown.
+- A 400 for a count outside 1 to 8, or with `results=options`, with no
+  `departAfter` or `arriveBy`, with `waypoints` or with `acrossMidnight`.
+- One request: one planning slot (the usual 503 when none is free) and
+  one step of the trip plan rate limit, however many searches it runs.
+- The body gains `count`, the count asked for (absent without it).
+
+Fixed at the same time: the plan sweep's searches for an arrive-by
+regular journey found their first train twice, so `GET /Journeys/{id}`'s
+`regularPlan.alternatives` could repeat its `choice`. Each search now
+arrives a minute before the last train found.
+
+DS-MCP: no change needed; `count` is there if a tool wants several
+departures.
+
 ## 2026-11-07: Delegated errors are always JSON
 
 On the delegated listener every error is now `{error, message}`
