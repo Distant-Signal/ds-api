@@ -3,6 +3,42 @@
 Changes to the Distant Signal (DS) HTTP API that a client such as DS-MCP
 needs to know about. Newest first. Field names are as served (camelCase).
 
+## 2026-11-07: Regular journeys: time away and pause until
+
+The scheduling options' R1 (distant-signal's
+`docs/superpowers/specs/2026-11-06-regular-journeys-design.md`; ds-core
+v0.11.0). Everything here is additive; cookie only, none of it delegated.
+
+- `GET /preferences/time-away`: the caller's time away that hasn't ended,
+  soonest first: `[{id, startsOn, endsOn, label}]`. Time away applies to
+  every regular journey they have.
+- `POST /preferences/time-away` `{startsOn, endsOn, label?}` adds a period
+  (inclusive dates; at most a year long, not already over, starting at
+  most a year ahead; `label` up to 60 characters, blank is none). It
+  answers `{period, deletedJourneyIds}`: journeys already added for those
+  dates that nobody had touched (every train still unpicked or picked by
+  the sweep, no ticket, not started) are deleted, without skip markers.
+  400 for bad dates, 409 at 50 periods. `PUT /preferences/time-away/{id}`
+  replaces one the same way (404 if not the caller's); `DELETE` removes
+  one (204, 404). Journeys a period held back come back on the next mint
+  once it is moved or deleted, if they are still due. A period is deleted
+  the day after it ends.
+- `PUT /JourneyTemplates/{id}/paused-until` `{pausedUntil: date | null}`
+  pauses the regular journey and its return until a date (after today, at
+  most a year ahead): nothing is made for a date before it, and it runs
+  again on it with nothing to do. Untouched journeys dated before it are
+  deleted, without skip markers. `null` ends the pause. It answers as
+  `PUT .../active`: `{templateIds, deletedJourneyIds}`. `active: false` is
+  still the pause with no end.
+- `GET /JourneyTemplates/mine` items and `GET /JourneyTemplates/{id}` gain
+  `pausedUntil` (`null` when not paused that way).
+- `nextSkips[].reason` and `upcomingDates[].skipReason` gain `"paused"`
+  and `"away"`. When several apply: `paused`, then `away`, then `skipped`,
+  then `bank_holiday`. `nextDate` passes over them.
+- The account export gains `timeAway`.
+
+DS-MCP: no change needed; it doesn't read templates.
+
 ## 2026-11-07: Regular journeys: upcoming dates, skipping several, preview
 
 The scheduling options' R0 (distant-signal's

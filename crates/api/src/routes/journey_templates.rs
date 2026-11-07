@@ -55,6 +55,10 @@ pub fn router() -> Router {
             axum::routing::put(put_journey_template_active),
         )
         .route(
+            "/JourneyTemplates/{template_id}/paused-until",
+            axum::routing::put(put_journey_template_paused_until),
+        )
+        .route(
             "/JourneyTemplates/{template_id}/skip",
             axum::routing::post(post_journey_template_skip),
         )
@@ -383,6 +387,8 @@ pub(crate) struct JourneyTemplateDetailResponse {
     next_skips: Vec<regular_journeys::NextSkip>,
     /// See `JourneyTemplateListItem` (additive).
     upcoming_dates: Vec<regular_journeys::UpcomingDate>,
+    /// See `JourneyTemplateListItem` (additive).
+    paused_until: Option<NaiveDate>,
 }
 
 fn internal_error(operation: &'static str) -> impl Fn(anyhow::Error) -> (StatusCode, String) {
@@ -930,6 +936,7 @@ async fn get_journey_template(
         skip_bank_holidays: template.skip_bank_holidays,
         next_skips: dates.next_skips,
         upcoming_dates: dates.upcoming,
+        paused_until: template.paused_until,
         station_buffer_minutes: template.station_buffer_minutes,
         id: template.id,
         custom_name: template.custom_name,
@@ -1210,6 +1217,59 @@ async fn put_journey_template_active(
     )
     .await
     .map_err(internal_error("pause or resume journey template"))?
+    .ok_or((
+        StatusCode::NOT_FOUND,
+        "no journey template with that id".to_string(),
+    ))?;
+    Ok(Json(SetTemplateActiveResponse {
+        template_ids: outcome.template_ids,
+        deleted_journey_ids: outcome.deleted_journey_ids,
+    }))
+}
+
+/// `PUT /JourneyTemplates/{id}/paused-until`'s body.
+#[derive(Debug, Deserialize, ts_rs::TS)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct SetTemplatePausedUntilRequest {
+    /// The date it runs again on: no journey is made for a date before it.
+    /// `null` ends the pause.
+    paused_until: Option<NaiveDate>,
+}
+
+/// `PUT /JourneyTemplates/{id}/paused-until` `{pausedUntil}`: pauses the
+/// template and its pair until a date (after today, at most a year ahead),
+/// or with `null` ends that pause (`regular_journeys::set_paused_until`).
+/// Pausing deletes their untouched journeys dated before it that haven't
+/// started, without writing skip markers. Answers as `PUT .../active`.
+async fn put_journey_template_paused_until(
+    State(app): State<App>,
+    user: AuthenticatedUser,
+    Path(template_id): Path<i64>,
+    Json(body): Json<SetTemplatePausedUntilRequest>,
+) -> Result<Json<SetTemplateActiveResponse>, (StatusCode, String)> {
+    let now = super::london_now().to_utc();
+    let today = regular_journeys::london_date(now);
+    if let Some(until) = body.paused_until {
+        if until <= today {
+            return Err(bad_request(
+                "Choose a date after today to start again on.".to_string(),
+            ));
+        }
+        if until > today + chrono::Duration::days(regular_journeys::MAX_PAUSE_DAYS_AHEAD) {
+            return Err(bad_request(
+                "You can pause a regular journey for up to a year.".to_string(),
+            ));
+        }
+    }
+    let outcome = regular_journeys::set_paused_until(
+        &app.database,
+        template_id,
+        &user.id,
+        body.paused_until,
+        now,
+    )
+    .await
+    .map_err(internal_error("pause a journey template until a date"))?
     .ok_or((
         StatusCode::NOT_FOUND,
         "no journey template with that id".to_string(),
@@ -3679,6 +3739,289 @@ mod db_tests {
             .execute(&pool)
             .await
             .unwrap();
+        cleanup_user(&pool, user_id).await;
+    }
+
+    async fn delete_json(router: axum::Router, uri: String, raw_token: Option<&str>) -> StatusCode {
+        delete_request(router, uri, raw_token).await.0
+    }
+
+    #[tokio::test]
+    #[ignore = "requires a live database; run with `cargo test -p api \
+                time_away_skips_every_regular_journey_and_deletes_untouched_ones \
+                -- --ignored --test-threads=1`"]
+    #[expect(
+        clippy::too_many_lines,
+        reason = "test code: one scenario read top to bottom"
+    )]
+    async fn time_away_skips_every_regular_journey_and_deletes_untouched_ones() {
+        let pool = connect().await;
+        let user_id = "test-regular-time-away";
+        let other = "test-regular-time-away-other";
+        cleanup_user(&pool, user_id).await;
+        cleanup_user(&pool, other).await;
+        let token = seed_session(&pool, user_id).await;
+        let other_token = seed_session(&pool, other).await;
+        let router = crate::app::Router::new()
+            .merge(super::router())
+            .merge(crate::routes::time_away::router())
+            .with_state(test_app(pool.clone()));
+        let (id, return_id) = create_plan(router.clone(), &token, true).await;
+        let return_id = return_id.unwrap();
+        let (other_id, _) = create_plan(router.clone(), &other_token, false).await;
+        let now = tuesday_morning();
+        let _pin = crate::routes::pin_london_now_for_tests(now);
+        let (wed, thu, fri) = (date("2026-11-11"), date("2026-11-12"), date("2026-11-13"));
+        let untouched = seed_occurrence(&pool, user_id, id, wed, Occurrence::Untouched).await;
+        let picked = seed_occurrence(&pool, user_id, return_id, thu, Occurrence::Picked).await;
+        let outside = seed_occurrence(&pool, user_id, id, fri, Occurrence::Untouched).await;
+        let others = seed_occurrence(&pool, other, other_id, wed, Occurrence::Untouched).await;
+
+        let (status, body) = post_json(
+            router.clone(),
+            "/preferences/time-away".to_string(),
+            Some(&token),
+            serde_json::json!({"startsOn": wed, "endsOn": thu, "label": " Holiday "}),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        assert_eq!(body["period"]["label"], "Holiday");
+        // Only the untouched journey inside the dates, and only the user's.
+        assert_eq!(body["deletedJourneyIds"], serde_json::json!([untouched]));
+        for kept in [picked, outside, others] {
+            assert!(journey_exists(&pool, kept).await, "{kept}");
+        }
+        let period_id = body["period"]["id"].as_i64().unwrap();
+
+        // Both directions skip the dates, as "away"; the other user's don't.
+        for template in [id, return_id] {
+            let (_, detail) = request(
+                router.clone(),
+                format!("/JourneyTemplates/{template}"),
+                Some(&token),
+            )
+            .await;
+            let reasons: Vec<Value> = detail["upcomingDates"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .take(3)
+                .map(|day| day["skipReason"].clone())
+                .collect();
+            assert_eq!(
+                reasons,
+                vec![Value::Null, Value::from("away"), Value::from("away")],
+                "{template}"
+            );
+            assert_eq!(detail["nextDate"], "2026-11-10");
+            // No markers written.
+            assert_eq!(detail["skippedDates"], serde_json::json!([]));
+        }
+        let (_, theirs) = request(
+            router.clone(),
+            format!("/JourneyTemplates/{other_id}"),
+            Some(&other_token),
+        )
+        .await;
+        assert_eq!(theirs["upcomingDates"][1]["skipReason"], Value::Null);
+
+        let (status, list) = request(
+            router.clone(),
+            "/preferences/time-away".to_string(),
+            Some(&token),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(list.as_array().unwrap().len(), 1);
+
+        // Moving it deletes untouched journeys inside the new dates.
+        let (status, body) = put_json(
+            router.clone(),
+            format!("/preferences/time-away/{period_id}"),
+            Some(&token),
+            serde_json::json!({"startsOn": fri, "endsOn": fri}),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        assert_eq!(body["deletedJourneyIds"], serde_json::json!([outside]));
+        assert_eq!(body["period"]["label"], Value::Null);
+
+        // Someone else's: not found. Bad dates: 400.
+        let (status, _) = put_json(
+            router.clone(),
+            format!("/preferences/time-away/{period_id}"),
+            Some(&other_token),
+            serde_json::json!({"startsOn": fri, "endsOn": fri}),
+        )
+        .await;
+        assert_eq!(status, StatusCode::NOT_FOUND);
+        for bad in [
+            serde_json::json!({"startsOn": thu, "endsOn": wed}),
+            serde_json::json!({"startsOn": "2026-11-01", "endsOn": "2026-11-09"}),
+            serde_json::json!({"startsOn": wed, "endsOn": "2027-12-01"}),
+        ] {
+            let (status, _) = post_json(
+                router.clone(),
+                "/preferences/time-away".to_string(),
+                Some(&token),
+                bad.clone(),
+            )
+            .await;
+            assert_eq!(status, StatusCode::BAD_REQUEST, "{bad}");
+        }
+
+        // The cap.
+        sqlx::query(
+            "INSERT INTO user_away_periods (user_id, starts_on, ends_on) \
+             SELECT $1, DATE '2027-01-01' + n, DATE '2027-01-01' + n \
+             FROM generate_series(1, 49) AS n",
+        )
+        .bind(user_id)
+        .execute(&pool)
+        .await
+        .unwrap();
+        let (status, _) = post_json(
+            router.clone(),
+            "/preferences/time-away".to_string(),
+            Some(&token),
+            serde_json::json!({"startsOn": wed, "endsOn": wed}),
+        )
+        .await;
+        assert_eq!(status, StatusCode::CONFLICT);
+
+        assert_eq!(
+            delete_json(
+                router.clone(),
+                format!("/preferences/time-away/{period_id}"),
+                Some(&token)
+            )
+            .await,
+            StatusCode::NO_CONTENT
+        );
+        assert_eq!(
+            delete_json(
+                router,
+                format!("/preferences/time-away/{period_id}"),
+                Some(&token)
+            )
+            .await,
+            StatusCode::NOT_FOUND
+        );
+
+        // Ended periods are pruned.
+        sqlx::query(
+            "INSERT INTO user_away_periods (user_id, starts_on, ends_on) VALUES ($1, '2026-11-01', '2026-11-09')",
+        )
+        .bind(user_id)
+        .execute(&pool)
+        .await
+        .unwrap();
+        let pruned = crate::data::time_away::prune_ended(&pool, date("2026-11-10"))
+            .await
+            .unwrap();
+        assert!(pruned >= 1);
+        let left: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM user_away_periods WHERE user_id = $1 AND ends_on < '2026-11-10'",
+        )
+        .bind(user_id)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!(left, 0);
+
+        cleanup_user(&pool, user_id).await;
+        cleanup_user(&pool, other).await;
+    }
+
+    #[tokio::test]
+    #[ignore = "requires a live database; run with `cargo test -p api \
+                pausing_until_a_date_pauses_the_pair_and_runs_again_on_it \
+                -- --ignored --test-threads=1`"]
+    async fn pausing_until_a_date_pauses_the_pair_and_runs_again_on_it() {
+        let pool = connect().await;
+        let user_id = "test-regular-paused-until";
+        cleanup_user(&pool, user_id).await;
+        let token = seed_session(&pool, user_id).await;
+        let router = test_router(test_app(pool.clone()));
+        let (id, return_id) = create_plan(router.clone(), &token, true).await;
+        let return_id = return_id.unwrap();
+        let now = tuesday_morning();
+        let _pin = crate::routes::pin_london_now_for_tests(now);
+        let (today, thu) = (date("2026-11-10"), date("2026-11-12"));
+        let before = seed_occurrence(&pool, user_id, return_id, today, Occurrence::Untouched).await;
+        let ticketed = seed_occurrence(&pool, user_id, id, today, Occurrence::Ticketed).await;
+        let on_the_day = seed_occurrence(&pool, user_id, id, thu, Occurrence::Untouched).await;
+
+        let (status, body) = put_json(
+            router.clone(),
+            format!("/JourneyTemplates/{id}/paused-until"),
+            Some(&token),
+            serde_json::json!({"pausedUntil": thu}),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        assert_eq!(body["templateIds"], serde_json::json!([id, return_id]));
+        assert_eq!(body["deletedJourneyIds"], serde_json::json!([before]));
+        assert!(journey_exists(&pool, ticketed).await, "a ticket keeps it");
+        assert!(
+            journey_exists(&pool, on_the_day).await,
+            "the day it runs again"
+        );
+
+        for template in [id, return_id] {
+            let (_, detail) = request(
+                router.clone(),
+                format!("/JourneyTemplates/{template}"),
+                Some(&token),
+            )
+            .await;
+            assert_eq!(detail["pausedUntil"], thu.to_string());
+            assert_eq!(detail["nextDate"], thu.to_string());
+            assert_eq!(detail["upcomingDates"][0]["skipReason"], "paused");
+            assert_eq!(detail["upcomingDates"][1]["skipReason"], "paused");
+            assert_eq!(detail["upcomingDates"][2]["skipReason"], Value::Null);
+            assert_eq!(
+                detail["nextSkips"],
+                serde_json::json!([
+                    {"date": "2026-11-10", "reason": "paused"},
+                    {"date": "2026-11-11", "reason": "paused"},
+                ])
+            );
+        }
+        let (_, mine) = request(
+            router.clone(),
+            "/JourneyTemplates/mine".to_string(),
+            Some(&token),
+        )
+        .await;
+        assert_eq!(mine_row(&mine, return_id)["pausedUntil"], thu.to_string());
+
+        for bad in [
+            serde_json::json!({"pausedUntil": today}),
+            serde_json::json!({"pausedUntil": "2027-11-12"}),
+        ] {
+            let (status, _) = put_json(
+                router.clone(),
+                format!("/JourneyTemplates/{id}/paused-until"),
+                Some(&token),
+                bad.clone(),
+            )
+            .await;
+            assert_eq!(status, StatusCode::BAD_REQUEST, "{bad}");
+        }
+
+        let (status, _) = put_json(
+            router.clone(),
+            format!("/JourneyTemplates/{return_id}/paused-until"),
+            Some(&token),
+            serde_json::json!({"pausedUntil": null}),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        let (_, detail) = request(router, format!("/JourneyTemplates/{id}"), Some(&token)).await;
+        assert_eq!(detail["pausedUntil"], Value::Null);
+        assert_eq!(detail["nextDate"], today.to_string());
+
         cleanup_user(&pool, user_id).await;
     }
 

@@ -56,6 +56,9 @@ pub struct RetentionOutcome {
     /// `usage_daily` rows older than 13 months (opt-in usage analytics,
     /// DS-190). Not personal data, but kept no longer than it is useful.
     pub usage_daily_rows: u64,
+    /// Time away that has ended (`user_away_periods`): it skips nothing
+    /// any more.
+    pub time_away_periods: u64,
     /// Train legs whose final arrival was recorded this run
     /// (`leg_outcomes::record_final_arrivals`). Not a deletion, so not in
     /// [`Self::total`].
@@ -73,6 +76,7 @@ impl RetentionOutcome {
             + self.accounts
             + self.lapsed_follows
             + self.usage_daily_rows
+            + self.time_away_periods
     }
 }
 
@@ -161,6 +165,11 @@ pub async fn prune_personal_data(
 
     // Not switchable either: the 13 months the privacy page promises.
     outcome.usage_daily_rows = crate::data::usage::prune(pool, now).await?;
+
+    // Not switchable: time away that has ended skips nothing, so it goes
+    // the day after (the privacy page says so).
+    outcome.time_away_periods =
+        crate::data::time_away::prune_ended(pool, cutoff_date(now, 0)).await?;
 
     Ok(outcome)
 }
@@ -365,9 +374,10 @@ mod tests {
             accounts: 6,
             lapsed_follows: 7,
             usage_daily_rows: 8,
+            time_away_periods: 10,
             recorded_leg_outcomes: 100,
         };
-        assert_eq!(outcome.total(), 45, "recording an outcome deletes nothing");
+        assert_eq!(outcome.total(), 55, "recording an outcome deletes nothing");
     }
 }
 

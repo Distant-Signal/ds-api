@@ -264,11 +264,15 @@ pub enum TemplateTargetKind {
     ArriveBy,
 }
 
-/// Why a regular journey passes over a date before its next one
-/// (`regular_journeys::next_skips`).
+/// Why a regular journey passes over a date (`nextSkips`,
+/// `upcomingDates`; `ds_store::recurrence::SkipReason`). When more than
+/// one applies: `paused`, then `away`, then `skipped`, then
+/// `bank_holiday`. More may follow: show one you don't know as skipped.
 #[derive(TS)]
 #[ts(rename_all = "snake_case")]
 pub enum NextSkipReason {
+    Paused,
+    Away,
     Skipped,
     BankHoliday,
 }
