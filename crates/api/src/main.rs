@@ -233,6 +233,10 @@ fn config_defaults() -> ds_runtime::service_args::ConfigDefaults {
             Some("false"),
         )
         .env(
+            data::day_overrides::DAY_OVERRIDES_ENABLED_ENV,
+            Some("false"),
+        )
+        .env(
             "REGULAR_PLAN_SWEEP_ENABLED",
             Some(&plan_sweep.enabled.to_string()),
         )
@@ -283,6 +287,12 @@ async fn server_main() -> anyhow::Result<()> {
         enabled = recurrence,
         "regular journey recurrence patterns ({})",
         data::recurrence_pattern::RECURRENCE_ENABLED_ENV
+    );
+    let day_overrides = data::day_overrides::init_from_env();
+    tracing::info!(
+        enabled = day_overrides,
+        "regular journey different times on some days ({})",
+        data::day_overrides::DAY_OVERRIDES_ENABLED_ENV
     );
 
     // Permissive ORIGIN, deliberately non-credentialed. The four

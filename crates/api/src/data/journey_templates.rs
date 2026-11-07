@@ -164,6 +164,10 @@ pub struct JourneyTemplateListItem {
     pub interval_weeks: i16,
     pub anchor_week: Option<NaiveDate>,
     pub extra_dates: Vec<NaiveDate>,
+    /// A different time on some days (R3, additive): each weekday's own
+    /// target, weekday order; empty for none. See
+    /// `data::day_overrides`.
+    pub day_overrides: Vec<crate::data::day_overrides::DayOverrideSummary>,
 }
 
 /// [`list_templates_for_user`]'s row, before its dates are worked out
@@ -551,8 +555,8 @@ where
     Ok(row)
 }
 
-/// Every leg of a template, `leg_order` ascending, with resolved station
-/// names. Deliberately NOT ownership-scoped on its own -- same reasoning
+/// The template's own legs (not a weekday's variant legs, R3), `leg_order`
+/// ascending, with resolved station names. Deliberately NOT ownership-scoped on its own -- same reasoning
 /// as `journeys::list_legs_for_journey`'s own doc comment: every real
 /// caller (the detail route, `materialize_template` below) already
 /// confirmed ownership one call earlier via [`get_owned_template`].
@@ -570,9 +574,43 @@ where
          FROM journey_template_legs jtl \
          LEFT JOIN stations so ON so.crs = UPPER(jtl.origin_crs)::bpchar \
          LEFT JOIN stations sd ON sd.crs = UPPER(jtl.destination_crs)::bpchar \
-         WHERE jtl.template_id = $1 ORDER BY jtl.leg_order",
+         WHERE jtl.template_id = $1 AND jtl.variant_weekday IS NULL ORDER BY jtl.leg_order",
     )
     .bind(template_id)
+    .fetch_all(executor)
+    .await?;
+    Ok(rows)
+}
+
+/// The legs a journey of the template on `service_date` is made from: that
+/// ISO weekday's variant legs when it has a different time that day (R3,
+/// `data::day_overrides`), else the template's own, as the notifier's mint
+/// reads them (`ds_store::recurrence::leg_variant_sql`). Numbered from 1.
+/// Not ownership-scoped, as [`list_template_legs`].
+pub async fn list_template_legs_for_date<'c, E>(
+    executor: E,
+    template_id: i64,
+    service_date: NaiveDate,
+) -> anyhow::Result<Vec<JourneyTemplateLegWithNamesRow>>
+where
+    E: sqlx::PgExecutor<'c>,
+{
+    let rows = sqlx::query_as::<_, JourneyTemplateLegWithNamesRow>(&format!(
+        "SELECT jtl.id, jtl.template_id, \
+                (ROW_NUMBER() OVER (ORDER BY jtl.leg_order))::int AS leg_order, \
+                jtl.origin_crs, so.name AS origin_name, \
+                jtl.destination_crs, sd.name AS destination_name, \
+                jtl.depart_after, jtl.depart_before, jtl.arrive_after, jtl.arrive_before \
+         FROM journey_template_legs jtl \
+         LEFT JOIN stations so ON so.crs = UPPER(jtl.origin_crs)::bpchar \
+         LEFT JOIN stations sd ON sd.crs = UPPER(jtl.destination_crs)::bpchar \
+         WHERE jtl.template_id = $1 \
+           AND jtl.variant_weekday IS NOT DISTINCT FROM {} \
+         ORDER BY jtl.leg_order",
+        ds_store::recurrence::leg_variant_sql("$1", "$2::date")
+    ))
+    .bind(template_id)
+    .bind(service_date)
     .fetch_all(executor)
     .await?;
     Ok(rows)
@@ -627,12 +665,14 @@ pub async fn list_templates_for_user(
                           AND arrive_after IS NULL AND arrive_before IS NULL \
                     ) AS open_legs, \
                     MIN(leg_order) AS min_order, MAX(leg_order) AS max_order \
-             FROM journey_template_legs GROUP BY template_id \
+             FROM journey_template_legs WHERE variant_weekday IS NULL GROUP BY template_id \
          ) leg_counts ON leg_counts.template_id = jt.id \
          LEFT JOIN journey_template_legs first_leg \
              ON first_leg.template_id = jt.id AND first_leg.leg_order = leg_counts.min_order \
+            AND first_leg.variant_weekday IS NULL \
          LEFT JOIN journey_template_legs last_leg \
              ON last_leg.template_id = jt.id AND last_leg.leg_order = leg_counts.max_order \
+            AND last_leg.variant_weekday IS NULL \
          LEFT JOIN stations so ON so.crs = UPPER(first_leg.origin_crs)::bpchar \
          LEFT JOIN stations sd ON sd.crs = UPPER(last_leg.destination_crs)::bpchar \
          LEFT JOIN stations sto ON sto.crs = UPPER(jt.origin_crs)::bpchar \
@@ -651,6 +691,7 @@ pub async fn list_templates_for_user(
         let mut conn = pool.acquire().await?;
         crate::data::regular_journeys::template_dates(&mut conn, &ids, now).await?
     };
+    let mut overrides = crate::data::day_overrides::load(pool, &ids).await?;
     Ok(rows
         .into_iter()
         .map(|row| {
@@ -664,6 +705,12 @@ pub async fn list_templates_for_user(
                 interval_weeks: row.interval_weeks,
                 anchor_week: row.anchor_week,
                 extra_dates: row.extra_dates,
+                day_overrides: overrides
+                    .remove(&row.id)
+                    .unwrap_or_default()
+                    .into_iter()
+                    .map(Into::into)
+                    .collect(),
                 skip_bank_holidays: row.skip_bank_holidays,
                 target: row
                     .target_kind
@@ -856,12 +903,19 @@ pub async fn replace_template(
         crate::data::recurrence_pattern::store(&mut tx, &locked, pattern).await?;
     }
 
-    sqlx::query("DELETE FROM journey_template_legs WHERE template_id = $1")
-        .bind(template_id)
-        .execute(&mut *tx)
-        .await?;
+    // The template's own legs; a weekday's variant legs (R3) are its
+    // override's, rewritten only when the overrides are.
+    sqlx::query(
+        "DELETE FROM journey_template_legs WHERE template_id = $1 AND variant_weekday IS NULL",
+    )
+    .bind(template_id)
+    .execute(&mut *tx)
+    .await?;
     for (index, leg) in legs.iter().enumerate() {
         insert_template_leg(&mut tx, template_id, (index + 1) as i32, leg).await?;
+    }
+    if let Some(overrides) = &target.day_overrides {
+        crate::data::day_overrides::store(&mut tx, template_id, overrides).await?;
     }
     tx.commit().await?;
     Ok(true)
@@ -883,6 +937,9 @@ pub struct TargetUpdate {
     /// The recurrence pattern (R2), written to both of a pair; `None`
     /// keeps it.
     pub pattern: Option<crate::data::recurrence_pattern::Pattern>,
+    /// A different time on some days (R3), this template only, validated;
+    /// `None` keeps them, an empty list clears them.
+    pub day_overrides: Option<Vec<crate::data::day_overrides::DayOverrideRequest>>,
 }
 
 /// Deletes a template the caller owns. Cascades into
@@ -1003,7 +1060,7 @@ pub async fn materialize_template(
         tx.rollback().await?;
         return Ok(None);
     };
-    let legs = list_template_legs(&mut *tx, template_id).await?;
+    let legs = list_template_legs_for_date(&mut *tx, template_id, service_date).await?;
     // Invariant from create_template/replace_template: a stored template
     // always has >=1 leg. Defensive rather than an unwrap/panic if that's
     // ever violated by a hand-edited row -- report "nothing to

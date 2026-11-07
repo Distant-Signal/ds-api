@@ -145,7 +145,8 @@ pub async fn prefill_for_station(
              WHERE jt.user_id = $1 AND jt.station_buffer_minutes IS NOT NULL \
                AND UPPER(COALESCE(jt.origin_crs, ( \
                    SELECT l.origin_crs FROM journey_template_legs l \
-                   WHERE l.template_id = jt.id ORDER BY l.leg_order LIMIT 1))) = $2 \
+                   WHERE l.template_id = jt.id AND l.variant_weekday IS NULL \
+                   ORDER BY l.leg_order LIMIT 1))) = $2 \
              UNION ALL \
              SELECT j.station_buffer_minutes, 1, j.updated_at \
              FROM journeys j \

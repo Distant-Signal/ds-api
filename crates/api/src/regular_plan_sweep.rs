@@ -22,7 +22,9 @@
 //! 1. leaves a day with no published timetable (and a target already past,
 //!    or in the missing hour of a clock change) `pending`: "no service" is
 //!    never decided on a day the timetable doesn't cover;
-//! 2. plans the target through its own planning slot (`ReplanSlot::Regular`,
+//! 2. plans the target (on a weekday with a different time, R3's
+//!    `data::day_overrides`, that day's target, and later that day's usual
+//!    train) through its own planning slot (`ReplanSlot::Regular`,
 //!    one permit, never a user's or the break sweep's), with the template's
 //!    vias, avoids, `maxChanges` and operator filter, `results=options`
 //!    with live data, so a train known to be cancelled is never picked;
@@ -201,20 +203,31 @@ struct Candidate {
 }
 
 /// The candidates: due occurrences of target templates dated today or
-/// tomorrow (London), oldest service date first. `$1` now, `$2` London's
+/// tomorrow (London), oldest service date first. On a weekday with a
+/// different time (R3, `data::day_overrides`) the target and usual
+/// itinerary are that day's; the stations and plan options are the
+/// template's. `$1` now, `$2` London's
 /// today, `$3` the schedule marker, `$4` the morning check hour, `$5` the
 /// limit.
 fn candidates_sql() -> String {
     let started = regular_journeys::occurrence_started_sql("j", "$1", "$2");
     format!(
         "SELECT j.id AS journey_id, j.user_id, d.service_date, jt.default_match_mode, \
-                jt.origin_crs, jt.destination_crs, jt.target_kind, jt.target_time, \
-                jt.target_day_offset, jt.plan_options, jt.usual_itinerary, \
+                jt.origin_crs, jt.destination_crs, \
+                COALESCE(o.target_kind, jt.target_kind) AS target_kind, \
+                COALESCE(o.target_time, jt.target_time) AS target_time, \
+                COALESCE(o.target_day_offset, jt.target_day_offset) AS target_day_offset, \
+                jt.plan_options, \
+                CASE WHEN o.template_id IS NOT NULL THEN o.usual_itinerary \
+                     ELSE jt.usual_itinerary END AS usual_itinerary, \
                 j.regular_plan_status, j.regular_planned_at \
          FROM journey_templates jt \
          JOIN journeys j ON j.source_template_id = jt.id AND j.user_id = jt.user_id \
          CROSS JOIN LATERAL (SELECT MIN(l.service_date) AS service_date \
                              FROM journey_legs l WHERE l.journey_id = j.id) d \
+         LEFT JOIN journey_template_day_overrides o \
+                ON o.template_id = jt.id \
+               AND o.weekday = EXTRACT(ISODOW FROM d.service_date)::smallint \
          WHERE jt.target_kind IS NOT NULL \
            AND d.service_date BETWEEN $2 AND $2 + 1 \
            AND NOT EXISTS (SELECT 1 FROM journey_breaks b WHERE b.journey_id = j.id) \

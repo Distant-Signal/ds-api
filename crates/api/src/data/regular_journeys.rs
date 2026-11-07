@@ -434,6 +434,8 @@ pub struct PlanTemplateInput {
     /// Minutes to get to the origin station (0 to 120), for the leave-by
     /// (regular journeys design §5.1); `None` for no leave-by.
     pub station_buffer_minutes: Option<i16>,
+    /// A different time on some days (R3), validated; this template's own.
+    pub day_overrides: Vec<crate::data::day_overrides::DayOverrideRequest>,
 }
 
 /// The recurrence a plan-mode create gives both templates.
@@ -557,6 +559,9 @@ async fn insert_plan_template(
         .enumerate()
     {
         journey_templates::insert_template_leg(tx, id, (index + 1) as i32, leg).await?;
+    }
+    if !input.day_overrides.is_empty() {
+        crate::data::day_overrides::store(tx, id, &input.day_overrides).await?;
     }
     Ok(id)
 }

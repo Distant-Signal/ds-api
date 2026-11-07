@@ -16,6 +16,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::app::{App, Router};
 use crate::auth::AuthenticatedUser;
+use crate::data::day_overrides::DayOverrideRequest;
 use crate::data::journey_templates::{self, TemplateLegInput};
 use crate::data::journeys;
 use crate::data::regular_journeys::{self, PlanOptions, TemplateTarget, UsualItinerary};
@@ -193,6 +194,12 @@ pub(crate) enum CreateJourneyTemplateRequest {
         /// Dates it also runs on (for `"dates"`, its only ones).
         #[serde(default)]
         extra_dates: Option<Vec<NaiveDate>>,
+        /// A different time on some days (R3; `data::day_overrides`): per
+        /// ISO weekday, its own target and usual train. The outbound's
+        /// only; `return` takes its own. Refused while
+        /// `REGULAR_JOURNEY_DAY_OVERRIDES_ENABLED` is off.
+        #[serde(default)]
+        day_overrides: Option<Vec<DayOverrideRequest>>,
     },
 }
 
@@ -211,6 +218,9 @@ pub(crate) struct ReturnJourneyRequest {
     /// Minutes to get to the return journey's origin (0 to 120).
     #[serde(default)]
     station_buffer_minutes: Option<i16>,
+    /// The return journey's own different time on some days (R3).
+    #[serde(default)]
+    day_overrides: Option<Vec<DayOverrideRequest>>,
 }
 
 /// `PUT /JourneyTemplates/{id}`'s body -- full-resource replace (Judgment
@@ -282,6 +292,13 @@ pub(crate) struct PutJourneyTemplateRequest {
     #[serde(flatten)]
     #[ts(flatten)]
     pattern: crate::data::recurrence_pattern::PatternRequest,
+    /// A different time on some days (R3, additive): this template only,
+    /// not its pair. Absent keeps them; a list replaces them (empty clears
+    /// them). Needs a target, and is refused while
+    /// `REGULAR_JOURNEY_DAY_OVERRIDES_ENABLED` is off.
+    #[serde(default)]
+    #[ts(optional)]
+    day_overrides: Option<Vec<DayOverrideRequest>>,
 }
 
 #[derive(Debug, Deserialize, ts_rs::TS)]
@@ -424,6 +441,11 @@ pub(crate) struct JourneyTemplateDetailResponse {
     interval_weeks: i16,
     anchor_week: Option<NaiveDate>,
     extra_dates: Vec<NaiveDate>,
+    /// A different time on some days (R3, additive): each weekday's own
+    /// target and usual train, weekday order; empty for none. `legs` are
+    /// the template's own; a journey on one of these weekdays is made from
+    /// that day's usual train instead.
+    day_overrides: Vec<crate::data::day_overrides::DayOverride>,
 }
 
 fn internal_error(operation: &'static str) -> impl Fn(anyhow::Error) -> (StatusCode, String) {
@@ -651,6 +673,7 @@ async fn post_journey_template(
             interval_weeks,
             anchor_week,
             extra_dates,
+            day_overrides,
         } => {
             let pattern = crate::data::recurrence_pattern::resolve(
                 &crate::data::recurrence_pattern::PatternRequest {
@@ -682,6 +705,7 @@ async fn post_journey_template(
                 plan_options,
                 &usual_itinerary,
                 station_buffer_minutes,
+                day_overrides.as_deref().unwrap_or_default(),
             )
             .await?;
             let return_input = match return_journey {
@@ -695,6 +719,7 @@ async fn post_journey_template(
                         ret.plan_options,
                         &ret.usual_itinerary,
                         ret.station_buffer_minutes,
+                        ret.day_overrides.as_deref().unwrap_or_default(),
                     )
                     .await
                     .map_err(|(status, message)| (status, format!("Return journey: {message}")))?,
@@ -901,6 +926,7 @@ async fn plan_template_input(
     plan_options: Option<PlanOptions>,
     usual_itinerary: &UsualItinerary,
     station_buffer_minutes: Option<i16>,
+    day_overrides: &[DayOverrideRequest],
 ) -> Result<regular_journeys::PlanTemplateInput, (StatusCode, String)> {
     let custom_name = train_tracking::validate_custom_name(custom_name).map_err(bad_request)?;
     crate::data::leave_by::validate_station_buffer(station_buffer_minutes).map_err(bad_request)?;
@@ -930,6 +956,7 @@ async fn plan_template_input(
         };
         return Err((StatusCode::UNPROCESSABLE_ENTITY, message));
     }
+    let day_overrides = validate_day_overrides(app, day_overrides).await?;
     Ok(regular_journeys::PlanTemplateInput {
         custom_name,
         origin_crs,
@@ -938,7 +965,34 @@ async fn plan_template_input(
         plan_options,
         usual_itinerary,
         station_buffer_minutes,
+        day_overrides,
     })
+}
+
+/// A request's different times on some days (R3), validated
+/// (`day_overrides::validate`), each usual train checked against its
+/// planned date's timetable as `usualItinerary` is (`422` otherwise).
+async fn validate_day_overrides(
+    app: &App,
+    overrides: &[DayOverrideRequest],
+) -> Result<Vec<DayOverrideRequest>, (StatusCode, String)> {
+    let overrides = crate::data::day_overrides::validate(overrides).map_err(bad_request)?;
+    for item in &overrides {
+        if let Some((leg, rejection)) =
+            regular_journeys::check_itinerary_calls(&app.database, &item.usual_itinerary)
+                .await
+                .map_err(internal_error("check the usual train's calling points"))?
+        {
+            let day = crate::data::day_overrides::weekday_name(item.weekday);
+            let message = if item.usual_itinerary.legs.len() > 1 {
+                format!("{day}: Leg {leg}: {}", rejection.message)
+            } else {
+                format!("{day}: {}", rejection.message)
+            };
+            return Err((StatusCode::UNPROCESSABLE_ENTITY, message));
+        }
+    }
+    Ok(overrides)
 }
 
 async fn get_my_journey_templates(
@@ -970,6 +1024,11 @@ async fn get_journey_template(
     let legs = journey_templates::list_template_legs(&app.database, template_id)
         .await
         .map_err(internal_error("list journey template legs"))?;
+    let day_overrides = crate::data::day_overrides::load(&app.database, &[template_id])
+        .await
+        .map_err(internal_error("read journey template"))?
+        .remove(&template_id)
+        .unwrap_or_default();
     let now = super::london_now().to_utc();
     let mut conn = app
         .database
@@ -1017,6 +1076,7 @@ async fn get_journey_template(
         interval_weeks: pattern.interval_weeks,
         anchor_week: pattern.anchor_week,
         extra_dates: pattern.extra_dates,
+        day_overrides,
         station_buffer_minutes: template.station_buffer_minutes,
         id: template.id,
         custom_name: template.custom_name,
@@ -1091,6 +1151,25 @@ async fn put_journey_template(
     )
     .await?;
     target_update.skip_bank_holidays = body.skip_bank_holidays;
+    if let Some(overrides) = &body.day_overrides {
+        let overrides = validate_day_overrides(&app, overrides).await?;
+        if !overrides.is_empty() && target_update.target.is_none() {
+            let stored =
+                journey_templates::get_owned_template(&app.database, template_id, &user.id)
+                    .await
+                    .map_err(internal_error("read journey template"))?
+                    .ok_or((
+                        StatusCode::NOT_FOUND,
+                        "no journey template with that id".to_string(),
+                    ))?;
+            if stored.target_kind.is_none() {
+                return Err(bad_request(
+                    "A different time on some days needs a target.".to_string(),
+                ));
+            }
+        }
+        target_update.day_overrides = Some(overrides);
+    }
     if !body.pattern.is_empty() {
         let today = regular_journeys::london_date(super::london_now().to_utc());
         let stored = crate::data::recurrence_pattern::stored(&app.database, template_id, today)
@@ -1235,6 +1314,7 @@ async fn put_target_update(
         station_buffer_minutes,
         skip_bank_holidays: None,
         pattern: None,
+        day_overrides: None,
     })
 }
 
@@ -4204,6 +4284,323 @@ mod db_tests {
         let (_, detail) = request(router, format!("/JourneyTemplates/{id}"), Some(&token)).await;
         assert_eq!(detail["pausedUntil"], Value::Null);
         assert_eq!(detail["nextDate"], today.to_string());
+
+        cleanup_user(&pool, user_id).await;
+    }
+
+    /// The legs of journey `journey_id`, `(leg_order, origin, departAfter)`.
+    async fn minted_legs(pool: &PgPool, journey_id: i64) -> Vec<(i32, String, chrono::NaiveTime)> {
+        sqlx::query_as(
+            "SELECT leg_order, origin_crs, depart_after FROM journey_legs \
+             WHERE journey_id = $1 ORDER BY leg_order",
+        )
+        .bind(journey_id)
+        .fetch_all(pool)
+        .await
+        .expect("read the minted legs")
+    }
+
+    /// The `(variant_weekday, leg_order, origin)` of template `id`'s legs.
+    async fn stored_legs(pool: &PgPool, id: i64) -> Vec<(Option<i16>, i32, String)> {
+        sqlx::query_as(
+            "SELECT variant_weekday, leg_order, origin_crs FROM journey_template_legs \
+             WHERE template_id = $1 ORDER BY variant_weekday NULLS FIRST, leg_order",
+        )
+        .bind(id)
+        .fetch_all(pool)
+        .await
+        .expect("read the template legs")
+    }
+
+    /// Regular journeys R3: a different time on some days. Refused while
+    /// off; on, each template of a pair keeps its own overrides and
+    /// variant legs; the detail, the list and the export serve them; "Run
+    /// now" on the weekday makes the journey from that day's legs and on
+    /// other days from the template's own; a PUT without `dayOverrides`
+    /// keeps them, `[]` clears them, and a template without a target
+    /// can't have any.
+    #[tokio::test]
+    #[ignore = "requires a live database; run with `cargo test -p api \
+                day_overrides_are_refused_while_off_and_kept_per_template \
+                -- --ignored --test-threads=1`"]
+    #[expect(
+        clippy::too_many_lines,
+        reason = "test code: one scenario read top to bottom"
+    )]
+    async fn day_overrides_are_refused_while_off_and_kept_per_template() {
+        let pool = connect().await;
+        let user_id = "test-regular-day-overrides";
+        cleanup_user(&pool, user_id).await;
+        let token = seed_session(&pool, user_id).await;
+        let router = test_router(test_app(pool.clone()));
+        let _pin = crate::routes::pin_london_now_for_tests(tuesday_morning());
+        let friday_earlier = serde_json::json!([{
+            "weekday": 5,
+            "target": {"kind": "depart_after", "time": "06:45"},
+            "usualItinerary": {"legs": [
+                {"trainUid": "w11111", "originCrs": "wok", "destinationCrs": "CLJ",
+                 "departs": "06:48"},
+                {"trainUid": "W22222", "originCrs": "CLJ", "destinationCrs": "WAT",
+                 "departs": "07:10"}
+            ]}
+        }]);
+        let with_overrides = || {
+            let mut body = plan_body(true);
+            body["dayOverrides"] = friday_earlier.clone();
+            body["return"]["dayOverrides"] = serde_json::json!([{
+                "weekday": 7,
+                "target": {"kind": "arrive_by", "time": "13:00"},
+                "usualItinerary": {"legs": [
+                    {"trainUid": "W33333", "originCrs": "WAT", "destinationCrs": "WOK",
+                     "departs": "12:05"}
+                ]}
+            }]);
+            body
+        };
+
+        // Off: refused, and nothing is created.
+        {
+            let _off = crate::data::day_overrides::set_enabled_for_tests(false);
+            let (status, message) = post_json(
+                router.clone(),
+                "/JourneyTemplates".to_string(),
+                Some(&token),
+                with_overrides(),
+            )
+            .await;
+            assert_eq!(status, StatusCode::BAD_REQUEST);
+            assert_eq!(message, crate::data::day_overrides::NOT_AVAILABLE_MESSAGE);
+            let count: i64 =
+                sqlx::query_scalar("SELECT COUNT(*) FROM journey_templates WHERE user_id = $1")
+                    .bind(user_id)
+                    .fetch_one(&pool)
+                    .await
+                    .unwrap();
+            assert_eq!(count, 0);
+        }
+
+        let _on = crate::data::day_overrides::set_enabled_for_tests(true);
+        // Two Fridays: refused.
+        let mut twice = plan_body(false);
+        twice["dayOverrides"] = serde_json::json!([friday_earlier[0], friday_earlier[0]]);
+        let (status, message) = post_json(
+            router.clone(),
+            "/JourneyTemplates".to_string(),
+            Some(&token),
+            twice,
+        )
+        .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert_eq!(message, "Friday has more than one different time.");
+
+        let (status, body) = post_json(
+            router.clone(),
+            "/JourneyTemplates".to_string(),
+            Some(&token),
+            with_overrides(),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        let id = body["templateId"].as_i64().unwrap();
+        let return_id = body["returnTemplateId"].as_i64().unwrap();
+
+        // The variant legs sit at the template's own positions.
+        assert_eq!(
+            stored_legs(&pool, id).await,
+            vec![
+                (None, 1, "WOK".to_string()),
+                (Some(5), 1, "WOK".to_string()),
+                (Some(5), 2, "CLJ".to_string()),
+            ]
+        );
+        assert_eq!(
+            stored_legs(&pool, return_id).await,
+            vec![
+                (None, 1, "WAT".to_string()),
+                (Some(7), 1, "WAT".to_string())
+            ]
+        );
+
+        // The detail: the template's own legs, and each one's overrides.
+        let (status, detail) = request(
+            router.clone(),
+            format!("/JourneyTemplates/{id}"),
+            Some(&token),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{detail}");
+        assert_eq!(detail["legs"].as_array().unwrap().len(), 1);
+        assert_eq!(detail["dayOverrides"][0]["weekday"], 5);
+        assert_eq!(detail["dayOverrides"][0]["target"]["time"], "06:45:00");
+        assert_eq!(
+            detail["dayOverrides"][0]["usualItinerary"]["legs"][0]["trainUid"],
+            "W11111"
+        );
+        assert_eq!(detail["dayOverrides"].as_array().unwrap().len(), 1);
+        let (_, detail) = request(
+            router.clone(),
+            format!("/JourneyTemplates/{return_id}"),
+            Some(&token),
+        )
+        .await;
+        assert_eq!(detail["dayOverrides"][0]["weekday"], 7);
+        assert_eq!(detail["dayOverrides"][0]["target"]["kind"], "arrive_by");
+        // The list: weekday and target, and still one leg.
+        let (_, mine) = request(
+            router.clone(),
+            "/JourneyTemplates/mine".to_string(),
+            Some(&token),
+        )
+        .await;
+        let row = mine_row(&mine, id);
+        assert_eq!(row["legCount"], 1);
+        assert_eq!(
+            row["dayOverrides"],
+            serde_json::json!([{"weekday": 5, "target":
+                {"kind": "depart_after", "time": "06:45:00", "dayOffset": 0}}])
+        );
+        // The export nests them.
+        let overrides: Value = sqlx::query_scalar(
+            "SELECT COALESCE(jsonb_agg(to_jsonb(o) - 'template_id'), '[]'::jsonb) \
+             FROM journey_template_day_overrides o WHERE o.template_id = $1",
+        )
+        .bind(id)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!(overrides[0]["weekday"], 5);
+
+        // "Run now": Friday 13 Nov from the Friday legs, Thursday 12 Nov
+        // from the template's own.
+        let window = |departs: &str| {
+            crate::data::journey_templates::window_around_departure(departs.parse().unwrap()).0
+        };
+        for (service_date, want) in [
+            (
+                "2026-11-13",
+                vec![
+                    (1, "WOK".to_string(), window("06:48")),
+                    (2, "CLJ".to_string(), window("07:10")),
+                ],
+            ),
+            ("2026-11-12", vec![(1, "WOK".to_string(), window("07:48"))]),
+        ] {
+            let (status, made) = post_json(
+                router.clone(),
+                format!("/JourneyTemplates/{id}/materialize"),
+                Some(&token),
+                serde_json::json!({ "serviceDate": service_date }),
+            )
+            .await;
+            assert_eq!(status, StatusCode::OK, "{made}");
+            let journey_id = made["journeyId"].as_i64().unwrap();
+            assert_eq!(minted_legs(&pool, journey_id).await, want, "{service_date}");
+        }
+
+        // The return journey's Sunday legs on the October clock change (a
+        // Sunday), its own on the Saturday before. ("Run now" takes dates
+        // up to 28 days ahead, so March's is the notifier's test.)
+        for (service_date, origin_departs) in [("2026-10-25", "12:05"), ("2026-10-24", "17:35")] {
+            let (status, made) = post_json(
+                router.clone(),
+                format!("/JourneyTemplates/{return_id}/materialize"),
+                Some(&token),
+                serde_json::json!({ "serviceDate": service_date }),
+            )
+            .await;
+            assert_eq!(status, StatusCode::OK, "{made}");
+            let journey_id = made["journeyId"].as_i64().unwrap();
+            assert_eq!(
+                minted_legs(&pool, journey_id).await,
+                vec![(1, "WAT".to_string(), window(origin_departs))],
+                "{service_date}"
+            );
+        }
+
+        // A PUT without dayOverrides keeps them and their legs.
+        let put_body = |overrides: Option<Value>| {
+            let mut body = serde_json::json!({
+                "customName": "Work",
+                "legs": [{"originCrs": "WOK", "destinationCrs": "WAT",
+                          "departWindow": {"after": "07:43", "before": "07:53"}}],
+                "daysOfWeek": 31,
+                "active": true,
+                "defaultMatchMode": "manual",
+                "autoCommitRule": null
+            });
+            if let Some(overrides) = overrides {
+                body["dayOverrides"] = overrides;
+            }
+            body
+        };
+        let (status, body) = put_json(
+            router.clone(),
+            format!("/JourneyTemplates/{id}"),
+            Some(&token),
+            put_body(None),
+        )
+        .await;
+        assert_eq!(status, StatusCode::NO_CONTENT, "{body}");
+        assert_eq!(stored_legs(&pool, id).await.len(), 3);
+        // A PUT replacing them: Mondays instead of Fridays.
+        let mut monday = friday_earlier.clone();
+        monday[0]["weekday"] = serde_json::json!(1);
+        let (status, body) = put_json(
+            router.clone(),
+            format!("/JourneyTemplates/{id}"),
+            Some(&token),
+            put_body(Some(monday)),
+        )
+        .await;
+        assert_eq!(status, StatusCode::NO_CONTENT, "{body}");
+        assert_eq!(
+            stored_legs(&pool, id)
+                .await
+                .iter()
+                .map(|(variant, _, _)| *variant)
+                .collect::<Vec<_>>(),
+            vec![None, Some(1), Some(1)]
+        );
+        // `[]` clears them, and the return journey keeps its own.
+        let (status, body) = put_json(
+            router.clone(),
+            format!("/JourneyTemplates/{id}"),
+            Some(&token),
+            put_body(Some(serde_json::json!([]))),
+        )
+        .await;
+        assert_eq!(status, StatusCode::NO_CONTENT, "{body}");
+        assert_eq!(stored_legs(&pool, id).await.len(), 1);
+        let (_, detail) = request(
+            router.clone(),
+            format!("/JourneyTemplates/{id}"),
+            Some(&token),
+        )
+        .await;
+        assert_eq!(detail["dayOverrides"], serde_json::json!([]));
+        assert_eq!(stored_legs(&pool, return_id).await.len(), 2);
+
+        // A template without a target can't have one.
+        let (_, created) = post_json(
+            router.clone(),
+            "/JourneyTemplates".to_string(),
+            Some(&token),
+            serde_json::json!({
+                "mode": "manual",
+                "legs": [{"originCrs": "WAT", "destinationCrs": "RDG"}]
+            }),
+        )
+        .await;
+        let manual_id = created["templateId"].as_i64().unwrap();
+        let (status, message) = put_json(
+            router.clone(),
+            format!("/JourneyTemplates/{manual_id}"),
+            Some(&token),
+            put_body(Some(friday_earlier.clone())),
+        )
+        .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert_eq!(message, "A different time on some days needs a target.");
 
         cleanup_user(&pool, user_id).await;
     }

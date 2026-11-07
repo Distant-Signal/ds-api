@@ -347,7 +347,9 @@ pub async fn export_account(pool: &PgPool, user_id: &str) -> Result<Option<Accou
                  'skipped_dates', (SELECT COALESCE(jsonb_agg(to_jsonb(s) ORDER BY s.service_date), '[]'::jsonb) \
                           FROM journey_template_skipped_dates s WHERE s.template_id = t.id), \
                  'extra_dates', (SELECT COALESCE(jsonb_agg(e.service_date ORDER BY e.service_date), '[]'::jsonb) \
-                          FROM journey_template_extra_dates e WHERE e.template_id = t.id)) \
+                          FROM journey_template_extra_dates e WHERE e.template_id = t.id), \
+                 'day_overrides', (SELECT COALESCE(jsonb_agg(to_jsonb(o) - 'template_id' ORDER BY o.weekday), '[]'::jsonb) \
+                          FROM journey_template_day_overrides o WHERE o.template_id = t.id)) \
              FROM journey_templates t WHERE user_id = $1 ORDER BY id",
             user_id,
         )

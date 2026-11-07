@@ -799,6 +799,7 @@ async fn after_the_regular_sweep_replans_only_the_new_train_counts() {
                 plan_options: None,
                 usual_itinerary,
                 station_buffer_minutes: None,
+                day_overrides: Vec::new(),
             },
             None,
         )

@@ -3,6 +3,46 @@
 Changes to the Distant Signal (DS) HTTP API that a client such as DS-MCP
 needs to know about. Newest first. Field names are as served (camelCase).
 
+## 2026-11-07: Regular journeys: a different time on some days
+
+The scheduling options' R3 (distant-signal's
+`docs/superpowers/specs/2026-11-06-regular-journeys-design.md`; ds-core
+v0.13.0 and v0.14.0), such as "Fridays an hour earlier". Additive. Off
+unless `REGULAR_JOURNEY_DAY_OVERRIDES_ENABLED` (the chart's
+`api.regularJourneys.dayOverrides.enabled`, default false): until then a
+request below that sets one is a 400 ("A different time on some days isn't
+available yet."). It goes on only after the notifier that mints one
+weekday's legs (ds-workers eac006c) is deployed.
+
+- A day override is `{weekday, target, usualItinerary}`: an ISO weekday (1
+  Monday to 7 Sunday, not `daysOfWeek`'s bits), that day's own target
+  (`{kind, time, dayOffset}`, as `target`) and the usual train picked for
+  it (as `usualItinerary`, checked the same way, `422` when the train
+  doesn't call there). At most one per weekday; one for a day the journey
+  doesn't run on has no effect. The journey's stations and plan options
+  are the template's.
+- `POST /JourneyTemplates` `mode: "plan"` takes `dayOverrides`, and
+  `return` its own `dayOverrides`: a return journey's different times are
+  its own, not the outbound's.
+- `PUT /JourneyTemplates/{id}` takes `dayOverrides`, for that template
+  only: absent keeps them, a list replaces them, `[]` clears them. 400 for
+  a template without a target. `legs` stay the template's own legs.
+- `GET /JourneyTemplates/{id}` gains `dayOverrides` (weekday order, empty
+  for none); `GET /JourneyTemplates/mine` items gain `dayOverrides` with
+  each `weekday` and `target` only. `legs` and `legCount` are the
+  template's own legs.
+- On an override's weekday a journey is made from that day's usual train,
+  by the notifier's mint and by `POST /JourneyTemplates/{id}/materialize`
+  alike, and the plan sweep plans that day's target with that day's usual
+  train (a stored plan's `reason: "usual"` then means that day's usual
+  train).
+- `GET /public/auth/session` gains `regularJourneyDayOverridesEnabled`
+  (false logged out).
+- The account export's journey templates gain `day_overrides`; their
+  `legs` gain `variant_weekday` (null for the template's own legs).
+
+DS-MCP: no change needed; it doesn't read templates.
+
 ## 2026-11-07: `/Trips/plan` lists several trains with `count`
 
 `GET /Trips/plan` takes `count=1..8` (DS-398). Additive: without it
