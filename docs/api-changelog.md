@@ -3,6 +3,39 @@
 Changes to the Distant Signal (DS) HTTP API that a client such as DS-MCP
 needs to know about. Newest first. Field names are as served (camelCase).
 
+## 2026-11-07: Regular journeys: upcoming dates, skipping several, preview
+
+The scheduling options' R0 (distant-signal's
+`docs/superpowers/specs/2026-11-06-regular-journeys-design.md`; ds-core
+v0.10.0's `ds_store::recurrence`, the one rule the notifier's mint uses
+too). Everything here is additive.
+
+- `GET /JourneyTemplates/mine` items and `GET /JourneyTemplates/{id}` gain
+  `upcomingDates: [{date, skipReason}]`: the next 8 dates the regular
+  journey is scheduled on from London's today (from tomorrow once today's
+  journey has started), due or skipped, in date order. `skipReason` is
+  `null` for a date a journey is made for, else as `nextSkips`' `reason`.
+  It is a superset of `nextSkips`. More reasons will follow (`"away"`,
+  `"paused"`): a client should show a reason it doesn't know as skipped.
+- `nextDate` and `nextRunOn` now look up to 400 days ahead, past any number
+  of skipped dates (they used to give up after a week plus one day per
+  skip, so a long run of skips could show no next date).
+- `POST /JourneyTemplates/{id}/skip` takes `serviceDates: [date]` (up to
+  60, each at most 366 days ahead), with `serviceDate` if given too. All
+  are skipped in one transaction, or none: 409 when any of them has a
+  journey that has started, 400 for a past date. The response gains
+  `serviceDates` (ascending); `serviceDate` is the first.
+- `POST /JourneyTemplates/preview-dates` `{daysOfWeek, startsOn?, endsOn?,
+  skipBankHolidays? (default true), count? (1 to 31, default 8)}`
+  returns `{nextDate, upcomingDates}` for a recurrence not saved yet, with
+  the caller's bank holidays. It saves nothing. Cookie only.
+- `PUT /JourneyTemplates/{id}` on one of a pair now writes `daysOfWeek`,
+  `startsOn`, `endsOn` and (when given) `skipBankHolidays` to the return
+  journey too, in the same transaction. The two directions always share
+  their days; `DELETE /JourneyTemplates/{id}/pair` unlinks them so they
+  can differ. Before this, an edit changed one direction only.
+
+DS-MCP: no change needed; it doesn't read templates.
 ## 2026-11-06: Track a journey again, move a journey
 
 Everything here is additive.

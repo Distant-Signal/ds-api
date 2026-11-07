@@ -37,6 +37,10 @@ pub fn router() -> Router {
             axum::routing::get(get_station_buffer_prefill),
         )
         .route(
+            "/JourneyTemplates/preview-dates",
+            axum::routing::post(post_preview_dates),
+        )
+        .route(
             "/JourneyTemplates/{template_id}",
             axum::routing::get(get_journey_template)
                 .put(put_journey_template)
@@ -293,6 +297,11 @@ pub(crate) struct SkipTemplateDateRequest {
     /// Default: the template's `nextDate`.
     #[serde(default)]
     service_date: Option<NaiveDate>,
+    /// Several dates at once (additive), with `serviceDate` if given too;
+    /// at most [`MAX_SKIP_DATES`]. All are skipped or, when one is
+    /// refused, none.
+    #[serde(default)]
+    service_dates: Option<Vec<NaiveDate>>,
     /// Skip the paired return journey's date too.
     #[serde(default)]
     pair: Option<bool>,
@@ -302,7 +311,10 @@ pub(crate) struct SkipTemplateDateRequest {
 #[derive(Debug, Serialize, ts_rs::TS)]
 #[serde(rename_all = "camelCase")]
 pub(crate) struct SkipTemplateDateResponse {
+    /// The first date skipped.
     service_date: NaiveDate,
+    /// Every date skipped, ascending (additive).
+    service_dates: Vec<NaiveDate>,
     template_ids: Vec<i64>,
     /// Journeys already added for that date, now deleted.
     deleted_journey_ids: Vec<i64>,
@@ -369,6 +381,8 @@ pub(crate) struct JourneyTemplateDetailResponse {
     /// Bank holidays (additive): see `JourneyTemplateListItem`.
     skip_bank_holidays: bool,
     next_skips: Vec<regular_journeys::NextSkip>,
+    /// See `JourneyTemplateListItem` (additive).
+    upcoming_dates: Vec<regular_journeys::UpcomingDate>,
 }
 
 fn internal_error(operation: &'static str) -> impl Fn(anyhow::Error) -> (StatusCode, String) {
@@ -680,6 +694,102 @@ pub(crate) struct StationBufferPrefillResponse {
     minutes: Option<i16>,
 }
 
+/// `POST /JourneyTemplates/preview-dates`'s body: a recurrence not saved
+/// yet, as the create and edit forms hold it.
+#[derive(Debug, Deserialize, ts_rs::TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(optional_fields = nullable)]
+pub(crate) struct PreviewDatesRequest {
+    /// Mon = 1 to Sun = 64, as `daysOfWeek` everywhere.
+    days_of_week: i16,
+    #[serde(default)]
+    starts_on: Option<NaiveDate>,
+    #[serde(default)]
+    ends_on: Option<NaiveDate>,
+    /// Default true, as for a new regular journey.
+    #[serde(default)]
+    skip_bank_holidays: Option<bool>,
+    /// How many dates (1 to [`MAX_PREVIEW_DATES`]); default
+    /// `regular_journeys::UPCOMING_DATES`.
+    #[serde(default)]
+    count: Option<u8>,
+}
+
+/// `POST /JourneyTemplates/preview-dates`'s response.
+#[derive(Debug, Serialize, ts_rs::TS)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct PreviewDatesResponse {
+    /// The first due date from London's today, or `null`.
+    next_date: Option<NaiveDate>,
+    /// The next scheduled dates from today, due or skipped, as
+    /// `upcomingDates` on a saved regular journey.
+    upcoming_dates: Vec<regular_journeys::UpcomingDate>,
+}
+
+/// The most dates a preview lists.
+const MAX_PREVIEW_DATES: u8 = 31;
+
+/// `POST /JourneyTemplates/preview-dates`: the dates a recurrence would
+/// run on from London's today, by the same rule the mint uses
+/// (`ds_store::recurrence`), with the caller's bank holidays when
+/// `skipBankHolidays`. Saves nothing; the forms call it instead of keeping
+/// their own copy of the rule.
+async fn post_preview_dates(
+    State(app): State<App>,
+    user: AuthenticatedUser,
+    Json(body): Json<PreviewDatesRequest>,
+) -> Result<Json<PreviewDatesResponse>, (StatusCode, String)> {
+    use ds_store::recurrence::{DEFAULT_HORIZON_DAYS, Rule, Schedule};
+
+    journey_templates::validate_template_recurrence(
+        "manual",
+        None,
+        Some(body.days_of_week),
+        body.starts_on,
+        body.ends_on,
+    )
+    .map_err(bad_request)?;
+    let count = body
+        .count
+        .map_or(regular_journeys::UPCOMING_DATES, usize::from);
+    if count == 0 || count > usize::from(MAX_PREVIEW_DATES) {
+        return Err(bad_request(format!(
+            "count must be from 1 to {MAX_PREVIEW_DATES}."
+        )));
+    }
+    let now = super::london_now().to_utc();
+    let today = regular_journeys::london_date(now);
+    let horizon_end = today + chrono::Duration::days(i64::from(DEFAULT_HORIZON_DAYS));
+    let exceptions = ds_store::recurrence::user_exceptions(
+        &app.database,
+        &user.id,
+        body.skip_bank_holidays.unwrap_or(true),
+        today,
+        horizon_end,
+    )
+    .await
+    .map_err(internal_error("read the dates a regular journey skips"))?;
+    let mut rule = Rule::weekly(Some(body.days_of_week));
+    rule.starts_on = body.starts_on;
+    rule.ends_on = body.ends_on;
+    let schedule = Schedule {
+        user_id: user.id,
+        rule,
+        exceptions,
+    };
+    let dates = regular_journeys::dates_for(&schedule, today, false, false);
+    let upcoming_dates = schedule
+        .rule
+        .upcoming(&schedule.exceptions, today, count, DEFAULT_HORIZON_DAYS)
+        .into_iter()
+        .map(regular_journeys::UpcomingDate::from)
+        .collect();
+    Ok(Json(PreviewDatesResponse {
+        next_date: dates.next_date,
+        upcoming_dates,
+    }))
+}
+
 /// `GET /JourneyTemplates/station-buffer?crs=WOK` `{minutes | null}`: the
 /// buffer the caller last used from that station, to pre-fill the regular
 /// journey form (decision 6): their most recently updated template from
@@ -787,12 +897,16 @@ async fn get_journey_template(
         .await
         .map_err(internal_error("list journey template legs"))?;
     let now = super::london_now().to_utc();
-    let (next_date, next_skips) =
-        regular_journeys::next_dates_and_skips(&app.database, &[template_id], now)
-            .await
-            .map_err(internal_error("read the next date"))?
-            .remove(&template_id)
-            .unwrap_or_default();
+    let mut conn = app
+        .database
+        .acquire()
+        .await
+        .map_err(|err| internal_error("read the next date")(err.into()))?;
+    let dates = regular_journeys::template_dates(&mut conn, &[template_id], now)
+        .await
+        .map_err(internal_error("read the next date"))?
+        .remove(&template_id)
+        .unwrap_or_default();
     let skipped_dates = regular_journeys::skipped_dates_from(
         &app.database,
         template_id,
@@ -811,10 +925,11 @@ async fn get_journey_template(
         plan_options: regular_journeys::decode_stored(template.plan_options),
         usual_itinerary: regular_journeys::decode_stored(template.usual_itinerary),
         paired_template_id: template.paired_template_id,
-        next_date,
+        next_date: dates.next_date,
         skipped_dates,
         skip_bank_holidays: template.skip_bank_holidays,
-        next_skips,
+        next_skips: dates.next_skips,
+        upcoming_dates: dates.upcoming,
         station_buffer_minutes: template.station_buffer_minutes,
         id: template.id,
         custom_name: template.custom_name,
@@ -1108,9 +1223,13 @@ async fn put_journey_template_active(
 /// How far ahead a date may be skipped.
 const MAX_SKIP_DAYS_AHEAD: i64 = 366;
 
-/// `POST /JourneyTemplates/{id}/skip` `{serviceDate?, pair?}`: skips a date
-/// (default: `nextDate`), for the pair too with `pair: true`
-/// (`regular_journeys::skip`). `409` once that date's journey has started.
+/// How many dates one skip may name.
+const MAX_SKIP_DATES: usize = 60;
+
+/// `POST /JourneyTemplates/{id}/skip` `{serviceDate?, serviceDates?, pair?}`:
+/// skips the dates given (none: `nextDate`), for the pair too with
+/// `pair: true` (`regular_journeys::skip`), all or none. `409` once one of
+/// those dates' journeys has started.
 async fn post_journey_template_skip(
     State(app): State<App>,
     user: AuthenticatedUser,
@@ -1119,9 +1238,18 @@ async fn post_journey_template_skip(
 ) -> Result<Json<SkipTemplateDateResponse>, (StatusCode, String)> {
     let body = body.map(|Json(body)| body).unwrap_or_default();
     let now = super::london_now().to_utc();
-    if let Some(date) = body.service_date
-        && date > regular_journeys::london_date(now) + chrono::Duration::days(MAX_SKIP_DAYS_AHEAD)
-    {
+    let dates: Vec<NaiveDate> = body
+        .service_date
+        .into_iter()
+        .chain(body.service_dates.unwrap_or_default())
+        .collect();
+    if dates.len() > MAX_SKIP_DATES {
+        return Err(bad_request(format!(
+            "You can skip up to {MAX_SKIP_DATES} dates at once."
+        )));
+    }
+    let latest = regular_journeys::london_date(now) + chrono::Duration::days(MAX_SKIP_DAYS_AHEAD);
+    if dates.iter().any(|date| *date > latest) {
         return Err(bad_request(
             "You can skip a date up to a year ahead.".to_string(),
         ));
@@ -1130,7 +1258,7 @@ async fn post_journey_template_skip(
         &app.database,
         template_id,
         &user.id,
-        body.service_date,
+        &dates,
         body.pair.unwrap_or(false),
         now,
     )
@@ -1138,11 +1266,12 @@ async fn post_journey_template_skip(
     .map_err(internal_error("skip a journey template date"))?;
     match outcome {
         regular_journeys::SkipOutcome::Skipped {
-            date,
+            dates,
             template_ids,
             deleted_journey_ids,
         } => Ok(Json(SkipTemplateDateResponse {
-            service_date: date,
+            service_date: dates[0],
+            service_dates: dates,
             template_ids,
             deleted_journey_ids,
         })),
@@ -3245,6 +3374,311 @@ mod db_tests {
         .await;
         assert_eq!(status, StatusCode::CONFLICT);
 
+        cleanup_user(&pool, user_id).await;
+    }
+
+    #[tokio::test]
+    #[ignore = "requires a live database; run with `cargo test -p api \
+                skipping_several_dates_is_all_or_nothing -- --ignored --test-threads=1`"]
+    #[expect(
+        clippy::too_many_lines,
+        reason = "test code: one scenario read top to bottom"
+    )]
+    async fn skipping_several_dates_is_all_or_nothing() {
+        let pool = connect().await;
+        let user_id = "test-regular-skip-many";
+        cleanup_user(&pool, user_id).await;
+        let token = seed_session(&pool, user_id).await;
+        let router = test_router(test_app(pool.clone()));
+        let (id, return_id) = create_plan(router.clone(), &token, true).await;
+        let return_id = return_id.unwrap();
+        let now = tuesday_morning();
+        let _pin = crate::routes::pin_london_now_for_tests(now);
+        let (today, wed, thu) = (date("2026-11-10"), date("2026-11-11"), date("2026-11-12"));
+
+        // Eight weekdays from today, all due.
+        let (_, mine) = request(
+            router.clone(),
+            "/JourneyTemplates/mine".to_string(),
+            Some(&token),
+        )
+        .await;
+        let upcoming = mine_row(&mine, id)["upcomingDates"].clone();
+        assert_eq!(upcoming.as_array().unwrap().len(), 8);
+        assert_eq!(
+            upcoming[0],
+            serde_json::json!({"date": today.to_string(), "skipReason": null})
+        );
+        // Saturday and Sunday aren't listed.
+        assert_eq!(upcoming[4]["date"], "2026-11-16");
+
+        // Thursday's journey has set off (seeded for the return): nothing
+        // is skipped.
+        seed_occurrence(
+            &pool,
+            user_id,
+            return_id,
+            thu,
+            Occurrence::StartedAt(now - chrono::Duration::minutes(5)),
+        )
+        .await;
+        let (status, _) = post_json(
+            router.clone(),
+            format!("/JourneyTemplates/{id}/skip"),
+            Some(&token),
+            serde_json::json!({"serviceDates": [wed, thu], "pair": true}),
+        )
+        .await;
+        assert_eq!(status, StatusCode::CONFLICT);
+        let markers: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM journey_template_skipped_dates WHERE template_id = ANY($1)",
+        )
+        .bind(vec![id, return_id])
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!(markers, 0);
+
+        // Without the pair, both dates go, with Wednesday's untouched journey.
+        let weds = seed_occurrence(&pool, user_id, id, wed, Occurrence::Untouched).await;
+        let (status, body) = post_json(
+            router.clone(),
+            format!("/JourneyTemplates/{id}/skip"),
+            Some(&token),
+            serde_json::json!({"serviceDates": [thu, wed, wed]}),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        assert_eq!(body["serviceDate"], wed.to_string());
+        assert_eq!(
+            body["serviceDates"],
+            serde_json::json!([wed.to_string(), thu.to_string()])
+        );
+        assert_eq!(body["deletedJourneyIds"], serde_json::json!([weds]));
+        let (_, detail) = request(
+            router.clone(),
+            format!("/JourneyTemplates/{id}"),
+            Some(&token),
+        )
+        .await;
+        assert_eq!(detail["nextDate"], today.to_string());
+        let reasons: Vec<Value> = detail["upcomingDates"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .take(4)
+            .map(|day| day["skipReason"].clone())
+            .collect();
+        assert_eq!(
+            reasons,
+            vec![
+                Value::Null,
+                Value::from("skipped"),
+                Value::from("skipped"),
+                Value::Null
+            ]
+        );
+
+        // Too many dates, or one past a year ahead, is refused.
+        let many: Vec<String> = (0..61)
+            .map(|n| (today + chrono::Duration::days(n)).to_string())
+            .collect();
+        let (status, _) = post_json(
+            router.clone(),
+            format!("/JourneyTemplates/{id}/skip"),
+            Some(&token),
+            serde_json::json!({"serviceDates": many}),
+        )
+        .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        let (status, _) = post_json(
+            router,
+            format!("/JourneyTemplates/{id}/skip"),
+            Some(&token),
+            serde_json::json!({"serviceDates": [wed, today + chrono::Duration::days(400)]}),
+        )
+        .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+
+        cleanup_user(&pool, user_id).await;
+    }
+
+    #[tokio::test]
+    #[ignore = "requires a live database; run with `cargo test -p api \
+                a_recurrence_edit_applies_to_both_of_a_pair -- --ignored --test-threads=1`"]
+    async fn a_recurrence_edit_applies_to_both_of_a_pair() {
+        let pool = connect().await;
+        let user_id = "test-regular-pair-edit";
+        cleanup_user(&pool, user_id).await;
+        let token = seed_session(&pool, user_id).await;
+        let router = test_router(test_app(pool.clone()));
+        let (id, return_id) = create_plan(router.clone(), &token, true).await;
+        let return_id = return_id.unwrap();
+        let _pin = crate::routes::pin_london_now_for_tests(tuesday_morning());
+        let (_, before) = request(
+            router.clone(),
+            format!("/JourneyTemplates/{return_id}"),
+            Some(&token),
+        )
+        .await;
+
+        let (status, body) = put_json(
+            router.clone(),
+            format!("/JourneyTemplates/{id}"),
+            Some(&token),
+            serde_json::json!({
+                "legs": [{"originCrs": "WOK", "destinationCrs": "WAT",
+                          "departWindow": {"after": "07:43", "before": "07:53"}}],
+                "daysOfWeek": 5,
+                "active": true,
+                "startsOn": "2026-12-01",
+                "endsOn": "2027-06-30",
+                "defaultMatchMode": "manual",
+                "autoCommitRule": null,
+                "skipBankHolidays": false
+            }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::NO_CONTENT, "{body}");
+        for template in [id, return_id] {
+            let (_, detail) = request(
+                router.clone(),
+                format!("/JourneyTemplates/{template}"),
+                Some(&token),
+            )
+            .await;
+            assert_eq!(detail["daysOfWeek"], 5, "{template}");
+            assert_eq!(detail["startsOn"], "2026-12-01");
+            assert_eq!(detail["endsOn"], "2027-06-30");
+            assert_eq!(detail["skipBankHolidays"], false);
+            assert_eq!(detail["nextDate"], "2026-12-02");
+        }
+        // The return keeps everything else: its legs, target and name.
+        let (_, after) = request(
+            router.clone(),
+            format!("/JourneyTemplates/{return_id}"),
+            Some(&token),
+        )
+        .await;
+        for field in [
+            "legs",
+            "target",
+            "customName",
+            "usualItinerary",
+            "originCrs",
+        ] {
+            assert_eq!(after[field], before[field], "{field}");
+        }
+
+        // Unlinked, an edit is the one direction's only.
+        let (status, _) = delete_request(
+            router.clone(),
+            format!("/JourneyTemplates/{id}/pair"),
+            Some(&token),
+        )
+        .await;
+        assert_eq!(status, StatusCode::NO_CONTENT);
+        let (status, _) = put_json(
+            router.clone(),
+            format!("/JourneyTemplates/{id}"),
+            Some(&token),
+            serde_json::json!({
+                "legs": [{"originCrs": "WOK", "destinationCrs": "WAT"}],
+                "daysOfWeek": 31,
+                "active": true,
+                "defaultMatchMode": "manual",
+                "autoCommitRule": null
+            }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::NO_CONTENT);
+        let (_, back) = request(
+            router,
+            format!("/JourneyTemplates/{return_id}"),
+            Some(&token),
+        )
+        .await;
+        assert_eq!(back["daysOfWeek"], 5);
+
+        cleanup_user(&pool, user_id).await;
+    }
+
+    #[tokio::test]
+    #[ignore = "requires a live database; run with `cargo test -p api \
+                the_preview_lists_dates_by_the_shared_rule -- --ignored --test-threads=1`"]
+    async fn the_preview_lists_dates_by_the_shared_rule() {
+        let pool = connect().await;
+        let user_id = "test-regular-preview";
+        cleanup_user(&pool, user_id).await;
+        let token = seed_session(&pool, user_id).await;
+        let router = test_router(test_app(pool.clone()));
+        let _pin = crate::routes::pin_london_now_for_tests(tuesday_morning());
+        sqlx::query(
+            "INSERT INTO bank_holidays (division, holiday_date, title, fetched_at) \
+             VALUES ('england-and-wales', '2026-11-11', 'Test holiday', now()) \
+             ON CONFLICT DO NOTHING",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+
+        let (status, body) = post_json(
+            router.clone(),
+            "/JourneyTemplates/preview-dates".to_string(),
+            Some(&token),
+            serde_json::json!({"daysOfWeek": 6, "count": 3}),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        // Tue 10 and Wed 11 Nov, Wed a bank holiday, then Tue 17.
+        assert_eq!(body["nextDate"], "2026-11-10");
+        assert_eq!(
+            body["upcomingDates"],
+            serde_json::json!([
+                {"date": "2026-11-10", "skipReason": null},
+                {"date": "2026-11-11", "skipReason": "bank_holiday"},
+                {"date": "2026-11-17", "skipReason": null},
+            ])
+        );
+        let (_, body) = post_json(
+            router.clone(),
+            "/JourneyTemplates/preview-dates".to_string(),
+            Some(&token),
+            serde_json::json!({"daysOfWeek": 4, "skipBankHolidays": false,
+                               "startsOn": "2026-11-11", "endsOn": "2026-11-11"}),
+        )
+        .await;
+        assert_eq!(
+            body["upcomingDates"],
+            serde_json::json!([{"date": "2026-11-11", "skipReason": null}])
+        );
+        for bad in [
+            serde_json::json!({"daysOfWeek": 0}),
+            serde_json::json!({"daysOfWeek": 1, "count": 0}),
+            serde_json::json!({"daysOfWeek": 1, "startsOn": "2026-12-02", "endsOn": "2026-12-01"}),
+        ] {
+            let (status, _) = post_json(
+                router.clone(),
+                "/JourneyTemplates/preview-dates".to_string(),
+                Some(&token),
+                bad.clone(),
+            )
+            .await;
+            assert_eq!(status, StatusCode::BAD_REQUEST, "{bad}");
+        }
+        let (status, _) = post_json(
+            router,
+            "/JourneyTemplates/preview-dates".to_string(),
+            None,
+            serde_json::json!({"daysOfWeek": 1}),
+        )
+        .await;
+        assert_eq!(status, StatusCode::UNAUTHORIZED);
+
+        sqlx::query("DELETE FROM bank_holidays WHERE title = 'Test holiday'")
+            .execute(&pool)
+            .await
+            .unwrap();
         cleanup_user(&pool, user_id).await;
     }
 
