@@ -114,7 +114,7 @@ pub struct JourneyTemplateListItem {
     pub default_match_mode: String,
     /// The next London date the sweep will add this template's journey on:
     /// `None` when it is paused, not recurring, past its `endsOn`, or has
-    /// no matching day left. See `next_run_on`.
+    /// no matching day left (`regular_journeys::TemplateDates::next_run_on`).
     pub next_run_on: Option<NaiveDate>,
     /// Whether any leg has no departure or arrival time at all. Such a leg
     /// gets no reminder and can't be picked for automatically, so the list
@@ -141,17 +141,18 @@ pub struct JourneyTemplateListItem {
     /// Bank holidays (phase 5, additive): whether the template skips the
     /// bank holidays of its owner's division (default true), and the dates
     /// it passes over before `nextDate`, ascending, with why
-    /// (`regular_journeys::next_skips`).
+    /// (`regular_journeys::TemplateDates::next_skips`).
     pub skip_bank_holidays: bool,
     pub next_skips: Vec<crate::data::regular_journeys::NextSkip>,
+    /// The next 8 scheduled dates from today, due or skipped, each with
+    /// its skip reason or `null` (additive; a superset of `nextSkips`).
+    /// The reasons may grow: show one you don't know as skipped.
+    pub upcoming_dates: Vec<crate::data::regular_journeys::UpcomingDate>,
 }
 
-/// [`list_templates_for_user`]'s row, before [`next_run_on`] is worked out.
+/// [`list_templates_for_user`]'s row, before its dates are worked out
+/// (`regular_journeys::template_dates`).
 #[derive(Debug, sqlx::FromRow)]
-#[expect(
-    clippy::struct_excessive_bools,
-    reason = "a SQL row: each flag is an independent column"
-)]
 struct JourneyTemplateListRow {
     id: i64,
     custom_name: Option<String>,
@@ -167,18 +168,9 @@ struct JourneyTemplateListRow {
     starts_on: Option<NaiveDate>,
     ends_on: Option<NaiveDate>,
     has_open_legs: bool,
-    /// Whether today's journey was already added (the sweep's own
-    /// "already materialized" guard).
-    ran_today: bool,
-    /// Whether today's journey was added and has started
-    /// (`regular_journeys::occurrence_started_sql`).
-    today_started: bool,
     /// Skipped dates (`journey_template_skipped_dates`) from today on.
     skipped_dates: Vec<NaiveDate>,
     skip_bank_holidays: bool,
-    /// The bank holidays it skips from today on
-    /// (`regular_journeys::bank_holiday_dates_sql`).
-    bank_holidays: Vec<NaiveDate>,
     origin_crs: Option<String>,
     origin_name: Option<String>,
     destination_crs: Option<String>,
@@ -246,42 +238,6 @@ pub fn validate_auto_mode_legs(
         return Err(AUTO_NEEDS_TIMES_MESSAGE.to_string());
     }
     Ok(())
-}
-
-/// The next date on or after `today` the sweep will add a template's
-/// journey on: an active template whose `days_of_week` (Monday bit 0)
-/// includes the day, inside `starts_on..=ends_on`, not a skipped date, and
-/// not today when today's journey was already added. The sweep's own
-/// rule (`notifier`'s `due_templates_for` plus its idempotency and
-/// skipped-date guards). `None` when there is no such date.
-pub fn next_run_on(
-    active: bool,
-    days_of_week: Option<i16>,
-    starts_on: Option<NaiveDate>,
-    ends_on: Option<NaiveDate>,
-    today: NaiveDate,
-    ran_today: bool,
-    skipped_dates: &[NaiveDate],
-) -> Option<NaiveDate> {
-    use chrono::Datelike;
-
-    let days = days_of_week.filter(|_| active)?;
-    let mut date = starts_on.map_or(today, |start| start.max(today));
-    // Each week has a matching day, so a week plus one day per skipped
-    // date is enough to find one.
-    for _ in 0..=(7 + skipped_dates.len()) {
-        if ends_on.is_some_and(|end| date > end) {
-            return None;
-        }
-        let bit = 1_i16 << date.weekday().num_days_from_monday();
-        let runs =
-            days & bit != 0 && !skipped_dates.contains(&date) && !(date == today && ran_today);
-        if runs {
-            return Some(date);
-        }
-        date = date.succ_opt()?;
-    }
-    None
 }
 
 /// User-facing validation for a manually-entered template leg's
@@ -615,7 +571,6 @@ const LAST_USED_SQL: &str = "GREATEST(jt.created_at, \
 /// never happen given `create_template`'s own non-empty-legs invariant,
 /// but defensively possible if a row is ever hand-edited) renders with
 /// `leg_count = 0` and every origin/destination field `NULL`, not an error.
-#[expect(clippy::too_many_lines, reason = "one query and its row mapping")]
 pub async fn list_templates_for_user(
     pool: &PgPool,
     user_id: &str,
@@ -628,28 +583,16 @@ pub async fn list_templates_for_user(
                 jt.origin_crs, sto.name AS origin_name, jt.destination_crs, \
                 std.name AS destination_name, jt.target_kind, jt.target_time, \
                 jt.target_day_offset, jt.paired_template_id, \
-                EXISTS ( \
-                    SELECT 1 FROM journeys j \
-                    WHERE j.source_template_id = jt.id \
-                      AND EXISTS (SELECT 1 FROM journey_legs dl \
-                                  WHERE dl.journey_id = j.id AND dl.service_date = $3) \
-                      AND {started} \
-                ) AS today_started, \
                 COALESCE(leg_counts.leg_count, 0) AS leg_count, \
                 COALESCE(leg_counts.open_legs, 0) > 0 AS has_open_legs, \
                 first_leg.origin_crs AS first_origin_crs, so.name AS first_origin_name, \
                 last_leg.destination_crs AS last_destination_crs, sd.name AS last_destination_name, \
-                EXISTS ( \
-                    SELECT 1 FROM journeys j JOIN journey_legs jl ON jl.journey_id = j.id \
-                    WHERE j.source_template_id = jt.id AND jl.service_date = $3 \
-                ) AS ran_today, \
                 ARRAY( \
                     SELECT s.service_date FROM journey_template_skipped_dates s \
                     WHERE s.template_id = jt.id AND s.service_date >= $3 \
                     ORDER BY s.service_date \
                 ) AS skipped_dates, \
-                jt.skip_bank_holidays, \
-                {bank_holidays} AS bank_holidays \
+                jt.skip_bank_holidays \
          FROM journey_templates jt \
          LEFT JOIN ( \
              SELECT template_id, COUNT(*) AS leg_count, \
@@ -669,43 +612,27 @@ pub async fn list_templates_for_user(
          LEFT JOIN stations sto ON sto.crs = UPPER(jt.origin_crs)::bpchar \
          LEFT JOIN stations std ON std.crs = UPPER(jt.destination_crs)::bpchar \
          WHERE jt.user_id = $1 \
-         ORDER BY {last_used} DESC, jt.created_at DESC \
+         ORDER BY {LAST_USED_SQL} DESC, jt.created_at DESC \
          LIMIT $2",
-        last_used = LAST_USED_SQL,
-        started = crate::data::regular_journeys::occurrence_started_sql("j", "$4", "$3"),
-        bank_holidays = crate::data::regular_journeys::bank_holiday_dates_sql("jt", "$3"),
     ))
     .bind(user_id)
     .bind(crate::data::train_tracking::MINE_LIST_LIMIT)
     .bind(today)
-    .bind(now)
     .fetch_all(pool)
     .await?;
+    let ids: Vec<i64> = rows.iter().map(|row| row.id).collect();
+    let mut dates = {
+        let mut conn = pool.acquire().await?;
+        crate::data::regular_journeys::template_dates(&mut conn, &ids, now).await?
+    };
     Ok(rows
         .into_iter()
         .map(|row| {
-            let passed_over =
-                crate::data::regular_journeys::passed_over(&row.skipped_dates, &row.bank_holidays);
-            let next_date = next_run_on(
-                row.active,
-                row.days_of_week,
-                row.starts_on,
-                row.ends_on,
-                today,
-                row.today_started,
-                &passed_over,
-            );
-            let next_skips = crate::data::regular_journeys::next_skips(
-                row.days_of_week.filter(|_| row.active),
-                row.starts_on,
-                today,
-                next_date,
-                &row.skipped_dates,
-                &row.bank_holidays,
-            );
+            let dates = dates.remove(&row.id).unwrap_or_default();
             JourneyTemplateListItem {
-                next_date,
-                next_skips,
+                next_date: dates.next_date,
+                next_skips: dates.next_skips,
+                upcoming_dates: dates.upcoming,
                 skip_bank_holidays: row.skip_bank_holidays,
                 target: row
                     .target_kind
@@ -718,15 +645,7 @@ pub async fn list_templates_for_user(
                             day_offset: row.target_day_offset,
                         },
                     ),
-                next_run_on: next_run_on(
-                    row.active,
-                    row.days_of_week,
-                    row.starts_on,
-                    row.ends_on,
-                    today,
-                    row.ran_today,
-                    &passed_over,
-                ),
+                next_run_on: dates.next_run_on,
                 id: row.id,
                 custom_name: row.custom_name,
                 created_at: row.created_at,
@@ -807,6 +726,10 @@ static BOOKED_DEPARTURES_SQL: std::sync::LazyLock<String> = std::sync::LazyLock:
 /// [`validate_template_recurrence`] -- this function trusts its caller and
 /// otherwise relies on the table's own CHECK constraints (Task 1's
 /// migration) as a last-resort guard.
+///
+/// A paired template's `days_of_week`, `starts_on`, `ends_on` and (when
+/// given) `skip_bank_holidays` are written to its pair too, in the same
+/// transaction, with both rows locked first in id order.
 #[expect(
     clippy::cast_possible_truncation,
     clippy::cast_possible_wrap,
@@ -828,6 +751,14 @@ pub async fn replace_template(
     target: &TargetUpdate,
 ) -> anyhow::Result<bool> {
     let mut tx = pool.begin().await?;
+    // The template and its pair, locked in id order, as pause and skip
+    // lock them: the recurrence below is written to both.
+    let locked =
+        crate::data::regular_journeys::lock_with_pair(&mut tx, template_id, user_id).await?;
+    if locked.is_empty() {
+        tx.rollback().await?;
+        return Ok(false);
+    }
     // Each target field is optional and an absent one keeps its value
     // (regular journeys design §4.2): a client from before targets
     // existed must not wipe one out.
@@ -873,6 +804,23 @@ pub async fn replace_template(
         tx.rollback().await?;
         return Ok(false);
     }
+
+    // Decision 2 of the scheduling options: a pair shares its recurrence,
+    // so an edit to one direction's days, dates or bank holiday switch is
+    // the return's too. Unlinking the pair is how they come to differ.
+    sqlx::query(
+        "UPDATE journey_templates SET days_of_week = $2, starts_on = $3, ends_on = $4, \
+                skip_bank_holidays = COALESCE($5, skip_bank_holidays), updated_at = NOW() \
+         WHERE id = ANY($1) AND id <> $6",
+    )
+    .bind(&locked)
+    .bind(days_of_week)
+    .bind(starts_on)
+    .bind(ends_on)
+    .bind(target.skip_bank_holidays)
+    .bind(template_id)
+    .execute(&mut *tx)
+    .await?;
 
     sqlx::query("DELETE FROM journey_template_legs WHERE template_id = $1")
         .bind(template_id)
@@ -1113,10 +1061,6 @@ mod validate_template_leg_tests {
         text.parse().unwrap()
     }
 
-    fn date(text: &str) -> NaiveDate {
-        text.parse().unwrap()
-    }
-
     #[test]
     fn a_departure_window_reaches_five_minutes_either_side() {
         assert_eq!(
@@ -1194,70 +1138,6 @@ mod validate_template_leg_tests {
         );
         assert_eq!(validate_auto_mode_legs("manual", &legs), Ok(()));
         assert_eq!(validate_auto_mode_legs("auto", &legs[..1]), Ok(()));
-    }
-
-    // 2026-11-06 is a Friday.
-    const WEEKDAYS: Option<i16> = Some(0b001_1111);
-
-    #[test]
-    fn next_run_is_today_until_today_has_run() {
-        let friday = date("2026-11-06");
-        assert_eq!(
-            next_run_on(true, WEEKDAYS, None, None, friday, false, &[]),
-            Some(friday)
-        );
-        assert_eq!(
-            next_run_on(true, WEEKDAYS, None, None, friday, true, &[]),
-            Some(date("2026-11-09")),
-            "the weekend is skipped"
-        );
-    }
-
-    #[test]
-    fn next_run_honours_skipped_dates_and_the_date_range() {
-        let friday = date("2026-11-06");
-        assert_eq!(
-            next_run_on(
-                true,
-                WEEKDAYS,
-                None,
-                None,
-                friday,
-                false,
-                &[friday, date("2026-11-09")]
-            ),
-            Some(date("2026-11-10"))
-        );
-        assert_eq!(
-            next_run_on(
-                true,
-                WEEKDAYS,
-                Some(date("2026-12-01")),
-                None,
-                friday,
-                false,
-                &[]
-            ),
-            Some(date("2026-12-01"))
-        );
-        assert_eq!(
-            next_run_on(true, WEEKDAYS, None, Some(friday), friday, true, &[]),
-            None,
-            "past its end date"
-        );
-    }
-
-    #[test]
-    fn a_paused_or_one_off_template_has_no_next_run() {
-        let friday = date("2026-11-06");
-        assert_eq!(
-            next_run_on(false, WEEKDAYS, None, None, friday, false, &[]),
-            None
-        );
-        assert_eq!(
-            next_run_on(true, None, None, None, friday, false, &[]),
-            None
-        );
     }
 
     #[test]

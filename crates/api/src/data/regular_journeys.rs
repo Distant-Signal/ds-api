@@ -604,7 +604,7 @@ fn occurrence_untouched_sql(journey: &str) -> String {
 /// The template `template_id` of `user_id` and its pair (if the pair is
 /// also theirs), locked `FOR UPDATE` in id order. Empty when the template
 /// isn't theirs.
-async fn lock_with_pair(
+pub(crate) async fn lock_with_pair(
     tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
     template_id: i64,
     user_id: &str,
@@ -697,10 +697,11 @@ pub async fn set_active(
 /// What [`skip`] did.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum SkipOutcome {
-    /// Skipped `date` for these templates; `deleted_journey_ids` are the
-    /// occurrences already minted for it, now deleted.
+    /// Skipped `dates` (ascending, each once) for these templates;
+    /// `deleted_journey_ids` are the occurrences already minted for them,
+    /// now deleted.
     Skipped {
-        date: NaiveDate,
+        dates: Vec<NaiveDate>,
         template_ids: Vec<i64>,
         deleted_journey_ids: Vec<i64>,
     },
@@ -708,24 +709,25 @@ pub enum SkipOutcome {
     NotFound,
     /// No date was given and the template has no next date.
     NoNextDate,
-    /// The date is before London's today.
+    /// A date is before London's today.
     InThePast,
-    /// That date's occurrence (this template's, or with `pair` its
-    /// pair's) has already started.
+    /// A date's occurrence (this template's, or with `pair` its pair's)
+    /// has already started.
     Started,
 }
 
-/// Skips `date` (default: the template's next date, [`next_date_for`]) for
-/// template `template_id`, and with `pair` for its pair too, in one
-/// transaction. Each skip is a `journey_template_skipped_dates` marker; an
-/// occurrence already minted for that date is deleted as
+/// Skips `dates` (none: the template's next date,
+/// [`TemplateDates::next_date`]) for template `template_id`, and with
+/// `pair` for its pair too, in one transaction: all of them or, when one
+/// is refused, none. Each skip is a `journey_template_skipped_dates`
+/// marker; an occurrence already minted for a date is deleted as
 /// `journeys::delete_journey` deletes one (which writes the same marker).
 /// Refused once that occurrence has started.
 pub async fn skip(
     pool: &PgPool,
     template_id: i64,
     user_id: &str,
-    date: Option<NaiveDate>,
+    dates: &[NaiveDate],
     pair: bool,
     now: DateTime<Utc>,
 ) -> anyhow::Result<SkipOutcome> {
@@ -736,10 +738,9 @@ pub async fn skip(
         tx.rollback().await?;
         return Ok(SkipOutcome::NotFound);
     }
-    let date = if let Some(date) = date {
-        date
-    } else {
-        let Some(date) = next_dates(&mut *tx, &[template_id], now)
+    let mut dates = dates.to_vec();
+    if dates.is_empty() {
+        let Some(date) = next_dates(&mut tx, &[template_id], now)
             .await?
             .get(&template_id)
             .copied()
@@ -748,9 +749,11 @@ pub async fn skip(
             tx.rollback().await?;
             return Ok(SkipOutcome::NoNextDate);
         };
-        date
-    };
-    if date < today {
+        dates.push(date);
+    }
+    dates.sort_unstable();
+    dates.dedup();
+    if dates.first().is_some_and(|first| *first < today) {
         tx.rollback().await?;
         return Ok(SkipOutcome::InThePast);
     }
@@ -759,7 +762,7 @@ pub async fn skip(
         "SELECT j.id, {started} FROM journeys j \
          WHERE j.source_template_id = ANY($1) AND j.user_id = $2 \
            AND EXISTS (SELECT 1 FROM journey_legs l \
-                       WHERE l.journey_id = j.id AND l.service_date = $5) \
+                       WHERE l.journey_id = j.id AND l.service_date = ANY($5)) \
          ORDER BY j.id",
         started = occurrence_started_sql("j", "$3", "$4"),
     ))
@@ -767,7 +770,7 @@ pub async fn skip(
     .bind(user_id)
     .bind(now)
     .bind(today)
-    .bind(date)
+    .bind(&dates)
     .fetch_all(&mut *tx)
     .await?;
     if occurrences.iter().any(|(_, started)| *started) {
@@ -783,16 +786,16 @@ pub async fn skip(
     }
     sqlx::query(
         "INSERT INTO journey_template_skipped_dates (template_id, service_date) \
-         SELECT id, $2 FROM unnest($1::bigint[]) AS id \
+         SELECT id, d FROM unnest($1::bigint[]) AS id CROSS JOIN unnest($2::date[]) AS d \
          ON CONFLICT (template_id, service_date) DO NOTHING",
     )
     .bind(&template_ids)
-    .bind(date)
+    .bind(&dates)
     .execute(&mut *tx)
     .await?;
     tx.commit().await?;
     Ok(SkipOutcome::Skipped {
-        date,
+        dates,
         template_ids,
         deleted_journey_ids: deleted,
     })
@@ -852,134 +855,13 @@ pub fn london_date(now: DateTime<Utc>) -> NaiveDate {
     now.with_timezone(&chrono_tz::Europe::London).date_naive()
 }
 
-/// The next date of each template in `template_ids` ([`next_date_for`]),
-/// by id. A template that doesn't exist is absent.
-pub async fn next_dates<'c, E>(
-    executor: E,
-    template_ids: &[i64],
-    now: DateTime<Utc>,
-) -> anyhow::Result<HashMap<i64, Option<NaiveDate>>>
-where
-    E: sqlx::PgExecutor<'c>,
-{
-    Ok(next_dates_and_skips(executor, template_ids, now)
-        .await?
-        .into_iter()
-        .map(|(id, (next, _))| (id, next))
-        .collect())
-}
+/// How many dates `upcomingDates` lists.
+pub const UPCOMING_DATES: usize = 8;
 
-/// [`next_dates`] with each template's [`next_skips`]: the dates it
-/// passes over on the way to its next date, and why.
-pub async fn next_dates_and_skips<'c, E>(
-    executor: E,
-    template_ids: &[i64],
-    now: DateTime<Utc>,
-) -> anyhow::Result<HashMap<i64, (Option<NaiveDate>, Vec<NextSkip>)>>
-where
-    E: sqlx::PgExecutor<'c>,
-{
-    let today = london_date(now);
-    let rows: Vec<NextDateRow> = sqlx::query_as(&format!(
-        "SELECT jt.id, jt.active, jt.days_of_week, jt.starts_on, jt.ends_on, \
-                EXISTS (SELECT 1 FROM journeys j \
-                        WHERE j.source_template_id = jt.id \
-                          AND EXISTS (SELECT 1 FROM journey_legs l \
-                                      WHERE l.journey_id = j.id AND l.service_date = $3) \
-                          AND {started}) AS today_started, \
-                ARRAY(SELECT s.service_date FROM journey_template_skipped_dates s \
-                      WHERE s.template_id = jt.id AND s.service_date >= $3 \
-                      ORDER BY s.service_date) AS skipped_dates, \
-                {bank_holidays} AS bank_holidays \
-         FROM journey_templates jt WHERE jt.id = ANY($1)",
-        started = occurrence_started_sql("j", "$2", "$3"),
-        bank_holidays = bank_holiday_dates_sql("jt", "$3"),
-    ))
-    .bind(template_ids)
-    .bind(now)
-    .bind(today)
-    .fetch_all(executor)
-    .await?;
-    Ok(rows
-        .into_iter()
-        .map(|row| {
-            let next = next_date_for(&row, today);
-            let skips = next_skips(
-                row.days_of_week.filter(|_| row.active),
-                row.starts_on,
-                today,
-                next,
-                &row.skipped_dates,
-                &row.bank_holidays,
-            );
-            (row.id, (next, skips))
-        })
-        .collect())
-}
-
-/// [`next_dates`]' row.
-#[derive(Debug, sqlx::FromRow)]
-pub(crate) struct NextDateRow {
-    pub id: i64,
-    pub active: bool,
-    pub days_of_week: Option<i16>,
-    pub starts_on: Option<NaiveDate>,
-    pub ends_on: Option<NaiveDate>,
-    /// Today's occurrence exists and has started.
-    pub today_started: bool,
-    /// Skip markers from today on.
-    pub skipped_dates: Vec<NaiveDate>,
-    /// Bank holidays the template skips from today on
-    /// ([`bank_holiday_dates_sql`]).
-    pub bank_holidays: Vec<NaiveDate>,
-}
-
-/// A template's next date: the next due date on or after `today` that
-/// isn't skipped, isn't a bank holiday it skips, and isn't today when
-/// today's occurrence has already started. `None` when paused, not
-/// recurring, or past its end.
-pub(crate) fn next_date_for(row: &NextDateRow, today: NaiveDate) -> Option<NaiveDate> {
-    journey_templates::next_run_on(
-        row.active,
-        row.days_of_week,
-        row.starts_on,
-        row.ends_on,
-        today,
-        row.today_started,
-        &passed_over(&row.skipped_dates, &row.bank_holidays),
-    )
-}
-
-/// The dates a template passes over: its skip markers and the bank
-/// holidays it skips, ascending, each once.
-pub(crate) fn passed_over(skipped: &[NaiveDate], bank_holidays: &[NaiveDate]) -> Vec<NaiveDate> {
-    let mut dates: Vec<NaiveDate> = skipped.iter().chain(bank_holidays).copied().collect();
-    dates.sort_unstable();
-    dates.dedup();
-    dates
-}
-
-/// SQL for the bank holidays template `template` skips from `from` (an SQL
-/// `DATE` expression) on, ascending: the owner's division's
-/// (`ds_store::bank_holidays::owner_division_sql`, England and Wales when
-/// they haven't chosen) when `skip_bank_holidays` is set, else none. The
-/// same rule as `ds_store::bank_holidays::bank_holiday_skip_sql`, which the
-/// notifier's mint reads, as a list.
-pub(crate) fn bank_holiday_dates_sql(template: &str, from: &str) -> String {
-    let division = ds_store::bank_holidays::owner_division_sql(template);
-    format!(
-        "CASE WHEN {template}.skip_bank_holidays THEN ARRAY( \
-             SELECT bh_l.holiday_date FROM bank_holidays bh_l \
-              WHERE bh_l.division = {division} AND bh_l.holiday_date >= {from} \
-              ORDER BY bh_l.holiday_date) \
-         ELSE ARRAY[]::date[] END"
-    )
-}
-
-/// Why [`next_skips`] lists a date: a skip marker (`"skipped"`) or a bank
-/// holiday in the owner's division (`"bank_holiday"`).
+/// `skipped`: a skip marker (the user skipped the date, or deleted its
+/// journey). The reasons are `ds_store::recurrence::SkipReason::as_str`.
 pub const SKIP_REASON_SKIPPED: &str = "skipped";
-/// See [`SKIP_REASON_SKIPPED`].
+/// `bank_holiday`: a bank holiday in the owner's division.
 pub const SKIP_REASON_BANK_HOLIDAY: &str = "bank_holiday";
 
 /// One date a template passes over before its next date.
@@ -992,46 +874,173 @@ pub struct NextSkip {
     pub reason: &'static str,
 }
 
-/// The due dates from `today` (or `starts_on`, if later) up to, not
-/// including, `next`, that the template passes over, ascending: each with
-/// a skip marker (`"skipped"`) or a bank holiday it skips
-/// (`"bank_holiday"`); a date with both is `"skipped"`. Only days in
-/// `days_of_week` count (a Saturday bank holiday is no skip for a weekday
-/// journey). Empty when there is no next date (paused, not recurring, or
-/// past `endsOn`).
-pub(crate) fn next_skips(
-    days_of_week: Option<i16>,
-    starts_on: Option<NaiveDate>,
-    today: NaiveDate,
-    next: Option<NaiveDate>,
-    skipped: &[NaiveDate],
-    bank_holidays: &[NaiveDate],
-) -> Vec<NextSkip> {
-    use chrono::Datelike;
+/// One of a template's next scheduled dates (`upcomingDates`).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, ts_rs::TS)]
+#[serde(rename_all = "camelCase")]
+pub struct UpcomingDate {
+    pub date: NaiveDate,
+    /// `null` when a journey is made for it; otherwise why not, as
+    /// [`NextSkip::reason`].
+    #[ts(as = "Option<crate::ts_values::NextSkipReason>")]
+    pub skip_reason: Option<&'static str>,
+}
 
-    let (Some(days), Some(next)) = (days_of_week, next) else {
-        return Vec::new();
-    };
-    let mut skips = Vec::new();
-    let mut date = starts_on.map_or(today, |start| start.max(today));
-    while date < next {
-        let bit = 1_i16 << date.weekday().num_days_from_monday();
-        if days & bit != 0 {
-            let reason = if skipped.contains(&date) {
-                Some(SKIP_REASON_SKIPPED)
-            } else if bank_holidays.contains(&date) {
-                Some(SKIP_REASON_BANK_HOLIDAY)
-            } else {
-                None
-            };
-            if let Some(reason) = reason {
-                skips.push(NextSkip { date, reason });
-            }
+impl From<ds_store::recurrence::Upcoming> for UpcomingDate {
+    fn from(day: ds_store::recurrence::Upcoming) -> Self {
+        Self {
+            date: day.date,
+            skip_reason: day.skip.map(ds_store::recurrence::SkipReason::as_str),
         }
-        let Some(after) = date.succ_opt() else { break };
-        date = after;
     }
-    skips
+}
+
+/// A template's dates from London's today, by `ds_store::recurrence` (the
+/// rule the notifier's mint decides with).
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct TemplateDates {
+    /// The next due date on or after today, passing over skipped ones, and
+    /// not today once today's journey has started: the date "Skip next"
+    /// skips. `None` when paused, not recurring, past its end, or with no
+    /// due date in `recurrence::DEFAULT_HORIZON_DAYS`.
+    pub next_date: Option<NaiveDate>,
+    /// As `next_date`, but not today once today's journey was added
+    /// (`nextRunOn`, the old list field).
+    pub next_run_on: Option<NaiveDate>,
+    /// The scheduled dates from today up to, not including, `next_date`
+    /// that are skipped, with why. Empty when there is no next date.
+    pub next_skips: Vec<NextSkip>,
+    /// The next [`UPCOMING_DATES`] scheduled dates, due or skipped, from
+    /// today (from tomorrow once today's journey has started).
+    pub upcoming: Vec<UpcomingDate>,
+}
+
+/// [`TemplateDates`] for one template's rule and exceptions, read from
+/// `today` on.
+pub(crate) fn dates_for(
+    schedule: &ds_store::recurrence::Schedule,
+    today: NaiveDate,
+    today_started: bool,
+    ran_today: bool,
+) -> TemplateDates {
+    use ds_store::recurrence::DEFAULT_HORIZON_DAYS;
+
+    let (rule, exceptions) = (&schedule.rule, &schedule.exceptions);
+    let tomorrow = today.succ_opt().unwrap_or(today);
+    let from = if today_started { tomorrow } else { today };
+    let next_date = rule.next_due(exceptions, from, DEFAULT_HORIZON_DAYS);
+    let next_run_on = rule.next_due(
+        exceptions,
+        if ran_today { tomorrow } else { today },
+        DEFAULT_HORIZON_DAYS,
+    );
+    let next_skips = next_date.map_or_else(Vec::new, |next| {
+        rule.upcoming(exceptions, today, usize::MAX, DEFAULT_HORIZON_DAYS)
+            .into_iter()
+            .take_while(|day| day.date < next)
+            .filter_map(|day| {
+                day.skip.map(|reason| NextSkip {
+                    date: day.date,
+                    reason: reason.as_str(),
+                })
+            })
+            .collect()
+    });
+    let upcoming = rule
+        .upcoming(exceptions, from, UPCOMING_DATES, DEFAULT_HORIZON_DAYS)
+        .into_iter()
+        .map(UpcomingDate::from)
+        .collect();
+    TemplateDates {
+        next_date,
+        next_run_on,
+        next_skips,
+        upcoming,
+    }
+}
+
+/// [`template_dates`]' row: whether today's journey was added, and whether
+/// it has started.
+#[derive(Debug, sqlx::FromRow)]
+struct TodayRow {
+    id: i64,
+    ran_today: bool,
+    today_started: bool,
+}
+
+/// The [`TemplateDates`] of each template in `template_ids`, by id. A
+/// template that doesn't exist is absent. Two statements on `conn` (a connection, or a transaction's): the
+/// rule and its exceptions (`ds_store::recurrence::load`, from today to
+/// the horizon), and today's journey.
+pub async fn template_dates(
+    conn: &mut sqlx::PgConnection,
+    template_ids: &[i64],
+    now: DateTime<Utc>,
+) -> anyhow::Result<HashMap<i64, TemplateDates>> {
+    let today = london_date(now);
+    let horizon_end =
+        today + chrono::Duration::days(i64::from(ds_store::recurrence::DEFAULT_HORIZON_DAYS));
+    let schedules =
+        ds_store::recurrence::load(&mut *conn, template_ids, today, horizon_end).await?;
+    let rows: Vec<TodayRow> = sqlx::query_as(&format!(
+        "SELECT jt.id, \
+                EXISTS (SELECT 1 FROM journeys j \
+                        WHERE j.source_template_id = jt.id \
+                          AND EXISTS (SELECT 1 FROM journey_legs l \
+                                      WHERE l.journey_id = j.id AND l.service_date = $3)) \
+                    AS ran_today, \
+                EXISTS (SELECT 1 FROM journeys j \
+                        WHERE j.source_template_id = jt.id \
+                          AND EXISTS (SELECT 1 FROM journey_legs l \
+                                      WHERE l.journey_id = j.id AND l.service_date = $3) \
+                          AND {started}) AS today_started \
+         FROM journey_templates jt WHERE jt.id = ANY($1)",
+        started = occurrence_started_sql("j", "$2", "$3"),
+    ))
+    .bind(template_ids)
+    .bind(now)
+    .bind(today)
+    .fetch_all(&mut *conn)
+    .await?;
+    Ok(rows
+        .into_iter()
+        .filter_map(|row| {
+            let schedule = schedules.get(&row.id)?;
+            Some((
+                row.id,
+                dates_for(schedule, today, row.today_started, row.ran_today),
+            ))
+        })
+        .collect())
+}
+
+/// The next date of each template in `template_ids`
+/// ([`TemplateDates::next_date`]), by id. A template that doesn't exist is
+/// absent.
+pub async fn next_dates(
+    conn: &mut sqlx::PgConnection,
+    template_ids: &[i64],
+    now: DateTime<Utc>,
+) -> anyhow::Result<HashMap<i64, Option<NaiveDate>>> {
+    Ok(template_dates(conn, template_ids, now)
+        .await?
+        .into_iter()
+        .map(|(id, dates)| (id, dates.next_date))
+        .collect())
+}
+
+/// [`next_dates`] with each template's [`TemplateDates::next_skips`]: the
+/// dates it passes over on the way to its next date, and why.
+pub async fn next_dates_and_skips(
+    pool: &PgPool,
+    template_ids: &[i64],
+    now: DateTime<Utc>,
+) -> anyhow::Result<HashMap<i64, (Option<NaiveDate>, Vec<NextSkip>)>> {
+    let mut conn = pool.acquire().await?;
+    Ok(template_dates(&mut conn, template_ids, now)
+        .await?
+        .into_iter()
+        .map(|(id, dates)| (id, (dates.next_date, dates.next_skips)))
+        .collect())
 }
 
 /// Skip markers on `template_id` from London's today on, ascending.
@@ -1195,30 +1204,127 @@ mod tests {
         assert!(validate_plan_options(&options).is_err());
     }
 
+    fn weekdays(
+        skipped: &[NaiveDate],
+        bank_holidays: &[NaiveDate],
+    ) -> ds_store::recurrence::Schedule {
+        ds_store::recurrence::Schedule {
+            user_id: "u".to_string(),
+            rule: ds_store::recurrence::Rule::weekly(Some(0b001_1111)),
+            exceptions: ds_store::recurrence::Exceptions {
+                skipped: skipped.iter().copied().collect(),
+                bank_holidays: bank_holidays.iter().copied().collect(),
+                away: Vec::new(),
+            },
+        }
+    }
+
+    fn day(m: u32, d: u32) -> NaiveDate {
+        NaiveDate::from_ymd_opt(2026, m, d).unwrap()
+    }
+
     #[test]
     fn the_next_date_skips_markers_and_a_started_today() {
         // Monday 9 Nov 2026, weekdays.
-        let today = NaiveDate::from_ymd_opt(2026, 11, 9).unwrap();
-        let row = |today_started, skipped: Vec<NaiveDate>, ends_on| NextDateRow {
-            id: 1,
-            active: true,
-            days_of_week: Some(0b001_1111),
-            starts_on: None,
-            ends_on,
-            today_started,
-            skipped_dates: skipped,
-            bank_holidays: vec![],
-        };
-        assert_eq!(next_date_for(&row(false, vec![], None), today), Some(today));
-        let tuesday = today.succ_opt().unwrap();
+        let today = day(11, 9);
+        let tuesday = day(11, 10);
         assert_eq!(
-            next_date_for(&row(true, vec![], None), today),
-            Some(tuesday)
+            dates_for(&weekdays(&[], &[]), today, false, false).next_date,
+            Some(today)
         );
+        let started = dates_for(&weekdays(&[], &[]), today, true, true);
+        assert_eq!(started.next_date, Some(tuesday));
+        assert_eq!(started.next_run_on, Some(tuesday));
+        // Added but not started: still today's to skip.
+        let added = dates_for(&weekdays(&[], &[]), today, false, true);
+        assert_eq!(added.next_date, Some(today));
+        assert_eq!(added.next_run_on, Some(tuesday));
         assert_eq!(
-            next_date_for(&row(false, vec![today, tuesday], None), today),
-            tuesday.succ_opt()
+            dates_for(&weekdays(&[today, tuesday], &[]), today, false, false).next_date,
+            Some(day(11, 11))
         );
-        assert_eq!(next_date_for(&row(true, vec![], Some(today)), today), None);
+        let mut ended = weekdays(&[], &[]);
+        ended.rule.ends_on = Some(today);
+        assert_eq!(dates_for(&ended, today, true, true).next_date, None);
+    }
+
+    #[test]
+    fn next_skips_are_the_skipped_dates_before_the_next_and_upcoming_is_a_superset() {
+        let today = day(11, 9);
+        // Skipped Mon and Tue, a bank holiday on Wed that is skipped too.
+        let schedule = weekdays(
+            &[today, day(11, 10), day(11, 11)],
+            &[day(11, 11), day(11, 12)],
+        );
+        let dates = dates_for(&schedule, today, false, false);
+        assert_eq!(dates.next_date, Some(day(11, 13)));
+        let skips: Vec<_> = dates
+            .next_skips
+            .iter()
+            .map(|s| (s.date, s.reason))
+            .collect();
+        assert_eq!(
+            skips,
+            vec![
+                (today, SKIP_REASON_SKIPPED),
+                (day(11, 10), SKIP_REASON_SKIPPED),
+                (day(11, 11), SKIP_REASON_SKIPPED),
+                (day(11, 12), SKIP_REASON_BANK_HOLIDAY),
+            ]
+        );
+        assert_eq!(dates.upcoming.len(), UPCOMING_DATES);
+        for skip in &dates.next_skips {
+            assert!(dates.upcoming.contains(&UpcomingDate {
+                date: skip.date,
+                skip_reason: Some(skip.reason),
+            }));
+        }
+        assert_eq!(
+            dates.upcoming[4],
+            UpcomingDate {
+                date: day(11, 13),
+                skip_reason: None
+            }
+        );
+        // The weekend isn't listed.
+        assert_eq!(dates.upcoming[5].date, day(11, 16));
+    }
+
+    #[test]
+    fn a_start_date_a_pause_or_no_days_bound_the_next_date() {
+        let friday = day(11, 6);
+        let mut later = weekdays(&[], &[]);
+        later.rule.starts_on = Some(day(12, 1));
+        assert_eq!(
+            dates_for(&later, friday, false, false).next_date,
+            Some(day(12, 1))
+        );
+        let mut paused = weekdays(&[], &[]);
+        paused.rule.active = false;
+        let dates = dates_for(&paused, friday, false, false);
+        assert_eq!(dates.next_date, None);
+        assert_eq!(dates.upcoming, Vec::new());
+        let mut one_off = weekdays(&[], &[]);
+        one_off.rule.days_of_week = None;
+        assert_eq!(dates_for(&one_off, friday, false, false).next_date, None);
+        // The weekend is passed over without being a skip.
+        let dates = dates_for(&weekdays(&[], &[]), friday, true, true);
+        assert_eq!(dates.next_date, Some(day(11, 9)));
+        assert_eq!(dates.next_skips, Vec::new());
+    }
+
+    #[test]
+    fn the_next_date_is_found_past_a_year_of_skips() {
+        let today = day(11, 9);
+        let mondays: Vec<_> = today.iter_weeks().take(52).collect();
+        let mut schedule = weekdays(&mondays, &[]);
+        schedule.rule.days_of_week = Some(1);
+        let dates = dates_for(&schedule, today, false, false);
+        assert_eq!(
+            dates.next_date,
+            Some(day(11, 9) + chrono::Duration::weeks(52))
+        );
+        assert_eq!(dates.next_skips.len(), 52);
+        assert_eq!(dates.upcoming.len(), UPCOMING_DATES);
     }
 }

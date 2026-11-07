@@ -1889,7 +1889,11 @@ stationBufferMinutes: number | null,
 /**
  * Bank holidays (additive): see `JourneyTemplateListItem`.
  */
-skipBankHolidays: boolean, nextSkips: Array<NextSkip>, };
+skipBankHolidays: boolean, nextSkips: Array<NextSkip>, 
+/**
+ * See `JourneyTemplateListItem` (additive).
+ */
+upcomingDates: Array<UpcomingDate>, };
 
 export type JourneyTemplateLegDetailResponse = { id: number, originCrs: string | null, originName: string | null, destinationCrs: string | null, destinationName: string | null, departAfter: string | null, departBefore: string | null, arriveAfter: string | null, arriveBefore: string | null, };
 
@@ -1910,7 +1914,7 @@ defaultMatchMode: TemplateMatchMode,
 /**
  * The next London date the sweep will add this template's journey on:
  * `None` when it is paused, not recurring, past its `endsOn`, or has
- * no matching day left. See `next_run_on`.
+ * no matching day left (`regular_journeys::TemplateDates::next_run_on`).
  */
 nextRunOn: string | null, 
 /**
@@ -1940,9 +1944,15 @@ skippedDates: Array<string>,
  * Bank holidays (phase 5, additive): whether the template skips the
  * bank holidays of its owner's division (default true), and the dates
  * it passes over before `nextDate`, ascending, with why
- * (`regular_journeys::next_skips`).
+ * (`regular_journeys::TemplateDates::next_skips`).
  */
-skipBankHolidays: boolean, nextSkips: Array<NextSkip>, };
+skipBankHolidays: boolean, nextSkips: Array<NextSkip>, 
+/**
+ * The next 8 scheduled dates from today, due or skipped, each with
+ * its skip reason or `null` (additive; a superset of `nextSkips`).
+ * The reasons may grow: show one you don't know as skipped.
+ */
+upcomingDates: Array<UpcomingDate>, };
 
 export type JsonValue = number | string | boolean | Array<JsonValue> | { [key in string]: JsonValue } | null;
 
@@ -3082,6 +3092,39 @@ silentPinnedLines: Array<string>,
 bankHolidayDivision: BankHolidayDivision | null, };
 
 /**
+ * `POST /JourneyTemplates/preview-dates`'s body: a recurrence not saved
+ * yet, as the create and edit forms hold it.
+ */
+export type PreviewDatesRequest = { 
+/**
+ * Mon = 1 to Sun = 64, as `daysOfWeek` everywhere.
+ */
+daysOfWeek: number, startsOn?: string | null, endsOn?: string | null, 
+/**
+ * Default true, as for a new regular journey.
+ */
+skipBankHolidays?: boolean | null, 
+/**
+ * How many dates (1 to [`MAX_PREVIEW_DATES`]); default
+ * `regular_journeys::UPCOMING_DATES`.
+ */
+count?: number | null, };
+
+/**
+ * `POST /JourneyTemplates/preview-dates`'s response.
+ */
+export type PreviewDatesResponse = { 
+/**
+ * The first due date from London's today, or `null`.
+ */
+nextDate: string | null, 
+/**
+ * The next scheduled dates from today, due or skipped, as
+ * `upcomingDates` on a saved regular journey.
+ */
+upcomingDates: Array<UpcomingDate>, };
+
+/**
  * `predictedStart.previousWorking`: the incoming train the prediction
  * rests on.
  */
@@ -3964,6 +4007,12 @@ export type SkipTemplateDateRequest = {
  */
 serviceDate?: string | null, 
 /**
+ * Several dates at once (additive), with `serviceDate` if given too;
+ * at most [`MAX_SKIP_DATES`]. All are skipped or, when one is
+ * refused, none.
+ */
+serviceDates?: Array<string> | null, 
+/**
  * Skip the paired return journey's date too.
  */
 pair?: boolean | null, };
@@ -3971,7 +4020,15 @@ pair?: boolean | null, };
 /**
  * `POST /JourneyTemplates/{id}/skip`'s response.
  */
-export type SkipTemplateDateResponse = { serviceDate: string, templateIds: Array<number>, 
+export type SkipTemplateDateResponse = { 
+/**
+ * The first date skipped.
+ */
+serviceDate: string, 
+/**
+ * Every date skipped, ascending (additive).
+ */
+serviceDates: Array<string>, templateIds: Array<number>, 
 /**
  * Journeys already added for that date, now deleted.
  */
@@ -5791,6 +5848,16 @@ transitNetwork?: string | null, transitLineId?: string | null, headsign?: string
  * An untracked leg's state, from the clock alone (spec §2.2).
  */
 export type UntrackedStatus = "planned" | "inProgress" | "done";
+
+/**
+ * One of a template's next scheduled dates (`upcomingDates`).
+ */
+export type UpcomingDate = { date: string, 
+/**
+ * `null` when a journey is made for it; otherwise why not, as
+ * [`NextSkip::reason`].
+ */
+skipReason: NextSkipReason | null, };
 
 /**
  * One of a line's `upcoming` notes (2026-10-06): a disruption announced
