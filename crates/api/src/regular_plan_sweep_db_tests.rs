@@ -181,6 +181,7 @@ async fn occurrence(
             plan_options: None,
             usual_itinerary,
             station_buffer_minutes: None,
+            day_overrides: Vec::new(),
         },
         None,
     )
@@ -683,4 +684,86 @@ async fn the_sweeps_slot_is_not_the_break_sweeps_or_a_users() {
 
 async fn connect() -> PgPool {
     ds_store::test_support::connect().await
+}
+
+/// Regular journeys R3: on a weekday with a different time, the sweep plans
+/// that day's target and prefers that day's usual train; a template whose
+/// different time is on another weekday plans its own.
+#[tokio::test]
+#[ignore = "requires a live database: DATABASE_URL"]
+async fn a_different_time_that_day_plans_the_days_own_target_and_usual_train() {
+    use chrono::Datelike;
+
+    let pool = connect().await;
+    let _cleanup = cleanup(&pool).await;
+    seed_timetable(&pool, DATE).await;
+    seed_user(&pool).await;
+    let date = day(DATE);
+    let weekday = i16::try_from(date.weekday().number_from_monday()).expect("weekday");
+    let other_weekday = weekday % 7 + 1;
+    // Both usually take RG0002 (08:12) after 07:45; on their different
+    // day, RG0004 (08:40) after 08:30.
+    let today_override = occurrence(
+        &pool,
+        "manual",
+        "depart_after",
+        "07:45",
+        ("RG0002", "08:12", "SW"),
+        date,
+    )
+    .await;
+    let other_override = occurrence(
+        &pool,
+        "manual",
+        "depart_after",
+        "07:45",
+        ("RG0002", "08:12", "SW"),
+        date,
+    )
+    .await;
+    for (journey, override_weekday) in [(today_override, weekday), (other_override, other_weekday)]
+    {
+        let template: i64 =
+            sqlx::query_scalar("SELECT source_template_id FROM journeys WHERE id = $1")
+                .bind(journey)
+                .fetch_one(&pool)
+                .await
+                .expect("template");
+        let itinerary: UsualItinerary = serde_json::from_value(serde_json::json!({
+            "legs": [{
+                "kind": "train", "trainUid": "RG0004", "atocCode": "SW",
+                "originCrs": "ZPA", "destinationCrs": "ZPB", "departs": "08:40"
+            }]
+        }))
+        .expect("itinerary");
+        let mut conn = pool.acquire().await.expect("connection");
+        crate::data::day_overrides::store(
+            &mut conn,
+            template,
+            &[crate::data::day_overrides::DayOverrideRequest {
+                weekday: override_weekday,
+                target: TemplateTarget {
+                    kind: "depart_after".to_string(),
+                    time: "08:30".parse().expect("time"),
+                    day_offset: 0,
+                },
+                usual_itinerary: itinerary,
+            }],
+        )
+        .await
+        .expect("store the override");
+    }
+
+    let swept = run_sweep(&app(&pool), &config(), evening_before(date))
+        .await
+        .expect("sweep");
+    assert_eq!(swept.suggested, 2, "{swept:?}");
+    let (_, plan) = plan_of(&pool, today_override).await;
+    assert_eq!(plan["reason"], "usual", "{plan}");
+    assert_eq!(chosen_uid(&plan), "RG0004", "{plan}");
+    // RG0004 is the only train after 08:30: no alternatives.
+    assert_eq!(plan["alternatives"], serde_json::json!([]), "{plan}");
+    let (_, plan) = plan_of(&pool, other_override).await;
+    assert_eq!(plan["reason"], "usual", "{plan}");
+    assert_eq!(chosen_uid(&plan), "RG0002", "{plan}");
 }

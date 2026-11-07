@@ -8,6 +8,7 @@ pub mod corpus;
 pub mod corpus_comparison;
 pub mod corpus_crosswalk;
 pub mod custom_lines;
+pub mod day_overrides;
 pub mod db_health;
 pub mod delay_repay_outcome;
 pub mod delay_repay_rules;

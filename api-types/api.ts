@@ -429,7 +429,14 @@ anchorWeek?: string | null,
 /**
  * Dates it also runs on (for `"dates"`, its only ones).
  */
-extraDates?: Array<string> | null, };
+extraDates?: Array<string> | null, 
+/**
+ * A different time on some days (R3; `data::day_overrides`): per
+ * ISO weekday, its own target and usual train. The outbound's
+ * only; `return` takes its own. Refused while
+ * `REGULAR_JOURNEY_DAY_OVERRIDES_ENABLED` is off.
+ */
+dayOverrides?: Array<DayOverrideRequest> | null, };
 
 export type CreateJourneyTemplateResponse = { templateId: number, 
 /**
@@ -558,6 +565,43 @@ northern_ireland_stations: string | null, };
  * How confident are we in this status?
  */
 export type DataQuality = "knowledgebase" | "ldbws-inferred" | "trust-inferred" | "planned" | "tfl" | "transit";
+
+/**
+ * One weekday's different time, as `GET /JourneyTemplates/{id}` serves it.
+ */
+export type DayOverride = { 
+/**
+ * ISO weekday: 1 Monday to 7 Sunday.
+ */
+weekday: number, target: TemplateTarget, usualItinerary: UsualItinerary | null, };
+
+/**
+ * One weekday's different time, as a create or a `PUT` gives it.
+ */
+export type DayOverrideRequest = { 
+/**
+ * ISO weekday: 1 Monday to 7 Sunday (not `daysOfWeek`'s bits). An
+ * override for a day the journey doesn't run on has no effect.
+ */
+weekday: number, 
+/**
+ * That day's target.
+ */
+target: TemplateTarget, 
+/**
+ * The train picked for that day's target, as `usualItinerary`: the
+ * day's template legs come from it.
+ */
+usualItinerary: UsualItinerary, };
+
+/**
+ * One weekday's different time as the list serves it: no itinerary.
+ */
+export type DayOverrideSummary = { 
+/**
+ * ISO weekday: 1 Monday to 7 Sunday.
+ */
+weekday: number, target: TemplateTarget, };
 
 /**
  * Which baseline a delay was measured against. See the module doc.
@@ -1924,7 +1968,14 @@ pausedUntil: string | null,
 /**
  * See `JourneyTemplateListItem` (additive).
  */
-recurrenceKind: RecurrenceKind, intervalWeeks: number, anchorWeek: string | null, extraDates: Array<string>, };
+recurrenceKind: RecurrenceKind, intervalWeeks: number, anchorWeek: string | null, extraDates: Array<string>, 
+/**
+ * A different time on some days (R3, additive): each weekday's own
+ * target and usual train, weekday order; empty for none. `legs` are
+ * the template's own; a journey on one of these weekdays is made from
+ * that day's usual train instead.
+ */
+dayOverrides: Array<DayOverride>, };
 
 export type JourneyTemplateLegDetailResponse = { id: number, originCrs: string | null, originName: string | null, destinationCrs: string | null, destinationName: string | null, departAfter: string | null, departBefore: string | null, arriveAfter: string | null, arriveBefore: string | null, };
 
@@ -1997,7 +2048,13 @@ pausedUntil: string | null,
  * dates it also runs on, from today on. A kind this client doesn't
  * know: show its next dates, not its days.
  */
-recurrenceKind: RecurrenceKind, intervalWeeks: number, anchorWeek: string | null, extraDates: Array<string>, };
+recurrenceKind: RecurrenceKind, intervalWeeks: number, anchorWeek: string | null, extraDates: Array<string>, 
+/**
+ * A different time on some days (R3, additive): each weekday's own
+ * target, weekday order; empty for none. See
+ * `data::day_overrides`.
+ */
+dayOverrides: Array<DayOverrideSummary>, };
 
 export type JsonValue = number | string | boolean | Array<JsonValue> | { [key in string]: JsonValue } | null;
 
@@ -3410,6 +3467,13 @@ stationBufferMinutes?: number | null,
  */
 skipBankHolidays?: boolean, 
 /**
+ * A different time on some days (R3, additive): this template only,
+ * not its pair. Absent keeps them; a list replaces them (empty clears
+ * them). Needs a target, and is refused while
+ * `REGULAR_JOURNEY_DAY_OVERRIDES_ENABLED` is off.
+ */
+dayOverrides?: Array<DayOverrideRequest>, 
+/**
  * `"weekly"` (the weekdays, the default) or `"dates"` (only
  * `extraDates`).
  */
@@ -3754,7 +3818,11 @@ export type ReturnJourneyRequest = { customName?: string | null, target: Templat
 /**
  * Minutes to get to the return journey's origin (0 to 120).
  */
-stationBufferMinutes?: number | null, };
+stationBufferMinutes?: number | null, 
+/**
+ * The return journey's own different time on some days (R3).
+ */
+dayOverrides?: Array<DayOverrideRequest> | null, };
 
 /**
  * `journey_revisions.actor` (its CHECK constraint).
@@ -3892,7 +3960,13 @@ personalTokensEnabled: boolean,
  * dates (`REGULAR_JOURNEY_RECURRENCE_ENABLED`, R2), so the form offers
  * it; `false` when logged out.
  */
-regularJourneyRecurrenceEnabled: boolean, };
+regularJourneyRecurrenceEnabled: boolean, 
+/**
+ * Whether a regular journey can have a different time on some days
+ * (`REGULAR_JOURNEY_DAY_OVERRIDES_ENABLED`, R3), so the form offers
+ * it; `false` when logged out.
+ */
+regularJourneyDayOverridesEnabled: boolean, };
 
 export type SetTemplateActiveRequest = { active: boolean, };
 

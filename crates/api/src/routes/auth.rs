@@ -739,6 +739,10 @@ pub(crate) struct SessionResponse {
     /// dates (`REGULAR_JOURNEY_RECURRENCE_ENABLED`, R2), so the form offers
     /// it; `false` when logged out.
     regular_journey_recurrence_enabled: bool,
+    /// Whether a regular journey can have a different time on some days
+    /// (`REGULAR_JOURNEY_DAY_OVERRIDES_ENABLED`, R3), so the form offers
+    /// it; `false` when logged out.
+    regular_journey_day_overrides_enabled: bool,
 }
 
 async fn session(
@@ -756,6 +760,7 @@ async fn session(
             analytics_opt_in: u.analytics_opt_in,
             personal_tokens_enabled,
             regular_journey_recurrence_enabled: crate::data::recurrence_pattern::enabled(),
+            regular_journey_day_overrides_enabled: crate::data::day_overrides::enabled(),
         }),
         None => Json(SessionResponse {
             authenticated: false,
@@ -766,6 +771,7 @@ async fn session(
             analytics_opt_in: false,
             personal_tokens_enabled: false,
             regular_journey_recurrence_enabled: false,
+            regular_journey_day_overrides_enabled: false,
         }),
     }
 }
@@ -872,6 +878,7 @@ mod tests {
             analytics_opt_in: true,
             personal_tokens_enabled: true,
             regular_journey_recurrence_enabled: false,
+            regular_journey_day_overrides_enabled: false,
         };
         let json = serde_json::to_value(&response).expect("serializes");
         assert_eq!(
@@ -892,6 +899,7 @@ mod tests {
             analytics_opt_in: false,
             personal_tokens_enabled: false,
             regular_journey_recurrence_enabled: false,
+            regular_journey_day_overrides_enabled: false,
         };
         let json = serde_json::to_value(&response).expect("serializes");
         assert_eq!(json["groups"], serde_json::json!([]));
