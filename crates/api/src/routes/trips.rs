@@ -376,6 +376,11 @@ struct TripPlanParams {
     /// order. Kept as a raw string for [`parse_count`]'s own 400.
     #[serde(default)]
     count: Option<String>,
+    /// `?direct=all` (2026-11-08, DS-398), with `count`: every direct
+    /// train in departure order, stopping trains too, merged with the
+    /// `count` series' connecting journeys. See [`parse_direct`].
+    #[serde(default)]
+    direct: Option<String>,
 }
 
 /// Which operator parameter a request used.
@@ -642,7 +647,7 @@ fn default_results() -> String {
 /// `GET /Trips/plan?origin=&destination=&date=[&waypoints=][&via=]
 /// [&departAfter=|&arriveBy=][&dayOffset=0|1][&acrossMidnight=true][&avoid=][&avoidStop=][&avoidChange=]
 /// [&results=fastest|options][&alternatives=true|false][&maxChanges=0..12][&live=true|false]
-/// [&count=1..8]`.
+/// [&count=1..8][&direct=all]`.
 ///
 /// - `dayOffset=1` (2026-10-19): the `departAfter`/`arriveBy` time is on
 ///   the morning after `date`, still on `date`'s trains -- "arrive by 00:30
@@ -774,6 +779,11 @@ fn default_results() -> String {
 ///   and one rate-limit step for the whole series, which stops early when
 ///   a search finds nothing or after [`SERIES_BUDGET`]
 ///   ([`plan_trip_series`]). Echoed as `count`.
+/// - `direct=all` (2026-11-08, DS-398), with `count`: every direct train
+///   (one pass over the day's connections, `trip_planner::direct`), the
+///   stopping train a faster one overtakes too, merged in departure order
+///   with the series' journeys that change ([`plan_trip_departures`]).
+///   With `via`, the series alone. Echoed as `direct`.
 ///
 /// **Read this before adding work to this handler.** One request here reads
 /// every `schedule_calling_points_full` row for the requested date (hundreds
@@ -884,6 +894,7 @@ async fn plan_trip_request(
         waypoints.len(),
         across_midnight,
     )?;
+    let direct = parse_direct(params.direct.as_deref(), count.is_some())?;
     // A CRS, or a bus stop's or ferry terminal's `tiploc:` code.
     let mut origin = common::location_naming::normalize_location_code(&params.origin);
     let mut destination = common::location_naming::normalize_location_code(&params.destination);
@@ -1082,6 +1093,18 @@ async fn plan_trip_request(
     // same permit (never with `acrossMidnight`, [`parse_count`]).
     let first_plan = async {
         match count {
+            Some(count) if direct => {
+                plan_trip_departures(
+                    &app,
+                    &graph,
+                    &inputs,
+                    date,
+                    time,
+                    usize::from(count),
+                    &permit,
+                )
+                .await
+            }
             Some(count) => {
                 plan_trip_series(
                     &app,
@@ -1247,6 +1270,7 @@ async fn plan_trip_request(
         service_dates,
         results: params.results,
         count,
+        direct: direct.then_some("all"),
     };
     Ok(Json(body))
 }
@@ -1323,6 +1347,10 @@ pub(crate) struct TripPlanResponse {
     #[serde(skip_serializing_if = "Option::is_none")]
     #[ts(optional)]
     count: Option<u8>,
+    /// Additive (2026-11-08, DS-398), with `direct=all` only: `"all"`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[ts(optional, as = "Option<String>")]
+    direct: Option<&'static str>,
     /// Additive (2026-10-08): whether the timetable is still provisional.
     /// Once per response, not per journey or leg.
     #[serde(flatten)]
@@ -1439,6 +1467,7 @@ async fn load_access_ends(
 /// One request's planning inputs, shared with every blocking search.
 /// Everything about a request that doesn't depend on the service date
 /// planned (the graph-dependent search state is built per date).
+#[derive(Clone)]
 struct DateInputs {
     origin: String,
     destination: String,
@@ -2024,6 +2053,128 @@ fn parse_count(
         return bad("count can't be used with acrossMidnight".to_string());
     }
     Ok(Some(count))
+}
+
+/// `?direct=`: absent or empty is off; `all` lists every direct train
+/// ([`plan_trip_departures`]) and needs `count`. Anything else is a 400.
+fn parse_direct(raw: Option<&str>, has_count: bool) -> Result<bool, (StatusCode, String)> {
+    match raw.map(str::trim).unwrap_or_default() {
+        "" => Ok(false),
+        "all" if has_count => Ok(true),
+        "all" => Err((
+            StatusCode::BAD_REQUEST,
+            "direct=all needs count".to_string(),
+        )),
+        other => Err((
+            StatusCode::BAD_REQUEST,
+            format!("direct must be 'all', not '{other}'"),
+        )),
+    }
+}
+
+/// Whether `itinerary` is one train from end to end, with no change or
+/// walk: a direct train.
+fn is_direct(itinerary: &trip_planning_itinerary::PlannedItinerary) -> bool {
+    matches!(
+        itinerary.legs.as_slice(),
+        [trip_planning_itinerary::PlannedLeg::Train { .. }]
+    )
+}
+
+/// The first `count` (leave after) or last `count` (arrive by) of `trains`
+/// (every direct train, in departure order) and `series` (the `count`
+/// series) merged, in departure order: the direct trains, and the series'
+/// journeys that change or walk. A list that came back full is complete
+/// only up to its last journey (arrive by: from its first), so nothing
+/// past that is kept, and paging carries on from the last one shown.
+fn merge_departures(
+    trains: Vec<trip_planning_itinerary::PlannedItinerary>,
+    series: Vec<trip_planning_itinerary::PlannedItinerary>,
+    count: usize,
+    arrive_by: bool,
+) -> Vec<trip_planning_itinerary::PlannedItinerary> {
+    let edge = |list: &[trip_planning_itinerary::PlannedItinerary]| -> Option<u32> {
+        if list.len() < count {
+            return None;
+        }
+        if arrive_by {
+            list.first().map(|itinerary| itinerary.departure_min)
+        } else {
+            list.last().map(|itinerary| itinerary.departure_min)
+        }
+    };
+    let edges: Vec<u32> = [edge(&trains), edge(&series)]
+        .into_iter()
+        .flatten()
+        .collect();
+    let mut merged = trains;
+    merged.extend(series.into_iter().filter(|itinerary| !is_direct(itinerary)));
+    merged.retain(|itinerary| {
+        edges.iter().all(|&edge| {
+            if arrive_by {
+                itinerary.departure_min >= edge
+            } else {
+                itinerary.departure_min <= edge
+            }
+        })
+    });
+    merged.sort_by_key(|itinerary| (itinerary.departure_min, itinerary.arrival_min));
+    merged.dedup_by(|a, b| same_journey(a, b));
+    if arrive_by {
+        let skip = merged.len().saturating_sub(count);
+        merged.drain(..skip);
+    } else {
+        merged.truncate(count);
+    }
+    merged
+}
+
+/// `?direct=all` (DS-398): every direct train from the time asked, in
+/// departure order (a `direct` plan, `trip_planner::direct`, so a stopping
+/// train overtaken by a faster one is listed too), merged with the
+/// connecting journeys of the `count` series ([`plan_trip_series`]) by
+/// [`merge_departures`]. Each of those is the fastest from its own time,
+/// so no direct train leaves later and arrives sooner. With vias, which a
+/// direct train isn't checked against, the series alone. Both plans run
+/// under the request's one permit.
+async fn plan_trip_departures(
+    app: &App,
+    graph: &Arc<trip_planning::PlanningGraph>,
+    inputs: &DateInputs,
+    date: NaiveDate,
+    time: trip_planning_itinerary::TimeBound,
+    count: usize,
+    permit: &PlanPermit,
+) -> Result<DatePlan, (StatusCode, String)> {
+    let mut plan = plan_trip_series(app, graph, inputs, date, time, count, permit).await?;
+    if !inputs.vias.is_empty() {
+        return Ok(plan);
+    }
+    let direct_inputs = DateInputs {
+        results: "direct".to_string(),
+        ..inputs.clone()
+    };
+    let direct = plan_on_date(app, graph, &direct_inputs, date, time, permit).await?;
+    plan.live = combine_live(plan.live.take(), direct.live);
+    let trains = direct
+        .segments
+        .into_iter()
+        .next()
+        .map(|segment| segment.itineraries)
+        .unwrap_or_default();
+    if let Some(segment) = plan.segments.first_mut() {
+        let series = std::mem::take(&mut segment.itineraries);
+        segment.itineraries = merge_departures(
+            trains,
+            series,
+            count,
+            matches!(time, trip_planning_itinerary::TimeBound::ArriveBy(_)),
+        );
+        if !segment.itineraries.is_empty() {
+            segment.no_result_reason = None;
+        }
+    }
+    Ok(plan)
 }
 
 /// The bound of the search after the one at `bound` found `found`: a
@@ -2883,6 +3034,7 @@ pub(crate) async fn regular_plan_query(
         avoid_operator: options.avoid_operator.clone(),
         prefer_operator: None,
         count: None,
+        direct: None,
     };
     let operator_rule = parse_operator_filter(app, &params, &[date])
         .await
@@ -3639,6 +3791,65 @@ mod tests {
     }
 
     #[test]
+    fn direct_is_all_with_a_count_only() {
+        assert!(!parse_direct(None, false).unwrap());
+        assert!(!parse_direct(Some(" "), true).unwrap());
+        assert!(parse_direct(Some("all"), true).unwrap());
+        assert_eq!(
+            parse_direct(Some("all"), false).unwrap_err().1,
+            "direct=all needs count"
+        );
+        assert_eq!(
+            parse_direct(Some("ALL"), true).unwrap_err().1,
+            "direct must be 'all', not 'ALL'"
+        );
+    }
+
+    #[test]
+    fn departures_merge_as_far_as_both_lists_are_complete() {
+        let times = |list: &[trip_planning_itinerary::PlannedItinerary]| -> Vec<(u32, u32)> {
+            list.iter()
+                .map(|i| (i.departure_min, i.arrival_min))
+                .collect()
+        };
+        // Direct trains 08:00, 08:05 (a stopper) and 08:30; the series'
+        // connections (no train legs here) at 08:10 and 09:00.
+        let trains = || vec![timed(480, 510), timed(485, 560), timed(510, 540)];
+        let series = || vec![timed(490, 530), timed(540, 585)];
+        assert_eq!(
+            times(&merge_departures(trains(), series(), 5, false)),
+            [(480, 510), (485, 560), (490, 530), (510, 540), (540, 585)]
+        );
+        // Three: the direct list is full to 08:30, so the 09:00 waits for
+        // Later.
+        assert_eq!(
+            times(&merge_departures(trains(), series(), 3, false)),
+            [(480, 510), (485, 560), (490, 530)]
+        );
+        // A full series stops the merge at its last journey too.
+        assert_eq!(
+            times(&merge_departures(trains(), series(), 2, false)),
+            [(480, 510), (485, 560)]
+        );
+        // Arrive by: the last ones, as far back as both are complete.
+        assert_eq!(
+            times(&merge_departures(trains(), series(), 2, true)),
+            [(510, 540), (540, 585)]
+        );
+        // The same journey from both lists is listed once.
+        assert_eq!(
+            times(&merge_departures(
+                vec![timed(480, 510)],
+                vec![timed(480, 510)],
+                5,
+                false
+            )),
+            [(480, 510)]
+        );
+        assert_eq!(merge_departures(Vec::new(), Vec::new(), 5, false).len(), 0);
+    }
+
+    #[test]
     fn a_series_steps_a_minute_past_the_train_it_found() {
         use trip_planning_itinerary::TimeBound;
         // Leave after 08:00, found 08:12-08:45: next from 08:13.
@@ -4383,6 +4594,7 @@ mod tests {
 )]
 mod db_tests {
     mod count_series;
+    mod direct_series;
     mod live_in_search;
     mod operator_filter;
     mod operator_rule;

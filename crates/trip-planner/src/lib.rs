@@ -10,6 +10,7 @@
 pub mod access;
 pub mod csa;
 mod dense;
+pub mod direct;
 pub mod options;
 pub mod overlay;
 pub mod raptor;
@@ -23,6 +24,7 @@ pub use csa::{
     Journey, JourneyLeg, ScanOptions, TrainLeg, TransferLeg, scan_connections,
     scan_connections_restricted, scan_connections_with_overlay,
 };
+pub use direct::{DirectBound, DirectOptions, direct_journeys};
 pub use options::{Alternative, Choice, DiversifyOptions, OptionJourney, diversify};
 pub use overlay::ConnectionOverlay;
 pub use raptor::{

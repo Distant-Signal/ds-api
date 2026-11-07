@@ -725,12 +725,17 @@ impl TimeBound {
 }
 
 /// Everything one segment search needs besides its endpoints and time.
+/// The most direct trains one `direct` search lists (`/Trips/plan`'s
+/// `count` ceiling).
+pub const DIRECT_TRAINS_LIMIT: usize = 8;
+
 #[derive(Clone, Copy)]
 pub struct SegmentSearch<'a> {
     pub connections: &'a [schedule_query::Connection],
     pub interchange: &'a InterchangeData,
     pub date: NaiveDate,
-    /// `"fastest"` or `"options"` -- see [`plan_segment`].
+    /// `"fastest"` or `"options"` -- see [`plan_segment`] -- or, for one
+    /// segment with no vias, `"direct"`: every direct train (DS-398).
     pub results: &'a str,
     pub max_changes: u32,
     pub overlay: Option<&'a trip_planner::ConnectionOverlay>,
@@ -832,6 +837,44 @@ impl SegmentSearch<'_> {
         bound: TimeBound,
     ) -> Result<(Vec<PlannedItinerary>, bool), String> {
         match (self.results, bound) {
+            // DS-398: every direct train (`trip_planner::direct`), up to
+            // [`DIRECT_TRAINS_LIMIT`], in departure order; `/Trips/plan`'s
+            // `direct=all` merges them with its fastest series.
+            ("direct", _) => {
+                let journeys = trip_planner::direct_journeys(
+                    &trip_planner::DirectOptions {
+                        connections: self.connections,
+                        from_tiplocs,
+                        to_tiplocs,
+                    },
+                    match bound {
+                        TimeBound::DepartAfter(minutes) => {
+                            trip_planner::DirectBound::DepartAfter(minutes)
+                        }
+                        TimeBound::ArriveBy(minutes) => {
+                            trip_planner::DirectBound::ArriveBy(minutes)
+                        }
+                    },
+                    DIRECT_TRAINS_LIMIT,
+                    self.overlay,
+                    self.restrictions,
+                );
+                let itineraries = journeys
+                    .iter()
+                    .map(|journey| {
+                        PlannedItinerary::from_legs(
+                            &journey.legs,
+                            journey.departure_min,
+                            journey.arrival_min,
+                            0,
+                            Some(false),
+                            self.date,
+                            self.interchange,
+                        )
+                    })
+                    .collect();
+                Ok((itineraries, false))
+            }
             ("fastest", _) => {
                 let Some(journey) =
                     self.fastest(from_tiplocs, to_tiplocs, bound, self.restrictions)
@@ -2739,6 +2782,11 @@ fn plan_chained(input: &TripPlanInput<'_>) -> Result<Vec<SegmentResult>, String>
         }
     }
 
+    // A `direct` list (DS-398) is merged with a fastest series that
+    // explains its own empty segment.
+    if input.search.results == "direct" {
+        return Ok(segments);
+    }
     for index in 0..segments.len() {
         if !segments[index].itineraries.is_empty() {
             continue;

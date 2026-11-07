@@ -43,6 +43,30 @@ weekday's legs (ds-workers eac006c) is deployed.
 
 DS-MCP: no change needed; it doesn't read templates.
 
+## 2026-11-08: `/Trips/plan` lists every direct train with `direct=all`
+
+`GET /Trips/plan` takes `direct=all` with `count` (DS-398). Additive:
+without it, `count` is unchanged.
+
+- Every direct train from `departAfter` (or reaching the destination by
+  `arriveBy`), in departure order, including a stopping train that a
+  later, faster one overtakes. Direct means one train, boarded at the
+  origin and left at the destination.
+- Merged with the `count` series' journeys that change. Each of those is
+  the fastest from its own time, so it is only listed where no direct
+  train leaves later and arrives sooner (a route with no direct train at
+  all is the series).
+- Up to `count` in all: the first `count` by departure, or arrive-by the
+  last. Page as with `count`: "later" from a minute after the last
+  departure shown, "earlier" by a minute before the first arrival shown.
+- The plan options apply as usual: avoid lists and `operator` or
+  `avoidOperator` rule direct trains out too, and the live overlay drops
+  a cancelled train. With `via` the list is the series alone.
+- A 400 for `direct` without `count`, or for any value but `all`.
+- The body gains `direct: "all"` (absent without it).
+
+DS-MCP: no change needed.
+
 ## 2026-11-07: `/Trips/plan` lists several trains with `count`
 
 `GET /Trips/plan` takes `count=1..8` (DS-398). Additive: without it

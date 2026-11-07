@@ -6033,7 +6033,11 @@ transitNotices?: Array<TransitPlanNotice>,
  * for. The segment has at most this many itineraries, in departure
  * order; fewer when fewer trains run.
  */
-count?: number, provisional: boolean, provisionalFrom: string, };
+count?: number, 
+/**
+ * Additive (2026-11-08, DS-398), with `direct=all` only: `"all"`.
+ */
+direct?: string, provisional: boolean, provisionalFrom: string, };
 
 /**
  * `GET /Trips/plan`'s `results`, checked by `plan_trip_request`.
