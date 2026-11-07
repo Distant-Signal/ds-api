@@ -3,6 +3,46 @@
 Changes to the Distant Signal (DS) HTTP API that a client such as DS-MCP
 needs to know about. Newest first. Field names are as served (camelCase).
 
+## 2026-11-07: Regular journeys: every few weeks, extra dates, a list of dates
+
+The scheduling options' R2 (distant-signal's
+`docs/superpowers/specs/2026-11-06-regular-journeys-design.md`; ds-core
+v0.12.0). Additive. Off unless `REGULAR_JOURNEY_RECURRENCE_ENABLED` (the
+chart's `api.regularJourneys.recurrence.enabled`, default false): until
+then any request below that sets a pattern is a 400 ("Repeating every few
+weeks, or on dates you choose, isn't available yet."), and every regular
+journey stays weekly, every week.
+
+- `POST /JourneyTemplates` `mode: "plan"`, `PUT /JourneyTemplates/{id}`
+  and `POST /JourneyTemplates/preview-dates` take:
+  - `recurrenceKind`: `"weekly"` (the weekdays; the default) or `"dates"`
+    (only `extraDates`; `daysOfWeek` is then ignored).
+  - `intervalWeeks`: every 1 to 4 weeks (default 1). Above 1 needs
+    `anchorWeek`, any day of a week that runs ("Starting this week" sends
+    this week's Monday); it is stored as that week's Monday.
+  - `extraDates`: dates it also runs on (for `"dates"` its only dates),
+    from today to 400 days ahead, at most 100; it replaces the stored list.
+  On `PUT` each absent field keeps its value. A pattern is written to the
+  return journey too, as the days are.
+- `GET /JourneyTemplates/mine` items and `GET /JourneyTemplates/{id}` gain
+  `recurrenceKind`, `intervalWeeks`, `anchorWeek` (`null` every week) and
+  `extraDates` (from today on). `nextDate`, `nextSkips` and
+  `upcomingDates` follow the pattern. A kind a client doesn't know: show
+  its dates, not its days.
+- `POST /JourneyTemplates/{id}/extra-dates` `{serviceDate}` adds one date
+  to this regular journey only (not its return): "Add a date" for a date
+  after tomorrow, which the evening-before mint then adds. 204; 400 for a
+  past date, over 400 days ahead, past 100 dates or while off; 404.
+  `DELETE /JourneyTemplates/{id}/extra-dates/{date}` removes one (204,
+  404); a journey already added for it is kept.
+- `preview-dates`'s `daysOfWeek` may be absent (for `"dates"`).
+- `GET /public/auth/session` gains `regularJourneyRecurrenceEnabled`, so a
+  client offers the patterns only when they are on (false logged out).
+- The account export's journey templates gain `recurrence_kind`,
+  `interval_weeks`, `anchor_week` and `extra_dates`.
+
+DS-MCP: no change needed; it doesn't read templates.
+
 ## 2026-11-07: Regular journeys: time away and pause until
 
 The scheduling options' R1 (distant-signal's

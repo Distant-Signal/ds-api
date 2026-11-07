@@ -708,6 +708,10 @@ async fn backchannel_logout(
 #[derive(Serialize, ts_rs::TS)]
 #[ts(rename = "SessionInfo")]
 #[serde(rename_all = "camelCase")]
+#[expect(
+    clippy::struct_excessive_bools,
+    reason = "a wire response: each flag is an independent fact for the client"
+)]
 pub(crate) struct SessionResponse {
     authenticated: bool,
     id: Option<String>,
@@ -731,6 +735,10 @@ pub(crate) struct SessionResponse {
     /// the account menu can offer "Revoke all API tokens"; `false` when
     /// logged out.
     personal_tokens_enabled: bool,
+    /// Whether regular journeys can repeat every few weeks or on chosen
+    /// dates (`REGULAR_JOURNEY_RECURRENCE_ENABLED`, R2), so the form offers
+    /// it; `false` when logged out.
+    regular_journey_recurrence_enabled: bool,
 }
 
 async fn session(
@@ -747,6 +755,7 @@ async fn session(
             groups: u.groups,
             analytics_opt_in: u.analytics_opt_in,
             personal_tokens_enabled,
+            regular_journey_recurrence_enabled: crate::data::recurrence_pattern::enabled(),
         }),
         None => Json(SessionResponse {
             authenticated: false,
@@ -756,6 +765,7 @@ async fn session(
             groups: vec![],
             analytics_opt_in: false,
             personal_tokens_enabled: false,
+            regular_journey_recurrence_enabled: false,
         }),
     }
 }
@@ -861,6 +871,7 @@ mod tests {
             groups: vec!["mcp-users".to_string(), "mcp-live-boards".to_string()],
             analytics_opt_in: true,
             personal_tokens_enabled: true,
+            regular_journey_recurrence_enabled: false,
         };
         let json = serde_json::to_value(&response).expect("serializes");
         assert_eq!(
@@ -880,6 +891,7 @@ mod tests {
             groups: vec![],
             analytics_opt_in: false,
             personal_tokens_enabled: false,
+            regular_journey_recurrence_enabled: false,
         };
         let json = serde_json::to_value(&response).expect("serializes");
         assert_eq!(json["groups"], serde_json::json!([]));

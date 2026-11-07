@@ -100,6 +100,11 @@ export type AddJourneyLegResponse = { legId: number,
 trackingId: number | null, };
 
 /**
+ * `POST /JourneyTemplates/{id}/extra-dates`'s body.
+ */
+export type AddTemplateExtraDateRequest = { serviceDate: string, };
+
+/**
  * One affected route of a [`DisruptionJson`], by CRS.
  */
 export type AffectedRoute = { from: string, to: string, };
@@ -406,7 +411,25 @@ stationBufferMinutes?: number | null,
  * Skip the bank holidays of the caller's division (phase 5),
  * for the return journey too. Default true.
  */
-skipBankHolidays?: boolean | null, };
+skipBankHolidays?: boolean | null, 
+/**
+ * The recurrence pattern (R2; `data::recurrence_pattern`), for
+ * the return journey too: `"weekly"` (default) or `"dates"`.
+ * Refused while `REGULAR_JOURNEY_RECURRENCE_ENABLED` is off.
+ */
+recurrenceKind?: RecurrenceKind | null, 
+/**
+ * Every this many weeks, 1 to 4; above 1 needs `anchorWeek`.
+ */
+intervalWeeks?: number | null, 
+/**
+ * A day of a week that runs; stored as its Monday.
+ */
+anchorWeek?: string | null, 
+/**
+ * Dates it also runs on (for `"dates"`, its only ones).
+ */
+extraDates?: Array<string> | null, };
 
 export type CreateJourneyTemplateResponse = { templateId: number, 
 /**
@@ -1897,7 +1920,11 @@ upcomingDates: Array<UpcomingDate>,
 /**
  * See `JourneyTemplateListItem` (additive).
  */
-pausedUntil: string | null, };
+pausedUntil: string | null, 
+/**
+ * See `JourneyTemplateListItem` (additive).
+ */
+recurrenceKind: RecurrenceKind, intervalWeeks: number, anchorWeek: string | null, extraDates: Array<string>, };
 
 export type JourneyTemplateLegDetailResponse = { id: number, originCrs: string | null, originName: string | null, destinationCrs: string | null, destinationName: string | null, departAfter: string | null, departBefore: string | null, arriveAfter: string | null, arriveBefore: string | null, };
 
@@ -1962,7 +1989,15 @@ upcomingDates: Array<UpcomingDate>,
  * before it, and it runs again on it with nothing to do. `null` when
  * not paused that way (`active: false` is the pause with no end).
  */
-pausedUntil: string | null, };
+pausedUntil: string | null, 
+/**
+ * The recurrence pattern (R2, additive): `"weekly"` (the weekdays)
+ * or `"dates"` (only `extraDates`); every `intervalWeeks` weeks from
+ * the week of `anchorWeek` (a Monday, `null` every week); and the
+ * dates it also runs on, from today on. A kind this client doesn't
+ * know: show its next dates, not its days.
+ */
+recurrenceKind: RecurrenceKind, intervalWeeks: number, anchorWeek: string | null, extraDates: Array<string>, };
 
 export type JsonValue = number | string | boolean | Array<JsonValue> | { [key in string]: JsonValue } | null;
 
@@ -3110,9 +3145,10 @@ bankHolidayDivision: BankHolidayDivision | null, };
  */
 export type PreviewDatesRequest = { 
 /**
- * Mon = 1 to Sun = 64, as `daysOfWeek` everywhere.
+ * Mon = 1 to Sun = 64, as `daysOfWeek` everywhere. May be absent for
+ * `recurrenceKind: "dates"` (additive).
  */
-daysOfWeek: number, startsOn?: string | null, endsOn?: string | null, 
+daysOfWeek?: number | null, startsOn?: string | null, endsOn?: string | null, 
 /**
  * Default true, as for a new regular journey.
  */
@@ -3121,7 +3157,27 @@ skipBankHolidays?: boolean | null,
  * How many dates (1 to [`MAX_PREVIEW_DATES`]); default
  * `regular_journeys::UPCOMING_DATES`.
  */
-count?: number | null, };
+count?: number | null, 
+/**
+ * `"weekly"` (the weekdays, the default) or `"dates"` (only
+ * `extraDates`).
+ */
+recurrenceKind?: RecurrenceKind | null, 
+/**
+ * Every this many weeks, 1 to 4 (default 1). Above 1 needs
+ * `anchorWeek`.
+ */
+intervalWeeks?: number | null, 
+/**
+ * A day of a week that runs ("Starting this week" sends this week's
+ * Monday). Stored as that week's Monday.
+ */
+anchorWeek?: string | null, 
+/**
+ * Dates it also runs on (for `"dates"`, its only dates), from today
+ * to 400 days ahead, at most 100. Replaces the stored list.
+ */
+extraDates?: Array<string> | null, };
 
 /**
  * `POST /JourneyTemplates/preview-dates`'s response.
@@ -3352,7 +3408,27 @@ stationBufferMinutes?: number | null,
  * Whether it skips the bank holidays of the caller's division; absent
  * keeps it (additive, bank holidays).
  */
-skipBankHolidays?: boolean, };
+skipBankHolidays?: boolean, 
+/**
+ * `"weekly"` (the weekdays, the default) or `"dates"` (only
+ * `extraDates`).
+ */
+recurrenceKind?: RecurrenceKind | null, 
+/**
+ * Every this many weeks, 1 to 4 (default 1). Above 1 needs
+ * `anchorWeek`.
+ */
+intervalWeeks?: number | null, 
+/**
+ * A day of a week that runs ("Starting this week" sends this week's
+ * Monday). Stored as that week's Monday.
+ */
+anchorWeek?: string | null, 
+/**
+ * Dates it also runs on (for `"dates"`, its only dates), from today
+ * to 400 days ahead, at most 100. Replaces the stored list.
+ */
+extraDates?: Array<string> | null, };
 
 export type QuietHours = { start: string, end: string, timezone: string, };
 
@@ -3380,6 +3456,13 @@ expectedUntilEndOfDay: boolean, };
  * `GET /public/incidents/recently-cleared`'s body.
  */
 export type RecentlyClearedResponse = { results: Array<RecentlyClearedIncident>, };
+
+/**
+ * `journey_templates.recurrence_kind` as the api accepts it (R2):
+ * `weekly` (the weekdays) or `dates` (only the extra dates). `cycle` is
+ * kept for shift rotas and not offered.
+ */
+export type RecurrenceKind = "weekly" | "dates";
 
 /**
  * `GET /Journeys/{id}`'s `regularPlan` (owner only): the day's train for
@@ -3803,7 +3886,13 @@ analyticsOptIn: boolean,
  * the account menu can offer "Revoke all API tokens"; `false` when
  * logged out.
  */
-personalTokensEnabled: boolean, };
+personalTokensEnabled: boolean, 
+/**
+ * Whether regular journeys can repeat every few weeks or on chosen
+ * dates (`REGULAR_JOURNEY_RECURRENCE_ENABLED`, R2), so the form offers
+ * it; `false` when logged out.
+ */
+regularJourneyRecurrenceEnabled: boolean, };
 
 export type SetTemplateActiveRequest = { active: boolean, };
 

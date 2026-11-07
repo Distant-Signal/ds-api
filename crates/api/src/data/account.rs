@@ -34,7 +34,8 @@ use crate::data::groups::{self, RemoveMemberOutcome};
 /// new table referencing `users(id)` is added without being added here and
 /// to [`export_account`]. Child tables with no direct `users` FK
 /// (`journey_legs`, `journey_revisions` and their `journey_revision_legs`,
-/// `journey_template_legs`, `journey_template_skipped_dates`) are exported
+/// `journey_template_legs`, `journey_template_skipped_dates`,
+/// `journey_template_extra_dates`) are exported
 /// nested under their parents.
 pub const USER_KEYED_TABLES: &[&str] = &[
     "custom_line_group_grants",
@@ -344,7 +345,9 @@ pub async fn export_account(pool: &PgPool, user_id: &str) -> Result<Option<Accou
                  'legs', (SELECT COALESCE(jsonb_agg(to_jsonb(l) ORDER BY l.leg_order), '[]'::jsonb) \
                           FROM journey_template_legs l WHERE l.template_id = t.id), \
                  'skipped_dates', (SELECT COALESCE(jsonb_agg(to_jsonb(s) ORDER BY s.service_date), '[]'::jsonb) \
-                          FROM journey_template_skipped_dates s WHERE s.template_id = t.id)) \
+                          FROM journey_template_skipped_dates s WHERE s.template_id = t.id), \
+                 'extra_dates', (SELECT COALESCE(jsonb_agg(e.service_date ORDER BY e.service_date), '[]'::jsonb) \
+                          FROM journey_template_extra_dates e WHERE e.template_id = t.id)) \
              FROM journey_templates t WHERE user_id = $1 ORDER BY id",
             user_id,
         )
@@ -610,6 +613,7 @@ pub(crate) mod db_tests {
         let tmpl = format!("(SELECT id FROM journey_templates WHERE user_id = '{user}' LIMIT 1)");
         exec(pool, &format!("INSERT INTO journey_template_legs (template_id, leg_order, origin_crs, destination_crs) VALUES ({tmpl}, 0, 'KGX', 'YRK')"), &[]).await;
         exec(pool, &format!("INSERT INTO journey_template_skipped_dates (template_id, service_date) VALUES ({tmpl}, CURRENT_DATE)"), &[]).await;
+        exec(pool, &format!("INSERT INTO journey_template_extra_dates (template_id, service_date) VALUES ({tmpl}, CURRENT_DATE + 7)"), &[]).await;
         exec(pool, &format!("INSERT INTO journeys (user_id, custom_name, source_template_id) VALUES ($1, 'Trip', {tmpl})"), u).await;
         let journey = format!("(SELECT id FROM journeys WHERE user_id = '{user}' LIMIT 1)");
         exec(pool, &format!("INSERT INTO journey_legs (journey_id, leg_order, service_date, train_subscription_id) VALUES ({journey}, 0, CURRENT_DATE, {sub})"), &[]).await;
@@ -917,6 +921,13 @@ pub(crate) mod db_tests {
         );
         assert_eq!(
             json["journeyTemplates"][0]["skipped_dates"]
+                .as_array()
+                .unwrap()
+                .len(),
+            1
+        );
+        assert_eq!(
+            json["journeyTemplates"][0]["extra_dates"]
                 .as_array()
                 .unwrap()
                 .len(),

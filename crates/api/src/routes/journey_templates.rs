@@ -55,6 +55,14 @@ pub fn router() -> Router {
             axum::routing::put(put_journey_template_active),
         )
         .route(
+            "/JourneyTemplates/{template_id}/extra-dates",
+            axum::routing::post(post_journey_template_extra_date),
+        )
+        .route(
+            "/JourneyTemplates/{template_id}/extra-dates/{service_date}",
+            axum::routing::delete(delete_journey_template_extra_date),
+        )
+        .route(
             "/JourneyTemplates/{template_id}/paused-until",
             axum::routing::put(put_journey_template_paused_until),
         )
@@ -170,6 +178,21 @@ pub(crate) enum CreateJourneyTemplateRequest {
         /// for the return journey too. Default true.
         #[serde(default)]
         skip_bank_holidays: Option<bool>,
+        /// The recurrence pattern (R2; `data::recurrence_pattern`), for
+        /// the return journey too: `"weekly"` (default) or `"dates"`.
+        /// Refused while `REGULAR_JOURNEY_RECURRENCE_ENABLED` is off.
+        #[serde(default)]
+        #[ts(as = "Option<crate::ts_values::RecurrenceKind>")]
+        recurrence_kind: Option<String>,
+        /// Every this many weeks, 1 to 4; above 1 needs `anchorWeek`.
+        #[serde(default)]
+        interval_weeks: Option<i16>,
+        /// A day of a week that runs; stored as its Monday.
+        #[serde(default)]
+        anchor_week: Option<NaiveDate>,
+        /// Dates it also runs on (for `"dates"`, its only ones).
+        #[serde(default)]
+        extra_dates: Option<Vec<NaiveDate>>,
     },
 }
 
@@ -253,6 +276,12 @@ pub(crate) struct PutJourneyTemplateRequest {
     #[serde(default)]
     #[ts(optional)]
     skip_bank_holidays: Option<bool>,
+    /// The recurrence pattern (R2, additive): each field absent keeps its
+    /// value; written to the return journey too. Refused while
+    /// `REGULAR_JOURNEY_RECURRENCE_ENABLED` is off.
+    #[serde(flatten)]
+    #[ts(flatten)]
+    pattern: crate::data::recurrence_pattern::PatternRequest,
 }
 
 #[derive(Debug, Deserialize, ts_rs::TS)]
@@ -389,6 +418,12 @@ pub(crate) struct JourneyTemplateDetailResponse {
     upcoming_dates: Vec<regular_journeys::UpcomingDate>,
     /// See `JourneyTemplateListItem` (additive).
     paused_until: Option<NaiveDate>,
+    /// See `JourneyTemplateListItem` (additive).
+    #[ts(as = "crate::ts_values::RecurrenceKind")]
+    recurrence_kind: String,
+    interval_weeks: i16,
+    anchor_week: Option<NaiveDate>,
+    extra_dates: Vec<NaiveDate>,
 }
 
 fn internal_error(operation: &'static str) -> impl Fn(anyhow::Error) -> (StatusCode, String) {
@@ -612,7 +647,22 @@ async fn post_journey_template(
             return_journey,
             station_buffer_minutes,
             skip_bank_holidays,
+            recurrence_kind,
+            interval_weeks,
+            anchor_week,
+            extra_dates,
         } => {
+            let pattern = crate::data::recurrence_pattern::resolve(
+                &crate::data::recurrence_pattern::PatternRequest {
+                    recurrence_kind,
+                    interval_weeks,
+                    anchor_week,
+                    extra_dates,
+                },
+                &crate::data::recurrence_pattern::Pattern::default(),
+                regular_journeys::london_date(super::london_now().to_utc()),
+            )
+            .map_err(bad_request)?;
             let default_match_mode = default_match_mode.unwrap_or_else(|| "manual".to_string());
             let auto_commit_rule = (default_match_mode == "auto").then_some("nearest_to_now");
             journey_templates::validate_template_recurrence(
@@ -657,6 +707,7 @@ async fn post_journey_template(
                 ends_on,
                 default_match_mode,
                 skip_bank_holidays: skip_bank_holidays.unwrap_or(true),
+                pattern,
             };
             let outcome = regular_journeys::create_plan_templates(
                 &app.database,
@@ -706,8 +757,10 @@ pub(crate) struct StationBufferPrefillResponse {
 #[serde(rename_all = "camelCase")]
 #[ts(optional_fields = nullable)]
 pub(crate) struct PreviewDatesRequest {
-    /// Mon = 1 to Sun = 64, as `daysOfWeek` everywhere.
-    days_of_week: i16,
+    /// Mon = 1 to Sun = 64, as `daysOfWeek` everywhere. May be absent for
+    /// `recurrenceKind: "dates"` (additive).
+    #[serde(default)]
+    days_of_week: Option<i16>,
     #[serde(default)]
     starts_on: Option<NaiveDate>,
     #[serde(default)]
@@ -719,6 +772,11 @@ pub(crate) struct PreviewDatesRequest {
     /// `regular_journeys::UPCOMING_DATES`.
     #[serde(default)]
     count: Option<u8>,
+    /// The recurrence pattern (R2, additive), as `POST /JourneyTemplates`
+    /// takes it. Refused while `REGULAR_JOURNEY_RECURRENCE_ENABLED` is off.
+    #[serde(flatten)]
+    #[ts(flatten)]
+    pattern: crate::data::recurrence_pattern::PatternRequest,
 }
 
 /// `POST /JourneyTemplates/preview-dates`'s response.
@@ -745,12 +803,12 @@ async fn post_preview_dates(
     user: AuthenticatedUser,
     Json(body): Json<PreviewDatesRequest>,
 ) -> Result<Json<PreviewDatesResponse>, (StatusCode, String)> {
-    use ds_store::recurrence::{DEFAULT_HORIZON_DAYS, Rule, Schedule};
+    use ds_store::recurrence::{DEFAULT_HORIZON_DAYS, Schedule};
 
     journey_templates::validate_template_recurrence(
         "manual",
         None,
-        Some(body.days_of_week),
+        body.days_of_week,
         body.starts_on,
         body.ends_on,
     )
@@ -775,9 +833,19 @@ async fn post_preview_dates(
     )
     .await
     .map_err(internal_error("read the dates a regular journey skips"))?;
-    let mut rule = Rule::weekly(Some(body.days_of_week));
-    rule.starts_on = body.starts_on;
-    rule.ends_on = body.ends_on;
+    let pattern = crate::data::recurrence_pattern::resolve(
+        &body.pattern,
+        &crate::data::recurrence_pattern::Pattern::default(),
+        today,
+    )
+    .map_err(bad_request)?
+    .unwrap_or_default();
+    let rule = crate::data::recurrence_pattern::preview_rule(
+        body.days_of_week,
+        body.starts_on,
+        body.ends_on,
+        &pattern,
+    );
     let schedule = Schedule {
         user_id: user.id,
         rule,
@@ -908,6 +976,14 @@ async fn get_journey_template(
         .acquire()
         .await
         .map_err(|err| internal_error("read the next date")(err.into()))?;
+    let pattern = crate::data::recurrence_pattern::stored(
+        &mut *conn,
+        template_id,
+        regular_journeys::london_date(now),
+    )
+    .await
+    .map_err(internal_error("read journey template"))?
+    .unwrap_or_default();
     let dates = regular_journeys::template_dates(&mut conn, &[template_id], now)
         .await
         .map_err(internal_error("read the next date"))?
@@ -937,6 +1013,10 @@ async fn get_journey_template(
         next_skips: dates.next_skips,
         upcoming_dates: dates.upcoming,
         paused_until: template.paused_until,
+        recurrence_kind: pattern.kind,
+        interval_weeks: pattern.interval_weeks,
+        anchor_week: pattern.anchor_week,
+        extra_dates: pattern.extra_dates,
         station_buffer_minutes: template.station_buffer_minutes,
         id: template.id,
         custom_name: template.custom_name,
@@ -1011,6 +1091,16 @@ async fn put_journey_template(
     )
     .await?;
     target_update.skip_bank_holidays = body.skip_bank_holidays;
+    if !body.pattern.is_empty() {
+        let today = regular_journeys::london_date(super::london_now().to_utc());
+        let stored = crate::data::recurrence_pattern::stored(&app.database, template_id, today)
+            .await
+            .map_err(internal_error("read journey template"))?
+            .unwrap_or_default();
+        target_update.pattern =
+            crate::data::recurrence_pattern::resolve(&body.pattern, &stored, today)
+                .map_err(bad_request)?;
+    }
     let replaced = journey_templates::replace_template(
         &app.database,
         template_id,
@@ -1144,6 +1234,7 @@ async fn put_target_update(
         usual_itinerary,
         station_buffer_minutes,
         skip_bank_holidays: None,
+        pattern: None,
     })
 }
 
@@ -1225,6 +1316,98 @@ async fn put_journey_template_active(
         template_ids: outcome.template_ids,
         deleted_journey_ids: outcome.deleted_journey_ids,
     }))
+}
+
+/// `POST /JourneyTemplates/{id}/extra-dates`'s body.
+#[derive(Debug, Deserialize, ts_rs::TS)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct AddTemplateExtraDateRequest {
+    service_date: NaiveDate,
+}
+
+/// `POST /JourneyTemplates/{id}/extra-dates` `{serviceDate}`: adds a date
+/// this regular journey also runs on (R2, decision 6: "Add a date" for a
+/// date after tomorrow stores it rather than adding the journey now; the
+/// mint adds it the evening before). This template only, not its pair.
+/// `204`; `400` for a date in the past or over 400 days ahead, or past
+/// 100 dates, or while `REGULAR_JOURNEY_RECURRENCE_ENABLED` is off; `404`
+/// when it isn't the caller's.
+async fn post_journey_template_extra_date(
+    State(app): State<App>,
+    user: AuthenticatedUser,
+    Path(template_id): Path<i64>,
+    Json(body): Json<AddTemplateExtraDateRequest>,
+) -> Result<StatusCode, (StatusCode, String)> {
+    use crate::data::recurrence_pattern::{self as pattern, PatternRequest};
+
+    let today = regular_journeys::london_date(super::london_now().to_utc());
+    journey_templates::get_owned_template(&app.database, template_id, &user.id)
+        .await
+        .map_err(internal_error("read journey template"))?
+        .ok_or((
+            StatusCode::NOT_FOUND,
+            "no journey template with that id".to_string(),
+        ))?;
+    let stored = pattern::stored(&app.database, template_id, today)
+        .await
+        .map_err(internal_error("read journey template"))?
+        .unwrap_or_default();
+    let mut dates = stored.extra_dates.clone();
+    dates.push(body.service_date);
+    let resolved = pattern::resolve(
+        &PatternRequest {
+            extra_dates: Some(dates),
+            ..PatternRequest::default()
+        },
+        &stored,
+        today,
+    )
+    .map_err(bad_request)?;
+    if let Some(resolved) = resolved {
+        sqlx::query(
+            "INSERT INTO journey_template_extra_dates (template_id, service_date) \
+             SELECT $1, d FROM unnest($2::date[]) AS d \
+             ON CONFLICT (template_id, service_date) DO NOTHING",
+        )
+        .bind(template_id)
+        .bind(&resolved.extra_dates)
+        .execute(&app.database)
+        .await
+        .map_err(|err| internal_error("add an extra date")(err.into()))?;
+    }
+    Ok(StatusCode::NO_CONTENT)
+}
+
+/// `DELETE /JourneyTemplates/{id}/extra-dates/{date}`: removes an extra
+/// date. A journey already added for it is kept (delete or skip it as any
+/// other). `204`, or `404` when the template isn't the caller's.
+async fn delete_journey_template_extra_date(
+    State(app): State<App>,
+    user: AuthenticatedUser,
+    Path((template_id, service_date)): Path<(i64, NaiveDate)>,
+) -> Result<StatusCode, (StatusCode, String)> {
+    let deleted = sqlx::query(
+        "DELETE FROM journey_template_extra_dates e USING journey_templates t \
+         WHERE e.template_id = t.id AND t.id = $1 AND t.user_id = $2 AND e.service_date = $3",
+    )
+    .bind(template_id)
+    .bind(&user.id)
+    .bind(service_date)
+    .execute(&app.database)
+    .await
+    .map_err(|err| internal_error("remove an extra date")(err.into()))?;
+    if deleted.rows_affected() == 0
+        && journey_templates::get_owned_template(&app.database, template_id, &user.id)
+            .await
+            .map_err(internal_error("read journey template"))?
+            .is_none()
+    {
+        return Err((
+            StatusCode::NOT_FOUND,
+            "no journey template with that id".to_string(),
+        ));
+    }
+    Ok(StatusCode::NO_CONTENT)
 }
 
 /// `PUT /JourneyTemplates/{id}/paused-until`'s body.
@@ -4023,6 +4206,318 @@ mod db_tests {
         assert_eq!(detail["nextDate"], today.to_string());
 
         cleanup_user(&pool, user_id).await;
+    }
+
+    #[tokio::test]
+    #[ignore = "requires a live database; run with `cargo test -p api \
+                recurrence_patterns_are_refused_while_off_and_shared_by_a_pair \
+                -- --ignored --test-threads=1`"]
+    #[expect(
+        clippy::too_many_lines,
+        reason = "test code: one scenario read top to bottom"
+    )]
+    async fn recurrence_patterns_are_refused_while_off_and_shared_by_a_pair() {
+        let pool = connect().await;
+        let user_id = "test-regular-patterns";
+        cleanup_user(&pool, user_id).await;
+        let token = seed_session(&pool, user_id).await;
+        let router = test_router(test_app(pool.clone()));
+        let _pin = crate::routes::pin_london_now_for_tests(tuesday_morning());
+        let every_other = |mut body: Value| {
+            // Mondays and Wednesdays, every other week from next week
+            // (Thursday 19 Nov is in the week of Monday 16 Nov).
+            body["daysOfWeek"] = serde_json::json!(5);
+            body["intervalWeeks"] = serde_json::json!(2);
+            body["anchorWeek"] = serde_json::json!("2026-11-19");
+            body["extraDates"] = serde_json::json!(["2026-11-14"]);
+            body
+        };
+
+        // Off: refused, and nothing is created.
+        {
+            let _off = crate::data::recurrence_pattern::set_enabled_for_tests(false);
+            let (status, message) = post_json(
+                router.clone(),
+                "/JourneyTemplates".to_string(),
+                Some(&token),
+                every_other(plan_body(true)),
+            )
+            .await;
+            assert_eq!(status, StatusCode::BAD_REQUEST);
+            assert_eq!(
+                message,
+                crate::data::recurrence_pattern::NOT_AVAILABLE_MESSAGE
+            );
+            let (status, _) = post_json(
+                router.clone(),
+                "/JourneyTemplates/preview-dates".to_string(),
+                Some(&token),
+                serde_json::json!({"daysOfWeek": 1, "intervalWeeks": 2, "anchorWeek": "2026-11-16"}),
+            )
+            .await;
+            assert_eq!(status, StatusCode::BAD_REQUEST);
+        }
+
+        let _on = crate::data::recurrence_pattern::set_enabled_for_tests(true);
+        let (status, body) = post_json(
+            router.clone(),
+            "/JourneyTemplates".to_string(),
+            Some(&token),
+            every_other(plan_body(true)),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        let id = body["templateId"].as_i64().unwrap();
+        let return_id = body["returnTemplateId"].as_i64().unwrap();
+        for template in [id, return_id] {
+            let (_, detail) = request(
+                router.clone(),
+                format!("/JourneyTemplates/{template}"),
+                Some(&token),
+            )
+            .await;
+            assert_eq!(detail["recurrenceKind"], "weekly");
+            assert_eq!(detail["intervalWeeks"], 2);
+            assert_eq!(detail["anchorWeek"], "2026-11-16", "stored as its Monday");
+            assert_eq!(detail["extraDates"], serde_json::json!(["2026-11-14"]));
+            let dates: Vec<Value> = detail["upcomingDates"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .take(4)
+                .map(|day| day["date"].clone())
+                .collect();
+            assert_eq!(
+                dates,
+                vec![
+                    Value::from("2026-11-14"),
+                    Value::from("2026-11-16"),
+                    Value::from("2026-11-18"),
+                    Value::from("2026-11-30"),
+                ],
+                "{template}"
+            );
+            assert_eq!(detail["nextDate"], "2026-11-14");
+        }
+
+        // A PUT changing only the interval keeps the extra dates, on both.
+        let (status, body) = put_json(
+            router.clone(),
+            format!("/JourneyTemplates/{id}"),
+            Some(&token),
+            serde_json::json!({
+                "legs": [{"originCrs": "WOK", "destinationCrs": "WAT",
+                          "departWindow": {"after": "07:43", "before": "07:53"}}],
+                "daysOfWeek": 5,
+                "active": true,
+                "defaultMatchMode": "manual",
+                "autoCommitRule": null,
+                "intervalWeeks": 1
+            }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::NO_CONTENT, "{body}");
+        let (_, mine) = request(
+            router.clone(),
+            "/JourneyTemplates/mine".to_string(),
+            Some(&token),
+        )
+        .await;
+        for template in [id, return_id] {
+            let row = mine_row(&mine, template);
+            assert_eq!(row["intervalWeeks"], 1);
+            assert_eq!(row["anchorWeek"], Value::Null);
+            assert_eq!(row["extraDates"], serde_json::json!(["2026-11-14"]));
+            // Every week again: Wed 11, the extra Sat 14, Mon 16, Wed 18.
+            assert_eq!(row["upcomingDates"][0]["date"], "2026-11-11");
+            assert_eq!(row["upcomingDates"][1]["date"], "2026-11-14");
+            assert_eq!(row["upcomingDates"][2]["date"], "2026-11-16");
+            assert_eq!(row["upcomingDates"][3]["date"], "2026-11-18");
+        }
+
+        // A list of dates: only its dates.
+        let (status, body) = put_json(
+            router.clone(),
+            format!("/JourneyTemplates/{return_id}"),
+            Some(&token),
+            serde_json::json!({
+                "legs": [{"originCrs": "WAT", "destinationCrs": "WOK"}],
+                "daysOfWeek": null,
+                "active": true,
+                "defaultMatchMode": "manual",
+                "autoCommitRule": null,
+                "recurrenceKind": "dates",
+                "extraDates": ["2026-12-01", "2026-11-20"]
+            }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::NO_CONTENT, "{body}");
+        let (_, detail) = request(
+            router.clone(),
+            format!("/JourneyTemplates/{id}"),
+            Some(&token),
+        )
+        .await;
+        assert_eq!(detail["recurrenceKind"], "dates");
+        let dates: Vec<Value> = detail["upcomingDates"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|day| day["date"].clone())
+            .collect();
+        assert_eq!(
+            dates,
+            vec![Value::from("2026-11-20"), Value::from("2026-12-01")]
+        );
+
+        // Bad patterns.
+        for bad in [
+            serde_json::json!({"recurrenceKind": "cycle"}),
+            serde_json::json!({"recurrenceKind": "weekly", "intervalWeeks": 3}),
+            serde_json::json!({"recurrenceKind": "weekly", "intervalWeeks": 5, "anchorWeek": "2026-11-16"}),
+            serde_json::json!({"recurrenceKind": "dates", "extraDates": []}),
+            serde_json::json!({"extraDates": ["2026-11-09"]}),
+        ] {
+            let mut body = serde_json::json!({
+                "legs": [{"originCrs": "WOK", "destinationCrs": "WAT"}],
+                "daysOfWeek": 5,
+                "active": true,
+                "defaultMatchMode": "manual",
+                "autoCommitRule": null
+            });
+            for (key, value) in bad.as_object().unwrap() {
+                body[key] = value.clone();
+            }
+            let (status, _) = put_json(
+                router.clone(),
+                format!("/JourneyTemplates/{id}"),
+                Some(&token),
+                body,
+            )
+            .await;
+            assert_eq!(status, StatusCode::BAD_REQUEST, "{bad}");
+        }
+
+        // The preview takes a pattern too.
+        let (status, body) = post_json(
+            router.clone(),
+            "/JourneyTemplates/preview-dates".to_string(),
+            Some(&token),
+            serde_json::json!({"daysOfWeek": 1, "intervalWeeks": 2, "anchorWeek": "2026-11-23",
+                               "skipBankHolidays": false, "count": 2}),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        assert_eq!(
+            body["upcomingDates"],
+            serde_json::json!([
+                {"date": "2026-11-23", "skipReason": null},
+                {"date": "2026-12-07", "skipReason": null},
+            ])
+        );
+
+        cleanup_user(&pool, user_id).await;
+    }
+
+    #[tokio::test]
+    #[ignore = "requires a live database; run with `cargo test -p api \
+                an_extra_date_is_added_and_removed_for_one_template \
+                -- --ignored --test-threads=1`"]
+    async fn an_extra_date_is_added_and_removed_for_one_template() {
+        let pool = connect().await;
+        let user_id = "test-regular-extra-date";
+        let other = "test-regular-extra-date-other";
+        cleanup_user(&pool, user_id).await;
+        cleanup_user(&pool, other).await;
+        let token = seed_session(&pool, user_id).await;
+        let other_token = seed_session(&pool, other).await;
+        let router = test_router(test_app(pool.clone()));
+        let _pin = crate::routes::pin_london_now_for_tests(tuesday_morning());
+        let (id, return_id) = create_plan(router.clone(), &token, true).await;
+        let return_id = return_id.unwrap();
+        let saturday = serde_json::json!({"serviceDate": "2026-11-21"});
+
+        {
+            let _off = crate::data::recurrence_pattern::set_enabled_for_tests(false);
+            let (status, _) = post_json(
+                router.clone(),
+                format!("/JourneyTemplates/{id}/extra-dates"),
+                Some(&token),
+                saturday.clone(),
+            )
+            .await;
+            assert_eq!(status, StatusCode::BAD_REQUEST);
+        }
+        let _on = crate::data::recurrence_pattern::set_enabled_for_tests(true);
+        let (status, _) = post_json(
+            router.clone(),
+            format!("/JourneyTemplates/{id}/extra-dates"),
+            Some(&token),
+            saturday.clone(),
+        )
+        .await;
+        assert_eq!(status, StatusCode::NO_CONTENT);
+        let (_, detail) = request(
+            router.clone(),
+            format!("/JourneyTemplates/{id}"),
+            Some(&token),
+        )
+        .await;
+        assert_eq!(detail["extraDates"], serde_json::json!(["2026-11-21"]));
+        // The pair isn't changed by an added date.
+        let (_, back) = request(
+            router.clone(),
+            format!("/JourneyTemplates/{return_id}"),
+            Some(&token),
+        )
+        .await;
+        assert_eq!(back["extraDates"], serde_json::json!([]));
+
+        let (status, _) = post_json(
+            router.clone(),
+            format!("/JourneyTemplates/{id}/extra-dates"),
+            Some(&other_token),
+            saturday,
+        )
+        .await;
+        assert_eq!(status, StatusCode::NOT_FOUND);
+        let (status, _) = post_json(
+            router.clone(),
+            format!("/JourneyTemplates/{id}/extra-dates"),
+            Some(&token),
+            serde_json::json!({"serviceDate": "2026-11-09"}),
+        )
+        .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+
+        assert_eq!(
+            delete_json(
+                router.clone(),
+                format!("/JourneyTemplates/{id}/extra-dates/2026-11-21"),
+                Some(&token)
+            )
+            .await,
+            StatusCode::NO_CONTENT
+        );
+        let (_, detail) = request(
+            router.clone(),
+            format!("/JourneyTemplates/{id}"),
+            Some(&token),
+        )
+        .await;
+        assert_eq!(detail["extraDates"], serde_json::json!([]));
+        assert_eq!(
+            delete_json(
+                router,
+                format!("/JourneyTemplates/{id}/extra-dates/2026-11-21"),
+                Some(&other_token)
+            )
+            .await,
+            StatusCode::NOT_FOUND
+        );
+
+        cleanup_user(&pool, user_id).await;
+        cleanup_user(&pool, other).await;
     }
 
     #[tokio::test]
