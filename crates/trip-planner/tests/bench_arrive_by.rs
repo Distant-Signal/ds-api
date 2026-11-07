@@ -2184,3 +2184,113 @@ fn bench_fastest_series_cpu() {
     );
     assert!(arrive_ratio <= 1.10, "arrive-by series {arrive_ratio:.3}x");
 }
+
+/// `/Trips/plan?direct=all` (DS-398): every direct train, one pass over
+/// the day's connections (`trip_planner::direct_journeys`, up to 8),
+/// leaving after 08:00 and arriving by 18:00, over the 20 pairs of
+/// [`bench_options_cpu`], against one Connection Scan from 08:00 for
+/// each, in CPU time (median over `DS_BENCH_REPS`, default 9). Asserted:
+/// each at most 3x one scan (a scan with an answer stops early; this
+/// pass reads on to the end of the day, or from its start to the
+/// deadline), with 10% for CPU-time noise. Measured (DS-398, release):
+/// 1.77x leaving after, 1.14x arriving by, about 3 ms a pair.
+#[test]
+#[ignore = "benchmark; see the module doc"]
+fn bench_direct_cpu() {
+    if !bench_requested() {
+        return;
+    }
+    let reps: usize = std::env::var("DS_BENCH_REPS")
+        .ok()
+        .and_then(|value| value.parse().ok())
+        .unwrap_or(9);
+    let (connections, interchange) = network();
+    let date = NaiveDate::from_ymd_opt(2026, 9, 29).unwrap();
+    let mut rng = Rng(0x0b71_0950);
+    let pairs: Vec<(Vec<String>, Vec<String>)> = (0..20)
+        .map(|_| {
+            (
+                vec![tiploc(HUBS + rng.next(STATIONS - HUBS))],
+                vec![tiploc(HUBS + rng.next(STATIONS - HUBS))],
+            )
+        })
+        .collect();
+    let scan = || {
+        pairs
+            .iter()
+            .filter(|(from, to)| {
+                scan_connections_restricted(
+                    ScanOptions {
+                        connections: &connections,
+                        interchange: &interchange,
+                        from_tiplocs: from,
+                        to_tiplocs: to,
+                        departure_min: 480,
+                        date,
+                    },
+                    None,
+                    None,
+                )
+                .is_some()
+            })
+            .count()
+    };
+    let (pairs, connections) = (&pairs, &connections);
+    let direct = |bound: trip_planner::DirectBound| {
+        move || {
+            pairs
+                .iter()
+                .map(|(from, to)| {
+                    trip_planner::direct_journeys(
+                        &trip_planner::DirectOptions {
+                            connections,
+                            from_tiplocs: from,
+                            to_tiplocs: to,
+                        },
+                        bound,
+                        8,
+                        None,
+                        None,
+                    )
+                    .len()
+                })
+                .sum::<usize>()
+        }
+    };
+    let depart = direct(trip_planner::DirectBound::DepartAfter(480));
+    let arrive = direct(trip_planner::DirectBound::ArriveBy(1080));
+    let cases: [&dyn Fn() -> usize; 3] = [&scan, &depart, &arrive];
+    let mut samples = [Vec::new(), Vec::new(), Vec::new()];
+    let mut found = [0; 3];
+    for _ in 0..reps {
+        for (case, f) in cases.iter().enumerate() {
+            let started = thread_cpu();
+            found[case] = f();
+            samples[case].push(thread_cpu().saturating_sub(started));
+        }
+    }
+    let [scan_cpu, depart_cpu, arrive_cpu] = samples.map(|mut times: Vec<Duration>| {
+        times.sort();
+        times[times.len() / 2]
+    });
+    let ratio = |cpu: Duration| cpu.as_secs_f64() / scan_cpu.as_secs_f64();
+    println!(
+        "csa 08:00 {scan_cpu:>9.2?} ({} found); direct after 08:00 {depart_cpu:>9.2?} \
+         ({} found, {:.3}x); direct by 18:00 {arrive_cpu:>9.2?} ({} found, {:.3}x)",
+        found[0],
+        found[1],
+        ratio(depart_cpu),
+        found[2],
+        ratio(arrive_cpu),
+    );
+    assert!(
+        ratio(depart_cpu) <= 3.0 * 1.10,
+        "direct after {:.3}x",
+        ratio(depart_cpu)
+    );
+    assert!(
+        ratio(arrive_cpu) <= 3.0 * 1.10,
+        "direct by {:.3}x",
+        ratio(arrive_cpu)
+    );
+}
