@@ -49,7 +49,6 @@ use chrono::{DateTime, Duration, NaiveDate, NaiveTime, TimeZone, Timelike, Utc};
 use sqlx::types::Json;
 
 use crate::app::App;
-use crate::data::journey_alternatives;
 use crate::data::journey_replace::{self, RegularWrite, Replaced, Replacement};
 use crate::data::journey_revisions::{Reason, RevisionMeta};
 use crate::data::regular_journeys::{self, PlanOptions, UsualItinerary};
@@ -405,33 +404,15 @@ async fn plan_occurrence(
             return mark_pending(app, candidate, marker, now).await;
         }
     };
-    let Some(itineraries) = departures(app, query).await? else {
+    let Some(itineraries) =
+        crate::routes::regular_plan::departures(app, query, ReplanSlot::Regular)
+            .await
+            .map_err(|(status, message)| anyhow::anyhow!("plan failed ({status}): {message}"))?
+    else {
         // No graph for the date: unpublished after all.
         return mark_pending(app, candidate, marker, now).await;
     };
-    let mut codes: Vec<String> = Vec::new();
-    let mut operators: Vec<String> = Vec::new();
-    for itinerary in &itineraries {
-        for leg in &itinerary.legs {
-            if let crate::data::trip_planning_itinerary::PlannedLeg::Train {
-                origin_crs,
-                destination_crs,
-                operator,
-                ..
-            } = leg
-            {
-                codes.extend(origin_crs.iter().chain(destination_crs).cloned());
-                operators.extend(operator.iter().cloned());
-            }
-        }
-    }
-    codes.sort();
-    codes.dedup();
-    operators.sort();
-    operators.dedup();
-    let names = journey_alternatives::station_names(&app.database, &codes).await;
-    let operator_names = journey_alternatives::operator_names(&app.database, &operators).await;
-    let planned = regular_plan::options_from(&itineraries, date, now, &names, &operator_names);
+    let planned = crate::routes::regular_plan::plan_options(app, &itineraries, date, now).await;
     let Some((choice, reason, alternatives)) =
         regular_plan::choose(usual.as_ref(), &candidate.target_kind, date, &planned)
     else {
@@ -545,52 +526,6 @@ async fn plan_occurrence(
         Replaced::Done { .. } => Outcome::Committed,
         _ => Outcome::Skipped,
     })
-}
-
-/// How many trains the sweep looks at for one occurrence: the first
-/// `fastest` search from the target, then each from just after (leave
-/// after) or just before (arrive by) the one it found.
-pub const SEARCHES: usize = 6;
-
-/// The next [`SEARCHES`] ways there from `query`'s target, each a
-/// `fastest` search through the sweep's own slot, in the order found
-/// (later departures for a leave-after target, earlier arrivals for an
-/// arrive-by one). `None` when no timetable is published for the date.
-async fn departures(
-    app: &App,
-    mut query: crate::routes::trips::ReplanQuery,
-) -> anyhow::Result<Option<Vec<crate::data::trip_planning_itinerary::PlannedItinerary>>> {
-    let mut found: Vec<crate::data::trip_planning_itinerary::PlannedItinerary> = Vec::new();
-    for _ in 0..SEARCHES {
-        let list =
-            match crate::routes::trips::plan_for_journey(app, &query, ReplanSlot::Regular).await {
-                Ok(Some(list)) => list,
-                Ok(None) if found.is_empty() => return Ok(None),
-                Ok(None) => break,
-                Err((status, message)) => anyhow::bail!("plan failed ({status}): {message}"),
-            };
-        let Some(first) = list.into_iter().next() else {
-            break;
-        };
-        // The minutes found already include the day offset.
-        query.day_offset = 0;
-        let next = match query.time {
-            TimeBound::DepartAfter(from) => {
-                let next = first.departure_min + 1;
-                (next > from).then_some(TimeBound::DepartAfter(next))
-            }
-            TimeBound::ArriveBy(by) => {
-                let next = first.arrival_min.min(by.saturating_sub(1));
-                (next < by && next > 0).then_some(TimeBound::ArriveBy(next))
-            }
-        };
-        found.push(first);
-        match next {
-            Some(time) => query.time = time,
-            None => break,
-        }
-    }
-    Ok(Some(found))
 }
 
 #[cfg(test)]

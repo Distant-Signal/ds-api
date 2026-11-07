@@ -3,6 +3,60 @@
 Changes to the Distant Signal (DS) HTTP API that a client such as DS-MCP
 needs to know about. Newest first. Field names are as served (camelCase).
 
+## 2026-11-06: Track a journey again, move a journey
+
+Everything here is additive.
+
+- `GET /Journeys/{id}/repeat?date=&time=&basis=` plans a journey's route
+  again and saves nothing. It plans from the first train's boarding
+  station to the last train's alighting station, via the stations the
+  trains changed at (then without them when that finds nothing), and
+  chooses as the regular plan sweep does: the same trains (`reason:
+  usual`), else the same operator within 5 minutes of the time
+  (`same_operator`), else the earliest arrival (`best`).
+  - `basis`: `booked` (default) repeats revision 1, the booked plan;
+    `current` reads the plan as it stands, which is what a move previews
+    (owner only).
+  - `date` (today or later; 400 before) defaults to today if the first
+    train's time is still ahead today, else tomorrow. `time` (`HH:MM`
+    London) defaults to the first train's booked time. At another time
+    than that, the same trains are not preferred, and the same operator
+    is looked for near the time asked.
+  - The body is `{status, unsupported, date, time, originalTime, reason,
+    choice, alternatives, via}`. `status` is `planned`, `pending` (no
+    timetable for the date yet), `no_service` or `unsupported`.
+    `unsupported` says why: `irish` (an Irish train), `transit` (a ride on
+    a transit network, or a regular journey planned with transit),
+    `waypoints` (a stop of over two hours between trains, or a regular
+    journey planned with waypoints) or `incomplete` (a train leg with no
+    train or stations).
+  - `choice` and up to two `alternatives` are `RegularPlanOption`s, never
+    leaving before `time`. The untracked legs before the first train and
+    after the last are included, moved by as much as the train next to
+    them. Save one with `POST /Journeys/itinerary`.
+  - Owner, or a session that can read the journey through a group (404
+    otherwise). A delegated route with `journeys:read`, own journeys only.
+    It shares `/Trips/plan`'s rate limit, and is a 503 when every
+    planning slot is busy.
+- `POST /Journeys/{id}/move` `{legs}` (cookie only, owner only, 404
+  otherwise) replaces every leg of a journey that hasn't started. The legs
+  are as `POST /Journeys/itinerary` takes them. It answers as `POST
+  .../replace` does (`ReplaceResponse`). Before a break, revision 1 becomes
+  the moved plan; otherwise the move is the next revision and resolves an
+  open break. The journey keeps its id, name and `sourceTemplateId`; a
+  regular plan the sweep made for it is cleared. 409 once a leg has left
+  (the body says the journey has started).
+- `GET /JourneyTemplates/mine` lists the most recently used regular journey
+  first: the one with the newest journey made from it, else the newest.
+  It was newest first.
+- `POST /JourneyTemplates` `mode: "plan"` takes `daysOfWeek` absent or
+  `null`: a regular journey with no days, a saved route. It has no next
+  date and nothing is made from it until the owner adds a date. A mask of
+  0 is still a 400.
+
+DS-MCP: nothing needed. It can offer "plan this journey again" with
+`GET .../repeat` and save the choice with `POST /Journeys/itinerary`.
+
 ## 2026-11-06: reliability and Delay Repay on journey legs; tickets simplified
 
 Reliability now counts the trains the caller actually took, Delay Repay is
@@ -78,6 +132,7 @@ ticket is a few optional details on a leg. distant-signal's
 
 DS-MCP: can add a reliability tool on `GET /Journeys/reliability`
 (`journeys:read`); nothing it calls was removed.
+
 
 ## 2026-11-06: Bank holidays
 

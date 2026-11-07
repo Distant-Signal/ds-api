@@ -97,6 +97,9 @@ fn visit_roots(v: &mut Collector) {
     // Regular journeys: the day's train.
     v.visit::<crate::data::regular_plan::RegularPlanResponse>();
     v.visit::<crate::routes::regular_plan::AcceptBody>();
+    // Track this journey again, and move it.
+    v.visit::<crate::routes::journey_repeat::RepeatResponse>();
+    v.visit::<crate::routes::journey_repeat::MoveBody>();
     // Line status and stats.
     v.visit::<crate::render::LineStatusReportJson>();
     v.visit::<crate::routes::line_status::DailyStats>();

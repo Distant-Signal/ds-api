@@ -601,7 +601,13 @@ where
     Ok(rows)
 }
 
-/// Most-recently-created template first, capped at
+/// SQL: when template `jt` was last used, for the list's order (most
+/// recently used first): the newest journey made from it ("Run now", "Add
+/// a date" or an occurrence), else when it was made.
+const LAST_USED_SQL: &str = "GREATEST(jt.created_at, \
+     (SELECT MAX(lu.created_at) FROM journeys lu WHERE lu.source_template_id = jt.id))";
+
+/// Most recently used template first ([`LAST_USED_SQL`]), capped at
 /// `train_tracking::MINE_LIST_LIMIT` -- same cap `journeys::JourneyListItem`
 /// already shares. Each row is summarized by its first leg's origin and
 /// last leg's destination (`MIN`/`MAX` on `leg_order`, joined back to the
@@ -663,8 +669,9 @@ pub async fn list_templates_for_user(
          LEFT JOIN stations sto ON sto.crs = UPPER(jt.origin_crs)::bpchar \
          LEFT JOIN stations std ON std.crs = UPPER(jt.destination_crs)::bpchar \
          WHERE jt.user_id = $1 \
-         ORDER BY jt.created_at DESC \
+         ORDER BY {last_used} DESC, jt.created_at DESC \
          LIMIT $2",
+        last_used = LAST_USED_SQL,
         started = crate::data::regular_journeys::occurrence_started_sql("j", "$4", "$3"),
         bank_holidays = crate::data::regular_journeys::bank_holiday_dates_sql("jt", "$3"),
     ))
@@ -1573,6 +1580,53 @@ mod db_tests {
         assert_eq!(stored_legs[1].origin_crs.as_deref(), Some("RDG"));
         assert_eq!(stored_legs[1].destination_crs.as_deref(), Some("BRI"));
 
+        cleanup_user(&pool, user_id).await;
+    }
+
+    #[tokio::test]
+    #[ignore = "requires a live database: DATABASE_URL"]
+    async fn the_list_puts_the_most_recently_used_template_first() {
+        let pool = connect().await;
+        let user_id = "TEST-TEMPLATE-LAST-USED";
+        cleanup_user(&pool, user_id).await;
+        seed_user(&pool, user_id).await;
+        let legs = vec![fixture_leg("WAT", "RDG")];
+        let older = create_template(&pool, user_id, Some("Older"), &legs)
+            .await
+            .expect("create template");
+        let newer = create_template(&pool, user_id, Some("Newer"), &legs)
+            .await
+            .expect("create template");
+        for (id, days) in [(older, 3), (newer, 2)] {
+            sqlx::query(
+                "UPDATE journey_templates SET created_at = now() - make_interval(days => $2) \
+                 WHERE id = $1",
+            )
+            .bind(id)
+            .bind(days)
+            .execute(&pool)
+            .await
+            .expect("age the templates");
+        }
+        let ids_in_order = |items: Vec<JourneyTemplateListItem>| -> Vec<i64> {
+            items.into_iter().map(|item| item.id).collect()
+        };
+        let now = Utc::now();
+        assert_eq!(
+            ids_in_order(list_templates_for_user(&pool, user_id, now).await.unwrap()),
+            [newer, older]
+        );
+        // A journey made from the older one today puts it first.
+        sqlx::query("INSERT INTO journeys (user_id, source_template_id) VALUES ($1, $2)")
+            .bind(user_id)
+            .bind(older)
+            .execute(&pool)
+            .await
+            .expect("use the older template");
+        assert_eq!(
+            ids_in_order(list_templates_for_user(&pool, user_id, now).await.unwrap()),
+            [older, newer]
+        );
         cleanup_user(&pool, user_id).await;
     }
 

@@ -780,7 +780,7 @@ async fn after_the_regular_sweep_replans_only_the_new_train_counts() {
             &pool,
             USER,
             &PlanRecurrence {
-                days_of_week: 127,
+                days_of_week: Some(127),
                 starts_on: None,
                 ends_on: None,
                 default_match_mode: "auto".to_string(),

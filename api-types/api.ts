@@ -389,9 +389,10 @@ resolutionStatus: ResolutionStatus | null, };
  */
 export type CreateJourneyTemplateRequest = { "mode": "manual", customName?: string | null, legs: Array<TemplateLegRequest>, } | { "mode": "fromJourney", customName?: string | null, journeyId: number, } | { "mode": "plan", customName?: string | null, originCrs: string, destinationCrs: string, target: TemplateTarget, planOptions?: PlanOptions | null, usualItinerary: UsualItinerary, 
 /**
- * Required: a regular journey recurs.
+ * The days it recurs on; absent or `null` for none, a saved
+ * route that only runs when the owner adds a date.
  */
-daysOfWeek: number, startsOn?: string | null, endsOn?: string | null, 
+daysOfWeek?: number | null, startsOn?: string | null, endsOn?: string | null, 
 /**
  * `manual` (the default: remind me to pick) or `auto`.
  */
@@ -1618,6 +1619,54 @@ codes: Array<string>,
 entries: Array<string>, };
 
 /**
+ * `GET /Journeys/{id}/repeat`'s body.
+ */
+export type JourneyRepeatResponse = { status: JourneyRepeatStatus, 
+/**
+ * Why, when `status` is `unsupported`.
+ */
+unsupported: JourneyRepeatUnsupported | null, 
+/**
+ * The day and London time planned (the defaults when not asked for).
+ */
+date: string, 
+/**
+ * `HH:MM`.
+ */
+time: string, 
+/**
+ * The first train's booked London time in the plan read, `HH:MM`;
+ * `null` when unsupported.
+ */
+originalTime: string | null, 
+/**
+ * As a regular plan's: `usual` (the same trains), `same_operator` or
+ * `best`.
+ */
+reason: RegularPlanReason | null, 
+/**
+ * Ready to save: train legs as `POST /Journeys/itinerary` takes them
+ * (`trainUid`, `serviceDate`, `originCrs`, `destinationCrs`) and the
+ * untracked legs before and after the trains, moved with them.
+ */
+choice: RegularPlanOption | null, alternatives: Array<RegularPlanOption>, 
+/**
+ * The stations the plan went via (the original changes); empty when
+ * it was planned without them.
+ */
+via: Array<string>, };
+
+/**
+ * What `GET /Journeys/{id}/repeat` found.
+ */
+export type JourneyRepeatStatus = "planned" | "pending" | "no_service" | "unsupported";
+
+/**
+ * Why a journey can't be planned again.
+ */
+export type JourneyRepeatUnsupported = "irish" | "transit" | "waypoints" | "incomplete";
+
+/**
  * `train_current_state.status` (its CHECK constraint): a train's own
  * status, served as `status` on train and journey responses.
  */
@@ -2535,6 +2584,16 @@ export type MaterializeTemplateRequest = {
 serviceDate: string, };
 
 export type MaterializeTemplateResponse = { journeyId: number, legIds: Array<number>, };
+
+/**
+ * `POST /Journeys/{id}/move`'s body.
+ */
+export type MoveJourneyRequest = { 
+/**
+ * The journey's new legs, each as `POST /Journeys/itinerary` takes
+ * them (a `GET .../repeat?basis=current` option's legs).
+ */
+legs: Array<ItineraryLegRequest>, };
 
 /**
  * A station returned by [`nearest_stations`]: the same `code`/`name` shape

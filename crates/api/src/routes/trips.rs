@@ -2708,6 +2708,15 @@ pub(crate) async fn hold_break_sweep_slot() -> tokio::sync::SemaphorePermit<'sta
     SWEEP_PLAN_SLOTS.acquire().await.expect("break sweep slot")
 }
 
+/// Holds the regular plan sweep's planning slot, for the same kind of test.
+#[cfg(test)]
+pub(crate) async fn hold_regular_sweep_slot() -> tokio::sync::SemaphorePermit<'static> {
+    REGULAR_PLAN_SLOTS
+        .acquire()
+        .await
+        .expect("regular plan sweep slot")
+}
+
 /// Holds every user's planning slot, for the same kind of test.
 #[cfg(test)]
 pub(crate) async fn hold_request_slots() -> tokio::sync::SemaphorePermit<'static> {

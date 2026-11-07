@@ -100,6 +100,11 @@ pub const DELEGATED_ROUTES: &[(Method, &str, Scope)] = &[
     (Method::GET, "/Journeys/mine", Scope::JourneysRead),
     (Method::GET, "/Journeys/{journey_id}", Scope::JourneysRead),
     (Method::GET, "/Journeys/reliability", Scope::JourneysRead),
+    (
+        Method::GET,
+        "/Journeys/{journey_id}/repeat",
+        Scope::JourneysRead,
+    ),
     (Method::POST, "/Journeys/itinerary", Scope::JourneysWrite),
     (Method::POST, "/Journeys/irish-train", Scope::JourneysWrite),
     (
@@ -1463,6 +1468,7 @@ mod tests {
                     "GET /Journeys/mine journeys:read",
                     "GET /Journeys/{journey_id} journeys:read",
                     "GET /Journeys/reliability journeys:read",
+                    "GET /Journeys/{journey_id}/repeat journeys:read",
                     "POST /Journeys/itinerary journeys:write",
                     "POST /Journeys/irish-train journeys:write",
                     "DELETE /Journeys/{journey_id} journeys:delete",
@@ -1501,6 +1507,7 @@ mod tests {
                 [
                     "routes/journey_irish_train.rs WriteScope",
                     "routes/journey_itinerary.rs WriteScope",
+                    "routes/journey_repeat.rs ReadScope",
                     "routes/journeys.rs DeleteScope",
                     "routes/journeys.rs ReadScope",
                     "routes/journeys.rs ReadScope",

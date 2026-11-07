@@ -249,14 +249,16 @@ fn is_tfl_arrivals(path: &str) -> bool {
         .is_some_and(|id| !id.is_empty() && !id.contains('/'))
 }
 
-/// A mid-journey route that runs the planner (spec 2026-10-22 §7): the
-/// alternatives (which "I missed this train" shows) and the re-plan
-/// preview cost what a `/Trips/plan` does, so they share its budget.
+/// A journey route that runs the planner (spec 2026-10-22 §7): the
+/// alternatives (which "I missed this train" shows), the re-plan preview
+/// and "Track this journey again" (`/repeat`) cost what a `/Trips/plan`
+/// does, so they share its budget.
 fn is_journey_replan(path: &str) -> bool {
     path.starts_with("/Journeys/")
         && (path.ends_with("/alternatives")
             || path.ends_with("/replan/preview")
-            || path.ends_with("/replan/accept"))
+            || path.ends_with("/replan/accept")
+            || path.ends_with("/repeat"))
 }
 
 /// Rate-limit settings, from the environment.
@@ -1499,6 +1501,14 @@ mod tests {
         );
         assert_eq!(
             classify(&Method::POST, "/Journeys/irish-train"),
+            Some(LimitClass::PublicWrite)
+        );
+        assert_eq!(
+            classify(&Method::GET, "/Journeys/12/repeat"),
+            Some(LimitClass::TripPlan)
+        );
+        assert_eq!(
+            classify(&Method::POST, "/Journeys/12/move"),
             Some(LimitClass::PublicWrite)
         );
         assert_eq!(

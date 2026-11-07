@@ -438,7 +438,8 @@ pub struct PlanTemplateInput {
 
 /// The recurrence a plan-mode create gives both templates.
 pub struct PlanRecurrence {
-    pub days_of_week: i16,
+    /// `None`: no days, a saved route (journeys are made from it by hand).
+    pub days_of_week: Option<i16>,
     pub starts_on: Option<NaiveDate>,
     pub ends_on: Option<NaiveDate>,
     /// `manual` or `auto`.

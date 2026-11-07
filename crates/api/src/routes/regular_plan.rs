@@ -8,6 +8,11 @@
 //!
 //! Cookie-only and owner-only (another user's journey is a 404), and not a
 //! delegated route.
+//!
+//! It also holds the searches the sweep and "Track this journey again"
+//! (`journey_repeat`) share: [`departures`], the next few trains from a
+//! target through a given planning slot, and [`plan_options`], those
+//! itineraries as the options [`regular_plan::choose`] picks from.
 
 use std::collections::HashMap;
 
@@ -20,11 +25,14 @@ use serde::{Deserialize, Serialize};
 
 use crate::app::{App, Router};
 use crate::auth::AuthenticatedUser;
+use crate::data::journey_alternatives;
 use crate::data::journey_replace::{self, RegularWrite, Replacement};
 use crate::data::journey_revisions::RevisionMeta;
-use crate::data::regular_plan::{self, StoredPlan};
+use crate::data::regular_plan::{self, PlanOption, StoredPlan};
+use crate::data::trip_planning_itinerary::{PlannedItinerary, PlannedLeg, TimeBound};
 use crate::routes::journey_itinerary::RouteError;
 use crate::routes::journey_replan::{internal, now_utc, render, replaced_response, require_owner};
+use crate::routes::trips::{ReplanQuery, ReplanSlot};
 
 pub fn router() -> Router {
     Router::new().route(
@@ -153,4 +161,85 @@ async fn post_accept(
         }
         .await,
     )
+}
+
+/// How many trains one target looks at: the first `fastest` search from
+/// the target, then each from just after (leave after) or just before
+/// (arrive by) the one it found.
+pub const SEARCHES: usize = 6;
+
+/// The next [`SEARCHES`] ways there from `query`'s target, each a
+/// `fastest` search holding `slot` (the plan sweep's own, or a user's for
+/// "Track this journey again"), in the order found (later departures for
+/// a leave-after target, earlier arrivals for an arrive-by one). `None`
+/// when no timetable is published for the date. A user's slot that is
+/// busy is the planner's 503.
+pub(crate) async fn departures(
+    app: &App,
+    mut query: ReplanQuery,
+    slot: ReplanSlot,
+) -> Result<Option<Vec<PlannedItinerary>>, (StatusCode, String)> {
+    let mut found: Vec<PlannedItinerary> = Vec::new();
+    for _ in 0..SEARCHES {
+        let list = match crate::routes::trips::plan_for_journey(app, &query, slot).await? {
+            Some(list) => list,
+            None if found.is_empty() => return Ok(None),
+            None => break,
+        };
+        let Some(first) = list.into_iter().next() else {
+            break;
+        };
+        // The minutes found already include the day offset.
+        query.day_offset = 0;
+        let next = match query.time {
+            TimeBound::DepartAfter(from) => {
+                let next = first.departure_min + 1;
+                (next > from).then_some(TimeBound::DepartAfter(next))
+            }
+            TimeBound::ArriveBy(by) => {
+                let next = first.arrival_min.min(by.saturating_sub(1));
+                (next < by && next > 0).then_some(TimeBound::ArriveBy(next))
+            }
+        };
+        found.push(first);
+        match next {
+            Some(time) => query.time = time,
+            None => break,
+        }
+    }
+    Ok(Some(found))
+}
+
+/// `itineraries` (from [`departures`]) as options on `date`, with their
+/// station and operator names (`regular_plan::options_from`: none
+/// cancelled, none leaving before `now`).
+pub(crate) async fn plan_options(
+    app: &App,
+    itineraries: &[PlannedItinerary],
+    date: chrono::NaiveDate,
+    now: DateTime<Utc>,
+) -> Vec<PlanOption> {
+    let mut codes: Vec<String> = Vec::new();
+    let mut operators: Vec<String> = Vec::new();
+    for itinerary in itineraries {
+        for leg in &itinerary.legs {
+            if let PlannedLeg::Train {
+                origin_crs,
+                destination_crs,
+                operator,
+                ..
+            } = leg
+            {
+                codes.extend(origin_crs.iter().chain(destination_crs).cloned());
+                operators.extend(operator.iter().cloned());
+            }
+        }
+    }
+    codes.sort();
+    codes.dedup();
+    operators.sort();
+    operators.dedup();
+    let names = journey_alternatives::station_names(&app.database, &codes).await;
+    let operator_names = journey_alternatives::operator_names(&app.database, &operators).await;
+    regular_plan::options_from(itineraries, date, now, &names, &operator_names)
 }
