@@ -785,6 +785,7 @@ async fn after_the_regular_sweep_replans_only_the_new_train_counts() {
                 ends_on: None,
                 default_match_mode: "auto".to_string(),
                 skip_bank_holidays: false,
+                pattern: None,
             },
             &PlanTemplateInput {
                 custom_name: None,

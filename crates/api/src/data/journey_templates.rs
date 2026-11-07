@@ -154,6 +154,16 @@ pub struct JourneyTemplateListItem {
     /// before it, and it runs again on it with nothing to do. `null` when
     /// not paused that way (`active: false` is the pause with no end).
     pub paused_until: Option<NaiveDate>,
+    /// The recurrence pattern (R2, additive): `"weekly"` (the weekdays)
+    /// or `"dates"` (only `extraDates`); every `intervalWeeks` weeks from
+    /// the week of `anchorWeek` (a Monday, `null` every week); and the
+    /// dates it also runs on, from today on. A kind this client doesn't
+    /// know: show its next dates, not its days.
+    #[ts(as = "crate::ts_values::RecurrenceKind")]
+    pub recurrence_kind: String,
+    pub interval_weeks: i16,
+    pub anchor_week: Option<NaiveDate>,
+    pub extra_dates: Vec<NaiveDate>,
 }
 
 /// [`list_templates_for_user`]'s row, before its dates are worked out
@@ -178,6 +188,10 @@ struct JourneyTemplateListRow {
     skipped_dates: Vec<NaiveDate>,
     skip_bank_holidays: bool,
     paused_until: Option<NaiveDate>,
+    recurrence_kind: String,
+    interval_weeks: i16,
+    anchor_week: Option<NaiveDate>,
+    extra_dates: Vec<NaiveDate>,
     origin_crs: Option<String>,
     origin_name: Option<String>,
     destination_crs: Option<String>,
@@ -578,6 +592,7 @@ const LAST_USED_SQL: &str = "GREATEST(jt.created_at, \
 /// never happen given `create_template`'s own non-empty-legs invariant,
 /// but defensively possible if a row is ever hand-edited) renders with
 /// `leg_count = 0` and every origin/destination field `NULL`, not an error.
+#[expect(clippy::too_many_lines, reason = "one query and its row mapping")]
 pub async fn list_templates_for_user(
     pool: &PgPool,
     user_id: &str,
@@ -599,7 +614,11 @@ pub async fn list_templates_for_user(
                     WHERE s.template_id = jt.id AND s.service_date >= $3 \
                     ORDER BY s.service_date \
                 ) AS skipped_dates, \
-                jt.skip_bank_holidays, jt.paused_until \
+                jt.skip_bank_holidays, jt.paused_until, jt.recurrence_kind, jt.interval_weeks, \
+                jt.anchor_week, \
+                ARRAY(SELECT e.service_date FROM journey_template_extra_dates e \
+                      WHERE e.template_id = jt.id AND e.service_date >= $3 \
+                      ORDER BY e.service_date) AS extra_dates \
          FROM journey_templates jt \
          LEFT JOIN ( \
              SELECT template_id, COUNT(*) AS leg_count, \
@@ -641,6 +660,10 @@ pub async fn list_templates_for_user(
                 next_skips: dates.next_skips,
                 upcoming_dates: dates.upcoming,
                 paused_until: row.paused_until,
+                recurrence_kind: row.recurrence_kind,
+                interval_weeks: row.interval_weeks,
+                anchor_week: row.anchor_week,
+                extra_dates: row.extra_dates,
                 skip_bank_holidays: row.skip_bank_holidays,
                 target: row
                     .target_kind
@@ -829,6 +852,9 @@ pub async fn replace_template(
     .bind(template_id)
     .execute(&mut *tx)
     .await?;
+    if let Some(pattern) = &target.pattern {
+        crate::data::recurrence_pattern::store(&mut tx, &locked, pattern).await?;
+    }
 
     sqlx::query("DELETE FROM journey_template_legs WHERE template_id = $1")
         .bind(template_id)
@@ -854,6 +880,9 @@ pub struct TargetUpdate {
     pub station_buffer_minutes: Option<Option<i16>>,
     /// Whether it skips its owner's bank holidays (phase 5).
     pub skip_bank_holidays: Option<bool>,
+    /// The recurrence pattern (R2), written to both of a pair; `None`
+    /// keeps it.
+    pub pattern: Option<crate::data::recurrence_pattern::Pattern>,
 }
 
 /// Deletes a template the caller owns. Cascades into
