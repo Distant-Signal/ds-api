@@ -40,7 +40,7 @@ async fn connect() -> PgPool {
         .expect("connect to postgres")
 }
 
-struct Harness {
+pub(super) struct Harness {
     /// The delegated listener.
     router: axum::Router,
     issuer: String,
@@ -48,7 +48,7 @@ struct Harness {
     _servers: (MockServer, MockServer),
 }
 
-async fn harness(pool: PgPool) -> Harness {
+pub(super) async fn harness(pool: PgPool) -> Harness {
     let (delegated_server, _) = mock_authentik().await;
     let (internal_server, internal_verifier) = mock_authentik().await;
     let mut state = Arc::try_unwrap(crate::test_support::inert_app(pool)).expect("a fresh app");
@@ -141,7 +141,7 @@ async fn seed_user(pool: &PgPool, user: &str, session: &str) -> String {
     raw
 }
 
-enum Auth<'a> {
+pub(super) enum Auth<'a> {
     Cookie(&'a str),
     /// The cookie, from another site's page.
     CrossSiteCookie(&'a str),
@@ -149,14 +149,14 @@ enum Auth<'a> {
     Service(&'a str),
 }
 
-struct Reply {
-    status: StatusCode,
-    headers: HeaderMap,
-    text: String,
+pub(super) struct Reply {
+    pub(super) status: StatusCode,
+    pub(super) headers: HeaderMap,
+    pub(super) text: String,
 }
 
 impl Reply {
-    fn json(&self) -> Value {
+    pub(super) fn json(&self) -> Value {
         serde_json::from_str(&self.text).unwrap_or(Value::Null)
     }
 
@@ -168,7 +168,7 @@ impl Reply {
     }
 }
 
-async fn send(
+pub(super) async fn send(
     h: &Harness,
     method: &str,
     uri: &str,
@@ -212,7 +212,7 @@ async fn send(
 }
 
 /// A delegated token for `sub`, issued `iat_offset` seconds from now.
-fn token(h: &Harness, sub: &str, scope: &str, iat_offset: i64) -> String {
+pub(super) fn token(h: &Harness, sub: &str, scope: &str, iat_offset: i64) -> String {
     let iat = chrono::Utc::now().timestamp() + iat_offset;
     sign_token(&json!({
         "sub": sub,
@@ -228,7 +228,7 @@ fn token(h: &Harness, sub: &str, scope: &str, iat_offset: i64) -> String {
 
 /// Connects the app through the consent route and the confirmation token,
 /// as the Connected apps page does.
-async fn grant(h: &Harness, cookie: &str, scopes: &[&str]) {
+pub(super) async fn grant(h: &Harness, cookie: &str, scopes: &[&str]) {
     let consent = send(
         h,
         "GET",

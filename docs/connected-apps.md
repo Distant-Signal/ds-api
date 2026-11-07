@@ -142,6 +142,15 @@ hours: 50 saves and 20 deletes (`api.delegated.dailySaveLimit`,
 itinerary may have 1 to 20 legs, the journey's own leg cap, for a
 delegated client as for the web app.
 
+## Errors
+
+Every error the delegated listener answers a bearer is JSON `{error,
+message}`. A
+handler's or extractor's plain-text error is wrapped there, its `error`
+taken from the status (`bad_request`, `not_found`, `rate_limited`,
+`service_unavailable`, `internal_error`), keeping `Retry-After`
+(`json_errors` in `crates/api/src/auth/delegated.rs`).
+
 ## Itinerary errors
 
 `POST /Journeys/itinerary` answers a delegated client with JSON `{error,

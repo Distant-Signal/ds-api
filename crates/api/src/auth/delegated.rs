@@ -138,9 +138,78 @@ pub enum Ingress {
 /// The delegated listener's copy of the api's router (`main.rs`): the same
 /// routes, with every request marked [`Ingress::Delegated`]. That mark is
 /// the only thing that lets [`gate`] accept a delegated bearer, and only
-/// this listener sets it.
+/// this listener sets it. Every error it answers a bearer is the delegated
+/// JSON shape ([`json_errors`]).
 pub fn delegated_listener_router(router: axum::Router) -> axum::Router {
-    router.layer(axum::Extension(Ingress::Delegated))
+    router
+        .layer(axum::middleware::from_fn(json_errors))
+        .layer(axum::Extension(Ingress::Delegated))
+}
+
+/// The largest error body [`json_errors`] reads to rewrap.
+const MAX_ERROR_BODY: usize = 16 * 1024;
+
+/// A non-JSON error to a bearer (an extractor's rejection, a handler's
+/// plain-text `(status, String)`, the planner's busy 503) as
+/// `{error, message}`, the shape every delegated route promises, keeping
+/// `Retry-After` and `WWW-Authenticate`. A JSON error, or a body that
+/// already is JSON (the outage 503's), passes as it is, and so does any
+/// answer to a session cookie (the web app's plain text).
+async fn json_errors(request: Request, next: Next) -> Response {
+    let bearer = bearer_token(request.headers()).is_some();
+    let response = next.run(request).await;
+    let status = response.status();
+    if !bearer {
+        return response;
+    }
+    if !(status.is_client_error() || status.is_server_error())
+        || response
+            .headers()
+            .get(header::CONTENT_TYPE)
+            .and_then(|value| value.to_str().ok())
+            .is_some_and(|value| value.starts_with("application/json"))
+    {
+        return response;
+    }
+    let (mut parts, body) = response.into_parts();
+    let bytes = axum::body::to_bytes(body, MAX_ERROR_BODY)
+        .await
+        .unwrap_or_default();
+    if serde_json::from_slice::<serde_json::Value>(&bytes).is_ok_and(|value| value.is_object()) {
+        parts.headers.insert(
+            header::CONTENT_TYPE,
+            HeaderValue::from_static("application/json"),
+        );
+        parts.headers.remove(header::CONTENT_LENGTH);
+        return Response::from_parts(parts, axum::body::Body::from(bytes));
+    }
+    let text = String::from_utf8_lossy(&bytes);
+    let message = match text.trim() {
+        "" => status.canonical_reason().unwrap_or("error"),
+        text => text,
+    };
+    let mut response = error_response(status, error_code(status), message);
+    for name in [header::RETRY_AFTER, header::WWW_AUTHENTICATE] {
+        if let Some(value) = parts.headers.get(&name) {
+            response.headers_mut().insert(name, value.clone());
+        }
+    }
+    response
+}
+
+/// [`json_errors`]' `error` for a status.
+fn error_code(status: StatusCode) -> &'static str {
+    match status {
+        StatusCode::BAD_REQUEST => "bad_request",
+        StatusCode::UNAUTHORIZED => "invalid_token",
+        StatusCode::FORBIDDEN => "forbidden",
+        StatusCode::NOT_FOUND => "not_found",
+        StatusCode::METHOD_NOT_ALLOWED => "method_not_allowed",
+        StatusCode::TOO_MANY_REQUESTS => "rate_limited",
+        StatusCode::SERVICE_UNAVAILABLE => "service_unavailable",
+        status if status.is_server_error() => "internal_error",
+        _ => "error",
+    }
 }
 
 /// How long a grant may go unused before it expires (D-6).
@@ -1521,5 +1590,111 @@ mod tests {
                  the spec's §5.8 and this list together"
             );
         }
+    }
+
+    /// The delegated listener answers every error as `{error, message}`.
+    #[tokio::test]
+    async fn the_delegated_listener_answers_errors_as_json() {
+        use axum::body::Body;
+        use axum::extract::Path;
+        use axum::http::Request;
+        use axum::routing::get;
+        use tower::ServiceExt;
+
+        let router = delegated_listener_router(
+            axum::Router::new()
+                .route(
+                    "/busy",
+                    get(|| async {
+                        (
+                            StatusCode::SERVICE_UNAVAILABLE,
+                            [(header::RETRY_AFTER, "5")],
+                            "too many trip plans are being computed right now",
+                        )
+                    }),
+                )
+                .route(
+                    "/outage",
+                    get(|| async {
+                        (
+                            StatusCode::SERVICE_UNAVAILABLE,
+                            crate::unavailable::UNAVAILABLE_BODY,
+                        )
+                    }),
+                )
+                .route("/ok", get(|| async { "fine" }))
+                .route("/Journeys/{journey_id}", get(|Path(_): Path<i64>| async {})),
+        );
+        let call = |uri: &'static str| {
+            let router = router.clone();
+            async move {
+                let response = router
+                    .oneshot(
+                        Request::get(uri)
+                            .header(header::AUTHORIZATION, "Bearer token")
+                            .body(Body::empty())
+                            .unwrap(),
+                    )
+                    .await
+                    .unwrap();
+                let status = response.status();
+                let headers = response.headers().clone();
+                let bytes = axum::body::to_bytes(response.into_body(), 1 << 16)
+                    .await
+                    .unwrap();
+                (status, headers, String::from_utf8(bytes.to_vec()).unwrap())
+            }
+        };
+        let json = |text: &str| serde_json::from_str::<serde_json::Value>(text).unwrap();
+
+        let (status, headers, text) = call("/busy").await;
+        assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
+        assert_eq!(headers[header::CONTENT_TYPE], "application/json");
+        assert_eq!(headers[header::RETRY_AFTER], "5");
+        assert_eq!(
+            json(&text),
+            serde_json::json!({
+                "error": "service_unavailable",
+                "message": "too many trip plans are being computed right now",
+            })
+        );
+
+        let (status, headers, text) = call("/outage").await;
+        assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
+        assert_eq!(headers[header::CONTENT_TYPE], "application/json");
+        assert_eq!(text, crate::unavailable::UNAVAILABLE_BODY);
+
+        let (status, _, text) = call("/ok").await;
+        assert_eq!((status, text.as_str()), (StatusCode::OK, "fine"));
+
+        // An extractor's rejection, and no route at all.
+        let (status, _, text) = call("/Journeys/abc").await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert_eq!(json(&text)["error"], "bad_request");
+        assert!(
+            json(&text)["message"]
+                .as_str()
+                .is_some_and(|m| !m.is_empty())
+        );
+        let (status, _, text) = call("/nowhere").await;
+        assert_eq!(status, StatusCode::NOT_FOUND);
+        assert_eq!(
+            json(&text),
+            serde_json::json!({"error": "not_found", "message": "Not Found"})
+        );
+
+        // Without a bearer (the web app's session cookie), plain text stays.
+        let response = router
+            .clone()
+            .oneshot(Request::get("/busy").body(Body::empty()).unwrap())
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+        assert!(
+            response.headers()[header::CONTENT_TYPE]
+                .to_str()
+                .unwrap()
+                .starts_with("text/plain")
+        );
     }
 }
