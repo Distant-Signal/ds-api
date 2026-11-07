@@ -176,8 +176,9 @@ pub(crate) enum RouteError {
         message: String,
         retry_after_secs: Option<i64>,
     },
-    /// An existing helper's `(status, body)`, kept as it is for a 503 (its
-    /// body is already the `service_unavailable` JSON).
+    /// An existing helper's `(status, body)`. The outage 503's body is
+    /// already the `service_unavailable` JSON and is kept as it is; any
+    /// other (the planner's busy 503) is wrapped like the rest.
     Legacy(StatusCode, String),
 }
 
@@ -204,13 +205,14 @@ impl RouteError {
                 retry_after_secs,
             } => (status, code, message, retry_after_secs),
             RouteError::Legacy(status, body) => {
-                if status == StatusCode::SERVICE_UNAVAILABLE || !delegated {
+                if !delegated || body == crate::unavailable::UNAVAILABLE_BODY {
                     return (status, body).into_response();
                 }
                 let code = match status {
                     StatusCode::BAD_REQUEST => bad_request_code,
                     StatusCode::NOT_FOUND => "not_found",
                     StatusCode::INTERNAL_SERVER_ERROR => "internal_error",
+                    StatusCode::SERVICE_UNAVAILABLE => "service_unavailable",
                     _ => "error",
                 };
                 (status, code, body, None)

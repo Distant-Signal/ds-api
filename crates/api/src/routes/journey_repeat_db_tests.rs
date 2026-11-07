@@ -564,6 +564,61 @@ async fn the_repeat_uses_a_users_slot_not_the_sweeps() {
     assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
 }
 
+/// On the delegated listener the busy 503 is the delegated JSON error, as
+/// every other delegated error is (DS-392).
+#[tokio::test]
+#[ignore = "requires a live database: DATABASE_URL"]
+async fn a_delegated_repeat_answers_the_busy_503_as_json() {
+    use crate::routes::delegated_db_tests::{Auth, grant, harness, send, token};
+    let pool = connect().await;
+    let (_cleanup, cookie) = setup(&pool).await;
+    let _now = crate::routes::pin_london_now_for_tests(london(day(DAY1), 6, 0));
+    let journey = save_journey(&router(pool.clone()), &cookie).await;
+    let h = harness(pool.clone()).await;
+    grant(&h, &cookie, &["journeys:read"]).await;
+    let bearer = token(&h, USER, "journeys:read", 0);
+    let uri = format!("/Journeys/{journey}/repeat?date={DAY2}");
+    let reply = send(&h, "GET", &uri, &Auth::Bearer(&bearer), None, &[]).await;
+    assert_eq!(reply.status, StatusCode::OK, "{}", reply.text);
+    assert_eq!(reply.json()["status"], "planned", "{}", reply.text);
+
+    let users = crate::routes::trips::hold_request_slots().await;
+    let reply = send(&h, "GET", &uri, &Auth::Bearer(&bearer), None, &[]).await;
+    assert_eq!(
+        reply.status,
+        StatusCode::SERVICE_UNAVAILABLE,
+        "{}",
+        reply.text
+    );
+    assert_eq!(reply.headers[header::CONTENT_TYPE], "application/json");
+    assert_eq!(
+        reply.json()["error"],
+        "service_unavailable",
+        "{}",
+        reply.text
+    );
+    assert!(
+        reply.json()["message"]
+            .as_str()
+            .is_some_and(|message| message.contains("trip plans")),
+        "{}",
+        reply.text
+    );
+    // A bad query is the delegated JSON too, not the extractor's text.
+    drop(users);
+    let reply = send(
+        &h,
+        "GET",
+        &format!("/Journeys/{journey}/repeat?date=soon"),
+        &Auth::Bearer(&bearer),
+        None,
+        &[],
+    )
+    .await;
+    assert_eq!(reply.status, StatusCode::BAD_REQUEST, "{}", reply.text);
+    assert_eq!(reply.json()["error"], "bad_request", "{}", reply.text);
+}
+
 /// `(revision count, revision 1's train UIDs and dates)`.
 async fn revisions_of(pool: &PgPool, journey: i64) -> (i64, Vec<(Option<String>, NaiveDate)>) {
     let count: i64 =
