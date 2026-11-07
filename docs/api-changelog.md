@@ -3,6 +3,20 @@
 Changes to the Distant Signal (DS) HTTP API that a client such as DS-MCP
 needs to know about. Newest first. Field names are as served (camelCase).
 
+## 2026-11-07: Delegated errors are always JSON
+
+On the delegated listener every error is now `{error, message}`
+(DS-392). Before, a few were plain text: `GET /Journeys/{id}/repeat`'s
+503 when every planning slot is busy, an unparsable path or query
+(`/Journeys/abc`, `?date=soon`) and a 500 from
+`GET /public/preferences/notifications`. Their `error` follows the
+status: `bad_request`, `not_found`, `rate_limited`,
+`service_unavailable` (the busy 503 keeps its `Retry-After`),
+`internal_error`. Errors that were already JSON are unchanged.
+
+DS-MCP: can drop its plain-text fallback for these; reading `message`
+works as for any other delegated error.
+
 ## 2026-11-07: Regular journeys: time away and pause until
 
 The scheduling options' R1 (distant-signal's
