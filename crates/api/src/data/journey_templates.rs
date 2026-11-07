@@ -57,6 +57,8 @@ pub struct JourneyTemplateRow {
     pub station_buffer_minutes: Option<i16>,
     /// Whether it skips its owner's bank holidays (phase 5).
     pub skip_bank_holidays: bool,
+    /// The date it runs again on, when paused until one (R1).
+    pub paused_until: Option<NaiveDate>,
 }
 
 impl JourneyTemplateRow {
@@ -148,6 +150,10 @@ pub struct JourneyTemplateListItem {
     /// its skip reason or `null` (additive; a superset of `nextSkips`).
     /// The reasons may grow: show one you don't know as skipped.
     pub upcoming_dates: Vec<crate::data::regular_journeys::UpcomingDate>,
+    /// Paused until this date (additive): no journey is made for a date
+    /// before it, and it runs again on it with nothing to do. `null` when
+    /// not paused that way (`active: false` is the pause with no end).
+    pub paused_until: Option<NaiveDate>,
 }
 
 /// [`list_templates_for_user`]'s row, before its dates are worked out
@@ -171,6 +177,7 @@ struct JourneyTemplateListRow {
     /// Skipped dates (`journey_template_skipped_dates`) from today on.
     skipped_dates: Vec<NaiveDate>,
     skip_bank_holidays: bool,
+    paused_until: Option<NaiveDate>,
     origin_crs: Option<String>,
     origin_name: Option<String>,
     destination_crs: Option<String>,
@@ -517,7 +524,7 @@ where
                 jt.updated_at, jt.origin_crs, so.name AS origin_name, jt.destination_crs, \
                 sd.name AS destination_name, jt.target_kind, jt.target_time, \
                 jt.target_day_offset, jt.plan_options, jt.usual_itinerary, jt.paired_template_id, \
-                jt.station_buffer_minutes, jt.skip_bank_holidays \
+                jt.station_buffer_minutes, jt.skip_bank_holidays, jt.paused_until \
          FROM journey_templates jt \
          LEFT JOIN stations so ON so.crs = UPPER(jt.origin_crs)::bpchar \
          LEFT JOIN stations sd ON sd.crs = UPPER(jt.destination_crs)::bpchar \
@@ -592,7 +599,7 @@ pub async fn list_templates_for_user(
                     WHERE s.template_id = jt.id AND s.service_date >= $3 \
                     ORDER BY s.service_date \
                 ) AS skipped_dates, \
-                jt.skip_bank_holidays \
+                jt.skip_bank_holidays, jt.paused_until \
          FROM journey_templates jt \
          LEFT JOIN ( \
              SELECT template_id, COUNT(*) AS leg_count, \
@@ -633,6 +640,7 @@ pub async fn list_templates_for_user(
                 next_date: dates.next_date,
                 next_skips: dates.next_skips,
                 upcoming_dates: dates.upcoming,
+                paused_until: row.paused_until,
                 skip_bank_holidays: row.skip_bank_holidays,
                 target: row
                     .target_kind

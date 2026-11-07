@@ -1893,7 +1893,11 @@ skipBankHolidays: boolean, nextSkips: Array<NextSkip>,
 /**
  * See `JourneyTemplateListItem` (additive).
  */
-upcomingDates: Array<UpcomingDate>, };
+upcomingDates: Array<UpcomingDate>, 
+/**
+ * See `JourneyTemplateListItem` (additive).
+ */
+pausedUntil: string | null, };
 
 export type JourneyTemplateLegDetailResponse = { id: number, originCrs: string | null, originName: string | null, destinationCrs: string | null, destinationName: string | null, departAfter: string | null, departBefore: string | null, arriveAfter: string | null, arriveBefore: string | null, };
 
@@ -1952,7 +1956,13 @@ skipBankHolidays: boolean, nextSkips: Array<NextSkip>,
  * its skip reason or `null` (additive; a superset of `nextSkips`).
  * The reasons may grow: show one you don't know as skipped.
  */
-upcomingDates: Array<UpcomingDate>, };
+upcomingDates: Array<UpcomingDate>, 
+/**
+ * Paused until this date (additive): no journey is made for a date
+ * before it, and it runs again on it with nothing to do. `null` when
+ * not paused that way (`active: false` is the pause with no end).
+ */
+pausedUntil: string | null, };
 
 export type JsonValue = number | string | boolean | Array<JsonValue> | { [key in string]: JsonValue } | null;
 
@@ -2636,15 +2646,18 @@ export type NewJourneyLegRequest = { "mode": "knownTrain", trainUid: string, ser
  */
 export type NextSkip = { date: string, 
 /**
- * `"skipped"` or `"bank_holiday"`; `"skipped"` when both apply.
+ * `"paused"`, `"away"`, `"skipped"` or `"bank_holiday"`, the first
+ * that applies in that order.
  */
 reason: NextSkipReason, };
 
 /**
- * Why a regular journey passes over a date before its next one
- * (`regular_journeys::next_skips`).
+ * Why a regular journey passes over a date (`nextSkips`,
+ * `upcomingDates`; `ds_store::recurrence::SkipReason`). When more than
+ * one applies: `paused`, then `away`, then `skipped`, then
+ * `bank_holiday`. More may follow: show one you don't know as skipped.
  */
-export type NextSkipReason = "skipped" | "bank_holiday";
+export type NextSkipReason = "paused" | "away" | "skipped" | "bank_holiday";
 
 /**
  * Which constraint made a trip-plan segment infeasible:
@@ -3808,6 +3821,16 @@ templateIds: Array<number>,
 deletedJourneyIds: Array<number>, };
 
 /**
+ * `PUT /JourneyTemplates/{id}/paused-until`'s body.
+ */
+export type SetTemplatePausedUntilRequest = { 
+/**
+ * The date it runs again on: no journey is made for a date before it.
+ * `null` ends the pause.
+ */
+pausedUntil: string | null, };
+
+/**
  * The unlisted share link `unlisted_links::UnlistedLink` mapped onto the
  * wire -- deliberately its own type rather than reusing `UnlistedLink`
  * directly, so this route's response shape doesn't change if that
@@ -4406,6 +4429,50 @@ modes: Array<string>, lines: Array<TflStopLine>, };
  * `ticket_type` clearly says.
  */
 export type TicketKind = "single" | "return" | "unknown";
+
+/**
+ * One period, as `GET /preferences/time-away` serves it.
+ */
+export type TimeAwayPeriod = { id: number, 
+/**
+ * The first date away (a London date).
+ */
+startsOn: string, 
+/**
+ * The last date away, inclusive.
+ */
+endsOn: string, 
+/**
+ * The user's own name for it, or `null`.
+ */
+label: string | null, };
+
+/**
+ * `POST`/`PUT /public/preferences/time-away`'s body.
+ */
+export type TimeAwayRequest = { 
+/**
+ * The first date away (a London date).
+ */
+startsOn: string, 
+/**
+ * The last date away, inclusive.
+ */
+endsOn: string, 
+/**
+ * The user's own name for it, up to 60 characters.
+ */
+label?: string | null, };
+
+/**
+ * `POST`/`PUT /public/preferences/time-away`'s response.
+ */
+export type TimeAwayResponse = { period: TimeAwayPeriod, 
+/**
+ * Journeys already added for those dates that nobody had touched, now
+ * deleted.
+ */
+deletedJourneyIds: Array<number>, };
 
 /**
  * A reusable, named "after/before" bound pair on a `NaiveTime` --

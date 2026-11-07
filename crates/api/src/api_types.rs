@@ -191,6 +191,10 @@ fn visit_roots(v: &mut Collector) {
     v.visit::<crate::routes::journey_templates::MaterializeTemplateRequest>();
     v.visit::<crate::routes::journey_templates::SetTemplateActiveRequest>();
     v.visit::<crate::routes::journey_templates::SkipTemplateDateRequest>();
+    v.visit::<crate::routes::journey_templates::SetTemplatePausedUntilRequest>();
+    v.visit::<crate::routes::time_away::TimeAwayRequest>();
+    v.visit::<crate::routes::time_away::TimeAwayResponse>();
+    v.visit::<crate::data::time_away::TimeAwayPeriod>();
     // Train and ticket writes.
     v.visit::<common::TrackPinRequest>();
     v.visit::<crate::routes::train::TrackPinResponse>();

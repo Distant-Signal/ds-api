@@ -71,6 +71,7 @@ pub mod stanox_crs;
 pub mod station_stats;
 pub mod tfl_stop_page;
 pub mod tfl_stops;
+pub mod time_away;
 pub mod train;
 pub mod trains;
 pub mod transit;
@@ -183,6 +184,7 @@ pub fn public_router() -> Router {
         .merge(operator_history::router())
         .merge(operators::router())
         .merge(preferences::router())
+        .merge(time_away::router())
         .merge(reference::router())
         .merge(island_of_ireland::router())
         .merge(auth::router())

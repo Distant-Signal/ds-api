@@ -624,6 +624,103 @@ pub(crate) async fn lock_with_pair(
     Ok(ids)
 }
 
+/// Deletes `user_id`'s untouched occurrences (journeys made from a
+/// regular journey, [`occurrence_untouched_sql`]) that haven't started and
+/// whose every leg is dated from `first` (or London's today, if later) to
+/// `last` (inclusive; `None`: no end), without writing tombstones: the
+/// caller has just made the rule skip those dates (a pause, a pause until,
+/// time away). With `template_ids`, only those templates' occurrences.
+/// Returns the deleted journeys' ids. Decision 16, and decision 7 of the
+/// scheduling options.
+pub(crate) async fn delete_untouched_occurrences(
+    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    user_id: &str,
+    template_ids: Option<&[i64]>,
+    first: NaiveDate,
+    last: Option<NaiveDate>,
+    now: DateTime<Utc>,
+) -> anyhow::Result<Vec<i64>> {
+    let today = london_date(now);
+    let first = first.max(today);
+    if last.is_some_and(|last| last < first) {
+        return Ok(Vec::new());
+    }
+    let doomed: Vec<i64> = sqlx::query_scalar(&format!(
+        "SELECT j.id FROM journeys j \
+         WHERE j.user_id = $2 AND j.source_template_id IS NOT NULL \
+           AND ($1::bigint[] IS NULL OR j.source_template_id = ANY($1)) \
+           AND EXISTS (SELECT 1 FROM journey_legs l WHERE l.journey_id = j.id) \
+           AND NOT EXISTS (SELECT 1 FROM journey_legs l \
+                           WHERE l.journey_id = j.id \
+                             AND (l.service_date < $5 \
+                                  OR ($6::date IS NOT NULL AND l.service_date > $6))) \
+           AND NOT {started} \
+           AND {untouched} \
+         ORDER BY j.id",
+        started = occurrence_started_sql("j", "$3", "$4"),
+        untouched = occurrence_untouched_sql("j"),
+    ))
+    .bind(template_ids)
+    .bind(user_id)
+    .bind(now)
+    .bind(today)
+    .bind(first)
+    .bind(last)
+    .fetch_all(&mut **tx)
+    .await?;
+    let mut deleted = Vec::new();
+    for journey_id in doomed {
+        if journeys::delete_journey_row_releasing_trains(tx, journey_id, user_id).await? {
+            deleted.push(journey_id);
+        }
+    }
+    Ok(deleted)
+}
+
+/// How far ahead `pausedUntil` may be, in days from London's today.
+pub const MAX_PAUSE_DAYS_AHEAD: i64 = 366;
+
+/// Sets `paused_until` on template `template_id` and its pair (decision 2:
+/// a pair shares its recurrence), in one transaction. With a date, also
+/// deletes their untouched occurrences dated before it
+/// ([`delete_untouched_occurrences`]). `None` when the template isn't the
+/// caller's.
+pub async fn set_paused_until(
+    pool: &PgPool,
+    template_id: i64,
+    user_id: &str,
+    paused_until: Option<NaiveDate>,
+    now: DateTime<Utc>,
+) -> anyhow::Result<Option<ActiveOutcome>> {
+    let today = london_date(now);
+    let mut tx = pool.begin().await?;
+    let ids = lock_with_pair(&mut tx, template_id, user_id).await?;
+    if ids.is_empty() {
+        tx.rollback().await?;
+        return Ok(None);
+    }
+    sqlx::query(
+        "UPDATE journey_templates SET paused_until = $2, updated_at = NOW() \
+         WHERE id = ANY($1) AND paused_until IS DISTINCT FROM $2",
+    )
+    .bind(&ids)
+    .bind(paused_until)
+    .execute(&mut *tx)
+    .await?;
+    let deleted = match paused_until.and_then(|until| until.pred_opt()) {
+        Some(last) if last >= today => {
+            delete_untouched_occurrences(&mut tx, user_id, Some(&ids), today, Some(last), now)
+                .await?
+        }
+        _ => Vec::new(),
+    };
+    tx.commit().await?;
+    Ok(Some(ActiveOutcome {
+        template_ids: ids,
+        deleted_journey_ids: deleted,
+    }))
+}
+
 /// What [`set_active`] did: the templates changed, and how many untouched
 /// occurrences a pause deleted. `None` from [`set_active`] when the
 /// template isn't the caller's.
@@ -661,32 +758,11 @@ pub async fn set_active(
     .bind(active)
     .execute(&mut *tx)
     .await?;
-    let mut deleted = Vec::new();
-    if !active {
-        let doomed: Vec<i64> = sqlx::query_scalar(&format!(
-            "SELECT j.id FROM journeys j \
-             WHERE j.source_template_id = ANY($1) AND j.user_id = $2 \
-               AND EXISTS (SELECT 1 FROM journey_legs l WHERE l.journey_id = j.id) \
-               AND NOT EXISTS (SELECT 1 FROM journey_legs l \
-                               WHERE l.journey_id = j.id AND l.service_date < $4) \
-               AND NOT {started} \
-               AND {untouched} \
-             ORDER BY j.id",
-            started = occurrence_started_sql("j", "$3", "$4"),
-            untouched = occurrence_untouched_sql("j"),
-        ))
-        .bind(&ids)
-        .bind(user_id)
-        .bind(now)
-        .bind(today)
-        .fetch_all(&mut *tx)
-        .await?;
-        for journey_id in doomed {
-            if journeys::delete_journey_row_releasing_trains(&mut tx, journey_id, user_id).await? {
-                deleted.push(journey_id);
-            }
-        }
-    }
+    let deleted = if active {
+        Vec::new()
+    } else {
+        delete_untouched_occurrences(&mut tx, user_id, Some(&ids), today, None, now).await?
+    };
     tx.commit().await?;
     Ok(Some(ActiveOutcome {
         template_ids: ids,
@@ -869,7 +945,8 @@ pub const SKIP_REASON_BANK_HOLIDAY: &str = "bank_holiday";
 #[serde(rename_all = "camelCase")]
 pub struct NextSkip {
     pub date: NaiveDate,
-    /// `"skipped"` or `"bank_holiday"`; `"skipped"` when both apply.
+    /// `"paused"`, `"away"`, `"skipped"` or `"bank_holiday"`, the first
+    /// that applies in that order.
     #[ts(as = "crate::ts_values::NextSkipReason")]
     pub reason: &'static str,
 }
