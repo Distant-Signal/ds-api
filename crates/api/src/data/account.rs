@@ -68,6 +68,7 @@ pub const USER_KEYED_TABLES: &[&str] = &[
     "train_notification_state",
     "train_subscriptions",
     "unlisted_links",
+    "user_away_periods",
 ];
 
 /// The exact confirmation phrase `DELETE /public/account` requires in its
@@ -182,6 +183,8 @@ pub struct AccountExport {
     /// The suggestion push opt-out (absent row: on).
     pub notification_preferences: Value,
     pub journey_templates: Value,
+    /// Time away: dates none of the user's regular journeys runs on.
+    pub time_away: Value,
     pub group_memberships: Value,
     pub group_shared_trains: Value,
     pub group_shared_journeys: Value,
@@ -343,6 +346,13 @@ pub async fn export_account(pool: &PgPool, user_id: &str) -> Result<Option<Accou
                  'skipped_dates', (SELECT COALESCE(jsonb_agg(to_jsonb(s) ORDER BY s.service_date), '[]'::jsonb) \
                           FROM journey_template_skipped_dates s WHERE s.template_id = t.id)) \
              FROM journey_templates t WHERE user_id = $1 ORDER BY id",
+            user_id,
+        )
+        .await?,
+        time_away: rows(
+            pool,
+            "SELECT to_jsonb(a) FROM user_away_periods a WHERE user_id = $1 \
+             ORDER BY starts_on, id",
             user_id,
         )
         .await?,
@@ -608,6 +618,7 @@ pub(crate) mod db_tests {
         // Regular journeys' leave-by bookkeeping and a morning summary.
         exec(pool, &format!("INSERT INTO regular_journey_push_state (journey_id, user_id, leave_leg_id, leave_by_sent, leave_by_sent_at, pushes) VALUES ({journey}, $1, {leg}, NOW(), NOW(), 1)"), u).await;
         exec(pool, "INSERT INTO regular_journey_summaries (user_id, service_date, sent_at) VALUES ($1, CURRENT_DATE, NOW())", u).await;
+        exec(pool, "INSERT INTO user_away_periods (user_id, starts_on, ends_on, label) VALUES ($1, CURRENT_DATE, CURRENT_DATE + 3, 'Holiday')", u).await;
         exec(pool, &format!("INSERT INTO unlisted_links (token_hash, resource_type, resource_id, created_by) VALUES ('tok-' || $1, 'journey', {journey}::text, $1)"), u).await;
         // Mid-journey changes: a booked revision, a break and the opt-out.
         exec(pool, &format!("INSERT INTO journey_revisions (journey_id, revision_no, reason, actor, is_compensation_baseline) VALUES ({journey}, 1, 'booked', 'owner', TRUE)"), &[]).await;
@@ -862,6 +873,7 @@ pub(crate) mod db_tests {
             "tickets",
             "journeys",
             "journeyTemplates",
+            "timeAway",
             "groupMemberships",
             "groupSharedTrains",
             "groupSharedJourneys",

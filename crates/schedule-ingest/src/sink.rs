@@ -25,9 +25,9 @@ use anyhow::{Context, anyhow};
 use chrono::{DateTime, Utc};
 use ds_runtime::secret::Secret;
 use ds_store::corpus::{
-    CorpusLocation, DeliveredFileProvenance, corpus_delivery_problem, corpus_provenance_problem,
-    delivery_source_problem, replace_corpus_locations_keeping_json_fallback,
-    replace_corpus_locations_with_provenance,
+    CorpusLoad, CorpusLocation, DeliveredFileProvenance, corpus_delivery_problem,
+    corpus_provenance_problem, delivery_source_problem,
+    replace_corpus_locations_keeping_json_fallback, replace_corpus_locations_with_provenance,
 };
 use ds_store::schedule::{
     ScheduleFeedSource, insert_schedule_feed_ingest, schedule_feed_ingest_problem,
@@ -104,9 +104,12 @@ pub(crate) trait IngestSink {
         request: &ScheduleFeedIngestRequest,
     ) -> Result<(), SinkError>;
 
-    /// Replaces `corpus_locations` with one whole CORPUS delivery.
-    /// Idempotent: the same delivery twice leaves the same rows.
-    async fn load_corpus(&self, request: &CorpusLoadRequest<'_>) -> Result<(), SinkError>;
+    /// Replaces `corpus_locations` with one whole CORPUS delivery, unless
+    /// its rows are those of the last applied delivery
+    /// ([`CorpusLoad::Unchanged`]: a re-upload of the same content, which
+    /// changes nothing). Idempotent: the same delivery twice leaves the
+    /// same rows.
+    async fn load_corpus(&self, request: &CorpusLoadRequest<'_>) -> Result<CorpusLoad, SinkError>;
 }
 
 /// Postgres directly, through `ds_store`.
@@ -187,8 +190,9 @@ impl IngestSink for DbSink {
 
     /// What the retired `POST /private/corpus-locations` did: its 400 and
     /// 422 checks in its order, then the load (one transaction, crosswalk
-    /// included).
-    async fn load_corpus(&self, request: &CorpusLoadRequest<'_>) -> Result<(), SinkError> {
+    /// included), which `ds_store` skips when the content matches the last
+    /// applied delivery's.
+    async fn load_corpus(&self, request: &CorpusLoadRequest<'_>) -> Result<CorpusLoad, SinkError> {
         if let Some(problem) = corpus_load_request_problem(request) {
             return Err(SinkError::Rejected(
                 anyhow!(problem).context("CORPUS load refused"),
@@ -205,7 +209,7 @@ impl IngestSink for DbSink {
         // resolved stops resolving (`ds_store::corpus::crosswalk::
         // CorpusLayers`). A JSON extract replaces everything.
         let keep_json = crate::pattern::is_nlc_xml_name(request.source_file);
-        let upserted = if keep_json {
+        let outcome = if keep_json {
             replace_corpus_locations_keeping_json_fallback(
                 &self.pool,
                 request.delivered_at,
@@ -226,15 +230,26 @@ impl IngestSink for DbSink {
         }
         .context("CORPUS load failed")
         .map_err(SinkError::from_db)?;
-        tracing::info!(
-            delivered_at = %request.delivered_at,
-            source_file = %request.source_file,
-            sha256 = request.sha256,
-            rows = upserted,
-            json_fallback_kept = keep_json,
-            "replaced corpus_locations"
-        );
-        Ok(())
+        match outcome {
+            CorpusLoad::Applied { rows } => tracing::info!(
+                delivered_at = %request.delivered_at,
+                source_file = %request.source_file,
+                sha256 = request.sha256,
+                rows,
+                json_fallback_kept = keep_json,
+                "replaced corpus_locations"
+            ),
+            CorpusLoad::Unchanged {
+                applied_delivered_at,
+            } => tracing::info!(
+                delivered_at = %request.delivered_at,
+                source_file = %request.source_file,
+                sha256 = request.sha256,
+                applied_delivered_at = %applied_delivered_at,
+                "CORPUS delivery has the applied delivery's rows; corpus_locations left as it is"
+            ),
+        }
+        Ok(outcome)
     }
 }
 
@@ -278,6 +293,8 @@ pub(crate) mod tests {
     #[derive(Debug, Clone, Copy)]
     pub(crate) enum Answer {
         Accept,
+        /// Accepts, and answers a CORPUS load as an unchanged redelivery.
+        Unchanged,
         /// A data rejection (a refused record, a class 22/23 SQLSTATE).
         Reject,
         /// Postgres unreachable.
@@ -313,7 +330,7 @@ pub(crate) mod tests {
 
         fn answer(&self) -> Result<(), SinkError> {
             match self.answer {
-                Answer::Accept => Ok(()),
+                Answer::Accept | Answer::Unchanged => Ok(()),
                 Answer::Reject => Err(SinkError::Rejected(anyhow!("bad"))),
                 Answer::Transient => Err(SinkError::Transient(anyhow!("connection refused"))),
             }
@@ -335,12 +352,20 @@ pub(crate) mod tests {
         fn load_corpus(
             &self,
             request: &CorpusLoadRequest<'_>,
-        ) -> impl Future<Output = Result<(), SinkError>> {
+        ) -> impl Future<Output = Result<CorpusLoad, SinkError>> {
             self.corpus
                 .lock()
                 .unwrap()
                 .push(serde_json::to_value(request).unwrap());
-            std::future::ready(self.answer())
+            let outcome = match self.answer {
+                Answer::Unchanged => CorpusLoad::Unchanged {
+                    applied_delivered_at: request.delivered_at,
+                },
+                _ => CorpusLoad::Applied {
+                    rows: request.locations.len() as u64,
+                },
+            };
+            std::future::ready(self.answer().map(|()| outcome))
         }
     }
 
@@ -389,7 +414,7 @@ pub(crate) mod tests {
         )
     }
 
-    fn rejected_message(result: Result<(), SinkError>) -> String {
+    fn rejected_message<T: std::fmt::Debug>(result: Result<T, SinkError>) -> String {
         match result {
             Err(SinkError::Rejected(err)) => err.root_cause().to_string(),
             other => panic!("expected a rejection, got {other:?}"),
@@ -622,7 +647,7 @@ mod db_tests {
     }
 
     /// A whole CORPUS load through the direct sink: the rows, the
-    /// delivery's provenance, and the same load twice is idempotent.
+    /// delivery's provenance, and the same load twice is an unchanged no-op.
     #[tokio::test]
     #[ignore = "requires a live database with no real CORPUS data (CI's fresh one); replaces corpus_locations"]
     async fn the_direct_sink_loads_a_corpus_delivery() {
@@ -668,9 +693,18 @@ mod db_tests {
             delivery_source: "sftp",
         };
         let sink = sink().await;
-        for _ in 0..2 {
-            sink.load_corpus(&request).await.unwrap();
-        }
+        assert_eq!(
+            sink.load_corpus(&request).await.unwrap(),
+            CorpusLoad::Applied { rows: 2 }
+        );
+        // The same rows again (here the same file; a re-upload in new gzip
+        // bytes is the same): nothing reloaded.
+        assert_eq!(
+            sink.load_corpus(&request).await.unwrap(),
+            CorpusLoad::Unchanged {
+                applied_delivered_at: delivered_at
+            }
+        );
 
         let rows: Vec<(String, Option<String>)> =
             sqlx::query_as("SELECT nlc, tiploc FROM corpus_locations ORDER BY nlc")
