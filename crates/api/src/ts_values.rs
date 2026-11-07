@@ -264,6 +264,16 @@ pub enum TemplateTargetKind {
     ArriveBy,
 }
 
+/// `journey_templates.recurrence_kind` as the api accepts it (R2):
+/// `weekly` (the weekdays) or `dates` (only the extra dates). `cycle` is
+/// kept for shift rotas and not offered.
+#[derive(TS)]
+#[ts(rename_all = "snake_case")]
+pub enum RecurrenceKind {
+    Weekly,
+    Dates,
+}
+
 /// Why a regular journey passes over a date (`nextSkips`,
 /// `upcomingDates`; `ds_store::recurrence::SkipReason`). When more than
 /// one applies: `paused`, then `away`, then `skipped`, then

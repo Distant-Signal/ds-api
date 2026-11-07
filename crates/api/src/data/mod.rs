@@ -50,6 +50,7 @@ pub mod pushport_platform;
 pub mod queries;
 pub mod recently_cleared;
 pub mod reconciliation;
+pub mod recurrence_pattern;
 pub mod reference;
 pub mod regular_journeys;
 pub mod regular_plan;

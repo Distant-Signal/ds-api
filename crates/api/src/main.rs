@@ -229,6 +229,10 @@ fn config_defaults() -> ds_runtime::service_args::ConfigDefaults {
         )
         .env("JOURNEY_BREAKS_SUGGESTIONS_MAX_AGE_SECS", None)
         .env(
+            data::recurrence_pattern::RECURRENCE_ENABLED_ENV,
+            Some("false"),
+        )
+        .env(
             "REGULAR_PLAN_SWEEP_ENABLED",
             Some(&plan_sweep.enabled.to_string()),
         )
@@ -274,6 +278,12 @@ async fn server_main() -> anyhow::Result<()> {
     // API_TRIP_PLAN_TRANSIT_NETWORKS (default empty): an unknown network
     // fails startup. See `data::transit_planning`.
     data::transit_planning::check_switch_from_env()?;
+    let recurrence = data::recurrence_pattern::init_from_env();
+    tracing::info!(
+        enabled = recurrence,
+        "regular journey recurrence patterns ({})",
+        data::recurrence_pattern::RECURRENCE_ENABLED_ENV
+    );
 
     // Permissive ORIGIN, deliberately non-credentialed. The four
     // line-status endpoints and /public/health are intentionally public.

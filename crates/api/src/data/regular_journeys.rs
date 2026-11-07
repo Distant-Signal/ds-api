@@ -446,6 +446,9 @@ pub struct PlanRecurrence {
     pub default_match_mode: String,
     /// Skip the owner's bank holidays (phase 5; both of a pair).
     pub skip_bank_holidays: bool,
+    /// The recurrence pattern (R2), both of a pair; `None`: weekly, every
+    /// week.
+    pub pattern: Option<crate::data::recurrence_pattern::Pattern>,
 }
 
 /// What [`create_plan_templates`] did.
@@ -502,6 +505,10 @@ pub async fn create_plan_templates(
         }
         None => None,
     };
+    if let Some(pattern) = &recurrence.pattern {
+        let ids: Vec<i64> = std::iter::once(id).chain(return_id).collect();
+        crate::data::recurrence_pattern::store(&mut tx, &ids, pattern).await?;
+    }
     tx.commit().await?;
     Ok(CreatePlanOutcome::Created { id, return_id })
 }
