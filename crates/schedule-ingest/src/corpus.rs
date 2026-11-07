@@ -36,7 +36,11 @@
 //!    snapshot, every row but the last JSON extract's, kept as a frozen
 //!    fallback so no code the JSON resolved stops resolving
 //!    (`ds_store::corpus::crosswalk::CorpusLayers`; the XML wins every key
-//!    it resolves);
+//!    it resolves). A file whose rows are exactly the last applied
+//!    delivery's (a re-upload in new gzip bytes; `ds_store` compares a hash
+//!    of the rows under its load lock) replaces nothing: it is audited as
+//!    `corpus_unchanged`, counted in `schedule_feed_corpus_unchanged_total`
+//!    and otherwise handled as loaded;
 //! 6. on success moves the file to `storage_dir/corpus/`, and every other
 //!    candidate to `storage_dir/corpus/superseded/` unloaded, keeping the
 //!    newest `CORPUS_RETENTION_KEEP` of each, so files never pile up in
@@ -104,6 +108,9 @@ use crate::sources::Lane;
 /// reads it.
 pub(crate) const REJECTED_METRIC: &str = "schedule_feed_corpus_rejected_total";
 const LAST_LOAD_METRIC: &str = "schedule_feed_corpus_last_load_delivered_at_seconds";
+/// Counts CORPUS files whose rows were those of the last applied delivery,
+/// by `format`: re-uploads that replaced nothing (DS-390).
+pub(crate) const UNCHANGED_METRIC: &str = "schedule_feed_corpus_unchanged_total";
 const ROWS_METRIC: &str = "schedule_feed_corpus_rows";
 /// The last load's mtime per `format`.
 const FORMAT_LAST_LOAD_METRIC: &str = "schedule_feed_corpus_format_last_load_delivered_at_seconds";
@@ -240,6 +247,8 @@ impl CorpusState {
 pub(crate) fn register_metrics() {
     for format in [CorpusFormat::Json, CorpusFormat::Xml] {
         metrics::counter!(ds_runtime::metrics::metric_name(REJECTED_METRIC), "format" => format.as_str())
+            .increment(0);
+        metrics::counter!(ds_runtime::metrics::metric_name(UNCHANGED_METRIC), "format" => format.as_str())
             .increment(0);
     }
     for stage in FAILURE_STAGES {
@@ -1021,11 +1030,62 @@ pub(crate) async fn run_corpus_cycle(
         sha256: &delivered.sha256,
         delivery_source: lane.ctx.source.as_str(),
     };
-    if let Err(err) = sink.load_corpus(&request).await {
-        // Every failure is retried, a rejection too (as before the sink):
-        // the file stays in watch_dir.
-        tracing::error!(error = %err, file = %winner.name, "CORPUS load failed; retrying next cycle");
-        count_failure("load");
+    let outcome = match sink.load_corpus(&request).await {
+        Ok(outcome) => outcome,
+        Err(err) => {
+            // Every failure is retried, a rejection too (as before the
+            // sink): the file stays in watch_dir.
+            tracing::error!(error = %err, file = %winner.name, "CORPUS load failed; retrying next cycle");
+            count_failure("load");
+            return Ok(());
+        }
+    };
+    if let ds_store::corpus::CorpusLoad::Unchanged {
+        applied_delivered_at,
+    } = outcome
+    {
+        // The same rows as the applied delivery in a new file (a re-upload:
+        // new mtime and gzip bytes): nothing was replaced, so no load
+        // gauge moves and no format comparison runs. Handled like a load
+        // otherwise: archived as loaded (the stored CORPUS is current as of
+        // this copy) and every other candidate superseded.
+        tracing::info!(
+            file = %winner.name,
+            format = winner.format.as_str(),
+            delivered_at = %delivered_at,
+            applied_delivered_at = %applied_delivered_at,
+            sha256 = %delivered.sha256,
+            "CORPUS delivery has the applied delivery's rows; nothing reloaded"
+        );
+        lane.ctx.audit(
+            &delivered,
+            delivered_at,
+            crate::audit::Outcome::CorpusUnchanged,
+            Some(&format!(
+                "same rows as the delivery applied at {applied_delivered_at}"
+            )),
+        );
+        lane.ctx.record(
+            kind,
+            &delivered,
+            delivered_at,
+            crate::sources::Settled::Accepted,
+        );
+        metrics::counter!(ds_runtime::metrics::metric_name(UNCHANGED_METRIC), "format" => winner.format.as_str())
+            .increment(1);
+        state.handled = Some((winner.name.clone(), winner.mtime, winner.len, Dest::Loaded));
+        archive(
+            watch_dir,
+            &winner.name,
+            (winner.mtime, winner.len),
+            dirs.of(Dest::Loaded),
+            keep,
+        );
+        let reason = format!(
+            "superseded by {} (unchanged, already loaded); not loaded",
+            winner.name
+        );
+        supersede(lane, &stable, Some(&winner.name), &reason, &dirs, keep);
         return Ok(());
     }
     tracing::info!(
@@ -1352,6 +1412,60 @@ pub(crate) mod tests {
         assert_eq!(body["locations"].as_array().unwrap().len(), 8);
         assert_eq!(body["locations"][0]["nlc"], "000700");
         assert_eq!(body["locations"][1]["tiploc"], serde_json::Value::Null);
+    }
+
+    /// DS-390: a re-upload whose rows match the applied delivery (the
+    /// store answers `Unchanged`) is handed to the store once, audited as
+    /// `corpus_unchanged`, archived as loaded and never retried; an older
+    /// candidate beside it is superseded.
+    #[tokio::test]
+    async fn an_unchanged_redelivery_is_archived_without_a_reload() {
+        let watch = tempfile::tempdir().unwrap();
+        let storage = tempfile::tempdir().unwrap();
+        let older = watch.path().join("NLC20261105.xml.gz");
+        std::fs::write(&older, gzip(XML_FIXTURE.as_bytes())).unwrap();
+        let hour_ago = SystemTime::now() - Duration::from_secs(3600);
+        std::fs::File::options()
+            .write(true)
+            .open(&older)
+            .unwrap()
+            .set_modified(hour_ago)
+            .unwrap();
+        std::fs::write(
+            watch.path().join("NLC20261106.xml.gz"),
+            gzip(XML_FIXTURE.as_bytes()),
+        )
+        .unwrap();
+
+        let mut args = args();
+        args.corpus_format_precedence = FormatPrecedence::Xml;
+        let sink = FakeSink::new(Answer::Unchanged);
+        let mut state = CorpusState::new();
+        let (guard, logs) = crate::audit::tests::capture_default();
+        run(watch.path(), storage.path(), &args, &sink, &mut state, 4).await;
+        drop(guard);
+
+        let loads = sink.corpus_loads();
+        assert_eq!(loads.len(), 1, "handed to the store once");
+        assert_eq!(loads[0]["source_file"], "NLC20261106.xml.gz");
+        let audit = logs.audit_lines();
+        let outcomes: Vec<(&str, &str)> = audit
+            .iter()
+            .map(|l| (l["file"].as_str().unwrap(), l["outcome"].as_str().unwrap()))
+            .collect();
+        assert_eq!(
+            outcomes,
+            [
+                ("NLC20261106.xml.gz", "corpus_unchanged"),
+                ("NLC20261105.xml.gz", "corpus_superseded"),
+            ]
+        );
+        assert_eq!(names(watch.path()), [] as [String; 0]);
+        let loaded = names(&storage.path().join(ARCHIVE_DIR));
+        assert!(
+            loaded.iter().any(|n| n.ends_with("-NLC20261106.xml.gz")),
+            "{loaded:?}"
+        );
     }
 
     /// A failing database leaves the file in place for the next cycle.

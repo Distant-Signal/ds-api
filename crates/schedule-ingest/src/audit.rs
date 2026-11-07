@@ -117,6 +117,10 @@ pub(crate) enum Outcome {
     /// one, the preferred format, or a snapshot dated later that is
     /// already loaded. Nothing is wrong with it.
     CorpusSuperseded,
+    /// A CORPUS file whose rows are those of the last applied delivery (a
+    /// re-upload of the same content in new gzip bytes): nothing was
+    /// replaced, and it is archived as loaded. Nothing is wrong with it.
+    CorpusUnchanged,
     /// The same content already came through the other delivery source
     /// (`sources.rs`): not extracted, checked or recorded again.
     Duplicate,
@@ -133,6 +137,7 @@ impl Outcome {
             Self::RejectedByApi => "rejected_by_api",
             Self::CorpusRejected => "corpus_rejected",
             Self::CorpusSuperseded => "corpus_superseded",
+            Self::CorpusUnchanged => "corpus_unchanged",
             Self::Duplicate => "duplicate",
             Self::Superseded => "superseded",
         }
@@ -369,6 +374,7 @@ pub(crate) mod tests {
                 Outcome::RejectedByApi,
                 Outcome::CorpusRejected,
                 Outcome::CorpusSuperseded,
+                Outcome::CorpusUnchanged,
                 Outcome::Duplicate,
                 Outcome::Superseded
             ]
@@ -379,6 +385,7 @@ pub(crate) mod tests {
                 "rejected_by_api",
                 "corpus_rejected",
                 "corpus_superseded",
+                "corpus_unchanged",
                 "duplicate",
                 "superseded"
             ]
