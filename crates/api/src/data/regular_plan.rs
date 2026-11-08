@@ -38,8 +38,9 @@ use crate::data::trip_planning_itinerary::PlannedItinerary;
 /// `journeys.regular_plan_status` (its CHECK constraint).
 pub const STATUSES: [&str; 4] = ["pending", "suggested", "committed", "no_service"];
 
-/// At most this many alternatives are kept besides the choice.
-pub const MAX_ALTERNATIVES: usize = 2;
+/// At most this many alternatives are kept besides the choice (DS-398:
+/// four, up from two; the sweep looks at up to six trains).
+pub const MAX_ALTERNATIVES: usize = 4;
 
 /// How far the first train may leave from the usual first departure and
 /// still count as "the same train" when the operator matches (a timetable
@@ -387,7 +388,8 @@ fn target_order(kind: &str, options: &[PlanOption]) -> Vec<usize> {
 
 /// Chooses among `options` (see the module doc) for a target of `kind` on
 /// `date`: the choice's index and why, then up to [`MAX_ALTERNATIVES`]
-/// alternatives in the target's order. `None` with no options.
+/// alternatives, the closest to the target first taken, listed by
+/// departure. `None` with no options.
 pub fn choose(
     usual: Option<&UsualItinerary>,
     kind: &str,
@@ -448,11 +450,16 @@ pub fn choose(
     } else {
         (order[0], ChoiceReason::Best)
     };
-    let alternatives = order
+    let mut alternatives: Vec<usize> = order
         .into_iter()
         .filter(|&index| index != choice)
         .take(MAX_ALTERNATIVES)
         .collect();
+    // Shown in departure order (DS-398); an accept's `index` counts the
+    // stored order, so it follows.
+    alternatives.sort_by(|&a, &b| {
+        (options[a].departure, options[a].arrival).cmp(&(options[b].departure, options[b].arrival))
+    });
     Some((choice, reason, alternatives))
 }
 
@@ -653,8 +660,21 @@ mod tests {
         let (choice, reason, alternatives) =
             choose(Some(&usual), "depart_after", date(), &options()).unwrap();
         assert_eq!((choice, reason), (1, ChoiceReason::Usual));
-        // The rest by earliest arrival: W00001, then W00003.
-        assert_eq!(alternatives, [0, 2]);
+        // The rest, by departure.
+        assert_eq!(alternatives, [0, 2, 3]);
+    }
+
+    #[test]
+    fn up_to_four_alternatives_are_listed_by_departure() {
+        let mut many = options();
+        many.push(option("W00005", "SW", (9, 0), (9, 30)));
+        many.push(option("W00006", "SW", (6, 30), (7, 10)));
+        let (choice, _, alternatives) = choose(None, "depart_after", date(), &many).unwrap();
+        // The earliest arrival (W00006) is chosen; the next four by
+        // arrival are W00001, W00003, W00002, W00004, listed by departure.
+        assert_eq!(choice, 5);
+        assert_eq!(alternatives, [0, 2, 1, 3]);
+        assert_eq!(alternatives.len(), MAX_ALTERNATIVES);
     }
 
     #[test]
@@ -676,11 +696,12 @@ mod tests {
         let (choice, reason, alternatives) =
             choose(None, "depart_after", date(), &options()).unwrap();
         assert_eq!((choice, reason), (0, ChoiceReason::Best));
-        assert_eq!(alternatives, [2, 1]);
+        assert_eq!(alternatives, [2, 1, 3]);
         // Arrive by: the latest departure wins.
         let (choice, reason, alternatives) = choose(None, "arrive_by", date(), &options()).unwrap();
         assert_eq!((choice, reason), (3, ChoiceReason::Best));
-        assert_eq!(alternatives, [1, 2]);
+        // Taken latest departure first, listed by departure.
+        assert_eq!(alternatives, [0, 2, 1]);
         assert!(choose(None, "arrive_by", date(), &[]).is_none());
     }
 

@@ -153,7 +153,7 @@ async fn post_accept(
             if matches!(outcome, journey_replace::Replaced::Done { .. }) {
                 metrics::counter!(
                     ds_runtime::metrics::metric_name("api_regular_plan_accepted_total"),
-                    "index" => match body.index { 0 => "0", 1 => "1", _ => "2" }
+                    "index" => match body.index { 0 => "0", 1 => "1", 2 => "2", 3 => "3", _ => "4" }
                 )
                 .increment(1);
             }

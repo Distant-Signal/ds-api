@@ -43,6 +43,22 @@ weekday's legs (ds-workers eac006c) is deployed.
 
 DS-MCP: no change needed; it doesn't read templates.
 
+## 2026-11-08: A regular journey's plan offers up to four other trains
+
+`GET /Journeys/{id}`'s `regularPlan.alternatives` holds up to four
+`RegularPlanOption`s (DS-398), up from two. Additive: a client that lists
+what it is given shows more.
+
+- The alternatives are listed by departure. Which ones are kept is as
+  before: the trains closest to the target, taken in the target's order
+  (earliest arrival leaving after, latest departure arriving by), the
+  choice excluded.
+- `POST /Journeys/{id}/regular-plan/accept`'s `index` still counts the
+  choice as 0, then the alternatives in the order served, so 1 to 4 now
+  pick an alternative.
+
+DS-MCP: no change needed.
+
 ## 2026-11-08: `/Trips/plan` lists every direct train with `direct=all`
 
 `GET /Trips/plan` takes `direct=all` with `count` (DS-398). Additive:

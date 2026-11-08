@@ -265,14 +265,14 @@ async fn remind_mode_suggests_the_usual_train_and_commits_nothing() {
     assert_eq!(status.as_deref(), Some("suggested"));
     assert_eq!(plan["reason"], "usual", "{plan}");
     assert_eq!(chosen_uid(&plan), "RG0002", "{plan}");
-    // The alternatives by earliest arrival: RG0001, RG0003.
+    // The other trains, by departure.
     let alternatives: Vec<&str> = plan["alternatives"]
         .as_array()
         .expect("alternatives")
         .iter()
         .map(|option| option["legs"][0]["trainUid"].as_str().unwrap())
         .collect();
-    assert_eq!(alternatives, ["RG0001", "RG0003"]);
+    assert_eq!(alternatives, ["RG0001", "RG0003", "RG0004"]);
     // Nothing committed: the leg is still unmatched.
     assert_eq!(
         legs_of(&pool, journey).await,
@@ -338,7 +338,8 @@ async fn a_new_uid_falls_back_to_the_same_operator_and_arrive_by_takes_the_lates
         .iter()
         .filter_map(|option| option["legs"][0]["trainUid"].as_str())
         .collect();
-    assert_eq!(alternatives, ["RG0003", "RG0001"], "{plan}");
+    // Taken latest departure first, listed by departure.
+    assert_eq!(alternatives, ["RG0001", "RG0003"], "{plan}");
 }
 
 #[tokio::test]
