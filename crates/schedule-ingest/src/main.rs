@@ -61,6 +61,7 @@ mod gcs;
 mod pattern;
 mod pubsub;
 mod scan;
+mod shutdown;
 mod sink;
 mod sources;
 #[cfg(test)]
@@ -78,6 +79,7 @@ use delivery::DeliveryRelation;
 use pattern::{FilePattern, Routing};
 use scan::{StabilityTracker, scan_incoming};
 use serde::Serialize;
+use shutdown::Shutdown;
 use sink::{IngestSink, SinkError};
 use sources::Lane;
 
@@ -224,9 +226,16 @@ async fn run() -> anyhow::Result<()> {
     // ticks are `poll_interval_secs` apart. See `scan_interval`'s own doc
     // comment for why it also sets `MissedTickBehavior::Delay`.
     let mut interval = scan_interval(config.poll_interval_secs);
+    // From here SIGTERM stops the loop between files (`shutdown.rs`);
+    // before it, SIGTERM's default action still stops a waiting pod at once.
+    let shutdown = Shutdown::on_sigterm();
 
     loop {
-        progress.idle(interval.tick()).await;
+        tokio::select! {
+            biased;
+            () = shutdown.requested() => break,
+            _ = progress.idle(interval.tick()) => {}
+        }
 
         // `check_times`/`final_check_time` no longer drive *when* a scan
         // happens (that's `poll_interval_secs` now) -- their one remaining
@@ -248,6 +257,7 @@ async fn run() -> anyhow::Result<()> {
             multi.as_ref(),
             &mut lanes,
             is_final_check_of_day,
+            &shutdown,
         )
         .await;
         progress.beat();
@@ -257,6 +267,8 @@ async fn run() -> anyhow::Result<()> {
         ))
         .record(cycle_start.elapsed().as_secs_f64());
     }
+    tracing::info!("schedule-ingest stopped between files on SIGTERM");
+    Ok(())
 }
 
 /// One delivery source's process-lifetime pipeline state (what was a set
@@ -293,7 +305,8 @@ impl LaneState {
 
 /// One poll interval over every lane, in order: the CIF scan cycle, then
 /// (with CORPUS on) the CORPUS cycle. A lane's failure is logged and never
-/// stops the next lane.
+/// stops the next lane. Once `shutdown` is requested no further cycle
+/// starts: the one running finishes its file, and this returns.
 async fn run_lanes_once(
     sink: &impl IngestSink,
     config: &Config,
@@ -301,9 +314,13 @@ async fn run_lanes_once(
     multi: Option<&sources::MultiSource>,
     lanes: &mut [LaneState],
     is_final_check_of_day: bool,
+    shutdown: &Shutdown,
 ) {
     let only_lane = lanes.len() == 1;
     for state in lanes {
+        if shutdown.is_requested() {
+            return;
+        }
         let lane = Lane {
             ctx: sources::LaneCtx {
                 source: state.source,
@@ -333,6 +350,9 @@ async fn run_lanes_once(
         .await
         {
             tracing::error!(error = ?err, source = state.source.as_str(), "scan cycle failed unexpectedly; will retry next poll interval");
+        }
+        if shutdown.is_requested() {
+            return;
         }
         if config.corpus.corpus_ingest_enabled
             && let Err(err) = corpus::run_corpus_cycle(

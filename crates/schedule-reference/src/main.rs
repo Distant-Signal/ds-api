@@ -20,6 +20,7 @@ mod config;
 mod discovery;
 mod locations;
 mod parser;
+mod shutdown;
 mod sink;
 
 use std::time::Duration;
@@ -199,8 +200,16 @@ async fn run_with(
         );
     }
 
-    loop {
-        progress.idle(interval.tick()).await;
+    // From here SIGTERM stops the loop between cycles (`shutdown.rs`);
+    // before it, SIGTERM's default action still stops a waiting pod at once.
+    let shutdown = shutdown::Shutdown::on_sigterm();
+
+    while !shutdown.is_requested() {
+        tokio::select! {
+            biased;
+            () = shutdown.requested() => break,
+            _ = progress.idle(interval.tick()) => {}
+        }
         let cycle_start = std::time::Instant::now();
         // The run lock, for this cycle only: a CronJob run alive at the
         // same time (the mode being switched, a manual Job) publishes
@@ -231,6 +240,8 @@ async fn run_with(
             tracing::error!(error = ?err, "schedule-reference cycle failed; will retry next interval");
         }
     }
+    tracing::info!("schedule-reference stopped between cycles on SIGTERM");
+    Ok(())
 }
 
 /// How many times a once-mode run reads its completion marker before it

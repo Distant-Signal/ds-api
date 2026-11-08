@@ -14,6 +14,7 @@ use crate::bucket::{BucketDirs, BucketSettings, BucketSource};
 use crate::config::Config;
 use crate::gcs::{Credentials, GcsClient};
 use crate::pattern::{FilePattern, Routing};
+use crate::shutdown::Shutdown;
 use crate::sink::tests::{Answer, FakeSink};
 use crate::sources::{MultiSource, Precedence, SourceId};
 use crate::tests::{real_zip, test_config};
@@ -118,13 +119,89 @@ impl Setup {
         lanes: &mut [LaneState],
         n: usize,
     ) -> Vec<serde_json::Value> {
+        // Never requested: the trigger is dropped at once.
+        let (_, shutdown) = Shutdown::manual();
+        self.cycles_with(sink, routing, multi, lanes, n, &shutdown)
+            .await
+    }
+
+    pub(crate) async fn cycles_with(
+        &self,
+        sink: &FakeSink,
+        routing: &Routing,
+        multi: &MultiSource,
+        lanes: &mut [LaneState],
+        n: usize,
+        shutdown: &Shutdown,
+    ) -> Vec<serde_json::Value> {
         let (guard, logs) = audit::tests::capture_default();
         for _ in 0..n {
-            run_lanes_once(sink, &self.config, routing, Some(multi), lanes, false).await;
+            run_lanes_once(
+                sink,
+                &self.config,
+                routing,
+                Some(multi),
+                lanes,
+                false,
+                shutdown,
+            )
+            .await;
         }
         drop(guard);
         logs.audit_lines()
     }
+}
+
+/// Once a stop is requested (SIGTERM, `shutdown.rs`) no cycle starts: the
+/// deliveries waiting in both lanes are left as they were, and the next
+/// process takes them as if nothing had happened.
+#[tokio::test]
+async fn a_requested_stop_starts_no_cycle_and_leaves_the_deliveries_for_the_next_start() {
+    let setup = Setup::new();
+    let bytes = real_zip();
+    put(setup.watch.path(), "timetable_full.zip", &bytes, ago(3));
+    put(&setup.incoming(), "timetable_full.zip", &bytes, ago(1));
+    let precedence = Precedence::default();
+    let multi = setup.multi(precedence);
+    let sink = FakeSink::new(Answer::Accept);
+    let mut lanes = setup.lanes(precedence);
+    let (trigger, shutdown) = Shutdown::manual();
+    trigger.trigger();
+    let audit = setup
+        .cycles_with(
+            &sink,
+            &Routing::defaults(),
+            &multi,
+            &mut lanes,
+            4,
+            &shutdown,
+        )
+        .await;
+    assert!(audit.is_empty(), "{audit:?}");
+    assert_eq!(
+        sink.feed_records(),
+        Vec::<serde_json::Value>::new(),
+        "no feed record"
+    );
+    assert_eq!(
+        delivery_dirs(setup.storage.path()),
+        Vec::<String>::new(),
+        "nothing extracted"
+    );
+    assert!(setup.watch.path().join("timetable_full.zip").exists());
+    assert!(setup.incoming().join("timetable_full.zip").exists());
+
+    // The next start: fresh lanes, the same disk.
+    let mut lanes = setup.lanes(precedence);
+    let audit = setup
+        .cycles(&sink, &Routing::defaults(), &multi, &mut lanes, 4)
+        .await;
+    let outcomes: Vec<&str> = audit
+        .iter()
+        .map(|l| l["outcome"].as_str().unwrap())
+        .collect();
+    assert_eq!(outcomes, ["accepted", "duplicate"], "{audit:?}");
+    assert_eq!(sink.feed_records().len(), 1);
 }
 
 /// The real hand-off: a fake GCS bucket holds the fixture delivery; one
