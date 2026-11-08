@@ -15,6 +15,14 @@ name: Containers
 # release-ordering rule 2 compares the two. A frontend built since (its
 # api-build is its api pin's build tag) is compared with the api's pinned
 # tag instead, so the label can go once no chart pins an older frontend.
+# The schedule-ingest and schedule-reference images are built from every
+# commit with the api's, but a build whose inputs didn't change has the
+# same digest (image.yml's reproducible builds: an api-only commit leaves
+# both digests alone), so their Deployment rolls only when their own code
+# or Cargo.lock (a ds-core bump, lock file maintenance) changes, or the
+# weekly rebuild picks up Debian updates. ds-deploy pins them apart from
+# the api (its README, "How a change reaches the cluster"; DS-403): any
+# chart change to them falls in the dtd-sftp deploy window.
 # Package setup on the first push (spec §5.9): each package's "Manage
 # Actions access" must give this repository write access, and its
 # visibility must stay public.
