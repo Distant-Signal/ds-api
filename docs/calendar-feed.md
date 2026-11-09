@@ -61,13 +61,30 @@ journey has a non-train leg), the non-affiliation statement and `/attribution`.
 
 ## Delay Repay reminder
 
-For a journey that is over and whose final arrival was measured 15 minutes
-or more late, or that had a cancelled train, a whole-day event on the last
-day of the claim window (28 days after the journey), with an alarm 7 days
-before, while that window is open. The text says claims usually close 28
-days after and that each train company sets its own minimum delay and
-deadline. Like `delay_repay_rules` it estimates and links out: nothing here
-submits, records or tracks a claim.
+For a journey that is over and whose final arrival was measured at least
+the operator's minimum delay late, or that had a cancelled train, a
+whole-day event on the last day of the operator's claim window (counted
+from the journey's day), with an alarm 7 days before, while that window is
+open. Like `delay_repay_rules` it estimates and links out: nothing here
+submits, records or tracks a claim, and the text sends the traveller to
+their train company's own page, which is the one that counts.
+
+The rule is the last train's operator's (`delay_repay_rules::claim_rule_for`,
+the CIF schedule's ATOC code through `data::train_operator`), checked on
+2026-11-09 against the operators' own pages (sources and which pages could
+only be confirmed through their search-result text are in the module doc of
+`data/delay_repay_rules.rs`):
+
+| Operator | Reminder from a delay of | Claim window |
+|---|---|---|
+| LNER, CrossCountry, ScotRail, Caledonian Sleeper, Hull Trains, Lumo | 30 minutes | 28 days |
+| Heathrow Express, Elizabeth line, London Overground, Merseyrail ("more than 30 minutes") | 31 minutes | 28 days |
+| Grand Central | 60 minutes | 28 days |
+| Every other operator, and a train whose operator is not known (Delay Repay 15; GWR, Southeastern and Avanti West Coast say so, the rest are assumed) | 15 minutes | 28 days |
+
+A cancelled train gets a reminder at any operator. When the journey has
+several trains, the last one's operator is used, because the delay is the
+one at the final arrival.
 
 ## Privacy
 

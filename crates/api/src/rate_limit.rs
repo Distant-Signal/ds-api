@@ -1526,6 +1526,10 @@ mod tests {
             Some(LimitClass::TrainByUid)
         );
         assert_eq!(
+            classify(&Method::GET, "/public/calendar/some-token.ics"),
+            Some(LimitClass::TrainByUid)
+        );
+        assert_eq!(
             classify(
                 &Method::GET,
                 "/public/island-of-ireland/trains/A120/2026-11-05"
