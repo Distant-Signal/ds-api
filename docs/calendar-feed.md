@@ -47,7 +47,8 @@ One event per journey of the caller's own (followed and group-shared
 journeys are never in it), from a week ago on: `Journey: {first origin} to
 {last destination}`, starting at the first departure. No train, operator,
 ticket, platform, delay, name the user gave the journey, share or group
-detail. An end time is given only for a journey that is one planned
+detail (the Delay Repay reminder below is the one event that says a
+journey may have been late or had a cancelled train). An end time is given only for a journey that is one planned
 non-train leg; a train's arrival is not known to the journeys list, so
 other events have a start only.
 
@@ -57,7 +58,11 @@ as a recurrence rule.
 
 The description carries the data licences' credits as the Atom feeds do
 (`routes::feeds::Credit`: National Rail, Network Rail, and TfL when a
-journey has a non-train leg), the non-affiliation statement and `/attribution`.
+journey has a non-train leg), the non-affiliation statement and the
+absolute address of the site's `/attribution` page (a calendar app cannot
+follow a relative path; the origin is the one `SSO_REDIRECT_URL` gives, as
+the Atom feeds use). The block starts "Credits:" so the licence wording,
+which is lower case by the licence, does not read as the entry's own text.
 
 ## Delay Repay reminder
 
@@ -65,7 +70,15 @@ For a journey that is over and whose final arrival was measured at least
 the operator's minimum delay late, or that had a cancelled train, a
 whole-day event on the last day of the operator's claim window (counted
 from the journey's day), with an alarm 7 days before, while that window is
-open. Like `delay_repay_rules` it estimates and links out: nothing here
+open. It is worded as a prompt to check, never as a deadline or a fact:
+the title is `Check Delay Repay: {origin} to {destination}`, the
+description says the journey "may have arrived late enough to claim" (the
+delay is the last train's, from Distant Signal's own data; the ticket is
+not known), and the alarm, whose pop-up shows nothing else, has its own
+text: check your train company's own rules, claims are usually open for up
+to the window's days. A cancelled train has its own sentence (a
+cancellation, depending on what happened to the journey and the ticket)
+and does not reuse the delay one. Like `delay_repay_rules` it estimates and links out: nothing here
 submits, records or tracks a claim, and the text sends the traveller to
 their train company's own page, which is the one that counts.
 
@@ -81,6 +94,10 @@ only be confirmed through their search-result text are in the module doc of
 | Heathrow Express, Elizabeth line, London Overground, Merseyrail ("more than 30 minutes") | 31 minutes | 28 days |
 | Grand Central | 60 minutes | 28 days |
 | Every other operator, and a train whose operator is not known (Delay Repay 15; GWR, Southeastern and Avanti West Coast say so, the rest are assumed) | 15 minutes | 28 days |
+
+The description states a rule as an operator's own ("LNER usually pays from
+a delay of 30 minutes") only for an operator in this table; for any other
+it says what most train companies do and that the company's may differ.
 
 A cancelled train gets a reminder at any operator. When the journey has
 several trains, the last one's operator is used, because the delay is the
