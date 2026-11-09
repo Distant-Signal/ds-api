@@ -2129,14 +2129,15 @@ export type LeaveBy = {
 at: string, 
 /**
  * The departure it is timed from: the first timed leg's booked
- * departure, or the suggestion's.
+ * departure, or the suggestion's (a cancelled train's replacement, or
+ * the plan sweep's for a train nobody has picked).
  */
 departure: string, basis: LeaveByBasis, };
 
 /**
  * What a leave-by is timed from.
  */
-export type LeaveByBasis = "booked" | "suggestion";
+export type LeaveByBasis = "booked" | "suggestion" | "usual" | "closest";
 
 /**
  * One row of `GET .../legs/{legId}/candidates`: the shared calling-point

@@ -1924,7 +1924,7 @@
             "$ref": "#/components/schemas/LeaveByBasis"
           },
           "departure": {
-            "description": "The departure it is timed from: the first timed leg's booked\ndeparture, or the suggestion's.",
+            "description": "The departure it is timed from: the first timed leg's booked\ndeparture, or the suggestion's (a cancelled train's replacement, or\nthe plan sweep's for a train nobody has picked).",
             "format": "date-time",
             "type": "string"
           }
@@ -1937,18 +1937,13 @@
         "type": "object"
       },
       "LeaveByBasis": {
-        "description": "What a leave-by is timed from.",
-        "oneOf": [
-          {
-            "const": "booked",
-            "description": "The plan's first timed leg (lateness never moves it).",
-            "type": "string"
-          },
-          {
-            "const": "suggestion",
-            "description": "The first train is cancelled: the open break's best covered\nsuggestion.",
-            "type": "string"
-          }
+        "description": "What a leave-by is timed from. The set may gain values: treat an unknown one as `booked`. `booked`: the plan's first timed leg (lateness never moves it). `suggestion`: the first train is cancelled, so the open break's best covered suggestion. `usual`: a remind-me occurrence nobody has picked a train for, so the plan sweep's suggestion, the usual train; not tracked or booked. `closest`: as `usual`, for the usual operator's nearest train (a retime or a new UID) rather than the usual train itself.",
+        "type": "string",
+        "x-extensible-enum": [
+          "booked",
+          "suggestion",
+          "usual",
+          "closest"
         ]
       },
       "LegConnection": {

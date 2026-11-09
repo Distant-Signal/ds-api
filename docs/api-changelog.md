@@ -3,6 +3,36 @@
 Changes to the Distant Signal (DS) HTTP API that a client such as DS-MCP
 needs to know about. Newest first. Field names are as served (camelCase).
 
+## 2026-11-10: Leave by for a train nobody has picked
+
+Regular journeys' `leaveBy` (the "Leave by" countdown) now also covers a
+remind-me occurrence whose train hasn't been picked yet. Additive; no
+migration (ds-core's `leave_by_sql`, the release that adds the new bases).
+
+- `leaveBy.basis` gains two values, `usual` and `closest`. Until now a
+  remind-me occurrence had no `leaveBy` until its owner tracked a train.
+  It now has one from the plan sweep's suggestion (`regularPlan.status`
+  `suggested`, not yet accepted): `usual` when the suggestion is the usual
+  train, `closest` when it is the usual operator's nearest train within 5
+  minutes of the usual departure (a retimed train, or a new UID after a
+  timetable change). `leaveBy.departure` is the suggested train's
+  departure, from the timetable, so a retime the plan hasn't caught up with
+  is in it; `leaveBy.at` is that less the station buffer.
+- A suggestion that is the day's `best` (the usual train doesn't run and
+  nothing is near it) has no `leaveBy`, nor does one whose train is
+  cancelled. Accepting the suggestion or tracking a train gives the train's
+  own `leaveBy` with basis `booked`.
+- `basis` is declared in the OpenAPI document as an extensible enum
+  (`x-extensible-enum`: `booked`, `suggestion`, `usual`, `closest`), not a
+  closed one, because the field may gain values. Treat an unknown value as
+  `booked`. `booked` is timed from the plan's first timed leg; `suggestion`
+  from the open break's best covered suggestion when the first train is
+  cancelled.
+- Clients that switch on `basis` should treat `usual` and `closest` as "for
+  a train that is not tracked or booked yet": the train is a suggestion.
+
+DS-MCP: a client that only reads `at` and `departure` needs no change.
+
 ## 2026-11-09: Journey calendar feed and Delay Repay reminders
 
 An opt-in iCalendar feed of the caller's journeys, a single-journey

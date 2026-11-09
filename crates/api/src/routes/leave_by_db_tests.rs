@@ -395,3 +395,86 @@ async fn the_prefill_prefers_the_template_from_that_station() {
     let (_, body) = call(&router, "GET", &prefill("QPB"), Some(&token), None).await;
     assert_eq!(body, json!({ "minutes": null }), "another station");
 }
+
+/// DS-425: a remind-me occurrence whose train nobody has picked has a
+/// `leaveBy` from the plan sweep's suggestion, on the journey page: basis
+/// `usual` (or `closest` for the usual operator's nearest train), none for
+/// the day's best.
+#[tokio::test]
+#[ignore = "requires DATABASE_URL (a migrated database)"]
+async fn an_unpicked_trains_suggestion_gives_a_usual_or_closest_leave_by() {
+    const USER: &str = "TEST-LEAVEBY-USUAL";
+    let pool = connect().await;
+    let _cleanup = cleanup(&pool, &[USER]).await;
+    let token = seed_session(&pool, USER).await;
+    let router = router(pool.clone());
+    let departure = (Utc::now() + Duration::hours(2))
+        .duration_trunc(Duration::minutes(1))
+        .unwrap();
+    let journey_id: i64 = sqlx::query_scalar(
+        "INSERT INTO journeys (user_id, station_buffer_minutes) VALUES ($1, 15) RETURNING id",
+    )
+    .bind(USER)
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    sqlx::query(
+        "INSERT INTO journey_legs (journey_id, leg_order, service_date, kind, match_mode, \
+                                   origin_crs, destination_crs) \
+         VALUES ($1, 1, ($2 AT TIME ZONE 'Europe/London')::date, 'train', 'unmatched', \
+                 'QUA', 'QUB')",
+    )
+    .bind(journey_id)
+    .bind(departure)
+    .execute(&pool)
+    .await
+    .unwrap();
+    let set_plan = |reason: &'static str| {
+        let pool = pool.clone();
+        async move {
+            let plan = json!({
+                "reason": reason,
+                "choice": {"departure": departure, "arrival": departure, "changeCount": 0,
+                           "legs": [{"kind": "train", "trainUid": "QU0001",
+                                     "serviceDate": departure.date_naive(), "originCrs": "QUA",
+                                     "departure": departure, "arrival": departure}]},
+                "alternatives": [], "sweepLegIds": [], "acceptedIndex": null,
+            });
+            sqlx::query(
+                "UPDATE journeys SET regular_plan = $2, regular_plan_status = 'suggested' \
+                 WHERE id = $1",
+            )
+            .bind(journey_id)
+            .bind(plan)
+            .execute(&pool)
+            .await
+            .unwrap();
+        }
+    };
+    let detail = || async {
+        call(
+            &router,
+            "GET",
+            &format!("/Journeys/{journey_id}"),
+            Some(&token),
+            None,
+        )
+        .await
+        .1
+    };
+
+    set_plan("usual").await;
+    let body = detail().await;
+    assert_eq!(body["leaveBy"]["basis"], json!("usual"), "{body}");
+    assert_eq!(
+        at(&body["leaveBy"]["at"]),
+        departure - Duration::minutes(15)
+    );
+    assert_eq!(at(&body["leaveBy"]["departure"]), departure);
+
+    set_plan("same_operator").await;
+    assert_eq!(detail().await["leaveBy"]["basis"], json!("closest"));
+
+    set_plan("best").await;
+    assert_eq!(detail().await["leaveBy"], Value::Null, "the day's best");
+}
