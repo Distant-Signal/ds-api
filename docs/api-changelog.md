@@ -3,6 +3,32 @@
 Changes to the Distant Signal (DS) HTTP API that a client such as DS-MCP
 needs to know about. Newest first. Field names are as served (camelCase).
 
+## 2026-11-09: Journey calendar feed and Delay Repay reminders
+
+An opt-in iCalendar feed of the caller's journeys, a single-journey
+download and a Delay Repay claim reminder (docs/calendar-feed.md).
+Additive. Off unless `CALENDAR_FEED_ENABLED` (the chart's
+`api.calendarFeed.enabled`, default false): until then every route below is
+`404` (`feature_disabled` on the account route). No migration: the secret
+link is an `unlisted_links` row of type `calendar_feed`, hashed like a
+journey share link.
+
+- `GET /public/account/calendar-feed` gives `{active}`; `POST` makes the
+  link (revoking an earlier one) and gives `{token}` once; `DELETE` revokes
+  it (`204`). Session cookie only, the mutations same origin.
+- `GET /public/calendar/{token}` (the site's `/api/calendar/{token}.ics`) is
+  the feed, authenticated by the token alone: `text/calendar`,
+  `Cache-Control: private`, `404` for any token that doesn't work. A plan,
+  not live status: one event per journey from a week ago on, with its two
+  ends and first departure only, and a whole-day claim-deadline event
+  (alarm 7 days earlier) for a journey that arrived 15 or more minutes late
+  or had a cancelled train, while its 28-day window is open.
+- `GET /Journeys/{id}/calendar.ics` downloads one of the caller's own
+  journeys; session cookie only.
+- `GET /public/auth/session` gains `calendarFeedEnabled` (false logged out).
+
+DS-MCP: no change needed; delegated callers can't reach any of these.
+
 ## 2026-11-07: Regular journeys: a different time on some days
 
 The scheduling options' R3 (distant-signal's

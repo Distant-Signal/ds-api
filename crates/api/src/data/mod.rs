@@ -2,6 +2,7 @@ pub mod account;
 pub mod account_continuity;
 pub mod alternative_ranking;
 pub mod bank_holidays;
+pub mod calendar_feed;
 pub mod cancellation;
 pub mod config;
 pub mod corpus;

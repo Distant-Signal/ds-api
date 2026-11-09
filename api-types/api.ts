@@ -174,6 +174,26 @@ faultNote: string | null, suggestions: SuggestionSet | null, stale: boolean, };
 export type BreakStatus = "open" | "accepted" | "dismissed" | "recovered" | "expired";
 
 /**
+ * `POST /public/account/calendar-feed`: the only response that carries
+ * the token.
+ */
+export type CalendarFeedCreated = { 
+/**
+ * The secret. The feed is `/api/calendar/{token}.ics` on the site.
+ */
+token: string, };
+
+/**
+ * `GET /public/account/calendar-feed`.
+ */
+export type CalendarFeedStatus = { 
+/**
+ * Whether the caller has a working feed link. The link itself is
+ * never shown again after it is made.
+ */
+active: boolean, };
+
+/**
  * A schedule calling point's `kind`, as `schedule-query` writes it.
  */
 export type CallingPointKind = "Origin" | "Intermediate" | "Terminate";
@@ -3966,7 +3986,13 @@ regularJourneyRecurrenceEnabled: boolean,
  * (`REGULAR_JOURNEY_DAY_OVERRIDES_ENABLED`, R3), so the form offers
  * it; `false` when logged out.
  */
-regularJourneyDayOverridesEnabled: boolean, };
+regularJourneyDayOverridesEnabled: boolean, 
+/**
+ * Whether the journey calendar feed and downloads are on
+ * (`CALENDAR_FEED_ENABLED`), so Preferences offers them; `false`
+ * when logged out.
+ */
+calendarFeedEnabled: boolean, };
 
 export type SetTemplateActiveRequest = { active: boolean, };
 
