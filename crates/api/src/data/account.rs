@@ -70,6 +70,7 @@ pub const USER_KEYED_TABLES: &[&str] = &[
     "train_subscriptions",
     "unlisted_links",
     "user_away_periods",
+    "webhook_destinations",
 ];
 
 /// The exact confirmation phrase `DELETE /public/account` requires in its
@@ -206,6 +207,9 @@ pub struct AccountExport {
     /// Personal API tokens (docs/specs/personal-api-tokens.md §8.5): every
     /// token, working or ended, without its hash.
     pub personal_api_tokens: Value,
+    /// Outbound webhook destinations (DS-415): address, name, state and
+    /// last result, without the encrypted signing secret.
+    pub webhook_destinations: Value,
     pub notification_state: NotificationStateExport,
     pub omitted: Vec<&'static str>,
     pub notes: Vec<&'static str>,
@@ -442,6 +446,13 @@ pub async fn export_account(pool: &PgPool, user_id: &str) -> Result<Option<Accou
             user_id,
         )
         .await?,
+        webhook_destinations: rows(
+            pool,
+            "SELECT to_jsonb(w) - 'secret_ciphertext' - 'secret_nonce' - 'secret_key_id' \
+             FROM webhook_destinations w WHERE user_id = $1 ORDER BY id",
+            user_id,
+        )
+        .await?,
         notification_state: NotificationStateExport {
             trains: rows(
                 pool,
@@ -490,6 +501,8 @@ pub async fn export_account(pool: &PgPool, user_id: &str) -> Result<Option<Accou
             "connected_app_confirmations.token_hash and session_id: a hashed one-time credential \
              and the hashed session it belongs to",
             "personal_api_tokens.token_hash: the hashed token",
+            "webhook_destinations.secret_ciphertext, secret_nonce and secret_key_id: the encrypted \
+             signing secret or access token",
         ],
         notes: vec![
             "Your login identity (name, username, email) comes from the single sign-on provider; \
@@ -640,6 +653,7 @@ pub(crate) mod db_tests {
         exec(pool, "INSERT INTO journey_idempotency_keys (user_id, idempotency_key, request_hash, response) VALUES ($1, 'key-' || $1, repeat('a', 64), '{}')", u).await;
         // A personal API token (its hash must never be exported).
         exec(pool, "INSERT INTO personal_api_tokens (user_id, name, token_hash, hint, scopes, expires_at) VALUES ($1, 'Display', sha256(convert_to('ptok-' || $1, 'UTF8')), 'AbC1', '{lines:read}', NOW() + INTERVAL '90 days')", u).await;
+        exec(pool, "INSERT INTO webhook_destinations (user_id, kind, name, url) VALUES ($1, 'generic', 'Hook', 'https://hooks.example/' || $1)", u).await;
 
         // Owned, with another member (an admin who should inherit it).
         let shared = format!("{user}-g-shared");

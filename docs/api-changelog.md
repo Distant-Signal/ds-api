@@ -33,6 +33,11 @@ migration (ds-core's `leave_by_sql`, the release that adds the new bases).
 
 DS-MCP: a client that only reads `at` and `departure` needs no change.
 
+`GET /public/account/export` also gains `webhookDestinations` (the caller's
+outbound webhook destinations, without the encrypted secret; always empty
+until the webhook settings routes ship), for ds-core's `webhook_destinations`
+table. Account deletion removes them with the user.
+
 ## 2026-11-09: Journey calendar feed and Delay Repay reminders
 
 An opt-in iCalendar feed of the caller's journeys, a single-journey

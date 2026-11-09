@@ -90,6 +90,7 @@ The inactive-account sweep (below) uses the same function.
 | `delegated_deletions` | What a connected app deleted: journey id, custom name, dates, stations, train UIDs | Cascade | Deleted after 30 days | `connectedAppDeletions` |
 | `journey_idempotency_keys` | `Idempotency-Key`s of itinerary saves, with the saved response | Cascade | Deleted after 24 hours | `journeySaveKeys` |
 | `personal_api_tokens` | Personal API tokens the user created: name, scopes, a hint (the token's last 4 characters), the hashed token, and created, expiry, last-used, push-notified and revoked times ([personal-api-tokens.md](personal-api-tokens.md)) | Cascade | Revoked after 90 days unused (`PERSONAL_TOKENS_IDLE_DAYS`) and at expiry (at most 365 days); ended rows are deleted 365 days later (`PERSONAL_TOKENS_REVOKED_RETENTION_DAYS`). The sweep runs only while the feature is on | `personalApiTokens` (without the hash) |
+| `webhook_destinations` | Outbound webhook destinations the user set up: kind, name, address, whether a signing secret or access token is held (encrypted; AES-256-GCM, key ring `WEBHOOK_SECRET_KEYS`), enabled flag, consecutive failures, last success, failure and error, created time | Cascade | Kept until the user deletes the destination or their account | `webhookDestinations` (without the encrypted secret) |
 
 Apple Wallet passes (`.pkpass`) uploaded to prefill a leg's ticket details are parsed in memory and never stored. (PDF tickets are no longer read, since 2026-11.)
 
