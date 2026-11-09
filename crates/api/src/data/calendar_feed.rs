@@ -12,7 +12,9 @@
 //!
 //! Also a Delay Repay reminder per journey that arrived late or had a
 //! cancelled train: a whole-day event on the last day of the claim window
-//! ([`CLAIM_WINDOW_DAYS`] after the journey) with an alarm a week earlier.
+//! with an alarm a week earlier. The minimum delay and the window are the
+//! last train's operator's own (`delay_repay_rules::claim_rule_for`, with
+//! its sources), Delay Repay 15 and 28 days when the operator is not known.
 //! Like `delay_repay_rules` it estimates and links out, and never submits
 //! or records a claim.
 //!
@@ -21,8 +23,11 @@
 
 use std::sync::atomic::{AtomicBool, Ordering};
 
+use std::collections::HashMap;
+
 use chrono::{DateTime, Duration, NaiveDate, Utc};
 
+use crate::data::delay_repay_rules::claim_rule_for;
 use crate::data::journeys::JourneyListItem;
 use crate::ics::{Alarm, Event, When};
 
@@ -37,14 +42,6 @@ pub const RESOURCE_TYPE: &str = "calendar_feed";
 /// How many days a feed lists a journey after it set off: the plan for
 /// today and last week's journeys, which the claim reminders follow.
 pub const PAST_DAYS: i64 = 7;
-
-/// How long a claim is usually open after the journey (days). Operators'
-/// schemes differ; the event says to check the operator's own page.
-pub const CLAIM_WINDOW_DAYS: i64 = 28;
-
-/// The smallest delay that can be worth a claim, in minutes (Delay Repay
-/// 15). A scheme that starts later (30 minutes) is for the user to check.
-pub const MIN_CLAIM_DELAY_MINUTES: i32 = 15;
 
 /// Days before the deadline an event's alarm shows.
 pub const REMINDER_DAYS_BEFORE: u32 = 7;
@@ -62,6 +59,13 @@ pub fn init_from_env() -> bool {
 /// Whether the calendar feed is on ([`init_from_env`]).
 pub fn enabled() -> bool {
     ENABLED.load(Ordering::Relaxed)
+}
+
+/// Turns the feed on or off for the whole test process; a DB test that
+/// needs it on says so first.
+#[cfg(test)]
+pub(crate) fn set_enabled_for_tests(enabled: bool) {
+    ENABLED.store(enabled, Ordering::Relaxed);
 }
 
 /// What an event is made from, and no more.
@@ -88,6 +92,9 @@ pub struct JourneyFacts {
     pub service_date: NaiveDate,
     /// Whether an untracked leg (a Tube, bus or walk) is part of it.
     pub untracked: bool,
+    /// The ATOC code of the last train's operator, when known
+    /// (`data::train_operator`).
+    pub operator_atoc: Option<String>,
 }
 
 impl From<&JourneyListItem> for JourneyFacts {
@@ -114,6 +121,7 @@ impl From<&JourneyListItem> for JourneyFacts {
             },
             service_date: item.final_service_date.unwrap_or(item.first_service_date),
             untracked: item.kind == "untracked" || item.leg_count > item.train_leg_count,
+            operator_atoc: None,
         }
     }
 }
@@ -161,13 +169,14 @@ pub fn claim_reminder(facts: &JourneyFacts, host: &str, today: NaiveDate) -> Opt
     if !facts.travelled || !facts.has_train_leg {
         return None;
     }
+    let rule = claim_rule_for(facts.operator_atoc.as_deref());
     let late = facts
         .final_delay_minutes
-        .is_some_and(|delay| delay >= MIN_CLAIM_DELAY_MINUTES);
+        .is_some_and(|delay| delay >= rule.min_delay_minutes);
     if !late && !facts.cancelled {
         return None;
     }
-    let deadline = facts.service_date + Duration::days(CLAIM_WINDOW_DAYS);
+    let deadline = facts.service_date + Duration::days(rule.window_days);
     if deadline < today {
         return None;
     }
@@ -186,10 +195,12 @@ pub fn claim_reminder(facts: &JourneyFacts, host: &str, today: NaiveDate) -> Opt
         ),
         description: format!(
             "Your journey on {} {what}. You may be able to claim Delay Repay from the \
-             train company; claims usually close {CLAIM_WINDOW_DAYS} days after the \
-             journey, and each company sets its own minimum delay and deadline, so check \
-             theirs. Distant Signal estimates this and never makes a claim for you. {}",
+             train company, which pays from a delay of {} minutes and takes claims for {} \
+             days after the journey. Check your train company's own page, which is the one \
+             that counts. Distant Signal estimates this and never makes a claim for you. {}",
             facts.service_date.format("%-d %B %Y"),
+            rule.min_delay_minutes,
+            rule.window_days,
             credits_text(facts.untracked)
         ),
         alarm: Some(Alarm {
@@ -212,23 +223,78 @@ pub async fn feed_events(
         crate::data::journeys::ListInclude::default(),
     )
     .await?;
-    Ok(events_for(
-        &rows,
-        host,
-        now,
-        now - Duration::days(PAST_DAYS),
-    ))
+    events_for_rows(pool, &rows, host, now, now - Duration::days(PAST_DAYS)).await
 }
 
-/// [`feed_events`]'s mapping, from the rows.
+/// The ATOC code of each journey's last train's operator, by journey id,
+/// from one read per service date. A journey whose train has no single
+/// known operator is absent.
+async fn operators_by_journey(
+    pool: &sqlx::PgPool,
+    rows: &[JourneyListItem],
+) -> anyhow::Result<HashMap<i64, String>> {
+    let mut by_date: HashMap<NaiveDate, Vec<&JourneyListItem>> = HashMap::new();
+    for row in rows {
+        if row.travelled
+            && let Some(date) = row.final_service_date
+            && row.final_train_uid.is_some()
+        {
+            by_date.entry(date).or_default().push(row);
+        }
+    }
+    let mut out = HashMap::new();
+    for (date, group) in by_date {
+        let uids: Vec<String> = group
+            .iter()
+            .filter_map(|row| row.final_train_uid.clone())
+            .collect();
+        let operators =
+            crate::data::train_operator::operators_for_trains(pool, &uids, date).await?;
+        for row in group {
+            if let Some(operator) = row
+                .final_train_uid
+                .as_ref()
+                .and_then(|uid| operators.get(uid))
+            {
+                out.insert(row.id, operator.code.clone());
+            }
+        }
+    }
+    Ok(out)
+}
+
+/// [`events_for`] with the operators read for the journeys that are over.
+pub async fn events_for_rows(
+    pool: &sqlx::PgPool,
+    rows: &[JourneyListItem],
+    host: &str,
+    now: DateTime<Utc>,
+    since: DateTime<Utc>,
+) -> anyhow::Result<Vec<Event>> {
+    let operators = operators_by_journey(pool, rows).await?;
+    Ok(events_for(rows, &operators, host, now, since))
+}
+
+/// The mapping from the rows and each journey's operator code.
+#[expect(
+    clippy::implicit_hasher,
+    reason = "only ever called with the std map operators_by_journey makes"
+)]
 pub fn events_for(
     rows: &[JourneyListItem],
+    operators: &HashMap<i64, String>,
     host: &str,
     now: DateTime<Utc>,
     since: DateTime<Utc>,
 ) -> Vec<Event> {
     let today = now.with_timezone(&chrono_tz::Europe::London).date_naive();
-    let facts: Vec<JourneyFacts> = rows.iter().map(JourneyFacts::from).collect();
+    let facts: Vec<JourneyFacts> = rows
+        .iter()
+        .map(|row| JourneyFacts {
+            operator_atoc: operators.get(&row.id).cloned(),
+            ..JourneyFacts::from(row)
+        })
+        .collect();
     let mut events: Vec<Event> = facts
         .iter()
         .filter_map(|f| journey_event(f, host, since))
@@ -255,6 +321,7 @@ mod tests {
             final_delay_minutes: None,
             service_date: NaiveDate::from_ymd_opt(2026, 11, 10).unwrap(),
             untracked: false,
+            operator_atoc: None,
         }
     }
 
@@ -348,5 +415,38 @@ mod tests {
         assert!(claim_reminder(&late(), "h", after).is_none());
         let on_day = NaiveDate::from_ymd_opt(2026, 12, 8).unwrap();
         assert!(claim_reminder(&late(), "h", on_day).is_some());
+    }
+
+    #[test]
+    fn the_reminder_follows_the_operators_own_threshold_and_window() {
+        let today = NaiveDate::from_ymd_opt(2026, 11, 11).unwrap();
+        // 22 minutes late: worth a claim at a DR15 operator, not at LNER.
+        let mut f = late();
+        f.operator_atoc = Some("GR".to_string());
+        assert!(claim_reminder(&f, "h", today).is_none());
+        f.final_delay_minutes = Some(30);
+        assert!(claim_reminder(&f, "h", today).is_some());
+        // "More than 30 minutes" starts at 31; Grand Central pays from 60.
+        f.operator_atoc = Some("XR".to_string());
+        assert!(claim_reminder(&f, "h", today).is_none());
+        f.final_delay_minutes = Some(31);
+        assert!(claim_reminder(&f, "h", today).is_some());
+        f.operator_atoc = Some("GC".to_string());
+        assert!(claim_reminder(&f, "h", today).is_none());
+        f.final_delay_minutes = Some(60);
+        let event = claim_reminder(&f, "h", today).expect("reminder");
+        assert!(event.description.contains("from a delay of 60 minutes"));
+        assert!(event.description.contains("28 days"));
+    }
+
+    #[test]
+    fn an_unknown_operator_gets_the_documented_default() {
+        let today = NaiveDate::from_ymd_opt(2026, 11, 11).unwrap();
+        let mut f = late();
+        f.operator_atoc = Some("ZZ".to_string());
+        let event = claim_reminder(&f, "h", today).expect("reminder");
+        assert!(event.description.contains("from a delay of 15 minutes"));
+        f.operator_atoc = None;
+        assert!(claim_reminder(&f, "h", today).is_some());
     }
 }

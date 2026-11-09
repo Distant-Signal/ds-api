@@ -240,12 +240,18 @@ pub(crate) async fn journey_calendar(
     };
     // A single journey is a deliberate download, so it is listed whatever
     // its age; its claim reminder is kept while one is open.
-    let events = calendar_feed::events_for(
+    let events = match calendar_feed::events_for_rows(
+        &app.database,
         std::slice::from_ref(row),
         &site.host,
         now,
         chrono::DateTime::<Utc>::MIN_UTC,
-    );
+    )
+    .await
+    {
+        Ok(events) => events,
+        Err(err) => return database_error("read the operator")(err),
+    };
     let disposition = format!("attachment; filename=\"journey-{journey_id}.ics\"");
     no_store(calendar_response(
         document(&site, events, "Distant Signal journey"),

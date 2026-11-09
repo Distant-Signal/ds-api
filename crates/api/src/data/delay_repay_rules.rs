@@ -30,11 +30,50 @@
 //!   2026-10-07, so their entries rest on the ORR table and the earlier
 //!   2026-08-29 check, not a fresh read of the operator's own page.
 //!
+//! * Claim windows and minimum delays for the calendar's claim reminder
+//!   ([`ClaimRule`], checked 2026-11-09, [`CLAIM_RULES_CHECKED_ON`]), from
+//!   each operator's own pages (a page that answered an automated fetch
+//!   is marked `read`; one that returned HTTP 403 and was confirmed only
+//!   through its search-result text is marked `search`):
+//!   - LNER, 30 minutes, 28 days from the delay (search):
+//!     <https://www.lner.co.uk/support/delay-repay/>
+//!   - `CrossCountry`, 30 minutes, 28 days (search):
+//!     <https://www.crosscountrytrains.co.uk/about-us/passenger-charter/full-charter>
+//!   - `ScotRail`, 30 minutes, 28 days (search):
+//!     <https://www.scotrail.co.uk/plan-your-journey/our-delay-repay-guarantee>
+//!   - Caledonian Sleeper, 30 minutes, 28 days (read):
+//!     <https://www.sleeper.scot/help-support/after-your-trip/>
+//!   - Hull Trains, 30 minutes, 28 days (read):
+//!     <https://www.hulltrains.co.uk/support-and-contact/refunds-and-compensation>
+//!   - Lumo, 30 minutes, 28 days from travel (read):
+//!     <https://www.lumo.co.uk/help/delay-repay>
+//!   - Heathrow Express, more than 30 minutes, 28 days (search, Conditions
+//!     of Carriage July 2026):
+//!     <https://www.heathrowexpress.com/docs/heathrow-express-conditions-of-carriage-july-2026.pdf>
+//!   - Elizabeth line and London Overground, more than 30 minutes, 28 days
+//!     from the delay (read):
+//!     <https://tfl.gov.uk/fares/refunds/apply-for-a-service-delay-refund>
+//!   - Merseyrail, more than half an hour, 28 days (search; its comments
+//!     and compensation form): <https://www.merseyrail.org/help-support/refunds-and-compensation/refunds-day-tickets/>
+//!   - Grand Central, 60 minutes, 28 days (read):
+//!     <https://www.grandcentralrail.com/help/refunds-and-compensation>
+//!   - Every other operator is DR15 with 28 days: GWR
+//!     (<https://www.gwr.com/help-and-support/faqs/compensation-and-refunds>),
+//!     Southeastern
+//!     (<https://www.southeasternrailway.co.uk/help/refunds-and-compensation/delay-repay-compensation>)
+//!     and Avanti West Coast (<https://www.avantiwestcoast.co.uk/help-and-support/delay-repay>,
+//!     read) each say 15 minutes and 28 days. The rest of the DR15
+//!     operators (Northern's page returned HTTP 403, and most were not
+//!     checked one by one) are assumed to match: that is
+//!     [`DEFAULT_CLAIM_RULE`], and the reminder tells the traveller to
+//!     check their own company's deadline.
+//!
 //! The ATOC codes are those in reference-data/toc-codes.csv.
 //!
 //! STRUCTURAL SAFETY NOTE, not just a comment: every function in this file
 //! is pure (no `PgPool`, no I/O of any kind) and is called only from
-//! read-only paths -- each leg's `delayRepay` on `GET /Journeys/{id}`
+//! read-only paths -- the journey calendar's claim reminder
+//! (`data::calendar_feed`), each leg's `delayRepay` on `GET /Journeys/{id}`
 //! (`crates/api/src/routes/journey_tickets.rs`) and `GET /Journeys/reliability`
 //! (`data::reliability`). This file must never gain a
 //! function that writes anywhere, and no future change anywhere in this
@@ -48,6 +87,10 @@ use serde::Serialize;
 /// `frontend/components/DelayRepayEstimate.tsx` shows it too (served as
 /// `rulesCheckedOn`).
 pub const RULES_CHECKED_ON: &str = "2026-10-07";
+
+/// When the claim windows and minimum delays ([`ClaimRule`]) were last
+/// checked against the operators' own pages.
+pub const CLAIM_RULES_CHECKED_ON: &str = "2026-11-09";
 
 /// How many minutes above a band's threshold a PROVISIONAL projection is
 /// "borderline": in production (2026-09-29..10-05) a band projected 30
@@ -98,6 +141,46 @@ impl Scheme {
     }
 }
 
+/// When a claim is worth making: the smallest delay, in minutes, an
+/// operator's scheme pays for (the first minute of a delay "of more than
+/// 30 minutes" is 31), and how many days after the journey a claim can
+/// still be made. Used only to word and date the calendar's claim reminder.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ClaimRule {
+    pub min_delay_minutes: i32,
+    pub window_days: i64,
+}
+
+const DR15_CLAIM: ClaimRule = ClaimRule {
+    min_delay_minutes: 15,
+    window_days: 28,
+};
+const DR30_CLAIM: ClaimRule = ClaimRule {
+    min_delay_minutes: 30,
+    window_days: 28,
+};
+/// "More than 30 minutes" (Heathrow Express, the Elizabeth line, London
+/// Overground, Merseyrail).
+const OVER_30_CLAIM: ClaimRule = ClaimRule {
+    min_delay_minutes: 31,
+    window_days: 28,
+};
+
+/// For an operator not in [`OPERATORS`], or a train whose operator is not
+/// known: Delay Repay 15 with 28 days (see the module doc's last source).
+pub const DEFAULT_CLAIM_RULE: ClaimRule = DR15_CLAIM;
+
+/// The claim rule for the operator with ATOC code `atoc`, or the default.
+pub fn claim_rule_for(atoc: Option<&str>) -> ClaimRule {
+    atoc.map(str::trim)
+        .and_then(|atoc| {
+            OPERATORS
+                .iter()
+                .find(|rule| rule.atoc.eq_ignore_ascii_case(atoc))
+        })
+        .map_or(DEFAULT_CLAIM_RULE, |rule| rule.claim)
+}
+
 /// One operator whose scheme or claim page differs from the default (DR15
 /// with the National Rail claim page).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -113,6 +196,7 @@ pub struct OperatorRule {
     pub claim_url: &'static str,
     /// Caledonian Sleeper also compensates the room supplement.
     pub room_supplement: bool,
+    pub claim: ClaimRule,
 }
 
 const LNER_CLAIM_URL: &str = "https://delayrepay.lner.co.uk/delayrepayV2/";
@@ -132,6 +216,7 @@ pub const OPERATORS: &[OperatorRule] = &[
         scheme: Scheme::Dr30,
         claim_url: LNER_CLAIM_URL,
         room_supplement: false,
+        claim: DR30_CLAIM,
     },
     OperatorRule {
         name: "CrossCountry",
@@ -140,6 +225,7 @@ pub const OPERATORS: &[OperatorRule] = &[
         scheme: Scheme::Dr30,
         claim_url: "https://delayrepay.crosscountrytrains.co.uk/",
         room_supplement: false,
+        claim: DR30_CLAIM,
     },
     OperatorRule {
         name: "ScotRail",
@@ -148,6 +234,7 @@ pub const OPERATORS: &[OperatorRule] = &[
         scheme: Scheme::Dr30,
         claim_url: "https://www.scotrail.co.uk/plan-your-journey/our-delay-repay-guarantee",
         room_supplement: false,
+        claim: DR30_CLAIM,
     },
     // Not "caledonian" alone: Caledonian MacBrayne is a ferry operator.
     OperatorRule {
@@ -157,6 +244,7 @@ pub const OPERATORS: &[OperatorRule] = &[
         scheme: Scheme::Dr30,
         claim_url: "https://www.sleeper.scot/help-support/after-your-trip/",
         room_supplement: true,
+        claim: DR30_CLAIM,
     },
     OperatorRule {
         name: "Hull Trains",
@@ -165,6 +253,7 @@ pub const OPERATORS: &[OperatorRule] = &[
         scheme: Scheme::Dr30,
         claim_url: "https://www.hulltrains.co.uk/support-and-contact/refunds-and-compensation",
         room_supplement: false,
+        claim: DR30_CLAIM,
     },
     OperatorRule {
         name: "Lumo",
@@ -173,6 +262,7 @@ pub const OPERATORS: &[OperatorRule] = &[
         scheme: Scheme::Dr30,
         claim_url: "https://www.lumo.co.uk/help/delay-repay",
         room_supplement: false,
+        claim: DR30_CLAIM,
     },
     OperatorRule {
         name: "Heathrow Express",
@@ -181,6 +271,7 @@ pub const OPERATORS: &[OperatorRule] = &[
         scheme: Scheme::HeathrowExpress,
         claim_url: "https://www.heathrowexpress.com/contact-us",
         room_supplement: false,
+        claim: OVER_30_CLAIM,
     },
     OperatorRule {
         name: "Elizabeth line",
@@ -189,6 +280,7 @@ pub const OPERATORS: &[OperatorRule] = &[
         scheme: Scheme::OwnScheme,
         claim_url: TFL_CLAIM_URL,
         room_supplement: false,
+        claim: OVER_30_CLAIM,
     },
     OperatorRule {
         name: "London Overground",
@@ -197,6 +289,7 @@ pub const OPERATORS: &[OperatorRule] = &[
         scheme: Scheme::OwnScheme,
         claim_url: TFL_CLAIM_URL,
         room_supplement: false,
+        claim: OVER_30_CLAIM,
     },
     OperatorRule {
         name: "Merseyrail",
@@ -205,6 +298,7 @@ pub const OPERATORS: &[OperatorRule] = &[
         scheme: Scheme::OwnScheme,
         claim_url: "https://www.merseyrail.org/help-support/refunds-and-compensation/refunds-day-tickets/",
         room_supplement: false,
+        claim: OVER_30_CLAIM,
     },
     OperatorRule {
         name: "Grand Central",
@@ -213,6 +307,10 @@ pub const OPERATORS: &[OperatorRule] = &[
         scheme: Scheme::OwnScheme,
         claim_url: "https://www.grandcentralrail.com/help/refunds-and-compensation",
         room_supplement: false,
+        claim: ClaimRule {
+            min_delay_minutes: 60,
+            window_days: 28,
+        },
     },
 ];
 
@@ -639,6 +737,26 @@ pub fn claim_url_for(operator: &str) -> &'static str {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn every_listed_operator_has_a_claim_rule_and_the_default_is_dr15_28_days() {
+        assert_eq!(
+            DEFAULT_CLAIM_RULE,
+            ClaimRule {
+                min_delay_minutes: 15,
+                window_days: 28
+            }
+        );
+        assert_eq!(claim_rule_for(None), DEFAULT_CLAIM_RULE);
+        assert_eq!(claim_rule_for(Some("ZZ")), DEFAULT_CLAIM_RULE);
+        for rule in OPERATORS {
+            assert!(rule.claim.window_days > 0, "{}", rule.name);
+            assert!(rule.claim.min_delay_minutes >= 15, "{}", rule.name);
+        }
+        assert_eq!(claim_rule_for(Some("gr")).min_delay_minutes, 30);
+        assert_eq!(claim_rule_for(Some("XR")).min_delay_minutes, 31);
+        assert_eq!(claim_rule_for(Some("GC")).min_delay_minutes, 60);
+    }
+
     use super::*;
     use crate::data::stop_delay::{DelayBasis, StopDelay};
 

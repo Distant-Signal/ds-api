@@ -21,8 +21,10 @@ journey share link.
   `Cache-Control: private`, `404` for any token that doesn't work. A plan,
   not live status: one event per journey from a week ago on, with its two
   ends and first departure only, and a whole-day claim-deadline event
-  (alarm 7 days earlier) for a journey that arrived 15 or more minutes late
-  or had a cancelled train, while its 28-day window is open.
+  (alarm 7 days earlier) for a journey that arrived at least its operator's
+  minimum delay late (15, 30, 31 or 60 minutes) or had a cancelled train,
+  while the operator's claim window (28 days for every operator checked)
+  is open (`delay_repay_rules::claim_rule_for`, docs/calendar-feed.md).
 - `GET /Journeys/{id}/calendar.ics` downloads one of the caller's own
   journeys; session cookie only.
 - `GET /public/auth/session` gains `calendarFeedEnabled` (false logged out).
