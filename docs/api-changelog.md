@@ -38,6 +38,40 @@ outbound webhook destinations, without the encrypted secret; always empty
 until the webhook settings routes ship), for ds-core's `webhook_destinations`
 table. Account deletion removes them with the user.
 
+## 2026-11-09: Outbound webhooks
+
+Notifications can also go to a user's own webhook destinations (DS-415;
+ds-core's `webhook_destinations` table, ds-workers' notifier). Additive. Off
+unless `WEBHOOKS_ENABLED` (the chart's `api.webhooks.enabled`, default
+false): until then every route below is `404 feature_disabled`. Secrets are
+encrypted at rest (AES-256-GCM) with the key ring in `WEBHOOK_SECRET_KEYS`;
+enabled without a usable one the routes stay off and the log says so. The
+notifier sends only with its own `WEBHOOKS_ENABLED` and the same key ring,
+which waits for the chart's egress policy.
+
+- `GET /public/account/webhooks` lists the presets (`generic`, `ntfy`,
+  `gotify`, each with whether a `secret` is `none`, `optional` or
+  `required`), the cap (`maxDestinations`, 5) and the user's destinations.
+  A destination has `id`, `kind`, `name`, `url`, `hasSecret`, `enabled`,
+  `disabledReason`, `lastSuccessAt`, `lastFailureAt`, `lastError` and
+  `createdAt`. A secret is never returned.
+- `POST /public/account/webhooks` `{kind, name, url, secret?}` creates one:
+  an `https` address that resolves to a public address (`400` otherwise),
+  `409 webhook_limit` at the cap and `409 webhook_exists` for a repeated
+  address. A `generic` destination gets a generated signing secret in the
+  `201` response's `secret`, once. `ntfy` takes an optional access token and
+  `gotify` its app token as `secret`.
+- `PATCH /public/account/webhooks/{id}` `{enabled}` switches one; turning it
+  on clears the failure count and `disabledReason` the notifier set when it
+  turned the destination off after repeated failures.
+  `DELETE /public/account/webhooks/{id}` deletes one (`204`).
+- Session cookie only, with the same-origin check on the mutations; a
+  personal token or delegated grant cannot reach them.
+- `GET /public/auth/session` gains `webhooksEnabled` (false logged out).
+- The signed JSON a `generic` destination receives is documented as the
+  OpenAPI document's `webhooks.notification` and the `WebhookNotification`
+  schema (`/v1/openapi.json`).
+
 ## 2026-11-09: Journey calendar feed and Delay Repay reminders
 
 An opt-in iCalendar feed of the caller's journeys, a single-journey

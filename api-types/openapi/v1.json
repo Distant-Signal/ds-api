@@ -4134,6 +4134,80 @@
             "type": "string"
           }
         ]
+      },
+      "WebhookNotification": {
+        "description": "One notification, with the same text a push shows.",
+        "properties": {
+          "attribution": {
+            "properties": {
+              "text": {
+                "type": "string"
+              },
+              "url": {
+                "description": "Where the data credits are.",
+                "type": "string"
+              }
+            },
+            "required": [
+              "text"
+            ],
+            "type": "object"
+          },
+          "body": {
+            "type": "string"
+          },
+          "delivery_id": {
+            "description": "Stable across a delivery's retries: de-duplicate on it.",
+            "type": "string"
+          },
+          "event": {
+            "enum": [
+              "line_status",
+              "train_update",
+              "stop_skipped",
+              "journey_attention",
+              "journey_break",
+              "leave_by",
+              "morning_summary"
+            ],
+            "type": "string"
+          },
+          "occurred_at": {
+            "format": "date-time",
+            "type": "string"
+          },
+          "schema_version": {
+            "const": 1,
+            "type": "integer"
+          },
+          "tag": {
+            "description": "A later notification with the same tag replaces an earlier one.",
+            "type": "string"
+          },
+          "title": {
+            "type": "string"
+          },
+          "urgent": {
+            "type": "boolean"
+          },
+          "url": {
+            "description": "The page the notification opens. A path when the operator has not set a site address.",
+            "type": "string"
+          }
+        },
+        "required": [
+          "schema_version",
+          "delivery_id",
+          "event",
+          "occurred_at",
+          "title",
+          "body",
+          "url",
+          "tag",
+          "urgent",
+          "attribution"
+        ],
+        "type": "object"
       }
     },
     "securitySchemes": {
@@ -5383,5 +5457,65 @@
     {
       "url": "https://ds-api.cursed.solutions"
     }
-  ]
+  ],
+  "webhooks": {
+    "notification": {
+      "post": {
+        "description": "Signed with the destination's secret: `X-DS-Signature` is `v1=` and the hex HMAC-SHA256 of `<X-DS-Timestamp>.<body>`. Reject a timestamp more than a few minutes old. Answer with any 2xx; a server error, 408 or 429 is retried with backoff, any other 4xx is not. A destination that keeps failing is turned off.",
+        "operationId": "webhookNotification",
+        "parameters": [
+          {
+            "in": "header",
+            "name": "X-DS-Event",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-DS-Delivery",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "description": "Unix seconds.",
+            "in": "header",
+            "name": "X-DS-Timestamp",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-DS-Signature",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/WebhookNotification"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Received."
+          }
+        },
+        "security": [],
+        "summary": "A notification, sent to a generic webhook destination"
+      }
+    }
+  }
 }

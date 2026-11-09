@@ -85,6 +85,7 @@ pub mod transit;
 pub mod trips;
 pub mod usage;
 pub mod version;
+pub mod webhooks;
 
 /// A field that is present, `null` or not: `Some(None)` for `null`.
 #[expect(
@@ -199,6 +200,7 @@ pub fn public_router() -> Router {
         .merge(account::router())
         .merge(connected_apps::router())
         .merge(personal_tokens::router())
+        .merge(webhooks::router())
         .merge(groups::router())
         .merge(station_stats::router())
         .merge(departures::router())

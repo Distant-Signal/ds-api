@@ -206,6 +206,10 @@ fn visit_roots(v: &mut Collector) {
     v.visit::<crate::routes::calendar::CalendarFeedCreated>();
     v.visit::<crate::routes::personal_tokens::CreatePersonalTokenRequest>();
     v.visit::<crate::routes::personal_tokens::CreatedPersonalTokenResponse>();
+    v.visit::<crate::routes::webhooks::WebhooksResponse>();
+    v.visit::<crate::routes::webhooks::CreateWebhookRequest>();
+    v.visit::<crate::routes::webhooks::UpdateWebhookRequest>();
+    v.visit::<crate::routes::webhooks::CreatedWebhookResponse>();
 }
 
 /// Collects one declaration per exportable type, keyed by its TypeScript
