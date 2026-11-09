@@ -4,6 +4,12 @@ pub mod account;
 pub mod admin;
 pub mod auth;
 pub mod calendar;
+#[cfg(test)]
+#[expect(
+    clippy::too_many_lines,
+    reason = "test code: scenario tests read top to bottom"
+)]
+mod calendar_db_tests;
 pub mod connected_apps;
 #[cfg(test)]
 #[expect(
