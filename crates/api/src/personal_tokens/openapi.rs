@@ -426,6 +426,81 @@ fn attribution_schema() -> Value {
     })
 }
 
+/// The body Distant Signal posts to a `generic` webhook destination
+/// (DS-415). Built by ds-workers' notifier (`webhook.rs`), which owns the
+/// shape; this is its contract. Additive only: a receiver must ignore keys
+/// it does not know.
+fn webhook_notification_schema() -> Value {
+    json!({
+        "type": "object",
+        "description": "One notification, with the same text a push shows.",
+        "required": [
+            "schema_version", "delivery_id", "event", "occurred_at", "title", "body",
+            "url", "tag", "urgent", "attribution"
+        ],
+        "properties": {
+            "schema_version": { "type": "integer", "const": 1 },
+            "delivery_id": {
+                "type": "string",
+                "description": "Stable across a delivery's retries: de-duplicate on it.",
+            },
+            "event": {
+                "type": "string",
+                "enum": [
+                    "line_status", "train_update", "stop_skipped", "journey_attention",
+                    "journey_break", "leave_by", "morning_summary"
+                ],
+            },
+            "occurred_at": { "type": "string", "format": "date-time" },
+            "title": { "type": "string" },
+            "body": { "type": "string" },
+            "url": {
+                "type": "string",
+                "description": "The page the notification opens. A path when the operator has not set a site address.",
+            },
+            "tag": { "type": "string", "description": "A later notification with the same tag replaces an earlier one." },
+            "urgent": { "type": "boolean" },
+            "attribution": {
+                "type": "object",
+                "required": ["text"],
+                "properties": {
+                    "text": { "type": "string" },
+                    "url": { "type": "string", "description": "Where the data credits are." },
+                },
+            },
+        },
+    })
+}
+
+/// The webhook Distant Signal sends, as `OpenAPI` 3.1 `webhooks`.
+fn webhooks() -> Value {
+    json!({
+        "notification": {
+            "post": {
+                "operationId": "webhookNotification",
+                "summary": "A notification, sent to a generic webhook destination",
+                "description": "Signed with the destination's secret: `X-DS-Signature` is \
+                    `v1=` and the hex HMAC-SHA256 of `<X-DS-Timestamp>.<body>`. Reject a \
+                    timestamp more than a few minutes old. Answer with any 2xx; a \
+                    server error, 408 or 429 is retried with backoff, any other 4xx is not. \
+                    A destination that keeps failing is turned off.",
+                "security": [],
+                "parameters": [
+                    { "name": "X-DS-Event", "in": "header", "required": true, "schema": { "type": "string" } },
+                    { "name": "X-DS-Delivery", "in": "header", "required": true, "schema": { "type": "string" } },
+                    { "name": "X-DS-Timestamp", "in": "header", "required": true, "schema": { "type": "string" }, "description": "Unix seconds." },
+                    { "name": "X-DS-Signature", "in": "header", "required": true, "schema": { "type": "string" } },
+                ],
+                "requestBody": {
+                    "required": true,
+                    "content": { "application/json": { "schema": { "$ref": "#/components/schemas/WebhookNotification" } } },
+                },
+                "responses": { "200": { "description": "Received." } },
+            },
+        },
+    })
+}
+
 fn build() -> Value {
     let mut generator = Generator::new();
     let mut paths = Map::new();
@@ -439,6 +514,10 @@ fn build() -> Value {
         schemas.insert(name, schema);
     }
     schemas.insert("Attribution".to_string(), attribution_schema());
+    schemas.insert(
+        "WebhookNotification".to_string(),
+        webhook_notification_schema(),
+    );
     schemas.insert(
         "ErrorBody".to_string(),
         json!({
@@ -473,6 +552,7 @@ fn build() -> Value {
         "servers": [{ "url": SERVER_URL }],
         "security": [{ "personalToken": [] }],
         "paths": paths,
+        "webhooks": webhooks(),
         "components": {
             "securitySchemes": {
                 "personalToken": {

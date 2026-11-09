@@ -121,7 +121,7 @@ fn database_error(operation: &'static str) -> impl Fn(anyhow::Error) -> Response
 }
 
 /// The strict check `logout` and the connected-apps mutations use.
-fn same_origin(app: &App, headers: &HeaderMap) -> bool {
+pub(crate) fn same_origin(app: &App, headers: &HeaderMap) -> bool {
     match auth::expected_browser_origin(&app.config.sso_redirect_url) {
         None => true,
         Some(expected) => auth::is_same_origin(
@@ -132,7 +132,7 @@ fn same_origin(app: &App, headers: &HeaderMap) -> bool {
     }
 }
 
-fn cross_site() -> Response {
+pub(crate) fn cross_site() -> Response {
     error_response(
         StatusCode::FORBIDDEN,
         "cross_site",

@@ -747,6 +747,9 @@ pub(crate) struct SessionResponse {
     /// (`CALENDAR_FEED_ENABLED`), so Preferences offers them; `false`
     /// when logged out.
     calendar_feed_enabled: bool,
+    /// Whether outbound webhooks can be set up (`WEBHOOKS_ENABLED`), so
+    /// the notification settings offer them; `false` when logged out.
+    webhooks_enabled: bool,
 }
 
 async fn session(
@@ -766,6 +769,7 @@ async fn session(
             regular_journey_recurrence_enabled: crate::data::recurrence_pattern::enabled(),
             regular_journey_day_overrides_enabled: crate::data::day_overrides::enabled(),
             calendar_feed_enabled: crate::data::calendar_feed::enabled(),
+            webhooks_enabled: crate::data::webhooks::enabled(),
         }),
         None => Json(SessionResponse {
             authenticated: false,
@@ -778,6 +782,7 @@ async fn session(
             regular_journey_recurrence_enabled: false,
             regular_journey_day_overrides_enabled: false,
             calendar_feed_enabled: false,
+            webhooks_enabled: false,
         }),
     }
 }
@@ -886,6 +891,7 @@ mod tests {
             regular_journey_recurrence_enabled: false,
             regular_journey_day_overrides_enabled: false,
             calendar_feed_enabled: false,
+            webhooks_enabled: false,
         };
         let json = serde_json::to_value(&response).expect("serializes");
         assert_eq!(
@@ -908,6 +914,7 @@ mod tests {
             regular_journey_recurrence_enabled: false,
             regular_journey_day_overrides_enabled: false,
             calendar_feed_enabled: false,
+            webhooks_enabled: false,
         };
         let json = serde_json::to_value(&response).expect("serializes");
         assert_eq!(json["groups"], serde_json::json!([]));

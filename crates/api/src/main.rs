@@ -241,6 +241,8 @@ fn config_defaults() -> ds_runtime::service_args::ConfigDefaults {
             Some("false"),
         )
         .env(data::calendar_feed::CALENDAR_ENABLED_ENV, Some("false"))
+        .env(data::webhooks::WEBHOOKS_ENABLED_ENV, Some("false"))
+        .env(data::webhooks::SECRET_KEYS_ENV, None)
         .env(
             "REGULAR_PLAN_SWEEP_ENABLED",
             Some(&plan_sweep.enabled.to_string()),
@@ -305,6 +307,13 @@ async fn server_main() -> anyhow::Result<()> {
         enabled = calendar_feed,
         "journey calendar feed ({})",
         data::calendar_feed::CALENDAR_ENABLED_ENV
+    );
+    let webhooks = data::webhooks::init_from_env();
+    tracing::info!(
+        enabled = webhooks,
+        "outbound webhook settings ({}, with {})",
+        data::webhooks::WEBHOOKS_ENABLED_ENV,
+        data::webhooks::SECRET_KEYS_ENV
     );
 
     // Permissive ORIGIN, deliberately non-credentialed. The four

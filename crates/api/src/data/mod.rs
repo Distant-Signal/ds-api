@@ -95,5 +95,6 @@ pub mod tube_link_walks;
 pub mod unlisted_links;
 pub mod usage;
 pub mod users;
+pub mod webhooks;
 
 pub use common::{LineDefinition, Station};
