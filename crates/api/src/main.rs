@@ -38,7 +38,11 @@ fn loggable_request_uri(
 const MAX_LOGGED_UNMATCHED_PATH: usize = 200;
 
 fn redact_unmatched_path(path: &str) -> String {
-    const SECRET_PREFIXES: [&str; 2] = ["/Journeys/shared/", "/public/groups/join/"];
+    const SECRET_PREFIXES: [&str; 3] = [
+        "/Journeys/shared/",
+        "/public/groups/join/",
+        "/public/calendar/",
+    ];
     for prefix in SECRET_PREFIXES {
         if let Some(rest) = path.strip_prefix(prefix)
             && !rest.is_empty()
@@ -236,6 +240,7 @@ fn config_defaults() -> ds_runtime::service_args::ConfigDefaults {
             data::day_overrides::DAY_OVERRIDES_ENABLED_ENV,
             Some("false"),
         )
+        .env(data::calendar_feed::CALENDAR_ENABLED_ENV, Some("false"))
         .env(
             "REGULAR_PLAN_SWEEP_ENABLED",
             Some(&plan_sweep.enabled.to_string()),
@@ -293,6 +298,13 @@ async fn server_main() -> anyhow::Result<()> {
         enabled = day_overrides,
         "regular journey different times on some days ({})",
         data::day_overrides::DAY_OVERRIDES_ENABLED_ENV
+    );
+
+    let calendar_feed = data::calendar_feed::init_from_env();
+    tracing::info!(
+        enabled = calendar_feed,
+        "journey calendar feed ({})",
+        data::calendar_feed::CALENDAR_ENABLED_ENV
     );
 
     // Permissive ORIGIN, deliberately non-credentialed. The four

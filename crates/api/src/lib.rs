@@ -38,6 +38,7 @@ pub mod auth;
 pub mod bank_holidays_sync;
 pub mod data;
 pub mod edge;
+pub mod ics;
 pub mod journey_break_sweep;
 pub mod personal_tokens;
 pub use ds_store::migrate;

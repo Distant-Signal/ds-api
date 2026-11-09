@@ -107,6 +107,10 @@ pub fn router() -> Router {
             axum::routing::delete(delete_journey_leg).put(put_journey_leg),
         )
         .route(
+            "/Journeys/{journey_id}/calendar.ics",
+            axum::routing::get(super::calendar::journey_calendar),
+        )
+        .route(
             "/Journeys/{journey_id}/share-link",
             axum::routing::post(create_journey_share_link).delete(revoke_journey_share_link),
         )

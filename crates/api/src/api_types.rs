@@ -202,6 +202,8 @@ fn visit_roots(v: &mut Collector) {
     v.visit::<crate::routes::train::RenameRequest>();
     // Personal API tokens (Connected apps).
     v.visit::<crate::routes::personal_tokens::PersonalTokensResponse>();
+    v.visit::<crate::routes::calendar::CalendarFeedStatus>();
+    v.visit::<crate::routes::calendar::CalendarFeedCreated>();
     v.visit::<crate::routes::personal_tokens::CreatePersonalTokenRequest>();
     v.visit::<crate::routes::personal_tokens::CreatedPersonalTokenResponse>();
 }

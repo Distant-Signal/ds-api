@@ -227,6 +227,7 @@ pub fn classify(method: &Method, path: &str) -> Option<LimitClass> {
     if path.starts_with("/Train/by-uid/")
         || is_tfl_arrivals(path)
         || path.starts_with("/public/feeds/")
+        || path.starts_with("/public/calendar/")
         || path.starts_with("/public/island-of-ireland/trains/")
     {
         return Some(LimitClass::TrainByUid);
