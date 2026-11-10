@@ -95,9 +95,9 @@ COPY --from=planner /app/recipe.json recipe.json
 RUN --mount=type=cache,id=cargo-registry,target=/usr/local/cargo/registry,sharing=locked \
     --mount=type=cache,id=cargo-git,target=/usr/local/cargo/git,sharing=locked \
     if [ "${CARGO_PROFILE}" = "release" ]; then \
-      cargo chef cook --release --locked --recipe-path recipe.json --bin api --bin corpus_compare --bin maintenance; \
+      cargo chef cook --release --locked --recipe-path recipe.json --bin api --bin bank_holidays_sync --bin corpus_compare --bin maintenance; \
     else \
-      cargo chef cook --locked --recipe-path recipe.json --bin api --bin corpus_compare --bin maintenance; \
+      cargo chef cook --locked --recipe-path recipe.json --bin api --bin bank_holidays_sync --bin corpus_compare --bin maintenance; \
     fi
 
 COPY . .
@@ -116,9 +116,9 @@ RUN --mount=type=cache,id=cargo-registry,target=/usr/local/cargo/registry,sharin
     --mount=type=cache,id=cargo-git,target=/usr/local/cargo/git,sharing=locked \
     if [ -z "${DS_PROJECT_URL}" ]; then unset DS_PROJECT_URL; fi; \
     if [ "${CARGO_PROFILE}" = "release" ]; then \
-      cargo build --release --locked --bin api --bin corpus_compare --bin maintenance > /tmp/cargo-build.log 2>&1; \
+      cargo build --release --locked --bin api --bin bank_holidays_sync --bin corpus_compare --bin maintenance > /tmp/cargo-build.log 2>&1; \
     else \
-      cargo build --locked --bin api --bin corpus_compare --bin maintenance > /tmp/cargo-build.log 2>&1; \
+      cargo build --locked --bin api --bin bank_holidays_sync --bin corpus_compare --bin maintenance > /tmp/cargo-build.log 2>&1; \
     fi; \
     status=$?; \
     cat /tmp/cargo-build.log; \
@@ -128,6 +128,7 @@ RUN --mount=type=cache,id=cargo-registry,target=/usr/local/cargo/registry,sharin
       exit 1; \
     fi; \
     cp "/app/target/${CARGO_PROFILE}/api" /usr/local/bin/api \
+    && cp "/app/target/${CARGO_PROFILE}/bank_holidays_sync" /usr/local/bin/bank_holidays_sync \
     && cp "/app/target/${CARGO_PROFILE}/corpus_compare" /usr/local/bin/corpus_compare \
     && cp "/app/target/${CARGO_PROFILE}/maintenance" /usr/local/bin/maintenance \
     && rm -rf /app/target /tmp/cargo-build.log
@@ -183,6 +184,9 @@ COPY --from=builder /usr/local/bin/corpus_compare /usr/local/bin/corpus_compare
 # personal-data retention), then exit: the hourly api-maintenance CronJob's
 # command (crates/api/src/bin/maintenance.rs).
 COPY --from=builder /usr/local/bin/maintenance /usr/local/bin/maintenance
+# One fetch of GOV.UK's bank holidays, then exit: the bank-holidays
+# CronJob's command (crates/api/src/bin/bank_holidays_sync.rs).
+COPY --from=builder /usr/local/bin/bank_holidays_sync /usr/local/bin/bank_holidays_sync
 # The TypeScript types generated from this api's request and response types
 # (crates/api/src/api_types.rs) and the personal-token API's OpenAPI
 # document (api-types/openapi/v1.json). The frontend takes its copies from

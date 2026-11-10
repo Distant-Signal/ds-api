@@ -263,6 +263,10 @@ fn config_defaults() -> ds_runtime::service_args::ConfigDefaults {
             "BANK_HOLIDAYS_ENABLED",
             Some(&bank_holidays.enabled.to_string()),
         )
+        .env(
+            "BANK_HOLIDAYS_LOOP_ENABLED",
+            Some(&bank_holidays.loop_enabled.to_string()),
+        )
         .env("BANK_HOLIDAYS_URL", Some(&bank_holidays.url))
         .env(
             "BANK_HOLIDAYS_INTERVAL_HOURS",
@@ -988,11 +992,25 @@ fn spawn_bank_holidays_sync(
     let config = api::bank_holidays_sync::SyncConfig::from_env();
     tracing::info!(
         enabled = config.enabled,
+        loop_enabled = config.loop_enabled,
         interval_hours = config.interval_hours,
-        "bank holidays sync (BANK_HOLIDAYS_ENABLED)"
+        "bank holidays sync (BANK_HOLIDAYS_ENABLED, BANK_HOLIDAYS_LOOP_ENABLED)"
     );
-    if !config.enabled {
-        return None;
+    match config.mode() {
+        api::bank_holidays_sync::Mode::Off => return None,
+        // The bank_holidays_sync CronJob fetches: no lock and no loop
+        // cycle here, only the gauges, read from the table.
+        api::bank_holidays_sync::Mode::GaugesOnly => {
+            tracing::info!(
+                "BANK_HOLIDAYS_LOOP_ENABLED is false: the api does not fetch bank \
+                 holidays (the bank_holidays_sync CronJob does)"
+            );
+            return Some(tokio::spawn(api::bank_holidays_sync::gauge_loop(
+                app.database.clone(),
+                shutdown.triggered(),
+            )));
+        }
+        api::bank_holidays_sync::Mode::Loop => {}
     }
     let pool = app.database.clone();
     let mut runner = ds_store::loops::LoopRunner::new(
