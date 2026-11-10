@@ -21,10 +21,13 @@ pub enum When {
 }
 
 /// One alarm, shown before the event.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Alarm {
     /// Days before the event.
     pub days_before: u32,
+    /// What the alarm says. A pop-up shows only this, not the event's own
+    /// text, so it carries its own hedging.
+    pub text: String,
 }
 
 /// One event.
@@ -129,10 +132,10 @@ pub fn render(calendar: &Calendar) -> String {
         line(format!("SUMMARY:{}", escape_text(&event.summary)));
         line(format!("DESCRIPTION:{}", escape_text(&event.description)));
         line("TRANSP:TRANSPARENT".to_string());
-        if let Some(alarm) = event.alarm {
+        if let Some(alarm) = &event.alarm {
             line("BEGIN:VALARM".to_string());
             line("ACTION:DISPLAY".to_string());
-            line(format!("DESCRIPTION:{}", escape_text(&event.summary)));
+            line(format!("DESCRIPTION:{}", escape_text(&alarm.text)));
             let mut trigger = String::new();
             let _ = write!(trigger, "TRIGGER:-P{}D", alarm.days_before);
             line(trigger);
@@ -195,7 +198,10 @@ mod tests {
                 end: None,
                 summary: "Reminder".to_string(),
                 description: "y".to_string(),
-                alarm: Some(Alarm { days_before: 7 }),
+                alarm: Some(Alarm {
+                    days_before: 7,
+                    text: "Check the rules".to_string(),
+                }),
             },
         ]));
         assert!(doc.starts_with("BEGIN:VCALENDAR\r\nVERSION:2.0\r\n"));
@@ -204,6 +210,7 @@ mod tests {
         assert!(doc.contains("DTSTART:20261110T083000Z\r\n"));
         assert!(doc.contains("DTSTART;VALUE=DATE:20261201\r\n"));
         assert!(doc.contains("TRIGGER:-P7D\r\n"));
+        assert!(doc.contains("ACTION:DISPLAY\r\nDESCRIPTION:Check the rules\r\n"));
         assert_eq!(doc.matches("BEGIN:VEVENT").count(), 2);
     }
 }

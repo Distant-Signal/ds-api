@@ -10,9 +10,9 @@
 //! operator, no ticket, no name the user gave it, no group or share
 //! information.
 //!
-//! Also a Delay Repay reminder per journey that arrived late or had a
-//! cancelled train: a whole-day event on the last day of the claim window
-//! with an alarm a week earlier. The minimum delay and the window are the
+//! Also a Delay Repay reminder per journey that may have arrived late or had
+//! a cancelled train: a whole-day event on the last day of the claim window
+//! with an alarm a week earlier, worded as a prompt to check. The minimum delay and the window are the
 //! last train's operator's own (`delay_repay_rules::claim_rule_for`, with
 //! its sources), Delay Repay 15 and 28 days when the operator is not known.
 //! Like `delay_repay_rules` it estimates and links out, and never submits
@@ -27,9 +27,10 @@ use std::collections::HashMap;
 
 use chrono::{DateTime, Duration, NaiveDate, Utc};
 
-use crate::data::delay_repay_rules::claim_rule_for;
+use crate::data::delay_repay_rules::{claim_rule_for, operator_rule_for};
 use crate::data::journeys::JourneyListItem;
 use crate::ics::{Alarm, Event, When};
+use crate::routes::feeds::Site;
 
 /// The environment variable that turns the calendar feed on.
 pub const CALENDAR_ENABLED_ENV: &str = "CALENDAR_FEED_ENABLED";
@@ -128,8 +129,9 @@ impl From<&JourneyListItem> for JourneyFacts {
 
 /// The text every event carries: the credits the data behind it needs
 /// (`routes::feeds::Credit`, as the Atom feeds do) and the
-/// non-affiliation statement.
-pub fn credits_text(untracked: bool) -> String {
+/// non-affiliation statement, then the full credits page's address (a
+/// calendar app cannot follow a relative path, so it is absolute).
+pub fn credits_text(untracked: bool, origin: &str) -> String {
     use crate::routes::feeds::{Credit, NON_AFFILIATION_STATEMENT};
     let mut credits = vec![Credit::NationalRail, Credit::NetworkRail];
     if untracked {
@@ -137,35 +139,42 @@ pub fn credits_text(untracked: bool) -> String {
     }
     let credits: Vec<String> = credits.into_iter().map(Credit::text).collect();
     format!(
-        "{} {NON_AFFILIATION_STATEMENT} Full credits: /attribution",
+        "Credits: {} {NON_AFFILIATION_STATEMENT} Full credits: {origin}/attribution",
         credits.join(" ")
     )
 }
 
 /// The event for a journey's plan, or `None` when it has no known start
 /// or set off before `since`.
-pub fn journey_event(facts: &JourneyFacts, host: &str, since: DateTime<Utc>) -> Option<Event> {
+pub fn journey_event(facts: &JourneyFacts, site: &Site, since: DateTime<Utc>) -> Option<Event> {
     let departs_at = facts.departs_at?;
     if departs_at < since {
         return None;
     }
     Some(Event {
-        uid: format!("journey-{}@{host}", facts.id),
+        uid: format!("journey-{}@{}", facts.id, site.host),
         start: When::At(departs_at),
         end: facts.planned_end.filter(|end| *end > departs_at),
         summary: format!("Journey: {} to {}", facts.origin, facts.destination),
         description: format!(
             "Planned in Distant Signal (unofficial). Times are as planned when this \
              calendar was made; check Distant Signal for the live train. {}",
-            credits_text(facts.untracked)
+            credits_text(facts.untracked, &site.origin)
         ),
         alarm: None,
     })
 }
 
-/// The Delay Repay reminder for a journey that is over and arrived late (or
-/// had a cancelled train), while its claim window is still open on `today`.
-pub fn claim_reminder(facts: &JourneyFacts, host: &str, today: NaiveDate) -> Option<Event> {
+/// The Delay Repay reminder for a journey that is over and may have arrived
+/// late (or had a cancelled train), while its claim window is still open on
+/// `today`.
+///
+/// Worded as a prompt to check, never as a deadline or a fact: the date is
+/// an estimate from the service date and the operator's window, the delay
+/// is Distant Signal's own reading for the last train only, and Distant
+/// Signal does not know the ticket. The alarm carries its own hedge because
+/// a pop-up shows nothing else.
+pub fn claim_reminder(facts: &JourneyFacts, site: &Site, today: NaiveDate) -> Option<Event> {
     if !facts.travelled || !facts.has_train_leg {
         return None;
     }
@@ -180,31 +189,65 @@ pub fn claim_reminder(facts: &JourneyFacts, host: &str, today: NaiveDate) -> Opt
     if deadline < today {
         return None;
     }
+    let date = facts.service_date.format("%-d %B %Y");
+    // A rule is worded as a company's own only when the company has one;
+    // the default is the usual rule, not any one company's.
+    let (delay_rule, window_rule) = match operator_rule_for(facts.operator_atoc.as_deref()) {
+        Some(operator) => (
+            format!(
+                "{} usually pays from a delay of {} minutes.",
+                operator.name, rule.min_delay_minutes
+            ),
+            format!(
+                "{} usually takes claims for up to {} days after the journey.",
+                operator.name, rule.window_days
+            ),
+        ),
+        None => (
+            format!(
+                "Most train companies pay from a delay of {} minutes, but yours may differ.",
+                rule.min_delay_minutes
+            ),
+            format!(
+                "Most train companies take claims for up to {} days after the journey, but \
+                 yours may differ.",
+                rule.window_days
+            ),
+        ),
+    };
     let what = if facts.cancelled {
-        "had a cancelled train"
+        format!(
+            "Your journey on {date} included a cancelled train. You may be able to claim \
+             Delay Repay for a cancellation, depending on what happened to your journey and \
+             your ticket. {window_rule}"
+        )
     } else {
-        "arrived late"
+        format!(
+            "Your journey on {date} may have arrived late enough to claim Delay Repay. \
+             {delay_rule} {window_rule}"
+        )
     };
     Some(Event {
-        uid: format!("claim-{}@{host}", facts.id),
+        uid: format!("claim-{}@{}", facts.id, site.host),
         start: When::Day(deadline),
         end: None,
         summary: format!(
-            "Delay Repay claim deadline: {} to {}",
+            "Check Delay Repay: {} to {}",
             facts.origin, facts.destination
         ),
         description: format!(
-            "Your journey on {} {what}. You may be able to claim Delay Repay from the \
-             train company, which pays from a delay of {} minutes and takes claims for {} \
-             days after the journey. Check your train company's own page, which is the one \
-             that counts. Distant Signal estimates this and never makes a claim for you. {}",
-            facts.service_date.format("%-d %B %Y"),
-            rule.min_delay_minutes,
-            rule.window_days,
-            credits_text(facts.untracked)
+            "{what} Check your train company's own page, which is the one that counts. \
+             Distant Signal estimates this from its own train data, does not know your ticket \
+             and never makes a claim for you. {}",
+            credits_text(facts.untracked, &site.origin)
         ),
         alarm: Some(Alarm {
             days_before: REMINDER_DAYS_BEFORE,
+            text: format!(
+                "Check Delay Repay for {} to {}. Check your train company's own rules: claims \
+                 are usually open for up to {} days after the journey.",
+                facts.origin, facts.destination, rule.window_days
+            ),
         }),
     })
 }
@@ -214,7 +257,7 @@ pub fn claim_reminder(facts: &JourneyFacts, host: &str, today: NaiveDate) -> Opt
 pub async fn feed_events(
     pool: &sqlx::PgPool,
     user_id: &str,
-    host: &str,
+    site: &Site,
     now: DateTime<Utc>,
 ) -> anyhow::Result<Vec<Event>> {
     let rows = crate::data::journeys::list_journeys_for_user(
@@ -223,7 +266,7 @@ pub async fn feed_events(
         crate::data::journeys::ListInclude::default(),
     )
     .await?;
-    events_for_rows(pool, &rows, host, now, now - Duration::days(PAST_DAYS)).await
+    events_for_rows(pool, &rows, site, now, now - Duration::days(PAST_DAYS)).await
 }
 
 /// The ATOC code of each journey's last train's operator, by journey id,
@@ -267,12 +310,12 @@ async fn operators_by_journey(
 pub async fn events_for_rows(
     pool: &sqlx::PgPool,
     rows: &[JourneyListItem],
-    host: &str,
+    site: &Site,
     now: DateTime<Utc>,
     since: DateTime<Utc>,
 ) -> anyhow::Result<Vec<Event>> {
     let operators = operators_by_journey(pool, rows).await?;
-    Ok(events_for(rows, &operators, host, now, since))
+    Ok(events_for(rows, &operators, site, now, since))
 }
 
 /// The mapping from the rows and each journey's operator code.
@@ -283,7 +326,7 @@ pub async fn events_for_rows(
 pub fn events_for(
     rows: &[JourneyListItem],
     operators: &HashMap<i64, String>,
-    host: &str,
+    site: &Site,
     now: DateTime<Utc>,
     since: DateTime<Utc>,
 ) -> Vec<Event> {
@@ -297,9 +340,9 @@ pub fn events_for(
         .collect();
     let mut events: Vec<Event> = facts
         .iter()
-        .filter_map(|f| journey_event(f, host, since))
+        .filter_map(|f| journey_event(f, site, since))
         .collect();
-    events.extend(facts.iter().filter_map(|f| claim_reminder(f, host, today)));
+    events.extend(facts.iter().filter_map(|f| claim_reminder(f, site, today)));
     events
 }
 
@@ -325,6 +368,13 @@ mod tests {
         }
     }
 
+    fn site() -> Site {
+        Site {
+            origin: "https://ds.example".to_string(),
+            host: "ds.example".to_string(),
+        }
+    }
+
     fn now() -> DateTime<Utc> {
         Utc.with_ymd_and_hms(2026, 11, 9, 12, 0, 0).unwrap()
     }
@@ -335,9 +385,19 @@ mod tests {
 
     #[test]
     fn an_event_has_the_two_ends_and_the_start_and_nothing_else_about_the_trip() {
-        let event = journey_event(&facts(), "ds.example", since()).expect("event");
+        let event = journey_event(&facts(), &site(), since()).expect("event");
         assert_eq!(event.summary, "Journey: York to London Kings Cross");
         assert_eq!(event.uid, "journey-7@ds.example");
+        assert!(
+            event
+                .description
+                .contains("Credits: powered by NationalRail")
+        );
+        assert!(
+            event
+                .description
+                .ends_with("Full credits: https://ds.example/attribution")
+        );
         assert_eq!(event.start, When::At(facts().departs_at.unwrap()));
         assert!(event.description.contains("powered by NationalRail"));
         assert!(event.description.contains("not affiliated"));
@@ -348,7 +408,7 @@ mod tests {
     fn a_journey_with_an_untracked_leg_credits_tfl() {
         let mut f = facts();
         f.untracked = true;
-        let event = journey_event(&f, "h", since()).expect("event");
+        let event = journey_event(&f, &site(), since()).expect("event");
         assert!(event.description.contains("Powered by TfL Open Data"));
     }
 
@@ -356,18 +416,18 @@ mod tests {
     fn journeys_before_the_window_or_with_no_start_have_no_event() {
         let mut f = facts();
         f.departs_at = Some(now() - Duration::days(8));
-        assert!(journey_event(&f, "h", since()).is_none());
+        assert!(journey_event(&f, &site(), since()).is_none());
         f.departs_at = None;
-        assert!(journey_event(&f, "h", since()).is_none());
+        assert!(journey_event(&f, &site(), since()).is_none());
     }
 
     #[test]
     fn a_planned_end_is_kept_only_after_the_start() {
         let mut f = facts();
         f.planned_end = Some(f.departs_at.unwrap() + Duration::minutes(20));
-        assert!(journey_event(&f, "h", since()).unwrap().end.is_some());
+        assert!(journey_event(&f, &site(), since()).unwrap().end.is_some());
         f.planned_end = Some(f.departs_at.unwrap() - Duration::minutes(1));
-        assert!(journey_event(&f, "h", since()).unwrap().end.is_none());
+        assert!(journey_event(&f, &site(), since()).unwrap().end.is_none());
     }
 
     fn late() -> JourneyFacts {
@@ -380,14 +440,25 @@ mod tests {
     #[test]
     fn a_late_journey_gets_a_reminder_on_the_last_claim_day_with_an_alarm() {
         let today = NaiveDate::from_ymd_opt(2026, 11, 11).unwrap();
-        let event = claim_reminder(&late(), "h", today).expect("reminder");
+        let event = claim_reminder(&late(), &site(), today).expect("reminder");
         assert_eq!(
             event.start,
             When::Day(NaiveDate::from_ymd_opt(2026, 12, 8).unwrap())
         );
-        assert_eq!(event.alarm, Some(Alarm { days_before: 7 }));
+        let alarm = event.alarm.expect("alarm");
+        assert_eq!(alarm.days_before, 7);
+        assert!(alarm.text.contains("Check your train company's own rules"));
+        assert!(alarm.text.contains("up to 28 days"));
+        assert!(!alarm.text.to_lowercase().contains("deadline"));
+        assert_eq!(
+            event.summary,
+            "Check Delay Repay: York to London Kings Cross"
+        );
+        assert!(!event.summary.to_lowercase().contains("deadline"));
+        assert!(event.description.contains("may have arrived late"));
+        assert!(!event.description.contains("arrived late."));
         assert!(event.description.contains("never makes a claim"));
-        assert_eq!(event.uid, "claim-7@h");
+        assert_eq!(event.uid, "claim-7@ds.example");
     }
 
     #[test]
@@ -396,7 +467,10 @@ mod tests {
         f.final_delay_minutes = None;
         f.cancelled = true;
         let today = NaiveDate::from_ymd_opt(2026, 11, 11).unwrap();
-        assert!(claim_reminder(&f, "h", today).is_some());
+        let event = claim_reminder(&f, &site(), today).expect("reminder");
+        assert!(event.description.contains("included a cancelled train"));
+        assert!(!event.description.contains("from a delay of"));
+        assert!(event.description.contains("depending on what happened"));
     }
 
     #[test]
@@ -404,17 +478,17 @@ mod tests {
         let today = NaiveDate::from_ymd_opt(2026, 11, 11).unwrap();
         let mut f = late();
         f.final_delay_minutes = Some(14);
-        assert!(claim_reminder(&f, "h", today).is_none());
+        assert!(claim_reminder(&f, &site(), today).is_none());
         let mut f = late();
         f.travelled = false;
-        assert!(claim_reminder(&f, "h", today).is_none());
+        assert!(claim_reminder(&f, &site(), today).is_none());
         let mut f = late();
         f.has_train_leg = false;
-        assert!(claim_reminder(&f, "h", today).is_none());
+        assert!(claim_reminder(&f, &site(), today).is_none());
         let after = NaiveDate::from_ymd_opt(2026, 12, 9).unwrap();
-        assert!(claim_reminder(&late(), "h", after).is_none());
+        assert!(claim_reminder(&late(), &site(), after).is_none());
         let on_day = NaiveDate::from_ymd_opt(2026, 12, 8).unwrap();
-        assert!(claim_reminder(&late(), "h", on_day).is_some());
+        assert!(claim_reminder(&late(), &site(), on_day).is_some());
     }
 
     #[test]
@@ -423,20 +497,24 @@ mod tests {
         // 22 minutes late: worth a claim at a DR15 operator, not at LNER.
         let mut f = late();
         f.operator_atoc = Some("GR".to_string());
-        assert!(claim_reminder(&f, "h", today).is_none());
+        assert!(claim_reminder(&f, &site(), today).is_none());
         f.final_delay_minutes = Some(30);
-        assert!(claim_reminder(&f, "h", today).is_some());
+        assert!(claim_reminder(&f, &site(), today).is_some());
         // "More than 30 minutes" starts at 31; Grand Central pays from 60.
         f.operator_atoc = Some("XR".to_string());
-        assert!(claim_reminder(&f, "h", today).is_none());
+        assert!(claim_reminder(&f, &site(), today).is_none());
         f.final_delay_minutes = Some(31);
-        assert!(claim_reminder(&f, "h", today).is_some());
+        assert!(claim_reminder(&f, &site(), today).is_some());
         f.operator_atoc = Some("GC".to_string());
-        assert!(claim_reminder(&f, "h", today).is_none());
+        assert!(claim_reminder(&f, &site(), today).is_none());
         f.final_delay_minutes = Some(60);
-        let event = claim_reminder(&f, "h", today).expect("reminder");
-        assert!(event.description.contains("from a delay of 60 minutes"));
-        assert!(event.description.contains("28 days"));
+        let event = claim_reminder(&f, &site(), today).expect("reminder");
+        assert!(
+            event
+                .description
+                .contains("Grand Central usually pays from a delay of 60 minutes")
+        );
+        assert!(event.description.contains("up to 28 days"));
     }
 
     #[test]
@@ -444,9 +522,15 @@ mod tests {
         let today = NaiveDate::from_ymd_opt(2026, 11, 11).unwrap();
         let mut f = late();
         f.operator_atoc = Some("ZZ".to_string());
-        let event = claim_reminder(&f, "h", today).expect("reminder");
-        assert!(event.description.contains("from a delay of 15 minutes"));
+        let event = claim_reminder(&f, &site(), today).expect("reminder");
+        assert!(
+            event
+                .description
+                .contains("Most train companies pay from a delay of 15 minutes")
+        );
+        assert!(event.description.contains("but yours may differ"));
+        assert!(!event.description.contains("usually pays"));
         f.operator_atoc = None;
-        assert!(claim_reminder(&f, "h", today).is_some());
+        assert!(claim_reminder(&f, &site(), today).is_some());
     }
 }

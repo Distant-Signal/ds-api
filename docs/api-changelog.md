@@ -3,6 +3,22 @@
 Changes to the Distant Signal (DS) HTTP API that a client such as DS-MCP
 needs to know about. Newest first. Field names are as served (camelCase).
 
+## 2026-11-10: Calendar feed wording
+
+Text only; no field or route changes. The journey calendar's events
+(`/public/calendar/{token}.ics` and `/Journeys/{id}/calendar.ics`) change
+their wording:
+
+- The Delay Repay reminder's title is `Check Delay Repay: {origin} to
+  {destination}` (was `Delay Repay claim deadline: ...`), and its alarm
+  now carries its own text (check the train company's own rules, claims
+  are usually open for up to N days) instead of repeating the title.
+  The description says the journey "may have arrived late enough to
+  claim", words the rule as the company's own only for an operator with a
+  rule of its own, and gives a cancelled train its own sentence.
+- The credits block starts "Credits:" and ends "Full credits:
+  {site origin}/attribution", an absolute address (was `/attribution`).
+
 ## 2026-11-10: Leave by for a train nobody has picked
 
 Regular journeys' `leaveBy` (the "Leave by" countdown) now also covers a

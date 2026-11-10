@@ -170,15 +170,17 @@ const OVER_30_CLAIM: ClaimRule = ClaimRule {
 /// known: Delay Repay 15 with 28 days (see the module doc's last source).
 pub const DEFAULT_CLAIM_RULE: ClaimRule = DR15_CLAIM;
 
+/// The operator with ATOC code `atoc`, when it has a rule of its own.
+pub fn operator_rule_for(atoc: Option<&str>) -> Option<&'static OperatorRule> {
+    let atoc = atoc.map(str::trim)?;
+    OPERATORS
+        .iter()
+        .find(|rule| rule.atoc.eq_ignore_ascii_case(atoc))
+}
+
 /// The claim rule for the operator with ATOC code `atoc`, or the default.
 pub fn claim_rule_for(atoc: Option<&str>) -> ClaimRule {
-    atoc.map(str::trim)
-        .and_then(|atoc| {
-            OPERATORS
-                .iter()
-                .find(|rule| rule.atoc.eq_ignore_ascii_case(atoc))
-        })
-        .map_or(DEFAULT_CLAIM_RULE, |rule| rule.claim)
+    operator_rule_for(atoc).map_or(DEFAULT_CLAIM_RULE, |rule| rule.claim)
 }
 
 /// One operator whose scheme or claim page differs from the default (DR15

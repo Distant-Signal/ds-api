@@ -205,8 +205,7 @@ async fn feed(State(app): State<App>, Path(token): Path<String>) -> Response {
         tracing::error!("SSO_REDIRECT_URL has no usable origin; the calendar is unavailable");
         return (StatusCode::INTERNAL_SERVER_ERROR, "calendar unavailable").into_response();
     };
-    match calendar_feed::feed_events(&app.database, &link.resource_id, &site.host, Utc::now()).await
-    {
+    match calendar_feed::feed_events(&app.database, &link.resource_id, &site, Utc::now()).await {
         Ok(events) => calendar_response(document(&site, events, "Distant Signal journeys"), &[]),
         Err(err) => database_error("read the journeys")(err),
     }
@@ -243,7 +242,7 @@ pub(crate) async fn journey_calendar(
     let events = match calendar_feed::events_for_rows(
         &app.database,
         std::slice::from_ref(row),
-        &site.host,
+        &site,
         now,
         chrono::DateTime::<Utc>::MIN_UTC,
     )
