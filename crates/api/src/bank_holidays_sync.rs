@@ -28,6 +28,16 @@
 //! Off unless `BANK_HOLIDAYS_ENABLED` (the chart's `api.bankHolidays.enabled`,
 //! default false). With it off, or before the first success, the table is
 //! empty and nothing is skipped.
+//!
+//! The loop can instead be switched off with `BANK_HOLIDAYS_LOOP_ENABLED=false`
+//! (default true, so nothing changes until the chart sets it) when a
+//! Kubernetes `CronJob` runs the `bank_holidays_sync` binary
+//! (`src/bin/bank_holidays_sync.rs`: [`sync_once`], then exit non-zero unless
+//! the fetch was applied) instead. A rollout of the api then never leaves the
+//! loop's lock held by an old pod, because there is no lock. Each api replica
+//! still refreshes the two gauges from the table every [`CHECK_EVERY`]
+//! ([`gauge_loop`], no lock, no fetch), so `DistantSignalBankHolidaysStale`
+//! keeps measuring the table, whoever fills it.
 
 use std::time::Duration as StdDuration;
 
@@ -58,6 +68,10 @@ pub const MAX_BODY_BYTES: usize = 1024 * 1024;
 pub struct SyncConfig {
     /// `BANK_HOLIDAYS_ENABLED` (default false).
     pub enabled: bool,
+    /// `BANK_HOLIDAYS_LOOP_ENABLED` (default true): whether this process
+    /// runs the fetch loop. `false` when the `CronJob` fetches; the gauges
+    /// are still kept (see [`gauge_loop`]).
+    pub loop_enabled: bool,
     /// `BANK_HOLIDAYS_URL` ([`DEFAULT_URL`]).
     pub url: String,
     /// `BANK_HOLIDAYS_INTERVAL_HOURS` (24): how old the last success may
@@ -65,10 +79,22 @@ pub struct SyncConfig {
     pub interval_hours: u64,
 }
 
+/// What an api process does about the sync ([`SyncConfig::mode`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Mode {
+    /// `BANK_HOLIDAYS_ENABLED` is off: nothing.
+    Off,
+    /// The fetch loop, under its advisory lock (today's behaviour).
+    Loop,
+    /// The `CronJob` fetches: only [`gauge_loop`].
+    GaugesOnly,
+}
+
 impl Default for SyncConfig {
     fn default() -> Self {
         Self {
             enabled: false,
+            loop_enabled: true,
             url: DEFAULT_URL.to_string(),
             interval_hours: 24,
         }
@@ -86,12 +112,22 @@ impl SyncConfig {
             .unwrap_or(default.url);
         Self {
             enabled: env_bool("BANK_HOLIDAYS_ENABLED", default.enabled),
+            loop_enabled: env_bool("BANK_HOLIDAYS_LOOP_ENABLED", default.loop_enabled),
             url,
             interval_hours: env_num("BANK_HOLIDAYS_INTERVAL_HOURS", default.interval_hours).max(1),
         }
     }
 
-    fn interval(&self) -> Duration {
+    /// What this process does about the sync.
+    pub fn mode(&self) -> Mode {
+        match (self.enabled, self.loop_enabled) {
+            (false, _) => Mode::Off,
+            (true, true) => Mode::Loop,
+            (true, false) => Mode::GaugesOnly,
+        }
+    }
+
+    pub fn interval(&self) -> Duration {
         Duration::hours(
             i64::try_from(self.interval_hours)
                 .unwrap_or(i64::MAX / 3600)
@@ -204,12 +240,17 @@ async fn tick(
     now: DateTime<Utc>,
 ) -> anyhow::Result<()> {
     let state = bank_holidays::sync_state(pool).await?;
-    let state = if due(state.as_ref(), now, config.interval()) {
+    if due(state.as_ref(), now, config.interval()) {
         sync_once(pool, client, &config.url, now).await?;
-        bank_holidays::sync_state(pool).await?
-    } else {
-        state
-    };
+    }
+    refresh_gauges(pool).await
+}
+
+/// Sets `api_bank_holidays_last_success_seconds` and
+/// `api_bank_holidays_latest_date_seconds{division}` from the tables.
+/// Read-only, so any replica may do it, whoever fetched.
+pub async fn refresh_gauges(pool: &PgPool) -> anyhow::Result<()> {
+    let state = bank_holidays::sync_state(pool).await?;
     if let Some(success) = state.and_then(|state| state.last_success_at) {
         #[expect(clippy::cast_precision_loss, reason = "a Unix time in seconds")]
         metrics::gauge!(ds_runtime::metrics::metric_name(
@@ -230,6 +271,25 @@ async fn tick(
         .set(seconds as f64);
     }
     Ok(())
+}
+
+/// With `BANK_HOLIDAYS_LOOP_ENABLED=false` (the `CronJob` fetches): every
+/// [`CHECK_EVERY`] until `shutdown`, [`refresh_gauges`]. No advisory lock
+/// and no `ds_store::loops` cycle, so the writer-loop alerts have nothing to
+/// expect of it and a rollout leaves nothing unowned.
+pub async fn gauge_loop(pool: PgPool, shutdown: impl Future<Output = ()>) {
+    tokio::pin!(shutdown);
+    let mut interval = tokio::time::interval(CHECK_EVERY);
+    interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+    loop {
+        tokio::select! {
+            () = &mut shutdown => return,
+            _ = interval.tick() => {}
+        }
+        if let Err(err) = refresh_gauges(&pool).await {
+            tracing::warn!(error = ?err, "bank holidays gauges not refreshed; will retry next tick");
+        }
+    }
 }
 
 /// The sync as a `ds_store::loops` loop, under its advisory lock.
@@ -288,9 +348,27 @@ mod tests {
     }
 
     #[test]
+    fn the_loop_switch_leaves_only_the_gauges() {
+        let config = |enabled, loop_enabled| SyncConfig {
+            enabled,
+            loop_enabled,
+            ..SyncConfig::default()
+        };
+        assert_eq!(SyncConfig::default().mode(), Mode::Off);
+        assert_eq!(config(true, true).mode(), Mode::Loop);
+        assert_eq!(config(true, false).mode(), Mode::GaugesOnly);
+        // The feature switch wins: off is off, with or without the loop.
+        assert_eq!(config(false, false).mode(), Mode::Off);
+    }
+
+    #[test]
     fn the_config_defaults_and_bounds() {
         let config = SyncConfig::default();
         assert!(!config.enabled);
+        assert!(
+            config.loop_enabled,
+            "the loop stays on until the chart turns it off"
+        );
         assert_eq!(config.url, "https://www.gov.uk/bank-holidays.json");
         assert_eq!(config.interval_hours, 24);
         assert_eq!(config.tick(), CHECK_EVERY);

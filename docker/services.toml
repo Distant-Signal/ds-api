@@ -10,6 +10,6 @@ rust-image = "1.99.0-bookworm@sha256:114c7a4425406451c2866b6aafe69fe29b1b298832d
 cargo-chef = "0.1.78"
 
 [services]
-"api" = ["api", "corpus_compare", "maintenance"]
+"api" = ["api", "bank_holidays_sync", "corpus_compare", "maintenance"]
 "schedule-ingest" = ["schedule-ingest"]
 "schedule-reference" = ["schedule-reference"]
