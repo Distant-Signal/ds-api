@@ -967,9 +967,10 @@ pub async fn stop_tracking_train(
     .bind(user_id)
     .fetch_all(&mut *tx)
     .await?;
+    let record_web = crate::data::recently_deleted::enabled();
     for journey_id in own_journeys {
         record_template_occurrence_skips(&mut tx, journey_id).await?;
-        delete_journey_row_releasing_trains(&mut tx, journey_id, user_id).await?;
+        delete_journey_row_releasing_trains(&mut tx, journey_id, user_id, record_web).await?;
     }
     if let Some(trains_id) = trains_id {
         ds_runtime::pg::lock_user_train_subscription(&mut tx, user_id, trains_id).await?;
@@ -2813,7 +2814,13 @@ pub async fn delete_journey(pool: &PgPool, journey_id: i64, user_id: &str) -> an
     // hour. See `record_template_occurrence_skips`.
     record_template_occurrence_skips(&mut tx, journey_id).await?;
 
-    let deleted = delete_journey_row_releasing_trains(&mut tx, journey_id, user_id).await?;
+    let deleted = delete_journey_row_releasing_trains(
+        &mut tx,
+        journey_id,
+        user_id,
+        crate::data::recently_deleted::enabled(),
+    )
+    .await?;
     tx.commit().await?;
     Ok(deleted)
 }
@@ -2823,11 +2830,15 @@ pub async fn delete_journey(pool: &PgPool, journey_id: i64, user_id: &str) -> an
 /// [`release_leg_subscription`] (no `move_to`), all on the caller's
 /// transaction: [`delete_journey`] and the delegated delete
 /// (`delegated::delete_journey_delegated`) both end this way (DS-93).
-/// Returns whether the journey row was deleted.
+/// With `record_web`, the user's own delete (Recently deleted is on), what
+/// the journey was is recorded first, under the locks below
+/// (`recently_deleted::record_web_deletion`). Returns whether the journey
+/// row was deleted.
 pub(crate) async fn delete_journey_row_releasing_trains(
     conn: &mut sqlx::PgConnection,
     journey_id: i64,
     user_id: &str,
+    record_web: bool,
 ) -> anyhow::Result<bool> {
     // The journey row first, as every add-leg path and [`delete_leg`] lock
     // it: a leg added concurrently either committed already (and is read
@@ -2856,6 +2867,9 @@ pub(crate) async fn delete_journey_row_releasing_trains(
     .await?;
     // Every leg's train once, whichever legs share it, in id order.
     let subscriptions: std::collections::BTreeSet<i64> = legs.into_iter().flatten().collect();
+    if record_web {
+        crate::data::recently_deleted::record_web_deletion(&mut *conn, user_id, journey_id).await?;
+    }
     let result = sqlx::query("DELETE FROM journeys WHERE id = $1 AND user_id = $2")
         .bind(journey_id)
         .bind(user_id)
@@ -3775,6 +3789,15 @@ pub enum ItineraryLeg {
         destination_crs: Option<String>,
     },
     Untracked(UntrackedLeg),
+    /// A train leg with no train: its stations and date only, unmatched,
+    /// as a leg is left when its tracked train goes. "Save again" from
+    /// Recently deleted (`data::recently_deleted`) builds one for a leg
+    /// whose train can no longer be tracked.
+    Unmatched {
+        service_date: NaiveDate,
+        origin_crs: Option<String>,
+        destination_crs: Option<String>,
+    },
 }
 
 /// Creates a journey and every one of its legs on `tx`, the caller's
@@ -3827,6 +3850,29 @@ pub(crate) async fn insert_itinerary_leg(
     let (trains_id, service_date, origin_override, destination_override) = match leg {
         ItineraryLeg::Untracked(untracked) => {
             let leg_id = insert_untracked_leg(&mut *tx, journey_id, leg_order, untracked).await?;
+            return Ok((leg_id, None));
+        }
+        ItineraryLeg::Unmatched {
+            service_date,
+            origin_crs,
+            destination_crs,
+        } => {
+            let leg_id = insert_leg(
+                &mut *tx,
+                journey_id,
+                leg_order,
+                origin_crs.as_deref(),
+                destination_crs.as_deref(),
+                *service_date,
+                None,
+                "unmatched",
+                None,
+                None,
+                None,
+                None,
+                false,
+            )
+            .await?;
             return Ok((leg_id, None));
         }
         ItineraryLeg::Train {

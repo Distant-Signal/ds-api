@@ -3,6 +3,62 @@
 Changes to the Distant Signal (DS) HTTP API that a client such as DS-MCP
 needs to know about. Newest first. Field names are as served (camelCase).
 
+## 2026-11-11: Recently deleted journeys
+
+A deleted journey can be saved again for a few days (DS-474). Additive,
+and off unless `RECENTLY_DELETED_ENABLED` (chart
+`api.recentlyDeleted.enabled`, default false); with it off nothing below
+changes and the new routes are `404`. No migration: it reuses
+`delegated_deletions`, the record of a connected app's deletes.
+
+- With it on, the user's own deletes (`DELETE /Journeys/{id}` and
+  `DELETE /Train/{trackingId}`, which deletes the train's one-leg journey)
+  record what the journey was, in the delete's own transaction, as a
+  `delegated_deletions` row with `client` `web`. They are kept
+  `RECENTLY_DELETED_RETENTION_DAYS` days (chart
+  `api.recentlyDeleted.retentionDays`, default 7, 7 to 31; any other value
+  stops the api at startup), then the hourly sweep deletes them, whether or
+  not the feature is still on. A connected app's deletes keep their 30
+  days and stay on the Connected apps page. Retention deletes, regular
+  journey changes and account deletion record nothing.
+- New cookie-only routes (not delegated, not personal-token routes; a row
+  of another user's is `404`):
+  - `GET /Journeys/recently-deleted`: `{retentionDays,
+    connectedAppRetentionDays, items}`, newest first, at most 200. Each
+    item is `{id, journeyId, client, deletedAt, expiresAt, summary}`;
+    `client` is `web` for the user's own delete, else the app's name (an
+    app's deletes are listed here too, so they can be saved again);
+    `summary` is the `DeletedJourneySummary` the Connected apps page
+    already shows.
+  - `POST /Journeys/recently-deleted/{id}/restore`, "Save again": `201
+    {journeyId, legs: [{leg, outcome, reason?}]}`. A new journey (new id,
+    `createdVia` `web`) with the deleted one's name and legs, and the row
+    leaves the list. `outcome` per leg (`leg` is its position in the
+    deleted journey, from 1): `tracked` (its train tracked again),
+    `untracked`, `without_train` (stations and date back, no train;
+    `reason` `no_train`, `train_gone` for a past train whose record has
+    gone, `train_changed` when it no longer calls there, or
+    `too_far_ahead`) or `left_out` (`incomplete` or `too_old`). Its
+    history does not come back: revisions, breaks, tickets, share links,
+    follows, group shares, its regular journey, operator filter and
+    leave-by settings. `409 journey_limit` or `pin_limit` at the same caps
+    as `POST /Journeys/itinerary`; `422 nothing_to_restore` when no leg
+    can come back (the row stays).
+  - `DELETE /Journeys/recently-deleted/{id}`, "Delete permanently": `204`.
+  - `DELETE /Journeys/recently-deleted`, "Empty now": `204`; every row of
+    the caller's, a connected app's included.
+- `GET /auth/session` gains `recentlyDeletedEnabled` (false when logged
+  out or off).
+- `DeletedJourneySummary`'s legs gain `plannedArrival` (an untracked leg's,
+  so it can be saved again); rows from before lack it.
+- `GET /public/account/export` gains `recentlyDeletedJourneys` (the
+  user's own deletes, without `grant_id`), and `connectedAppDeletions` now
+  lists only a connected app's. Account deletion removes both with the
+  user.
+
+DS-MCP: no change. Its deletes are recorded and kept as before, and a web
+delete never counts towards its daily delete cap.
+
 ## 2026-11-10: Calendar feed wording
 
 Text only; no field or route changes. The journey calendar's events

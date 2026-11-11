@@ -682,7 +682,7 @@ pub(crate) async fn delete_untouched_occurrences(
     .await?;
     let mut deleted = Vec::new();
     for journey_id in doomed {
-        if journeys::delete_journey_row_releasing_trains(tx, journey_id, user_id).await? {
+        if journeys::delete_journey_row_releasing_trains(tx, journey_id, user_id, false).await? {
             deleted.push(journey_id);
         }
     }
@@ -868,7 +868,9 @@ pub async fn skip(
     let mut deleted = Vec::new();
     for (journey_id, _) in occurrences {
         journeys::record_template_occurrence_skips(&mut tx, journey_id).await?;
-        if journeys::delete_journey_row_releasing_trains(&mut tx, journey_id, user_id).await? {
+        if journeys::delete_journey_row_releasing_trains(&mut tx, journey_id, user_id, false)
+            .await?
+        {
             deleted.push(journey_id);
         }
     }

@@ -242,6 +242,11 @@ fn config_defaults() -> ds_runtime::service_args::ConfigDefaults {
         )
         .env(data::calendar_feed::CALENDAR_ENABLED_ENV, Some("false"))
         .env(data::webhooks::WEBHOOKS_ENABLED_ENV, Some("false"))
+        .env(data::recently_deleted::ENABLED_ENV, Some("false"))
+        .env(
+            data::recently_deleted::RETENTION_DAYS_ENV,
+            Some(&data::recently_deleted::DEFAULT_RETENTION_DAYS.to_string()),
+        )
         .env(data::webhooks::SECRET_KEYS_ENV, None)
         .env(
             "REGULAR_PLAN_SWEEP_ENABLED",
@@ -318,6 +323,17 @@ async fn server_main() -> anyhow::Result<()> {
         "outbound webhook settings ({}, with {})",
         data::webhooks::WEBHOOKS_ENABLED_ENV,
         data::webhooks::SECRET_KEYS_ENV
+    );
+    // RECENTLY_DELETED_ENABLED (default off) and
+    // RECENTLY_DELETED_RETENTION_DAYS (7 to 31, default 7; anything else
+    // fails startup). See `data::recently_deleted`.
+    let recently_deleted = data::recently_deleted::init_from_env()?;
+    tracing::info!(
+        enabled = recently_deleted.enabled,
+        retention_days = recently_deleted.retention_days,
+        "recently deleted journeys ({}, {})",
+        data::recently_deleted::ENABLED_ENV,
+        data::recently_deleted::RETENTION_DAYS_ENV
     );
 
     // Permissive ORIGIN, deliberately non-credentialed. The four
@@ -1232,12 +1248,16 @@ async fn session_cleanup_sweep_loop(app: App) {
             }
         }
         // Delegated access (spec 2026-10-14 §5.3, §5.5a): grants unused for
-        // 90 days, `delegated_deletions` past 30 days, expired idempotency
-        // keys and confirmation tokens. Same hourly cadence.
+        // 90 days, a connected app's `delegated_deletions` past 30 days,
+        // the user's own (Recently deleted) past
+        // RECENTLY_DELETED_RETENTION_DAYS, whether or not that feature is
+        // on, expired idempotency keys and confirmation tokens. Same hourly
+        // cadence.
         data::delegated::run_sweep(
             &app.database,
             chrono::Utc::now(),
             app.delegated.revoked_grant_retention_days,
+            data::recently_deleted::retention_days(),
         )
         .await;
         // Personal API tokens (docs/specs/personal-api-tokens.md §8.5):

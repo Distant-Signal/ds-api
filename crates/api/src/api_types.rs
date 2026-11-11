@@ -171,6 +171,9 @@ fn visit_roots(v: &mut Collector) {
     v.visit::<crate::routes::history_retention::HistoryRetention>();
     // Connected apps.
     v.visit::<crate::routes::connected_apps::ConnectedAppsResponse>();
+    // Recently deleted journeys.
+    v.visit::<crate::routes::recently_deleted::RecentlyDeletedResponse>();
+    v.visit::<crate::routes::recently_deleted::RestoreResponse>();
     v.visit::<crate::routes::connected_apps::NoticeResponse>();
     v.visit::<crate::routes::connected_apps::ConsentResponse>();
     v.visit::<crate::routes::connected_apps::CreateGrantRequest>();

@@ -773,12 +773,16 @@ export type DelayRepayScheme = "DR15" | "DR30" | "HX";
 /**
  * One leg of a [`DeletedJourneySummary`].
  */
-export type DeletedJourneyLeg = { serviceDate?: string | null, originCrs?: string | null, destinationCrs?: string | null, trainUid?: string | null, kind?: JourneyLegKind | null, transitMode?: TransitMode | null, originName?: string | null, destinationName?: string | null, lineName?: string | null, plannedDeparture?: string | null, originStopId?: string | null, destinationStopId?: string | null, };
+export type DeletedJourneyLeg = { serviceDate?: string | null, originCrs?: string | null, destinationCrs?: string | null, trainUid?: string | null, kind?: JourneyLegKind | null, transitMode?: TransitMode | null, originName?: string | null, destinationName?: string | null, lineName?: string | null, plannedDeparture?: string | null, 
+/**
+ * Kept since 2026-11-11 (DS-474), for "Save again".
+ */
+plannedArrival?: string | null, originStopId?: string | null, destinationStopId?: string | null, };
 
 /**
- * `delegated_deletions.summary`: the journey a connected app deleted, as
- * `delegated::delete_journey_delegated` stores it. Rows written before a
- * field existed lack it.
+ * `delegated_deletions.summary`: the journey a connected app or (Recently
+ * deleted) the user deleted, as `recently_deleted::journey_summary`
+ * stores it. Rows written before a field existed lack it.
  */
 export type DeletedJourneySummary = { customName?: string | null, legs?: Array<DeletedJourneyLeg> | null, };
 
@@ -3556,6 +3560,38 @@ expectedUntilEndOfDay: boolean, };
 export type RecentlyClearedResponse = { results: Array<RecentlyClearedIncident>, };
 
 /**
+ * One recently deleted journey, as the list shows it.
+ */
+export type RecentlyDeletedJourney = { id: number, 
+/**
+ * The deleted journey's id. It no longer exists; a journey saved again
+ * gets a new one.
+ */
+journeyId: number, 
+/**
+ * `web` for the user's own delete, else the connected app's name.
+ */
+client: string, deletedAt: string, 
+/**
+ * When the sweep deletes the row for good.
+ */
+expiresAt: string, summary: DeletedJourneySummary, };
+
+/**
+ * `GET /Journeys/recently-deleted`'s body.
+ */
+export type RecentlyDeletedResponse = { 
+/**
+ * Days the caller's own deletes are kept
+ * (`RECENTLY_DELETED_RETENTION_DAYS`).
+ */
+retentionDays: number, 
+/**
+ * Days a connected app's deletes are kept (30).
+ */
+connectedAppRetentionDays: number, items: Array<RecentlyDeletedJourney>, };
+
+/**
  * `journey_templates.recurrence_kind` as the api accepts it (R2):
  * `weekly` (the weekdays) or `dates` (only the extra dates). `cycle` is
  * kept for shift rotas and not offered.
@@ -3845,6 +3881,34 @@ export type ResolutionStatus = "pending" | "schedule_matched" | "resolved" | "un
 export type ResolveMatchedOn = "rsid" | "rsidPrefix" | "timetable";
 
 /**
+ * `POST /Journeys/recently-deleted/{id}/restore`'s body.
+ */
+export type RestoreDeletedJourneyResponse = { 
+/**
+ * The new journey.
+ */
+journeyId: number, legs: Array<RestoredLeg>, };
+
+/**
+ * One leg in `POST .../restore`'s body.
+ */
+export type RestoredLeg = { 
+/**
+ * Its position in the deleted journey, from 1.
+ */
+leg: number, outcome: RestoredLegOutcome, reason?: RestoredLegReason | null, };
+
+/**
+ * What happened to one leg on "Save again".
+ */
+export type RestoredLegOutcome = "tracked" | "untracked" | "without_train" | "left_out";
+
+/**
+ * Why a leg came back without its train, or not at all.
+ */
+export type RestoredLegReason = "no_train" | "train_gone" | "train_changed" | "too_far_ahead" | "too_old" | "incomplete";
+
+/**
  * The return journey of a plan-mode create: its own target, options and
  * usual itinerary.
  */
@@ -4011,7 +4075,13 @@ calendarFeedEnabled: boolean,
  * Whether outbound webhooks can be set up (`WEBHOOKS_ENABLED`), so
  * the notification settings offer them; `false` when logged out.
  */
-webhooksEnabled: boolean, };
+webhooksEnabled: boolean, 
+/**
+ * Whether deleted journeys are kept for a while to save again
+ * (`RECENTLY_DELETED_ENABLED`), so the journeys page links to the
+ * Recently deleted list; `false` when logged out.
+ */
+recentlyDeletedEnabled: boolean, };
 
 export type SetTemplateActiveRequest = { active: boolean, };
 
@@ -6527,6 +6597,7 @@ export const USAGE_EVENTS = {
     "/island-of-ireland/[network]/trains/[train]/[date]",
     "/journeys",
     "/journeys/[id]",
+    "/journeys/recently-deleted",
     "/journeys/regular",
     "/journeys/regular/[id]",
     "/journeys/regular/new",

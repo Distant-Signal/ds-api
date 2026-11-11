@@ -18,8 +18,10 @@
 //!    records the final arrival of every train leg whose train is over
 //!    (`data::leg_outcomes`);
 //! 4. `data::delegated::run_sweep`: delegated-access grants unused for 90
-//!    days, `delegated_deletions` past 30 days, expired idempotency keys
-//!    and consent confirmation tokens;
+//!    days, a connected app's `delegated_deletions` past 30 days, the
+//!    user's own (Recently deleted) past `RECENTLY_DELETED_RETENTION_DAYS`
+//!    (the api's variable and default, 7), expired idempotency keys and
+//!    consent confirmation tokens;
 //! 5. `data::journey_breaks::expire_finished`: open journey breaks whose
 //!    journey is over, whether or not the break sweep is on;
 //! 6. `data::personal_tokens::run_sweep`, only with
@@ -107,6 +109,9 @@ async fn run() -> anyhow::Result<()> {
     // same way, from the environment only): the token sweep runs only while
     // the feature is on.
     let personal_tokens = api::personal_tokens::PersonalTokenSettings::from_env()?;
+    // `RECENTLY_DELETED_RETENTION_DAYS`, read and checked as the api reads
+    // it; the sweep uses it whether or not the feature is on.
+    let recently_deleted = api::data::recently_deleted::Settings::from_env()?;
     ds_runtime::logging::init_with_filter(
         "api-maintenance",
         ds_runtime::logging::EnvFilter::try_from_default_env()
@@ -127,6 +132,7 @@ async fn run() -> anyhow::Result<()> {
         &pool,
         args.retention_policy(),
         args.delegated_revoked_grant_retention_days,
+        recently_deleted.retention_days,
         chrono::Utc::now(),
     )
     .await;
@@ -167,6 +173,7 @@ async fn run_pass(
     pool: &sqlx::PgPool,
     policy: RetentionPolicy,
     revoked_grant_retention_days: i64,
+    web_deletion_retention_days: i64,
     now: chrono::DateTime<chrono::Utc>,
 ) -> PassReport {
     let mut report = PassReport::default();
@@ -191,8 +198,13 @@ async fn run_pass(
             report.failed.push("personal_data");
         }
     }
-    report.delegated =
-        api::data::delegated::run_sweep(pool, now, revoked_grant_retention_days).await;
+    report.delegated = api::data::delegated::run_sweep(
+        pool,
+        now,
+        revoked_grant_retention_days,
+        web_deletion_retention_days,
+    )
+    .await;
     if report.delegated.is_none() {
         report.failed.push("delegated");
     }
@@ -377,7 +389,7 @@ mod tests {
             inactive_account_days: 0,
             regular_journey_days: 0,
         };
-        let report = run_pass(&pool, policy, 365, chrono::Utc::now()).await;
+        let report = run_pass(&pool, policy, 365, 7, chrono::Utc::now()).await;
         assert!(report.failed.is_empty(), "{report:?}");
         assert!(report.expired_sessions >= Some(1), "{report:?}");
         assert!(report.dead_links >= Some(1), "{report:?}");
@@ -404,7 +416,7 @@ mod tests {
         assert_eq!(kept, "new");
 
         // Idempotent: a second pass finds nothing more of ours.
-        let again = run_pass(&pool, policy, 365, chrono::Utc::now()).await;
+        let again = run_pass(&pool, policy, 365, 7, chrono::Utc::now()).await;
         assert!(again.failed.is_empty(), "{again:?}");
         assert_eq!(count(&pool, sessions, USER).await, 1);
         assert_eq!(count(&pool, links, USER).await, 1);
@@ -469,7 +481,7 @@ mod tests {
             inactive_account_days: 0,
             regular_journey_days: 0,
         };
-        let report = run_pass(&pool, policy, 365, chrono::Utc::now()).await;
+        let report = run_pass(&pool, policy, 365, 7, chrono::Utc::now()).await;
         assert!(report.failed.is_empty(), "{report:?}");
         assert!(report.expired_breaks >= Some(1), "{report:?}");
         let statuses: Vec<String> =

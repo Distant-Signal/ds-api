@@ -252,8 +252,10 @@ pub async fn prune_regular_occurrences(pool: &PgPool, date: NaiveDate) -> Result
         .bind(journey_id.to_string())
         .execute(&mut *tx)
         .await?;
-        if crate::data::journeys::delete_journey_row_releasing_trains(&mut tx, journey_id, &user_id)
-            .await?
+        if crate::data::journeys::delete_journey_row_releasing_trains(
+            &mut tx, journey_id, &user_id, false,
+        )
+        .await?
         {
             deleted += 1;
         }

@@ -231,6 +231,7 @@ pub const ROUTE_TEMPLATES: &[&str] = &[
     "/island-of-ireland/[network]/trains/[train]/[date]",
     "/journeys",
     "/journeys/[id]",
+    "/journeys/recently-deleted",
     "/journeys/regular",
     "/journeys/regular/[id]",
     "/journeys/regular/new",

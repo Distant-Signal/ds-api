@@ -138,6 +138,8 @@ pub fn router() -> Router {
         .merge(super::reliability::router())
         // Track this journey again, and move it.
         .merge(super::journey_repeat::router())
+        // Recently deleted journeys and "Save again" (DS-474), cookie-only.
+        .merge(super::recently_deleted::router())
 }
 
 /// Three mutually-exclusive leg-creation shapes, discriminated by an

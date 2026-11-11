@@ -51,6 +51,7 @@ pub mod preferences;
 pub mod pushport_platform;
 pub mod queries;
 pub mod recently_cleared;
+pub mod recently_deleted;
 pub mod reconciliation;
 pub mod recurrence_pattern;
 pub mod reference;

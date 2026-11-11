@@ -202,6 +202,9 @@ pub struct AccountExport {
     pub connected_app_confirmations: Value,
     /// Journeys a connected app deleted in the last 30 days.
     pub connected_app_deletions: Value,
+    /// The user's own recently deleted journeys (DS-474), kept
+    /// `RECENTLY_DELETED_RETENTION_DAYS` to save again.
+    pub recently_deleted_journeys: Value,
     /// `Idempotency-Key`s of the last 24 hours' itinerary saves.
     pub journey_save_keys: Value,
     /// Personal API tokens (docs/specs/personal-api-tokens.md §8.5): every
@@ -428,7 +431,15 @@ pub async fn export_account(pool: &PgPool, user_id: &str) -> Result<Option<Accou
         .await?,
         connected_app_deletions: rows(
             pool,
-            "SELECT to_jsonb(d) FROM delegated_deletions d WHERE user_id = $1 ORDER BY id",
+            "SELECT to_jsonb(d) FROM delegated_deletions d \
+             WHERE user_id = $1 AND client <> 'web' ORDER BY id",
+            user_id,
+        )
+        .await?,
+        recently_deleted_journeys: rows(
+            pool,
+            "SELECT to_jsonb(d) - 'grant_id' FROM delegated_deletions d \
+             WHERE user_id = $1 AND client = 'web' ORDER BY id",
             user_id,
         )
         .await?,
@@ -650,6 +661,8 @@ pub(crate) mod db_tests {
         exec(pool, "INSERT INTO delegated_grants (user_id, client, client_display_name, scopes) VALUES ($1, 'ds-mcp', 'Assistant', '{journeys:read}')", u).await;
         exec(pool, "INSERT INTO delegated_grant_confirmations (token_hash, session_id, user_id, client, expires_at) VALUES (encode(sha256(convert_to('conf-' || $1, 'UTF8')), 'hex'), 'sess-' || $1, $1, 'ds-mcp', NOW() + INTERVAL '10 minutes')", u).await;
         exec(pool, "INSERT INTO delegated_deletions (user_id, client, grant_id, journey_id, summary) VALUES ($1, 'ds-mcp', (SELECT id FROM delegated_grants WHERE user_id = $1 LIMIT 1), 0, '{\"legs\": []}')", u).await;
+        // A journey the user deleted themselves (Recently deleted).
+        exec(pool, "INSERT INTO delegated_deletions (user_id, client, grant_id, journey_id, summary) VALUES ($1, 'web', NULL, 0, '{\"legs\": []}')", u).await;
         exec(pool, "INSERT INTO journey_idempotency_keys (user_id, idempotency_key, request_hash, response) VALUES ($1, 'key-' || $1, repeat('a', 64), '{}')", u).await;
         // A personal API token (its hash must never be exported).
         exec(pool, "INSERT INTO personal_api_tokens (user_id, name, token_hash, hint, scopes, expires_at) VALUES ($1, 'Display', sha256(convert_to('ptok-' || $1, 'UTF8')), 'AbC1', '{lines:read}', NOW() + INTERVAL '90 days')", u).await;
@@ -903,6 +916,7 @@ pub(crate) mod db_tests {
             "connectedApps",
             "connectedAppConfirmations",
             "connectedAppDeletions",
+            "recentlyDeletedJourneys",
             "journeySaveKeys",
         ] {
             let rows = object[key]
