@@ -394,7 +394,7 @@ mod tests {
         let event = journey_event(&facts(), &site(), since()).expect("event");
         assert_eq!(event.summary, "Journey: York to London Kings Cross");
         assert_eq!(event.uid, "journey-7@ds.example");
-        assert!(event.alarms.is_empty());
+        assert_eq!(event.alarms, []);
         assert!(
             event
                 .description
