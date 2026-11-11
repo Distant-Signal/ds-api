@@ -59,6 +59,14 @@ changes and the new routes are `404`. No migration: it reuses
 DS-MCP: no change. Its deletes are recorded and kept as before, and a web
 delete never counts towards its daily delete cap.
 
+## 2026-11-11: Calendar feed day-before alarm
+
+No field or route changes. The journey calendar's Delay Repay reminder now
+has two alarms (two `VALARM`s with the same text): 7 days and 1 day before
+its date (was 7 days only), so a journey whose 7-day date has passed when
+the feed is first read still gets one. Some calendar apps, such as Google
+Calendar, ignore alarms on subscribed feeds.
+
 ## 2026-11-10: Calendar feed wording
 
 Text only; no field or route changes. The journey calendar's events

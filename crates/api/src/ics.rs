@@ -42,7 +42,8 @@ pub struct Event {
     pub summary: String,
     /// Plain text.
     pub description: String,
-    pub alarm: Option<Alarm>,
+    /// Alarms shown before the event, each its own `VALARM`; none for most.
+    pub alarms: Vec<Alarm>,
 }
 
 /// One calendar document.
@@ -132,7 +133,7 @@ pub fn render(calendar: &Calendar) -> String {
         line(format!("SUMMARY:{}", escape_text(&event.summary)));
         line(format!("DESCRIPTION:{}", escape_text(&event.description)));
         line("TRANSP:TRANSPARENT".to_string());
-        if let Some(alarm) = &event.alarm {
+        for alarm in &event.alarms {
             line("BEGIN:VALARM".to_string());
             line("ACTION:DISPLAY".to_string());
             line(format!("DESCRIPTION:{}", escape_text(&alarm.text)));
@@ -190,7 +191,7 @@ mod tests {
                 end: None,
                 summary: "Train: A to B".to_string(),
                 description: "x".to_string(),
-                alarm: None,
+                alarms: Vec::new(),
             },
             Event {
                 uid: "r1@example".to_string(),
@@ -198,10 +199,16 @@ mod tests {
                 end: None,
                 summary: "Reminder".to_string(),
                 description: "y".to_string(),
-                alarm: Some(Alarm {
-                    days_before: 7,
-                    text: "Check the rules".to_string(),
-                }),
+                alarms: vec![
+                    Alarm {
+                        days_before: 7,
+                        text: "Check the rules".to_string(),
+                    },
+                    Alarm {
+                        days_before: 1,
+                        text: "Check the rules".to_string(),
+                    },
+                ],
             },
         ]));
         assert!(doc.starts_with("BEGIN:VCALENDAR\r\nVERSION:2.0\r\n"));
@@ -210,6 +217,10 @@ mod tests {
         assert!(doc.contains("DTSTART:20261110T083000Z\r\n"));
         assert!(doc.contains("DTSTART;VALUE=DATE:20261201\r\n"));
         assert!(doc.contains("TRIGGER:-P7D\r\n"));
+        assert!(doc.contains("TRIGGER:-P1D\r\n"));
+        assert_eq!(doc.matches("BEGIN:VALARM\r\n").count(), 2);
+        assert_eq!(doc.matches("END:VALARM\r\n").count(), 2);
+        assert_eq!(doc.matches("ACTION:DISPLAY\r\n").count(), 2);
         assert!(doc.contains("ACTION:DISPLAY\r\nDESCRIPTION:Check the rules\r\n"));
         assert_eq!(doc.matches("BEGIN:VEVENT").count(), 2);
     }
