@@ -277,7 +277,7 @@ pub async fn refresh_gauges(pool: &PgPool) -> anyhow::Result<()> {
 /// [`CHECK_EVERY`] until `shutdown`, [`refresh_gauges`]. No advisory lock
 /// and no `ds_store::loops` cycle, so the writer-loop alerts have nothing to
 /// expect of it and a rollout leaves nothing unowned.
-pub async fn gauge_loop(pool: PgPool, shutdown: impl std::future::Future<Output = ()>) {
+pub async fn gauge_loop(pool: PgPool, shutdown: impl Future<Output = ()>) {
     tokio::pin!(shutdown);
     let mut interval = tokio::time::interval(CHECK_EVERY);
     interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);

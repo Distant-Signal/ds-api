@@ -30,7 +30,7 @@
 //! after `BANK_HOLIDAYS_CONNECT_DEADLINE_SECS` (default 120), as
 //! `maintenance` does for a pod whose `NetworkPolicy` isn't programmed yet.
 //! Metrics are not exported (a Job has nothing to scrape): the api
-//! replicas' gauges, read from the table, and the chart's CronJob alerts
+//! replicas' gauges, read from the table, and the chart's `CronJob` alerts
 //! cover it.
 
 use clap::Parser;
