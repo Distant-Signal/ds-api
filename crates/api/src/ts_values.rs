@@ -447,9 +447,9 @@ pub enum TransitStatusSource {
     Situations,
 }
 
-/// `delegated_deletions.summary`: the journey a connected app deleted, as
-/// `delegated::delete_journey_delegated` stores it. Rows written before a
-/// field existed lack it.
+/// `delegated_deletions.summary`: the journey a connected app or (Recently
+/// deleted) the user deleted, as `recently_deleted::journey_summary`
+/// stores it. Rows written before a field existed lack it.
 #[derive(TS)]
 #[ts(rename_all = "camelCase", optional_fields = nullable)]
 pub struct DeletedJourneySummary {
@@ -471,6 +471,8 @@ pub struct DeletedJourneyLeg {
     pub destination_name: Option<String>,
     pub line_name: Option<String>,
     pub planned_departure: Option<String>,
+    /// Kept since 2026-11-11 (DS-474), for "Save again".
+    pub planned_arrival: Option<String>,
     pub origin_stop_id: Option<String>,
     pub destination_stop_id: Option<String>,
 }

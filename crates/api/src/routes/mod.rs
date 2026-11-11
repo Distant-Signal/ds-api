@@ -70,6 +70,13 @@ pub mod personal_tokens;
 mod personal_tokens_db_tests;
 pub mod preferences;
 pub mod provisional;
+pub mod recently_deleted;
+#[cfg(test)]
+#[expect(
+    clippy::too_many_lines,
+    reason = "test code: scenario tests read top to bottom"
+)]
+mod recently_deleted_db_tests;
 pub mod reference;
 pub mod regular_plan;
 pub mod reliability;

@@ -750,6 +750,10 @@ pub(crate) struct SessionResponse {
     /// Whether outbound webhooks can be set up (`WEBHOOKS_ENABLED`), so
     /// the notification settings offer them; `false` when logged out.
     webhooks_enabled: bool,
+    /// Whether deleted journeys are kept for a while to save again
+    /// (`RECENTLY_DELETED_ENABLED`), so the journeys page links to the
+    /// Recently deleted list; `false` when logged out.
+    recently_deleted_enabled: bool,
 }
 
 async fn session(
@@ -770,6 +774,7 @@ async fn session(
             regular_journey_day_overrides_enabled: crate::data::day_overrides::enabled(),
             calendar_feed_enabled: crate::data::calendar_feed::enabled(),
             webhooks_enabled: crate::data::webhooks::enabled(),
+            recently_deleted_enabled: crate::data::recently_deleted::enabled(),
         }),
         None => Json(SessionResponse {
             authenticated: false,
@@ -783,6 +788,7 @@ async fn session(
             regular_journey_day_overrides_enabled: false,
             calendar_feed_enabled: false,
             webhooks_enabled: false,
+            recently_deleted_enabled: false,
         }),
     }
 }
@@ -892,6 +898,7 @@ mod tests {
             regular_journey_day_overrides_enabled: false,
             calendar_feed_enabled: false,
             webhooks_enabled: false,
+            recently_deleted_enabled: false,
         };
         let json = serde_json::to_value(&response).expect("serializes");
         assert_eq!(
@@ -915,6 +922,7 @@ mod tests {
             regular_journey_day_overrides_enabled: false,
             calendar_feed_enabled: false,
             webhooks_enabled: false,
+            recently_deleted_enabled: false,
         };
         let json = serde_json::to_value(&response).expect("serializes");
         assert_eq!(json["groups"], serde_json::json!([]));

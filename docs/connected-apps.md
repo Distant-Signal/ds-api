@@ -89,6 +89,16 @@ and every delegated bearer is refused.
 - `/account/connected-apps` (and the account page's link) lists grants,
   with Disconnect, and "Recently deleted by the assistant": what a client
   deleted in the last 30 days.
+- With `RECENTLY_DELETED_ENABLED` (off by default), the same table also
+  records the user's own deletes (`client` `web`, no grant), kept
+  `RECENTLY_DELETED_RETENTION_DAYS` (7 by default), and the journeys
+  page's Recently deleted list shows both kinds with "Save again"
+  (`crates/api/src/data/recently_deleted.rs`, docs/api-changelog.md
+  2026-11-11). A connected app's deletes keep their own 30 days: they are
+  the user's check on what an app did, which can go unnoticed for longer
+  than their own deletes, and the privacy notice already promises 30
+  days. The Connected apps page leaves out the `web` rows, and they never
+  count towards a client's daily delete cap.
 
 ## Reading notification settings (`preferences:read`)
 
@@ -181,7 +191,8 @@ the `Idempotency-Key` stays unused. Code: `crates/api/src/data/leg_validation.rs
 The hourly maintenance pass (the api loop, or the `api-maintenance`
 CronJob) revokes grants unused for 90 days, deletes revoked grants 365 days
 after revocation (`api.delegated.revokedGrantRetentionDays`,
-`DELEGATED_REVOKED_GRANT_RETENTION_DAYS`), `delegated_deletions` after 30 days, `Idempotency-Key`s
+`DELEGATED_REVOKED_GRANT_RETENTION_DAYS`), a client's `delegated_deletions` after 30 days (the user's own,
+`client` `web`, after `RECENTLY_DELETED_RETENTION_DAYS`), `Idempotency-Key`s
 after 24 hours and expired confirmation tokens. See
 [personal-data-retention.md](personal-data-retention.md).
 

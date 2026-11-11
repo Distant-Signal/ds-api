@@ -1547,7 +1547,10 @@ async fn the_sweep_expires_idle_grants_and_purges_old_rows() {
     .await;
     sqlx::query(
         "INSERT INTO delegated_deletions (user_id, client, journey_id, deleted_at, summary) \
-         VALUES ($1, 'ds-mcp', 1, now() - INTERVAL '31 days', '{}'), ($1, 'ds-mcp', 2, now(), '{}')",
+         VALUES ($1, 'ds-mcp', 1, now() - INTERVAL '31 days', '{}'), ($1, 'ds-mcp', 2, now(), '{}'), \
+                ($1, 'web', 3, now() - INTERVAL '8 days', '{}'), \
+                ($1, 'web', 4, now() - INTERVAL '6 days', '{}'), \
+                ($1, 'ds-mcp', 5, now() - INTERVAL '8 days', '{}')",
     )
     .bind(&user)
     .execute(&pool)
@@ -1562,7 +1565,7 @@ async fn the_sweep_expires_idle_grants_and_purges_old_rows() {
     .await
     .unwrap();
 
-    let outcome = crate::data::delegated::sweep(&pool, chrono::Utc::now(), 90, 365)
+    let outcome = crate::data::delegated::sweep(&pool, chrono::Utc::now(), 90, 365, 7)
         .await
         .unwrap();
     assert!(
@@ -1594,13 +1597,16 @@ async fn the_sweep_expires_idle_grants_and_purges_old_rows() {
         Some(Some("user".to_string())),
         "kept until a year after revocation"
     );
-    let deletions: Vec<i64> =
-        sqlx::query_scalar("SELECT journey_id FROM delegated_deletions WHERE user_id = $1")
-            .bind(&user)
-            .fetch_all(&pool)
-            .await
-            .unwrap();
-    assert_eq!(deletions, vec![2]);
+    // A connected app's deletes go after 30 days, the user's own (Recently
+    // deleted, `client` web) after the 7 days passed in.
+    let deletions: Vec<i64> = sqlx::query_scalar(
+        "SELECT journey_id FROM delegated_deletions WHERE user_id = $1 ORDER BY journey_id",
+    )
+    .bind(&user)
+    .fetch_all(&pool)
+    .await
+    .unwrap();
+    assert_eq!(deletions, vec![2, 4, 5]);
     let keys: Vec<String> = sqlx::query_scalar(
         "SELECT idempotency_key FROM journey_idempotency_keys WHERE user_id = $1",
     )
@@ -1610,7 +1616,7 @@ async fn the_sweep_expires_idle_grants_and_purges_old_rows() {
     .unwrap();
     assert_eq!(keys, vec!["new".to_string()]);
     // Idempotent.
-    let again = crate::data::delegated::sweep(&pool, chrono::Utc::now(), 90, 365)
+    let again = crate::data::delegated::sweep(&pool, chrono::Utc::now(), 90, 365, 7)
         .await
         .unwrap();
     assert_eq!(again.inactive_grants, 0, "{again:?}");

@@ -371,14 +371,14 @@ pub async fn delete_journey_delegated(
     daily_limit: i64,
 ) -> Result<DelegatedDeleteOutcome> {
     let mut tx = pool.begin().await?;
-    let row: Option<(Option<String>, String)> = sqlx::query_as(
-        "SELECT custom_name, created_via FROM journeys WHERE id = $1 AND user_id = $2 FOR UPDATE",
+    let row: Option<String> = sqlx::query_scalar(
+        "SELECT created_via FROM journeys WHERE id = $1 AND user_id = $2 FOR UPDATE",
     )
     .bind(journey_id)
     .bind(user_id)
     .fetch_optional(&mut *tx)
     .await?;
-    let Some((custom_name, created_via)) = row else {
+    let Some(created_via) = row else {
         return Ok(DelegatedDeleteOutcome::NotFound);
     };
     if created_via != client {
@@ -403,9 +403,10 @@ pub async fn delete_journey_delegated(
         .await?;
     let (recent, oldest): (i64, Option<DateTime<Utc>>) = sqlx::query_as(
         "SELECT COUNT(*), MIN(deleted_at) FROM delegated_deletions \
-         WHERE user_id = $1 AND deleted_at > now() - INTERVAL '24 hours'",
+         WHERE user_id = $1 AND client <> $2 AND deleted_at > now() - INTERVAL '24 hours'",
     )
     .bind(user_id)
+    .bind(crate::data::recently_deleted::WEB)
     .fetch_one(&mut *tx)
     .await?;
     if recent >= daily_limit {
@@ -413,26 +414,13 @@ pub async fn delete_journey_delegated(
         let retry_after_secs = (frees_at - Utc::now()).num_seconds().max(1);
         return Ok(DelegatedDeleteOutcome::DailyLimit { retry_after_secs });
     }
-    let legs: serde_json::Value = sqlx::query_scalar(
-        "SELECT COALESCE(jsonb_agg(jsonb_build_object( \
-             'serviceDate', jl.service_date, 'originCrs', jl.origin_crs, \
-             'destinationCrs', jl.destination_crs, 'trainUid', tr.train_uid, \
-             'kind', jl.kind, 'transitMode', jl.transit_mode, \
-             'originName', jl.origin_place, 'destinationName', jl.destination_place, \
-             'lineName', jl.line_name, 'plannedDeparture', jl.planned_departure, \
-             'originStopId', jl.origin_stop_id, 'destinationStopId', jl.destination_stop_id) \
-             ORDER BY jl.leg_order), '[]'::jsonb) \
-         FROM journey_legs jl \
-         LEFT JOIN train_subscriptions ts ON ts.id = jl.train_subscription_id \
-         LEFT JOIN trains tr ON tr.id = ts.trains_id \
-         WHERE jl.journey_id = $1",
-    )
-    .bind(journey_id)
-    .fetch_one(&mut *tx)
-    .await?;
-    let summary = serde_json::json!({ "customName": custom_name, "legs": legs });
+    // The journey and its legs as "Save again" needs them, read under the
+    // journey's lock, which every add-leg path takes first.
+    let summary = crate::data::recently_deleted::journey_summary(&mut tx, journey_id)
+        .await?
+        .unwrap_or_else(|| serde_json::json!({ "customName": null, "legs": [] }));
     crate::data::journeys::record_template_occurrence_skips(&mut tx, journey_id).await?;
-    crate::data::journeys::delete_journey_row_releasing_trains(&mut tx, journey_id, user_id)
+    crate::data::journeys::delete_journey_row_releasing_trains(&mut tx, journey_id, user_id, false)
         .await?;
     sqlx::query(
         "INSERT INTO delegated_deletions (user_id, client, grant_id, journey_id, summary) \
@@ -464,15 +452,17 @@ pub struct DeletionRow {
 }
 
 /// `user_id`'s delegated deletes of the last [`DELETION_RETENTION_DAYS`],
-/// newest first.
+/// newest first. Not the user's own (`client` `web`, the Recently deleted
+/// list's, `data::recently_deleted`).
 pub async fn recent_deletions(pool: &PgPool, user_id: &str) -> Result<Vec<DeletionRow>> {
     Ok(sqlx::query_as::<_, DeletionRow>(
         "SELECT id, client, journey_id, deleted_at, summary FROM delegated_deletions \
-         WHERE user_id = $1 AND deleted_at > now() - make_interval(days => $2) \
+         WHERE user_id = $1 AND client <> $3 AND deleted_at > now() - make_interval(days => $2) \
          ORDER BY deleted_at DESC, id DESC LIMIT 200",
     )
     .bind(user_id)
     .bind(i32::try_from(DELETION_RETENTION_DAYS)?)
+    .bind(crate::data::recently_deleted::WEB)
     .fetch_all(pool)
     .await?)
 }
@@ -499,14 +489,16 @@ impl SweepOutcome {
 
 /// The hourly pass (§5.3, §5.5a): grants unused for `idle_days` are
 /// revoked (`inactive`); grants revoked more than `revoked_retention_days`
-/// ago,
-/// `delegated_deletions` rows past 30 days, expired idempotency keys and
+/// ago, a connected app's `delegated_deletions` rows past 30 days, the
+/// user's own (`client` `web`, `data::recently_deleted`) past
+/// `web_deletion_retention_days`, expired idempotency keys and
 /// confirmation tokens are deleted. Idempotent.
 pub async fn sweep(
     pool: &PgPool,
     now: DateTime<Utc>,
     idle_days: i64,
     revoked_retention_days: i64,
+    web_deletion_retention_days: i64,
 ) -> Result<SweepOutcome> {
     let inactive_grants = sqlx::query(
         "UPDATE delegated_grants SET revoked_at = $1, revoked_reason = 'inactive' \
@@ -528,10 +520,14 @@ pub async fn sweep(
     .await?
     .rows_affected();
     let deletions_purged = sqlx::query(
-        "DELETE FROM delegated_deletions WHERE deleted_at < $1 - make_interval(days => $2)",
+        "DELETE FROM delegated_deletions \
+         WHERE deleted_at < $1 - make_interval(days => \
+             CASE WHEN client = $4 THEN $3 ELSE $2 END)",
     )
     .bind(now)
     .bind(i32::try_from(DELETION_RETENTION_DAYS)?)
+    .bind(i32::try_from(web_deletion_retention_days)?)
+    .bind(crate::data::recently_deleted::WEB)
     .execute(pool)
     .await?
     .rows_affected();
@@ -566,12 +562,14 @@ pub async fn run_sweep(
     pool: &PgPool,
     now: DateTime<Utc>,
     revoked_retention_days: i64,
+    web_deletion_retention_days: i64,
 ) -> Option<SweepOutcome> {
     let outcome = match sweep(
         pool,
         now,
         crate::auth::delegated::GRANT_IDLE_DAYS,
         revoked_retention_days,
+        web_deletion_retention_days,
     )
     .await
     {
