@@ -12,7 +12,7 @@
 //!
 //! Also a Delay Repay reminder per journey that may have arrived late or had
 //! a cancelled train: a whole-day event on the last day of the claim window
-//! with an alarm a week earlier, worded as a prompt to check. The minimum delay and the window are the
+//! with alarms a week and a day earlier, worded as a prompt to check. The minimum delay and the window are the
 //! last train's operator's own (`delay_repay_rules::claim_rule_for`, with
 //! its sources), Delay Repay 15 and 28 days when the operator is not known.
 //! Like `delay_repay_rules` it estimates and links out, and never submits
@@ -44,8 +44,10 @@ pub const RESOURCE_TYPE: &str = "calendar_feed";
 /// today and last week's journeys, which the claim reminders follow.
 pub const PAST_DAYS: i64 = 7;
 
-/// Days before the deadline an event's alarm shows.
-pub const REMINDER_DAYS_BEFORE: u32 = 7;
+/// Days before the last claim day that a reminder's alarms show: a week
+/// ahead, and a day ahead for a journey whose week-ahead date has already
+/// passed when the feed is first read.
+pub const REMINDER_DAYS_BEFORE: [u32; 2] = [7, 1];
 
 static ENABLED: AtomicBool = AtomicBool::new(false);
 
@@ -161,7 +163,7 @@ pub fn journey_event(facts: &JourneyFacts, site: &Site, since: DateTime<Utc>) ->
              calendar was made; check Distant Signal for the live train. {}",
             credits_text(facts.untracked, &site.origin)
         ),
-        alarm: None,
+        alarms: Vec::new(),
     })
 }
 
@@ -227,6 +229,11 @@ pub fn claim_reminder(facts: &JourneyFacts, site: &Site, today: NaiveDate) -> Op
              {delay_rule} {window_rule}"
         )
     };
+    let alarm_text = format!(
+        "Check Delay Repay for {} to {}. Check your train company's own rules: claims \
+         are usually open for up to {} days after the journey.",
+        facts.origin, facts.destination, rule.window_days
+    );
     Some(Event {
         uid: format!("claim-{}@{}", facts.id, site.host),
         start: When::Day(deadline),
@@ -241,14 +248,13 @@ pub fn claim_reminder(facts: &JourneyFacts, site: &Site, today: NaiveDate) -> Op
              and never makes a claim for you. {}",
             credits_text(facts.untracked, &site.origin)
         ),
-        alarm: Some(Alarm {
-            days_before: REMINDER_DAYS_BEFORE,
-            text: format!(
-                "Check Delay Repay for {} to {}. Check your train company's own rules: claims \
-                 are usually open for up to {} days after the journey.",
-                facts.origin, facts.destination, rule.window_days
-            ),
-        }),
+        alarms: REMINDER_DAYS_BEFORE
+            .into_iter()
+            .map(|days_before| Alarm {
+                days_before,
+                text: alarm_text.clone(),
+            })
+            .collect(),
     })
 }
 
@@ -388,6 +394,7 @@ mod tests {
         let event = journey_event(&facts(), &site(), since()).expect("event");
         assert_eq!(event.summary, "Journey: York to London Kings Cross");
         assert_eq!(event.uid, "journey-7@ds.example");
+        assert_eq!(event.alarms, []);
         assert!(
             event
                 .description
@@ -445,11 +452,13 @@ mod tests {
             event.start,
             When::Day(NaiveDate::from_ymd_opt(2026, 12, 8).unwrap())
         );
-        let alarm = event.alarm.expect("alarm");
-        assert_eq!(alarm.days_before, 7);
-        assert!(alarm.text.contains("Check your train company's own rules"));
-        assert!(alarm.text.contains("up to 28 days"));
-        assert!(!alarm.text.to_lowercase().contains("deadline"));
+        let days: Vec<u32> = event.alarms.iter().map(|alarm| alarm.days_before).collect();
+        assert_eq!(days, [7, 1]);
+        for alarm in &event.alarms {
+            assert!(alarm.text.contains("Check your train company's own rules"));
+            assert!(alarm.text.contains("up to 28 days"));
+            assert!(!alarm.text.to_lowercase().contains("deadline"));
+        }
         assert_eq!(
             event.summary,
             "Check Delay Repay: York to London Kings Cross"

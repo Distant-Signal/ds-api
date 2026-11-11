@@ -69,12 +69,13 @@ which is lower case by the licence, does not read as the entry's own text.
 For a journey that is over and whose final arrival was measured at least
 the operator's minimum delay late, or that had a cancelled train, a
 whole-day event on the last day of the operator's claim window (counted
-from the journey's day), with an alarm 7 days before, while that window is
-open. It is worded as a prompt to check, never as a deadline or a fact:
+from the journey's day), with two alarms, 7 days and 1 day before (the later one is for a journey
+whose 7-day date has already passed when the feed is first read), while that
+window is open. It is worded as a prompt to check, never as a deadline or a fact:
 the title is `Check Delay Repay: {origin} to {destination}`, the
 description says the journey "may have arrived late enough to claim" (the
 delay is the last train's, from Distant Signal's own data; the ticket is
-not known), and the alarm, whose pop-up shows nothing else, has its own
+not known), and each alarm, whose pop-up shows nothing else, has its own
 text: check your train company's own rules, claims are usually open for up
 to the window's days. A cancelled train has its own sentence (a
 cancellation, depending on what happened to the journey and the ticket)
