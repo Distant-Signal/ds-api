@@ -7509,7 +7509,17 @@ mod db_tests {
     #[ignore = "requires a live database; run with `DATABASE_URL=... cargo test -p api \
                 concurrent_add_leg_calls_serialise_on_the_journey_row -- --ignored --test-threads=1`"]
     async fn concurrent_add_leg_calls_serialise_on_the_journey_row() {
-        let pool = connect().await;
+        // The role-split pass runs this as the schema owner (connection limit
+        // 10, shared with the fixture cleanup connections), so the default
+        // pool of 10 would exhaust it. 8 connections still contend on the
+        // journey row for the 25 concurrent adds.
+        let database_url =
+            std::env::var("DATABASE_URL").expect("DATABASE_URL must be set to run this test");
+        let pool = PgPoolOptions::new()
+            .max_connections(8)
+            .connect(&database_url)
+            .await
+            .expect("connect to postgres");
         let _trains = crate::test_support::fixture_trains_cleanup(&pool).await;
         let user_id = "TEST-DB2-17-CONCURRENT-ADD";
         cleanup_user(&pool, user_id).await;

@@ -1,6 +1,6 @@
 //! The schema gate (spec §12.2) passes for the `schedule_reference` role's
 //! grants on a migrated database, as whichever role `DATABASE_URL` is (CI:
-//! the superuser, the role-split app role, and in the per-service step the
+//! the superuser, the schema owner of the role split, and in the per-service step the
 //! narrowed `distant_signal_schedule_reference` itself, plan 2a.6).
 
 use std::time::Duration;

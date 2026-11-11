@@ -7,7 +7,7 @@ r"""Build the DB/Redis-backed test binaries once; run each CI pass from them.
   scripts/db-tests.py list-passes
 
 CI's DB tests (the `#[ignore]`d tests that need DATABASE_URL, REDIS_URL or
-fake-gcs-server) run several times: as the superuser, as the app role
+fake-gcs-server) run several times: as the superuser, as the schema owner
 (scripts/test-postgres-roles.py --mode existing / new), and as each
 service's own role (--mode per-service, with and without --narrow). With
 `cargo test`, each pass's different `-p` selection unified features
@@ -176,7 +176,7 @@ PASSES: Mapping[str, tuple[Step, ...]] = {
             packages=("schedule-ingest",), filters=("bucket_e2e_tests",), serial=False
         ),
     ),
-    # test-postgres-roles.py --mode existing: DATABASE_URL is the app role.
+    # test-postgres-roles.py --mode existing: DATABASE_URL is the owner role.
     "existing": (
         Step(
             packages=("api",),
