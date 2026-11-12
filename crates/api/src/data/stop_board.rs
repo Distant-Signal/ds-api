@@ -11,8 +11,7 @@
 //!
 //! Nested rather than flat because `JourneyStop.delayMinutes` already means
 //! TRUST's minutes late at the stop; this one is Darwin's (MCP team naming
-//! decision, 2026-09-27). Scope and measurements:
-//! ds-review/ldbws-delay-reason-on-train-detail-scope.md.
+//! decision, 2026-09-27).
 //!
 //! **Matching (train -> board, per stop).** Candidates are the rows of a
 //! fresh board for the stop's station whose `std` is within

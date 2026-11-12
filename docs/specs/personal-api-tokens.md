@@ -568,7 +568,7 @@ chart's new Service is `distant-signal-api-tokens`, port 8083.
 
    Also update the hostname list in the comment block of
    `clusters/base/apps/cloudflared.yaml`.
-2. **cloudflared egress** (`clusters/mine-bringer/apps/netpol-cloudflared.yaml`,
+2. **cloudflared egress** (`clusters/<cluster>/apps/netpol-cloudflared.yaml`,
    policy `cloudflared-egress`). Add a rule for the api pods' token port.
    kube-router checks egress after the Service DNAT, so it is the pod port:
 
@@ -589,7 +589,7 @@ chart's new Service is `distant-signal-api-tokens`, port 8083.
        - protocol: TCP
          port: 8083
    ```
-3. **DS values** (`clusters/mine-bringer/apps/distant-signal.yaml`), once
+3. **DS values** (`clusters/<cluster>/apps/distant-signal.yaml`), once
    the chart version with the feature is deployed:
 
    ```yaml

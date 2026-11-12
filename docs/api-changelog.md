@@ -3361,7 +3361,7 @@ lists it in `api.delegated.clients`. Spec:
 operator doc: `docs/connected-apps.md`.
 
 **For ds-mcp (the delegated client).** Send a `distant-signal-api` token
-(`iss=https://sso.cursed.solutions/application/o/distant-signal-api/`,
+(`iss=https://sso.example.com/application/o/distant-signal-api/`,
 `aud=distant-signal-api`, from RFC 8693 token exchange) as
 `Authorization: Bearer` to the **delegated listener**,
 `http://<release>-api-delegated.<namespace>.svc:8082`. The same token on the

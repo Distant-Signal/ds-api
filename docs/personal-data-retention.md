@@ -136,7 +136,7 @@ The privacy page says so; keep it in step if that changes.
 
 ## The login service
 
-Public login moves from the primary Authentik (`sso.cursed.solutions`,
+Public login moves from the primary Authentik (`sso.example.com`,
 which also runs the operator's own infrastructure) to `ds-sso`, an
 Authentik used only for DS (Ranma-Config `docs/specs/ds-public-auth-idp.md`;
 the cut-over is in [connected-apps.md](connected-apps.md), "Account

@@ -20,7 +20,7 @@ and every delegated bearer is refused.
 
 1. ds-mcp exchanges the user's Authentik token for a 5-minute token from the
    `distant-signal-api` provider (`iss`
-   `https://sso.cursed.solutions/application/o/distant-signal-api/` until
+   `https://sso.example.com/application/o/distant-signal-api/` until
    the move to `ds-sso`: "Account continuity", "Cut-over"; `aud` and `azp`
    `distant-signal-api`, RS256, a `scope` claim, no `act`, no `sid`).
 2. It calls the api's **delegated listener** (`api.delegated.port`, 8082) on
@@ -59,7 +59,7 @@ and every delegated bearer is refused.
        clients:
          - name: ds-mcp
            displayName: Distant Signal assistant
-           issuerUrl: https://sso.cursed.solutions/application/o/distant-signal-api/
+           issuerUrl: https://sso.example.com/application/o/distant-signal-api/
            audience: distant-signal-api
            maxScopes: [journeys:read, journeys:write, journeys:delete]
            enabled: true
@@ -265,7 +265,7 @@ The order is the Ranma-Config spec's runbook (`docs/specs/ds-public-auth-idp.md`
 | The api, this runbook | Distant-Signal/ds-api |
 | Migrations and `db-grants.yaml` | Distant-Signal/ds-core, `crates/ds-store` (tag v0.1.1 and later) |
 | The chart, its values reference, the role setup Job | Distant-Signal/ds-deploy, `charts/distant-signal` |
-| Production values | Ranma-Config: `clusters/mine-bringer/apps/distant-signal.yaml` (the `distant-signal-config` ConfigMap's `values.yaml`, and the `distant-signal-secret` SealedSecret), `clusters/mine-bringer/apps/ds-mcp/release.yaml` |
+| Production values | Ranma-Config: `clusters/<cluster>/apps/distant-signal.yaml` (the `distant-signal-config` ConfigMap's `values.yaml`, and the `distant-signal-secret` SealedSecret), `clusters/<cluster>/apps/ds-mcp/release.yaml` |
 
 The commands use `<ns>` for the namespace and `<release>` for the Helm
 release (both `distant-signal` in production) and connect as the chart's
