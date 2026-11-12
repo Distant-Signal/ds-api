@@ -149,9 +149,9 @@ that user out of Distant Signal on their other devices. A token carrying only
 ### Authentik configuration (for the Ranma-Config session)
 
 These settings are on the production Authentik (2026.8.1,
-`https://sso.cursed.solutions`). They apply to the OAuth2/OpenID provider
+`https://sso.example.com`). They apply to the OAuth2/OpenID provider
 behind the `distant-signal` application (issuer
-`https://sso.cursed.solutions/application/o/distant-signal/`), not the
+`https://sso.example.com/application/o/distant-signal/`), not the
 `distant-signal-internal` one.
 
 1. **Provider > Edit > Advanced protocol settings** (blueprint attrs in

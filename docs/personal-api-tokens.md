@@ -51,7 +51,7 @@ hours (`personal_api_tokens.push_notified_at`, in the notifier's
 `grant_notice` cycle), and every page shows a banner for 7 days naming the
 token, with a link to revoke it. Then:
 
-1. DS chart values (Ranma-Config, `clusters/mine-bringer/apps/distant-signal.yaml`):
+1. DS chart values (Ranma-Config, `clusters/<cluster>/apps/distant-signal.yaml`):
 
    ```yaml
    api:
