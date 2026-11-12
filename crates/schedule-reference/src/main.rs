@@ -2000,9 +2000,9 @@ fn line_tiplocs<'a>(
 /// CRS via this cycle's already-resolved `stanox_crs_records`, capped to
 /// the earliest `MAX_DEPARTURES_PER_STATION` per station, published as ONE
 /// batch-array POST (not one POST per CRS, unlike the per-line publish
-/// above -- see the design doc's Decision 1 for why: this route has one
-/// reader, `api` itself, storing every row from one cycle in one
-/// transaction).
+/// above -- see the design doc's Decision 1 for why: this product has one
+/// reader, `api` itself, storing every row from one delivery's publish in
+/// one transaction).
 const MAX_DEPARTURES_PER_STATION: usize = 10; // mirrors poller-ldbws's own
 // num_rows=10 default,
 // crates/poller-ldbws/src/config.rs:45-46
@@ -2070,8 +2070,15 @@ async fn publish_schedule_network_departures(
 /// exact bug class `CallingPoint::day_offset`/`assign_day_offsets` exist to
 /// prevent everywhere else in this codebase (see
 /// `crates/schedule-query/src/resolve.rs`'s own doc comment), just missed
-/// here at publish time. Backs `GET /public/stations/{crs}/schedule-departures`,
-/// the CIF fallback picker `TrackTrainForm.tsx::pickCifDeparture` reads.
+/// here at publish time.
+///
+/// Only a fallback since 2026-11-12 (DS-435): `GET
+/// /public/stations/{crs}/schedule-departures` computes its board on read
+/// from `schedule_destination_departures` (today through today+28, from the
+/// first publish after the previous evening's delivery) and serves a stored
+/// row from here only for a station the timetable has no calls for. This
+/// publish covers `today` alone, once per delivery, so its rows are the
+/// first ten departures from publish time.
 fn schedule_network_departures_rows(
     mut by_crs: std::collections::HashMap<String, Vec<schedule_query::ScheduleDeparture>>,
     today: chrono::NaiveDate,
