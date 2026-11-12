@@ -69,6 +69,7 @@ SQLX_TEST_SKIPS = (
     "line_timetable::db_tests",
     "auth::sliding_session_tests",
     "reads::db_tests",
+    "station_index_sqlx_tests",
     "users::sliding_session_db_tests",
 )
 

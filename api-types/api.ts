@@ -4409,6 +4409,26 @@ name: string | null, };
 export type StationGroupsResponse = { groups: Array<StationGroup>, };
 
 /**
+ * `GET /public/stations/index`'s body.
+ */
+export type StationIndex = { stations: Array<StationIndexEntry>, };
+
+/**
+ * One station of `GET /public/stations/index`.
+ */
+export type StationIndexEntry = { 
+/**
+ * The three-letter CRS code, upper case.
+ */
+crs: string, name: string, 
+/**
+ * Whether the station's page has real content: a catalogue line lists
+ * the station (line-status coverage), or a train in the published
+ * timetable calls there on one of the next [`STATION_INDEX_DAYS`] days.
+ */
+served: boolean, };
+
+/**
  * One operator's row of `GET /public/stations/{crs}/sample-stats`.
  * `sampleAvailability` is never `no-coverage` here (the route's own
  * invariant); `fullCoverageAvailability` is always present.

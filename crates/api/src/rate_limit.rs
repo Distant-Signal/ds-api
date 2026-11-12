@@ -35,7 +35,8 @@
 //!   default, as a backstop for anonymous write amplification.
 //!
 //! Cheap cacheable reads stay unlimited, including the sitemap's id lists
-//! (`/public/stations/codes`, `/public/tfl/stops/ids`).
+//! (`/public/stations/codes`, `/public/stations/index`,
+//! `/public/tfl/stops/ids`).
 //!
 //! A limited request gets `429 Too Many Requests` with `Retry-After`, and is counted in
 //! `distant_signal_api_rate_limited_total{class,caller}`.
@@ -1554,6 +1555,7 @@ mod tests {
         assert_eq!(classify(&Method::GET, "/public/tfl/stops//arrivals"), None);
         // The sitemap's id lists: one cached primary-key scan each.
         assert_eq!(classify(&Method::GET, "/public/stations/codes"), None);
+        assert_eq!(classify(&Method::GET, "/public/stations/index"), None);
         assert_eq!(classify(&Method::GET, "/public/tfl/stops/ids"), None);
         assert_eq!(
             classify(&Method::GET, "/Line/Mode/national-rail/Status"),

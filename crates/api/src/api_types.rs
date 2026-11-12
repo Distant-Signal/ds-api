@@ -119,6 +119,8 @@ fn visit_roots(v: &mut Collector) {
     v.visit::<crate::data::reference::Suggestion>();
     v.visit::<crate::data::reference::NearbyStation>();
     v.visit::<crate::routes::reference::StationCodes>();
+    v.visit::<crate::routes::reference::StationIndex>();
+    v.visit::<crate::data::reference::StationIndexEntry>();
     v.visit::<crate::ts_values::StationAccessibility>();
     v.visit::<crate::routes::station_stats::StationOperatorSampleStatsJson>();
     v.visit::<crate::render::StationDepartureJson>();
