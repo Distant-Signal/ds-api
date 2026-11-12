@@ -3,6 +3,24 @@
 Changes to the Distant Signal (DS) HTTP API that a client such as DS-MCP
 needs to know about. Newest first. Field names are as served (camelCase).
 
+## 2026-11-12: Station schedule departures are available all day
+
+`GET /public/stations/{crs}/schedule-departures` (DS-435). No field,
+parameter or status changes; the same rows are now there when they should
+be.
+
+- It used to be a `404` for every station from London midnight until the
+  day's schedule publish (about 21:35 UTC), and after that held the first ten
+  departures from publish time, nearly all gone. It is now the next ten
+  departures from now (boardable calls only, in train-day order; the time
+  compared is the public departure, else the working one), computed from the
+  same timetable `GET /public/trains/search` reads, so it works from London
+  midnight for today and for yesterday (`?date=`, the after-midnight calls
+  still to come).
+- `404` still means the station has no timetable that day; `200 []` means
+  nothing is left to come.
+- A station with no timetable rows still gets its stored board, as before.
+
 ## 2026-11-11: Recently deleted journeys
 
 A deleted journey can be saved again for a few days (DS-474). Additive,

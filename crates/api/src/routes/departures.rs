@@ -176,19 +176,31 @@ pub(crate) struct StationDeparturesParams {
     calling_at: Option<String>,
 }
 
-/// `GET /public/stations/{crs}/schedule-departures`: today's CIF
-/// SCHEDULE-derived scheduled departures for `crs` -- the whole-network
+/// `GET /public/stations/{crs}/schedule-departures`: the next CIF
+/// SCHEDULE-derived scheduled departures from `crs` -- the whole-network
 /// trip-search fallback picker's backing route, see
 /// docs/superpowers/specs/2026-09-04-whole-network-trip-search-design.md
-/// Decision 1. Reads `schedule_network_departures` directly for today's
-/// date, server-side -- same "always now" posture as
-/// `get_station_departures` above, and the same 404-vs-`200 []` honesty
-/// split: 404 when no row exists for `(crs, today)` at all (this station
-/// isn't in `stanox_crs`, or today's cycle simply hasn't published yet);
-/// `200 []` when a row exists but its `now`-forward filter left nothing.
+/// Decision 1.
+///
+/// **The board is computed on read** (2026-11-12, DS-435): the next
+/// [`BOARD_SIZE`] departures from now, from `schedule_destination_departures`
+/// ([`schedule_board`]), the same table and index `GET /public/trains/search`
+/// reads. That table holds today through today+28 from the first
+/// `schedule-reference` publish after the previous evening's delivery, so a
+/// day's board exists all day. This route used to read only
+/// `schedule_network_departures`, which `schedule-reference` published for
+/// today alone, once per delivery (about 21:35 UTC): from London midnight
+/// until then every station was a `404`, and once there the stored board was
+/// the first ten departures from publish time, nearly all gone.
+///
+/// Only a station with no timetable rows that day falls back to the stored
+/// `schedule_network_departures` board for `(crs, date)` as it is. The split
+/// is the same honest one as `get_station_departures` above: `404` when
+/// neither has the station (it is not on the timetable, or not on a
+/// published day); `200 []` when it is but nothing is left to come.
 ///
 /// **`?date=YYYY-MM-DD`** (optional, 2026-10-07) serves another London
-/// service date's bucket instead of today's. Only today and yesterday are
+/// service date's board instead of today's. Only today and yesterday are
 /// accepted (anything else is a `400`): yesterday exists so a caller between
 /// London midnight and the 02:00 rail-day rollover can still see the
 /// previous evening's services that call here after midnight (its rows with
@@ -204,14 +216,14 @@ async fn get_station_schedule_departures(
     // mirrors: during the 00:00-01:00 BST window, `Utc::now().date_naive()`
     // is still yesterday in London, so a UTC "today" served yesterday's
     // CIF-derived schedule (or 404'd) for the first hour of every service
-    // day. `schedule_network_departures` is keyed by London rail-day date,
-    // never UTC, so the lookup key must be computed the same way.
-    let today = super::london_today();
+    // day. The schedule tables are keyed by London rail-day date, never
+    // UTC, so the lookup key must be computed the same way.
+    let now = super::london_now();
+    let today = now.date_naive();
     let service_date = schedule_departures_date(params.date, today)?;
-    let Some(departures) =
-        queries::latest_schedule_network_departures(&app.database, &crs, service_date)
-            .await
-            .map_err(internal_error)?
+    let Some(rows) = schedule_board(&app.database, &crs, service_date, today, now.time())
+        .await
+        .map_err(internal_error)?
     else {
         return Err((
             StatusCode::NOT_FOUND,
@@ -219,7 +231,6 @@ async fn get_station_schedule_departures(
         ));
     };
 
-    let rows = departures.as_array().cloned().unwrap_or_default();
     // Same batched name-lookup enrichment as `get_station_departures`
     // above, over this route's own `destination_crs` (nullable here --
     // absent codes are simply skipped, `station_names_for_crs_batch`
@@ -258,6 +269,82 @@ async fn get_station_schedule_departures(
     schedule_rows::attach_live(&app.database, service_date, &mut rendered).await;
     schedule_rows::annotate_service_modes(&app.database, service_date, &mut rendered).await;
     Ok(Json(rendered))
+}
+
+/// How many departures the board holds: the same ten the stored
+/// `schedule_network_departures` board and a live board have.
+const BOARD_SIZE: i64 = 10;
+
+/// The lower bound of the board's departure window, in train-day minutes of
+/// `service_date` (`queries::train_day_minutes`): the current London time
+/// for today, the same instant a day later on the clock for yesterday (its
+/// after-midnight rows have `dayOffset >= 1`), the start of the day for a
+/// later date. A board never lists a departure that has gone.
+fn board_depart_from(
+    service_date: chrono::NaiveDate,
+    today: chrono::NaiveDate,
+    now: chrono::NaiveTime,
+) -> i32 {
+    match u32::try_from((today - service_date).num_days()) {
+        Ok(days_ago) => queries::train_day_minutes(now, days_ago),
+        Err(_) => 0,
+    }
+}
+
+/// The board [`get_station_schedule_departures`] serves for `crs` on
+/// `service_date`, as stored-board JSON rows (`uid`, `scheduled`,
+/// `day_offset`, `destination_crs`, `public_departure`), or `None` when the
+/// station has no board for the day at all.
+///
+/// The next [`BOARD_SIZE`] departures from `now` by
+/// `queries::search_schedule_calling_point_departures` (boardable calls
+/// only, public time first, train-day order); empty with the station on the
+/// day's timetable is `Some(vec![])`. A station with no timetable rows falls
+/// back to its stored `schedule_network_departures` rows for the date,
+/// unfiltered.
+async fn schedule_board(
+    pool: &sqlx::PgPool,
+    crs: &str,
+    service_date: chrono::NaiveDate,
+    today: chrono::NaiveDate,
+    now: chrono::NaiveTime,
+) -> anyhow::Result<Option<Vec<Value>>> {
+    let station = queries::normalize_code(crs);
+    let page = queries::search_schedule_calling_point_departures(
+        pool,
+        &queries::CallingPointSearch {
+            station_crs: &station,
+            service_date,
+            depart_from: board_depart_from(service_date, today, now),
+            depart_to: None,
+            true_origin_crs: None,
+            terminates_at: None,
+            stops_at: None,
+            arrive_from: None,
+            arrive_to: None,
+            operators: None,
+            stop_filter: None,
+            across_midnight: false,
+            after: None,
+            limit: BOARD_SIZE,
+        },
+    )
+    .await?;
+    if let Some(page) = page {
+        if !page.departures.is_empty() {
+            return Ok(Some(page.departures));
+        }
+        if queries::schedule_destination_departures_has_station(pool, &station, service_date)
+            .await?
+        {
+            return Ok(Some(Vec::new()));
+        }
+    }
+    Ok(
+        queries::latest_schedule_network_departures(pool, &station, service_date)
+            .await?
+            .map(|stored| stored.as_array().cloned().unwrap_or_default()),
+    )
 }
 
 /// Query string of [`get_station_schedule_departures`]. Unknown keys are
@@ -1066,6 +1153,20 @@ mod db_tests {
         }
     }
 
+    #[test]
+    fn board_window_starts_at_now_today_a_day_on_for_yesterday_and_at_midnight_later() {
+        let today: chrono::NaiveDate = "2026-11-12".parse().unwrap();
+        let now = chrono::NaiveTime::from_hms_opt(0, 30, 59).unwrap();
+        assert_eq!(board_depart_from(today, today, now), 30);
+        // Yesterday's board on today's clock: 00:30 is minute 1470 of it.
+        assert_eq!(
+            board_depart_from(today.pred_opt().unwrap(), today, now),
+            1470
+        );
+        // A later date has no "now" to be forward of.
+        assert_eq!(board_depart_from(today.succ_opt().unwrap(), today, now), 0);
+    }
+
     #[tokio::test]
     #[ignore = "requires a live database; run with `cargo test -p api \
                 schedule_departures -- --ignored --test-threads=1`"]
@@ -1098,7 +1199,7 @@ mod db_tests {
         sqlx::query(
             "INSERT INTO schedule_destination_departures \
                 (service_date, destination_crs, scheduled, train_uid, origin_crs, true_origin_crs) \
-             VALUES ($1, 'SNF', '23:40:00'::time, 'SDLVYD', 'ZRC', 'ZSP')",
+             VALUES ($1, 'SNF', '23:40:00'::time, 'SDLVYD', 'ZRD', 'ZSP')",
         )
         .bind(yesterday)
         .execute(&pool)
@@ -1221,7 +1322,7 @@ mod db_tests {
             sqlx::query(
                 "INSERT INTO schedule_destination_departures \
                     (service_date, destination_crs, scheduled, train_uid, origin_crs, true_origin_crs) \
-                 VALUES ($1, 'CRE', $2::time, $3, 'ZRC', $4)",
+                 VALUES ($1, 'CRE', $2::time, $3, 'ZRD', $4)",
             )
             .bind(today)
             .bind(scheduled)
@@ -1305,5 +1406,203 @@ mod db_tests {
         assert_eq!(third["dayOffset"], 1);
 
         clear_live_fixtures(&pool).await;
+    }
+
+    /// Seeds one `schedule_destination_departures` row for the calling
+    /// point `crs`: the product `schedule-reference` publishes for today
+    /// through today+28 at each delivery.
+    async fn seed_timetable_call(
+        pool: &PgPool,
+        service_date: chrono::NaiveDate,
+        crs: &str,
+        uid: &str,
+        scheduled: &str,
+        day_offset: i16,
+        can_board: bool,
+    ) {
+        sqlx::query(
+            "INSERT INTO schedule_destination_departures \
+                (service_date, destination_crs, scheduled, day_offset, train_uid, origin_crs, \
+                 can_board) \
+             VALUES ($1, 'SNF', $2::time, $3, $4, $5, $6)",
+        )
+        .bind(service_date)
+        .bind(scheduled)
+        .bind(day_offset)
+        .bind(uid)
+        .bind(crs)
+        .bind(can_board)
+        .execute(pool)
+        .await
+        .expect("seed timetable call");
+    }
+
+    async fn clear_board_fixtures(pool: &PgPool) {
+        for sql in [
+            "DELETE FROM schedule_destination_departures WHERE train_uid LIKE 'SDLB%'",
+            "DELETE FROM schedule_network_departures WHERE crs IN ('ZRE', 'ZRF')",
+        ] {
+            sqlx::query(sql)
+                .execute(pool)
+                .await
+                .expect("clear board fixtures");
+        }
+    }
+
+    async fn get_board(pool: &PgPool, uri: &str) -> (StatusCode, Value) {
+        let router: axum::Router = Router::new()
+            .merge(router())
+            .with_state(test_app(pool.clone()));
+        let response = router
+            .oneshot(Request::builder().uri(uri).body(Body::empty()).unwrap())
+            .await
+            .unwrap();
+        let status = response.status();
+        let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let json = serde_json::from_slice(&body).unwrap_or(Value::Null);
+        (status, json)
+    }
+
+    /// DS-435. `schedule-reference` publishes the timetable for today
+    /// through today+28 at each delivery, about 21:35 UTC the evening
+    /// before, and the network-departures board (once) for the delivery's
+    /// day only. This is the state at London midnight: the timetable rows
+    /// for today and no `schedule_network_departures` row at all. The board
+    /// must still be served, from now on, and for the first minute of the
+    /// day as for any other.
+    #[tokio::test]
+    #[ignore = "requires a live database; run with `cargo test -p api \
+                schedule_departures -- --ignored --test-threads=1`"]
+    async fn schedule_departures_board_exists_all_day_from_the_previous_evenings_publish() {
+        let pool = connect().await;
+        clear_board_fixtures(&pool).await;
+        let today: chrono::NaiveDate = "2026-11-12".parse().unwrap();
+        // 2026-11-12 is GMT: London time is UTC.
+        let at = |hour, minute| today.and_hms_opt(hour, minute, 0).unwrap().and_utc();
+        seed_timetable_call(&pool, today, "ZRE", "SDLBA1", "00:10:00", 0, true).await;
+        // Twelve more, from 06:00; the board holds the next ten.
+        for n in 0..12 {
+            let uid = format!("SDLBB{n:02}");
+            let time = format!("{:02}:00:00", 6 + n);
+            seed_timetable_call(&pool, today, "ZRE", &uid, &time, 0, true).await;
+        }
+        // Set down only: never on a board.
+        seed_timetable_call(&pool, today, "ZRE", "SDLBSD", "06:30:00", 0, false).await;
+        // A late call, last of the day.
+        seed_timetable_call(&pool, today, "ZRE", "SDLBZZ", "23:55:00", 0, true).await;
+
+        let uids = |json: &Value| -> Vec<String> {
+            json.as_array()
+                .unwrap()
+                .iter()
+                .map(|row| row["uid"].as_str().unwrap().to_string())
+                .collect()
+        };
+
+        {
+            let _now = crate::routes::pin_london_now_for_tests(at(0, 30));
+            let (status, json) = get_board(&pool, "/stations/ZRE/schedule-departures").await;
+            assert_eq!(status, StatusCode::OK, "{json}");
+            let got = uids(&json);
+            assert_eq!(got.len(), 10, "{json}");
+            // The 00:10 departure has gone; the set-down call is absent.
+            assert_eq!(got[0], "SDLBB00", "{json}");
+            assert!(!got.contains(&"SDLBA1".to_string()));
+            assert!(!got.contains(&"SDLBSD".to_string()));
+            assert_eq!(json[0]["scheduled"], "06:00");
+            assert_eq!(json[0]["dayOffset"], 0);
+            assert_eq!(json[0]["destinationCrs"], "SNF");
+            // Lower-case and padded codes resolve like the stored board's.
+            let (status, again) = get_board(&pool, "/stations/zre/schedule-departures").await;
+            assert_eq!(status, StatusCode::OK);
+            assert_eq!(uids(&again), got);
+        }
+        {
+            // Mid-evening: only what is still to come, in order.
+            let _now = crate::routes::pin_london_now_for_tests(at(16, 0));
+            let (status, json) = get_board(&pool, "/stations/ZRE/schedule-departures").await;
+            assert_eq!(status, StatusCode::OK, "{json}");
+            assert_eq!(uids(&json), ["SDLBB10", "SDLBB11", "SDLBZZ"], "{json}");
+        }
+        {
+            // Everything has gone: the station is on the timetable, so 200 [].
+            let _now = crate::routes::pin_london_now_for_tests(at(23, 59));
+            let (status, json) = get_board(&pool, "/stations/ZRE/schedule-departures").await;
+            assert_eq!(status, StatusCode::OK, "{json}");
+            assert_eq!(json, serde_json::json!([]));
+            // A station with no timetable and no stored board is still 404.
+            let (status, _) = get_board(&pool, "/stations/ZRF/schedule-departures").await;
+            assert_eq!(status, StatusCode::NOT_FOUND);
+        }
+
+        clear_board_fixtures(&pool).await;
+    }
+
+    /// The computed board wins over a stored one (the first ten departures
+    /// from its publish time, here long gone); a station with no timetable
+    /// rows still gets its stored board.
+    #[tokio::test]
+    #[ignore = "requires a live database; run with `cargo test -p api \
+                schedule_departures -- --ignored --test-threads=1`"]
+    async fn schedule_departures_computed_board_replaces_a_stale_stored_one() {
+        let pool = connect().await;
+        clear_board_fixtures(&pool).await;
+        let today: chrono::NaiveDate = "2026-11-12".parse().unwrap();
+        let _now =
+            crate::routes::pin_london_now_for_tests(today.and_hms_opt(12, 0, 0).unwrap().and_utc());
+        sqlx::query(
+            "INSERT INTO schedule_network_departures (crs, service_date, departures) \
+             VALUES ('ZRE', $1, $2), ('ZRF', $1, $2)",
+        )
+        .bind(today)
+        .bind(serde_json::json!([
+            {"uid": "SDLBOLD", "scheduled": "08:00:00", "day_offset": 0, "destination_crs": "SNF"},
+        ]))
+        .execute(&pool)
+        .await
+        .expect("seed stored boards");
+        seed_timetable_call(&pool, today, "ZRE", "SDLBNEW", "12:30:00", 0, true).await;
+
+        let (status, json) = get_board(&pool, "/stations/ZRE/schedule-departures").await;
+        assert_eq!(status, StatusCode::OK, "{json}");
+        assert_eq!(json.as_array().unwrap().len(), 1, "{json}");
+        assert_eq!(json[0]["uid"], "SDLBNEW");
+        let (status, json) = get_board(&pool, "/stations/ZRF/schedule-departures").await;
+        assert_eq!(status, StatusCode::OK, "{json}");
+        assert_eq!(json[0]["uid"], "SDLBOLD");
+
+        clear_board_fixtures(&pool).await;
+    }
+
+    /// Yesterday's board between London midnight and the 02:00 rollover:
+    /// only the calls after its midnight that are still to come.
+    #[tokio::test]
+    #[ignore = "requires a live database; run with `cargo test -p api \
+                schedule_departures -- --ignored --test-threads=1`"]
+    async fn schedule_departures_yesterdays_computed_board_keeps_only_after_midnight_calls_to_come()
+    {
+        let pool = connect().await;
+        clear_board_fixtures(&pool).await;
+        let today: chrono::NaiveDate = "2026-11-12".parse().unwrap();
+        let yesterday = today.pred_opt().unwrap();
+        let _now =
+            crate::routes::pin_london_now_for_tests(today.and_hms_opt(0, 30, 0).unwrap().and_utc());
+        seed_timetable_call(&pool, yesterday, "ZRE", "SDLBY1", "23:40:00", 0, true).await;
+        seed_timetable_call(&pool, yesterday, "ZRE", "SDLBY2", "00:10:00", 1, true).await;
+        seed_timetable_call(&pool, yesterday, "ZRE", "SDLBY3", "00:50:00", 1, true).await;
+
+        let (status, json) = get_board(
+            &pool,
+            &format!("/stations/ZRE/schedule-departures?date={yesterday}"),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{json}");
+        assert_eq!(json.as_array().unwrap().len(), 1, "{json}");
+        assert_eq!(json[0]["uid"], "SDLBY3");
+        assert_eq!(json[0]["dayOffset"], 1);
+
+        clear_board_fixtures(&pool).await;
     }
 }

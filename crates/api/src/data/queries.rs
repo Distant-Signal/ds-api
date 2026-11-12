@@ -1014,6 +1014,31 @@ pub(crate) async fn schedule_destination_departures_published_for(
     Ok(probe.is_some())
 }
 
+/// Whether `schedule_destination_departures` has any row for the calling
+/// point `crs` on `service_date`: the station is on that day's published
+/// timetable. `GET /public/stations/{crs}/schedule-departures` uses it to
+/// tell a station whose departures have all gone (`200 []`) from one with
+/// no timetable at all (`404`).
+///
+/// `crs` is normalised with [`normalize_code`]. One probe on
+/// `schedule_destination_departures_calling_point_idx`
+/// (`service_date, origin_crs, ...`).
+pub(crate) async fn schedule_destination_departures_has_station(
+    pool: &PgPool,
+    crs: &str,
+    service_date: chrono::NaiveDate,
+) -> Result<bool> {
+    let probe: Option<(i32,)> = sqlx::query_as(
+        "SELECT 1 FROM schedule_destination_departures \
+         WHERE service_date = $1 AND origin_crs = $2 LIMIT 1",
+    )
+    .bind(service_date)
+    .bind(normalize_code(crs))
+    .fetch_optional(pool)
+    .await?;
+    Ok(probe.is_some())
+}
+
 /// The earliest and latest `service_date` with any
 /// `schedule_destination_departures` rows, or `None` when the table is
 /// empty. This is the timetable `GET /public/trains/search` can actually
