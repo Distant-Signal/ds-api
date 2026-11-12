@@ -21,6 +21,31 @@ be.
   nothing is left to come.
 - A station with no timetable rows still gets its stored board, as before.
 
+## 2026-11-12: Station index
+
+Additive: one new public, unauthenticated route that lists every station
+with its name and whether its page has content (DS-170), for the web app's
+A to Z station pages and sitemap, which today read a name per station and
+guess at coverage. Nothing existing changes (`GET /public/stations/codes`
+is as it was). No migration and no grant: it reads `stations` and
+`schedule_destination_departures`, which the api role can already read.
+DS-MCP needs no change.
+
+- **New: `GET /public/stations/index`**: `{"stations": [{"crs": "AAP",
+  "name": "Alexandra Palace", "served": true}, ...]}`, every station sorted
+  by CRS (about 2,600 rows, 150 KB uncompressed, much less gzipped), with
+  no pagination. An empty database gives `{"stations": []}`.
+- `served` is `true` when the station's page has real content: a line in
+  the catalogue lists the station (the stations `GET
+  /StopPoint/{crs}/Disruption` answers for; custom lines are never
+  counted), or a train in the published timetable calls there on one of
+  the next 7 London service dates, from today. Live-sample statistics and
+  accessibility data are not counted: nearly every station has them, so
+  they would not tell the pages apart.
+- It sends `Cache-Control: public, max-age=3600`, is answered from a
+  five-minute in-process cache, and is not rate limited, like
+  `/public/stations/codes`.
+
 ## 2026-11-11: Recently deleted journeys
 
 A deleted journey can be saved again for a few days (DS-474). Additive,

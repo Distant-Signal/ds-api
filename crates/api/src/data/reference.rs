@@ -402,6 +402,98 @@ pub async fn all_station_codes(pool: &PgPool) -> Result<Vec<String>> {
     Ok(codes)
 }
 
+/// How many service dates, from today, [`load_station_index`] looks across
+/// for a timetabled train. `schedule-reference` publishes up to 8 days
+/// ahead of `schedule_destination_departures`, and a late delivery can leave
+/// today's date empty for a while, so one date would flap; a week does not.
+pub(crate) const STATION_INDEX_DAYS: u64 = 7;
+
+/// How long [`StationIndexCache`] serves one answer before reading the
+/// database again (the same bound as the station list the type-ahead keeps).
+const STATION_INDEX_TTL: Duration = Duration::from_secs(5 * 60);
+
+/// One station of `GET /public/stations/index`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, ts_rs::TS)]
+pub struct StationIndexEntry {
+    /// The three-letter CRS code, upper case.
+    pub crs: String,
+    pub name: String,
+    /// Whether the station's page has real content: a catalogue line lists
+    /// the station (line-status coverage), or a train in the published
+    /// timetable calls there on one of the next [`STATION_INDEX_DAYS`] days.
+    pub served: bool,
+}
+
+/// Every station with its name and whether it is served, sorted by CRS
+/// (`GET /public/stations/index`). `covered` says whether a catalogue line
+/// lists a CRS (the line catalogue is in memory, never the database; custom lines
+/// are never in it). The timetable side is one `EXISTS` per station against
+/// `schedule_destination_departures_calling_point_idx` (`(service_date,
+/// origin_crs, ...)`, where `origin_crs` is the row's own calling point), so
+/// about 2,600 index probes per date, not a scan of the table.
+///
+/// Not `schedule_network_departures`, which is published once a day for that
+/// day's date alone: for most of each day it holds no row for today.
+pub async fn load_station_index(
+    pool: &PgPool,
+    covered: &(dyn Fn(&str) -> bool + Sync),
+    today: chrono::NaiveDate,
+) -> Result<Vec<StationIndexEntry>> {
+    let dates: Vec<chrono::NaiveDate> = (0..STATION_INDEX_DAYS)
+        .map(|offset| today + chrono::Days::new(offset))
+        .collect();
+    let rows: Vec<(String, String, bool)> = sqlx::query_as(
+        "SELECT s.crs::text, s.name, \
+                EXISTS (SELECT 1 FROM schedule_destination_departures d \
+                         WHERE d.service_date = ANY($1::date[]) \
+                           AND d.origin_crs = s.crs::text) \
+         FROM stations s ORDER BY s.crs",
+    )
+    .bind(&dates)
+    .fetch_all(pool)
+    .await?;
+    Ok(rows
+        .into_iter()
+        .map(|(crs, name, timetabled)| StationIndexEntry {
+            served: timetabled || covered(crs.as_str()),
+            crs,
+            name,
+        })
+        .collect())
+}
+
+/// One cached [`load_station_index`] answer, shared by every request for
+/// [`STATION_INDEX_TTL`]. One load at a time: the lock is held across the
+/// read, so a cold cache costs one query however many requests arrive.
+pub(crate) struct StationIndexCache {
+    loaded: Mutex<Option<(Instant, Arc<Vec<StationIndexEntry>>)>>,
+}
+
+impl StationIndexCache {
+    pub(crate) const fn new() -> Self {
+        Self {
+            loaded: Mutex::const_new(None),
+        }
+    }
+
+    pub(crate) async fn get(
+        &self,
+        pool: &PgPool,
+        covered: &(dyn Fn(&str) -> bool + Sync),
+        today: chrono::NaiveDate,
+    ) -> Result<Arc<Vec<StationIndexEntry>>> {
+        let mut loaded = self.loaded.lock().await;
+        if let Some((at, entries)) = loaded.as_ref()
+            && at.elapsed() < STATION_INDEX_TTL
+        {
+            return Ok(Arc::clone(entries));
+        }
+        let entries = Arc::new(load_station_index(pool, covered, today).await?);
+        *loaded = Some((Instant::now(), Arc::clone(&entries)));
+        Ok(entries)
+    }
+}
+
 /// Which of `codes` are a known operator for a train search over
 /// `service_dates`: a `tocs` row's ATOC code, or the `BX` operator of a
 /// schedule running on one of those dates (2026-10-22: the timetable
@@ -1296,5 +1388,84 @@ mod db_tests {
             result, None,
             "no stations row at all must be None, not Some({{}})"
         );
+    }
+
+    /// `#[sqlx::test]` tests (a throwaway database each, so the empty-database
+    /// case never touches a shared one): `scripts/db-tests.py` runs this
+    /// module as the superuser only (`SQLX_TEST_SKIPS`).
+    mod station_index_sqlx_tests {
+        use super::*;
+
+        #[sqlx::test(migrator = "ds_store::migrate::MIGRATOR")]
+        #[ignore = "needs DATABASE_URL (a role that can create databases)"]
+        async fn station_index_is_empty_on_an_empty_database(pool: PgPool) {
+            let covered = |_: &str| false;
+            let today = chrono::NaiveDate::from_ymd_opt(2026, 11, 12).unwrap();
+            let index = load_station_index(&pool, &covered, today)
+                .await
+                .expect("query");
+            assert_eq!(index, Vec::<StationIndexEntry>::new());
+        }
+
+        #[sqlx::test(migrator = "ds_store::migrate::MIGRATOR")]
+        #[ignore = "needs DATABASE_URL (a role that can create databases)"]
+        async fn station_index_marks_timetabled_and_line_covered_stations_served(pool: PgPool) {
+            let today = chrono::NaiveDate::from_ymd_opt(2026, 11, 12).unwrap();
+            for (crs, name) in [
+                ("ZZC", "Zed Covered"),
+                ("ZZA", "Zed Aaa"),
+                ("ZZL", "Zed Late"),
+                ("ZZO", "Zed Old"),
+                ("ZZN", "Zed Nothing"),
+            ] {
+                sqlx::query("INSERT INTO stations (crs, name) VALUES ($1, $2)")
+                    .bind(crs)
+                    .bind(name)
+                    .execute(&pool)
+                    .await
+                    .expect("seed station");
+            }
+            // ZZA: a train calls on today; ZZL: only on day 7 (outside the
+            // window); ZZO: only yesterday (outside it).
+            for (crs, offset) in [("ZZA", 0_i64), ("ZZL", 7), ("ZZO", -1)] {
+                sqlx::query(
+                    "INSERT INTO schedule_destination_departures \
+                     (service_date, destination_crs, scheduled, train_uid, origin_crs) \
+                     VALUES ($1, 'ZZN', '08:00', 'Z00001', $2)",
+                )
+                .bind(today + chrono::TimeDelta::days(offset))
+                .bind(crs)
+                .execute(&pool)
+                .await
+                .expect("seed departure");
+            }
+            let covered = |crs: &str| crs == "ZZC";
+
+            let index = load_station_index(&pool, &covered, today)
+                .await
+                .expect("query");
+
+            let got: Vec<(&str, &str, bool)> = index
+                .iter()
+                .map(|e| (e.crs.as_str(), e.name.as_str(), e.served))
+                .collect();
+            assert_eq!(
+                got,
+                vec![
+                    ("ZZA", "Zed Aaa", true),
+                    ("ZZC", "Zed Covered", true),
+                    ("ZZL", "Zed Late", false),
+                    ("ZZN", "Zed Nothing", false),
+                    ("ZZO", "Zed Old", false),
+                ],
+                "sorted by CRS; served = line-covered or timetabled in the next 7 days"
+            );
+
+            // Day 6 is inside the window.
+            let later = load_station_index(&pool, &covered, today + chrono::TimeDelta::days(1))
+                .await
+                .expect("query");
+            assert!(later.iter().any(|e| e.crs == "ZZL" && e.served));
+        }
     }
 }

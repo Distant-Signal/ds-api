@@ -16,7 +16,9 @@ use axum::http::{StatusCode, header};
 use serde::Deserialize;
 
 use crate::app::{App, Router};
-use crate::data::reference::{self, NearbyStation, Suggestion};
+use crate::data::reference::{
+    self, NearbyStation, StationIndexCache, StationIndexEntry, Suggestion,
+};
 
 /// Caps how many rows a single type-ahead request can return. 20 is
 /// plenty for a dropdown the user is actively narrowing by typing more.
@@ -38,6 +40,7 @@ pub fn router() -> Router {
     Router::new()
         .route("/stations", axum::routing::get(search_stations))
         .route("/stations/codes", axum::routing::get(list_station_codes))
+        .route("/stations/index", axum::routing::get(list_station_index))
         .route(
             "/stations/{crs}/accessibility",
             axum::routing::get(get_station_accessibility),
@@ -215,6 +218,43 @@ async fn list_station_codes(
 #[derive(Debug, serde::Serialize, ts_rs::TS)]
 pub(crate) struct StationCodes {
     codes: Vec<String>,
+}
+
+/// The cache behind `/stations/index`.
+static STATION_INDEX: StationIndexCache = StationIndexCache::new();
+
+/// `GET /public/stations/index`: `{"stations": [{"crs", "name",
+/// "served"}, ...]}`, every station sorted by CRS. See
+/// [`StationIndexEntry`] for `served`. Unauthenticated and not rate
+/// limited: answered from memory for five minutes, and the `Cache-Control`
+/// lets the edge do the same.
+async fn list_station_index(
+    State(app): State<App>,
+) -> Result<([(header::HeaderName, &'static str); 1], Json<StationIndex>), (StatusCode, String)> {
+    station_index_response(&app, &STATION_INDEX).await
+}
+
+async fn station_index_response(
+    app: &App,
+    cache: &StationIndexCache,
+) -> Result<([(header::HeaderName, &'static str); 1], Json<StationIndex>), (StatusCode, String)> {
+    let covered = |crs: &str| app.config.lines.iter().any(|line| line.has_station(crs));
+    let entries = cache
+        .get(&app.database, &covered, crate::routes::london_today())
+        .await
+        .map_err(internal_error)?;
+    Ok((
+        [(header::CACHE_CONTROL, ID_LIST_CACHE)],
+        Json(StationIndex {
+            stations: entries.as_ref().clone(),
+        }),
+    ))
+}
+
+/// `GET /public/stations/index`'s body.
+#[derive(Debug, serde::Serialize, ts_rs::TS)]
+pub(crate) struct StationIndex {
+    stations: Vec<StationIndexEntry>,
 }
 
 async fn list_all_tocs(
@@ -808,5 +848,91 @@ mod db_tests {
         let b = codes.iter().position(|c| c == "9JB").expect("9JB listed");
         assert!(a < b);
         assert!(codes.iter().all(|c| c.len() == 3), "CRS codes, unpadded");
+    }
+
+    #[test]
+    fn station_index_body_has_a_stable_shape() {
+        let body = StationIndex {
+            stations: vec![StationIndexEntry {
+                crs: "KGX".to_string(),
+                name: "London Kings Cross".to_string(),
+                served: true,
+            }],
+        };
+        assert_eq!(
+            serde_json::to_value(&body).unwrap(),
+            serde_json::json!({
+                "stations": [{"crs": "KGX", "name": "London Kings Cross", "served": true}]
+            })
+        );
+        let empty = StationIndex { stations: vec![] };
+        assert_eq!(
+            serde_json::to_value(&empty).unwrap(),
+            serde_json::json!({"stations": []})
+        );
+    }
+
+    /// `#[sqlx::test]` tests (a throwaway database each, so the empty-database
+    /// case never touches a shared one): `scripts/db-tests.py` runs this
+    /// module as the superuser only (`SQLX_TEST_SKIPS`).
+    mod station_index_sqlx_tests {
+        use super::*;
+
+        #[sqlx::test(migrator = "ds_store::migrate::MIGRATOR")]
+        #[ignore = "needs DATABASE_URL (a role that can create databases)"]
+        async fn station_index_route_is_cacheable_and_survives_an_empty_database(pool: PgPool) {
+            let app: axum::Router = Router::new()
+                .merge(router())
+                .with_state(test_app(pool.clone()));
+            let get = |app: axum::Router| async move {
+                let response = app
+                    .oneshot(
+                        Request::builder()
+                            .uri("/stations/index")
+                            .body(Body::empty())
+                            .unwrap(),
+                    )
+                    .await
+                    .unwrap();
+                assert_eq!(response.status(), StatusCode::OK);
+                assert_eq!(
+                    response.headers().get(header::CACHE_CONTROL).unwrap(),
+                    ID_LIST_CACHE
+                );
+                let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+                    .await
+                    .unwrap();
+                serde_json::from_slice::<serde_json::Value>(&body).unwrap()
+            };
+            assert_eq!(
+                get(app.clone()).await,
+                serde_json::json!({"stations": []}),
+                "an empty database is an empty list, not an error"
+            );
+
+            sqlx::query(
+                "INSERT INTO stations (crs, name) VALUES ('ZZB', 'Zed B'), ('ZZA', 'Zed A')",
+            )
+            .execute(&pool)
+            .await
+            .unwrap();
+            // The first answer is still cached (this test is the only user of
+            // the route's static cache).
+            assert_eq!(get(app).await, serde_json::json!({"stations": []}));
+
+            // A fresh cache reads the rows: sorted, named, nothing served (no
+            // lines, no timetable), and nothing else in the objects.
+            let fresh = StationIndexCache::new();
+            let (_, Json(body)) = station_index_response(&test_app(pool), &fresh)
+                .await
+                .unwrap();
+            assert_eq!(
+                serde_json::to_value(&body).unwrap(),
+                serde_json::json!({"stations": [
+                    {"crs": "ZZA", "name": "Zed A", "served": false},
+                    {"crs": "ZZB", "name": "Zed B", "served": false},
+                ]})
+            );
+        }
     }
 }
