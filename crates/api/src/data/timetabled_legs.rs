@@ -176,6 +176,12 @@ pub struct LineView {
     pub colour: Option<String>,
     /// `tube`, `dlr`, `tram` (a line's own, else the network's).
     pub mode: Option<String>,
+    /// Who runs the line (additive, DS-522): `LT` for the Underground,
+    /// `ds:DLR`, `ds:METROLINK` and so on, the planner's operator codes
+    /// (`planner_operators::transit_operator`). Absent when none is known.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub operator: Option<String>,
 }
 
 /// One timetabled call of the ride, from boarding to alighting.
@@ -370,12 +376,27 @@ async fn line_view(
     .fetch_optional(pool)
     .await
     .context("read the transit line")?;
-    Ok(row.map(|(name, colour, mode, network_mode)| LineView {
-        id: format!("{network}:{line_id}"),
+    Ok(row.map(|(name, colour, mode, network_mode)| {
+        build_line_view(network, line_id, name, colour, mode.unwrap_or(network_mode))
+    }))
+}
+
+fn build_line_view(
+    network: &str,
+    line_id: &str,
+    name: String,
+    colour: Option<String>,
+    mode: String,
+) -> LineView {
+    let id = format!("{network}:{line_id}");
+    let operator = crate::data::planner_operators::transit_operator(&id, Some(&mode)).code();
+    LineView {
+        id,
         name,
         colour,
-        mode: Some(mode.unwrap_or(network_mode)),
-    }))
+        mode: Some(mode),
+        operator,
+    }
 }
 
 /// Every ride on `line_id` of `feed_version` from station `origin` to
@@ -753,6 +774,17 @@ pub async fn resolve_all(pool: &PgPool, keys: &[Option<LegKey>]) -> Vec<Option<L
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_line_view_carries_its_operator_from_network_and_mode() {
+        let view = |network: &str, mode: &str| {
+            build_line_view(network, "x", "X".to_owned(), None, mode.to_owned()).operator
+        };
+        assert_eq!(view("tfl", "tube").as_deref(), Some("LT"));
+        assert_eq!(view("tfl", "dlr").as_deref(), Some("ds:DLR"));
+        assert_eq!(view("tfl", "bus"), None);
+        assert!(view("metrolink", "tram").is_some());
+    }
 
     fn at(s: &str) -> DateTime<Utc> {
         DateTime::parse_from_rfc3339(s).unwrap().with_timezone(&Utc)
