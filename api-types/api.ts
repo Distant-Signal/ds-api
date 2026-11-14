@@ -2660,7 +2660,13 @@ id: string, name: string, colour: string | null,
 /**
  * `tube`, `dlr`, `tram` (a line's own, else the network's).
  */
-mode: string | null, };
+mode: string | null, 
+/**
+ * Who runs the line (additive, DS-522): `LT` for the Underground,
+ * `ds:DLR`, `ds:METROLINK` and so on, the planner's operator codes
+ * (`planner_operators::transit_operator`). Absent when none is known.
+ */
+operator?: string, };
 
 /**
  * What a client picks from `GET /public/tfl/stops/{stopId}/arrivals` for

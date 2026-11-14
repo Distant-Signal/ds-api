@@ -3,6 +3,23 @@
 Changes to the Distant Signal (DS) HTTP API that a client such as DS-MCP
 needs to know about. Newest first. Field names are as served (camelCase).
 
+## 2026-11-14: Operator on a timetabled leg's line
+
+Additive (DS-522, the DS-514 follow-up). `GET /Journeys/{id}` (and the other
+responses that carry a leg's `timetable`) gains an optional `operator` on
+`timetable.line`, so a timetabled untracked leg (a Tube, DLR, tram or
+Metrolink ride) shows who runs it, as a tracked train leg does with
+`trackedTrainState.operatorCode`. Nothing existing changes. No migration and
+no grant.
+
+- `timetable.line.operator`: the planner's operator code for the line,
+  `LT` for the Underground, else a `ds:` code (`ds:DLR`, `ds:LONDON_TRAMS`,
+  `ds:METROLINK`...). Absent when none is known, and with the line itself
+  when the active feed no longer has it. Code only: the api has no names for
+  the `ds:` codes, so a client resolves names itself.
+- Other untracked legs (a bus, a walk, a ride with no network line) and open
+  window legs still have no operator: there is no service to name.
+
 ## 2026-11-12: Station schedule departures are available all day
 
 `GET /public/stations/{crs}/schedule-departures` (DS-435). No field,

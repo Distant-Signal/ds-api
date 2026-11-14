@@ -2374,6 +2374,13 @@
           },
           "name": {
             "type": "string"
+          },
+          "operator": {
+            "description": "Who runs the line (additive, DS-522): `LT` for the Underground,\n`ds:DLR`, `ds:METROLINK` and so on, the planner's operator codes\n(`planner_operators::transit_operator`). Absent when none is known.",
+            "type": [
+              "string",
+              "null"
+            ]
           }
         },
         "required": [
