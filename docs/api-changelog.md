@@ -3,6 +3,28 @@
 Changes to the Distant Signal (DS) HTTP API that a client such as DS-MCP
 needs to know about. Newest first. Field names are as served (camelCase).
 
+## 2026-11-16: Headcode for live-only trains
+
+Additive (DS-532); no migration, grant or schema change. A live-only train
+is a `trains` row with no schedule row for its uid and date, such as a late
+STP or VSTP working the full timetable lacks. It had a `null` `headcode` and
+could not be found by headcode. Its headcode is now the one embedded in its
+TRUST train id (characters 3 to 6 of the 10-character id: `161Z721T16` is
+`1Z72`), only when those characters have a headcode's shape.
+
+- `GET /Train/by-uid/{uid}/{date}` and the line-trains live state: `headcode`
+  carries that headcode for a live-only train. A CIF headcode is never
+  overridden, and a scheduled train whose schedule rows disagree stays
+  `null`. `trainId` is unchanged. Origin, destination and stops stay `null`
+  or empty when the `trains` row holds none; none are invented.
+- `GET /public/trains/by-headcode`: also returns live-only trains whose
+  parsed headcode matches on the date, once each, merged with the schedule's
+  results in departure order (a train with no known departure last), still
+  at most 50. Such a row has `identity` set and `originCrs`,
+  `destinationCrs` and `scheduled` from the `trains` row, `null` where it
+  holds nothing. A date with nothing published is still a `404` unless a
+  live-only train matches.
+
 ## 2026-11-16: Per-kind bucket source metrics
 
 Additive, metrics only (DS-531); no HTTP change, migration or grant.

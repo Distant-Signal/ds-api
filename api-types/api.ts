@@ -3359,7 +3359,12 @@ trainId: string | null,
  * The CIF `BS` Train Identity -- the 4-character signalling headcode
  * (e.g. `"1S00"`) -- read from the published schedule
  * (`schedule_destination_departures.headcode`), not from TRUST. `None`
- * when no row carries one or the rows disagree.
+ * when no row carries one or the rows disagree. The one exception is a
+ * live-only train (a `trains` row with no schedule row at all, such as a
+ * late STP or VSTP working absent from the full timetable): its headcode
+ * is the one embedded in `train_id`, the
+ * only identity it has. A CIF headcode is never overridden, and
+ * schedule rows that disagree stay `None`.
  */
 headcode: string | null, status: JourneyStatus | null, lastReportedLocation: string | null, lastEventType: string | null, 
 /**

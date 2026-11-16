@@ -34,6 +34,7 @@ use super::{
 use crate::app::App;
 use crate::data::queries;
 use crate::data::stop_filters;
+use crate::data::trains::LIVE_ONLY_HEADCODE_SQL;
 use crate::render::calling_point_departure_json;
 use crate::routes::schedule_rows::TrainSearchRow;
 
@@ -769,6 +770,70 @@ pub(super) async fn get_trains_arrivals(
     }))
 }
 
+/// The live-only trains under `headcode` on `service_date`: `trains` rows with
+/// no schedule row at all (a late STP or VSTP working the full timetable
+/// lacks), whose TRUST train id embeds the headcode
+/// ([`crate::data::trains::LIVE_ONLY_HEADCODE_SQL`]). Each is a search row at
+/// whatever the `trains` row holds (origin, destination, departure), `null`
+/// where it holds nothing; no stops are invented. Trains with schedule rows
+/// are excluded here (the schedule query returns them), so the two never
+/// overlap.
+async fn live_only_headcode_rows(
+    app: &App,
+    service_date: chrono::NaiveDate,
+    headcode: &str,
+) -> Result<Vec<(Option<i32>, String, Value, String, i64)>, (StatusCode, String)> {
+    #[derive(sqlx::FromRow)]
+    struct LiveOnly {
+        train_uid: String,
+        origin_crs: Option<String>,
+        destination_crs: Option<String>,
+        scheduled_departure: Option<chrono::DateTime<chrono::Utc>>,
+    }
+    let live: Vec<LiveOnly> = sqlx::query_as(&format!(
+        "SELECT tr.train_uid, tr.origin_crs, tr.destination_crs, tr.scheduled_departure \
+         FROM trains tr \
+         WHERE tr.service_date = $1 AND {LIVE_ONLY_HEADCODE_SQL} = $2 \
+         ORDER BY tr.scheduled_departure NULLS LAST, tr.train_uid \
+         LIMIT $3",
+    ))
+    .bind(service_date)
+    .bind(headcode)
+    .bind(MAX_HEADCODE_MATCHES)
+    .fetch_all(&app.database)
+    .await
+    .map_err(|err| internal_error(err.into()))?;
+    Ok(live
+        .into_iter()
+        .map(|train| {
+            let local = train
+                .scheduled_departure
+                .map(|at| at.with_timezone(&chrono_tz::Europe::London));
+            let day_offset = local
+                .map_or(0, |at| (at.date_naive() - service_date).num_days())
+                .max(0);
+            let time = local.map(|at| at.time());
+            let sort = time.map(|time| minutes(time, day_offset));
+            let raw = json!({
+                "uid": train.train_uid,
+                "service_date": service_date,
+                "day_offset": day_offset,
+                "destination_crs": train.destination_crs,
+                "true_origin_crs": train.origin_crs,
+                "scheduled": time.map(|t| t.format("%H:%M:%S").to_string()),
+                "headcode": headcode,
+            });
+            (
+                sort,
+                train.train_uid,
+                raw,
+                train.origin_crs.unwrap_or_default(),
+                day_offset,
+            )
+        })
+        .collect())
+}
+
 /// `GET /public/trains/by-headcode?headcode=[&date=]` -- the trains
 /// running under one headcode on a date (2026-10-30), each as a row at its
 /// origin: the search's row shape with `stationCrs` the train's first
@@ -776,7 +841,8 @@ pub(super) async fn get_trains_arrivals(
 /// order. At most 50.
 ///
 /// The headcode's trains are read from `schedule_services` (one row per
-/// train and date); a date it has not been published for yet answers an
+/// train and date), plus live-only trains (a `trains` row with no schedule
+/// row) whose TRUST train id carries the headcode; a date it has not been published for yet answers an
 /// empty list. `200 {"results", "serviceDate"}` plus the
 /// timetable-certainty fields; `404` when nothing at all is published for
 /// the date; `400` for a malformed headcode or date.
@@ -788,7 +854,7 @@ pub(super) async fn get_trains_by_headcode(
     let today = crate::routes::london_today();
     let service_date = requested_date(&app, params.date.as_deref(), today).await?;
     // Each train's first call that day: its origin departure.
-    let mut rows: Vec<BoardRow> = sqlx::query_as(&format!(
+    let rows: Vec<BoardRow> = sqlx::query_as(&format!(
         "SELECT DISTINCT ON (train_uid) {BOARD_COLUMNS} FROM schedule_destination_departures \
          WHERE service_date = $1 \
            AND train_uid IN ( \
@@ -802,24 +868,38 @@ pub(super) async fn get_trains_by_headcode(
     .fetch_all(&app.database)
     .await
     .map_err(|err| internal_error(err.into()))?;
+    let live_only = live_only_headcode_rows(&app, service_date, &headcode).await?;
     if rows.is_empty()
+        && live_only.is_empty()
         && !queries::schedule_destination_departures_published_for(&app.database, service_date)
             .await
             .map_err(internal_error)?
     {
         return Err(unpublished(service_date, today));
     }
-    rows.sort_by_key(|row| {
-        let (time, day_offset) = row.shown_departure();
-        (minutes(time, day_offset), row.train_uid.clone())
-    });
-    let rendered = rows
+    let mut keyed: Vec<(Option<i32>, String, Value, String, i64)> = rows
         .into_iter()
         .map(|row| {
-            let (_, day_offset) = row.shown_departure();
-            let origin = row.origin_crs.clone();
-            (row.raw_json(service_date), origin, day_offset)
+            let (time, day_offset) = row.shown_departure();
+            (
+                Some(minutes(time, day_offset)),
+                row.train_uid.clone(),
+                row.raw_json(service_date),
+                row.origin_crs.clone(),
+                day_offset,
+            )
         })
+        .collect();
+    let seen: std::collections::HashSet<String> =
+        keyed.iter().map(|(_, uid, ..)| uid.clone()).collect();
+    keyed.extend(live_only.into_iter().filter(|row| !seen.contains(&row.1)));
+    // Scheduled trains by departure; a live-only train with no known
+    // departure goes last.
+    keyed.sort_by(|a, b| (a.0.is_none(), a.0, &a.1).cmp(&(b.0.is_none(), b.0, &b.1)));
+    keyed.truncate(usize::try_from(MAX_HEADCODE_MATCHES).unwrap_or(50));
+    let rendered = keyed
+        .into_iter()
+        .map(|(_, _, raw, origin, day_offset)| (raw, origin, day_offset))
         .collect();
     let results = render_rows(&app, service_date, rendered, |row, day_offset: &i64| {
         row.day_offset = Some(*day_offset);
