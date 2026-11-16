@@ -3,6 +3,28 @@
 Changes to the Distant Signal (DS) HTTP API that a client such as DS-MCP
 needs to know about. Newest first. Field names are as served (camelCase).
 
+## 2026-11-16: Per-kind bucket source metrics
+
+Additive, metrics only (DS-531); no HTTP change, migration or grant.
+schedule-ingest's bucket source gains three series with a `kind` label
+(`cif` for `timetable_full.zip`, `corpus` for `CORPUSExtract.json.gz` and
+`NLC*.xml.gz`) beside `source="bucket"`, all registered at 0:
+
+- `distant_signal_schedule_feed_source_last_new_object_seconds{source,kind}`:
+  Unix seconds of the last new object of that kind, restored from the seen
+  ledger on start. The existing gauge without `kind` is unchanged (the
+  newest of either kind).
+- `distant_signal_schedule_feed_source_last_object_bytes{source,kind}`: the
+  size of that object.
+- `distant_signal_schedule_feed_source_deliveries_total{source,kind}`: a
+  counter, one per newly downloaded object.
+
+`distant_signal_schedule_feed_source_errors_total{kind}` is unchanged, with
+`kind` one of `auth`, `list`, `get`, `verify`, `delete`, `size`. `auth`
+covers both revoked access (`..._access_revoked` is 1) and a transient
+token exchange failure (it stays 0), which `DistantSignalScheduleBucketReadErrors`
+does not count; tell them apart with `access_revoked`.
+
 ## 2026-11-14: Operator on a timetabled leg's line
 
 Additive (DS-522, the DS-514 follow-up). `GET /Journeys/{id}` (and the other
