@@ -661,12 +661,56 @@ enum ReadOutcome {
     Retry,
 }
 
+/// The largest CORPUS file (as delivered, gzipped) this process reads. The
+/// real JSON extract is ~7 MB before gzip and an XML snapshot smaller, so
+/// this is generous; it stops a huge file with a CORPUS-shaped name (the
+/// SFTP lane limits no file's size) being read whole into memory, on every
+/// restart while it sits in `watch_dir`.
+pub(crate) const MAX_FILE_BYTES: u64 = 64 * 1024 * 1024;
+
+/// The whole file at `path`, or `None` when it is larger than `max_bytes`
+/// (at most `max_bytes + 1` of it is read to find out).
+fn read_capped(path: &Path, max_bytes: u64) -> std::io::Result<Option<Vec<u8>>> {
+    let file = std::fs::File::open(path)?;
+    if file.metadata()?.len() > max_bytes {
+        return Ok(None);
+    }
+    let mut bytes = Vec::new();
+    file.take(max_bytes.saturating_add(1))
+        .read_to_end(&mut bytes)?;
+    Ok((bytes.len() as u64 <= max_bytes).then_some(bytes))
+}
+
 fn read_and_parse(watch_dir: &Path, file: &Candidate, args: &CorpusArgs) -> ReadOutcome {
-    match std::fs::read(watch_dir.join(&file.name)) {
-        Ok(bytes) if bytes.len() as u64 == file.len => ReadOutcome::Parsed(
+    let path = watch_dir.join(&file.name);
+    if file.len > MAX_FILE_BYTES {
+        // Never read whole: hashed (streamed) for the audit line, then
+        // rejected and moved out of watch_dir like any other bad file.
+        return match crate::audit::DeliveredFile::hash_file(&file.name, &path) {
+            Ok(delivered) if delivered.bytes == file.len => ReadOutcome::Parsed(
+                delivered,
+                Err(Rejected(format!(
+                    "{} bytes, larger than the {MAX_FILE_BYTES}-byte limit for a CORPUS file",
+                    file.len
+                ))),
+            ),
+            Ok(_) => {
+                tracing::info!(file = %file.name, "CORPUS file changed while being read; retrying next cycle");
+                ReadOutcome::Retry
+            }
+            Err(err) => {
+                tracing::error!(error = %err, file = %file.name, "failed to read CORPUS file; retrying next cycle");
+                count_failure("read");
+                ReadOutcome::Retry
+            }
+        };
+    }
+    match read_capped(&path, MAX_FILE_BYTES) {
+        Ok(Some(bytes)) if bytes.len() as u64 == file.len => ReadOutcome::Parsed(
             crate::audit::DeliveredFile::from_bytes(&file.name, &bytes),
             parse_file(file.format, &bytes, args),
         ),
+        // Grown (past the limit, or to any other size) since the scan.
         Ok(_) => {
             tracing::info!(file = %file.name, "CORPUS file changed while being read; retrying next cycle");
             ReadOutcome::Retry
@@ -774,8 +818,15 @@ fn compare_with_other(
         tracing::info!(file = %file.name, "no {} CORPUS file to compare with", other.as_str());
         return;
     };
-    let other_rows = match std::fs::read(&path)
+    let other_rows = match read_capped(&path, MAX_FILE_BYTES)
         .map_err(|err| Rejected(err.to_string()))
+        .and_then(|bytes| {
+            bytes.ok_or_else(|| {
+                Rejected(format!(
+                    "larger than the {MAX_FILE_BYTES}-byte limit for a CORPUS file"
+                ))
+            })
+        })
         .and_then(|bytes| parse_file(other, &bytes, args))
     {
         Ok(parsed) => parsed.locations,
@@ -1523,6 +1574,48 @@ pub(crate) mod tests {
             rejected[0].ends_with("-CORPUSExtract.json.gz"),
             "{rejected:?}"
         );
+    }
+
+    /// A CORPUS-named file over [`MAX_FILE_BYTES`] is rejected and moved
+    /// aside without being read into memory (sparse, so cheap to make).
+    #[tokio::test]
+    async fn an_oversized_file_is_rejected_unread_and_moved_aside() {
+        let watch = tempfile::tempdir().unwrap();
+        let storage = tempfile::tempdir().unwrap();
+        let path = watch.path().join("CORPUSExtract.json.gz");
+        let file = std::fs::File::create(&path).unwrap();
+        file.set_len(MAX_FILE_BYTES + 1).unwrap();
+        drop(file);
+        let args = args();
+        let sink = FakeSink::new(Answer::Transient);
+        let mut state = CorpusState::new();
+        let (guard, logs) = crate::audit::tests::capture_default();
+        run(watch.path(), storage.path(), &args, &sink, &mut state, 3).await;
+        drop(guard);
+
+        let audit = logs.audit_lines();
+        assert_eq!(audit.len(), 1, "{audit:?}");
+        assert_eq!(audit[0]["outcome"], "corpus_rejected");
+        assert!(
+            audit[0]["reason"]
+                .as_str()
+                .is_some_and(|r| r.contains("byte limit for a CORPUS file")),
+            "{audit:?}"
+        );
+        assert_eq!(names(watch.path()), [] as [String; 0]);
+        assert_eq!(sink.corpus_loads(), [] as [serde_json::Value; 0]);
+        let rejected = names(&storage.path().join(ARCHIVE_DIR).join(REJECTED_DIR));
+        assert_eq!(rejected.len(), 1, "{rejected:?}");
+    }
+
+    #[test]
+    fn read_capped_stops_past_the_limit() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("f");
+        std::fs::write(&path, b"12345").unwrap();
+        assert_eq!(read_capped(&path, 5).unwrap(), Some(b"12345".to_vec()));
+        assert_eq!(read_capped(&path, 4).unwrap(), None);
+        assert!(read_capped(&dir.path().join("missing"), 5).is_err());
     }
 
     /// The synthetic NLC XML fixture (`tests/fixtures/SOURCE.md`).
