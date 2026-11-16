@@ -1471,10 +1471,17 @@ mod tests {
         let zip_mtime = std::fs::metadata(&zip_path).unwrap().modified().unwrap();
         assert_eq!(rejected_mtime, Some(zip_mtime));
         assert!(pending_post.is_none());
+        let names: Vec<String> = std::fs::read_dir(storage_dir.path())
+            .unwrap()
+            .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
+            .collect();
         assert_eq!(
-            std::fs::read_dir(storage_dir.path()).unwrap().count(),
-            0,
-            "nothing extracted, and no scratch directory left behind"
+            names,
+            [format!(
+                ".rejected-{}",
+                delivery::delivery_dir_name(zip_mtime)
+            )],
+            "nothing extracted, and no scratch directory left behind; only the rejection record"
         );
     }
 
@@ -1998,11 +2005,17 @@ mod tests {
 
         let (rejected_mtime, audit) = run_cycles(watch_dir.path(), storage_dir.path(), 5).await;
 
-        assert_eq!(
-            rejected_mtime,
-            Some(std::fs::metadata(&zip_path).unwrap().modified().unwrap())
-        );
-        assert_eq!(std::fs::read_dir(storage_dir.path()).unwrap().count(), 0);
+        let zip_mtime = std::fs::metadata(&zip_path).unwrap().modified().unwrap();
+        assert_eq!(rejected_mtime, Some(zip_mtime));
+        // No delivery directory; only the rejection record.
+        let record = format!(".rejected-{}", delivery::delivery_dir_name(zip_mtime));
+        let names = || -> Vec<String> {
+            std::fs::read_dir(storage_dir.path())
+                .unwrap()
+                .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
+                .collect()
+        };
+        assert_eq!(names(), std::slice::from_ref(&record));
         assert_eq!(audit.len(), 1, "{audit:?}");
         assert_eq!(audit[0]["outcome"], "quarantined");
         assert_eq!(
@@ -2011,6 +2024,17 @@ mod tests {
         );
         let reason = audit[0]["reason"].as_str().unwrap();
         assert!(reason.contains("ZZ"), "{reason}");
+
+        // After a restart it stays quarantined without being extracted.
+        let (rejected_mtime, audit) = run_cycles(watch_dir.path(), storage_dir.path(), 5).await;
+        assert_eq!(rejected_mtime, Some(zip_mtime));
+        assert_eq!(names(), [record]);
+        assert_eq!(audit.len(), 1, "{audit:?}");
+        let reason = audit[0]["reason"].as_str().unwrap();
+        assert!(
+            reason.contains("ZZ") && reason.contains("rejected before"),
+            "{reason}"
+        );
     }
 
     /// Compared with the last accepted delivery: a delivery whose schedule

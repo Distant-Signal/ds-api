@@ -163,6 +163,23 @@ impl std::fmt::Display for RejectedZip {
 
 impl std::error::Error for RejectedZip {}
 
+/// A delivery refused by a check relative to the settings or to another
+/// delivery (`cif_check::check`: its age, its counts against the last
+/// accepted one). Quarantined like a [`RejectedZip`] (it displays the
+/// same), but not remembered across restarts the way a [`RejectedZip`] is
+/// (see [`ensure_extracted`]): a restart after the settings change, or once
+/// the delivery it was compared with is gone, checks it again.
+#[derive(Debug)]
+pub(crate) struct RejectedForNow(pub String);
+
+impl std::fmt::Display for RejectedForNow {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "zip delivery rejected: {}", self.0)
+    }
+}
+
+impl std::error::Error for RejectedForNow {}
+
 /// One file of a delivery directory: its name, size, and the SHA-256 of
 /// its contents when this process extracted it (a directory adopted from
 /// before the hashes existed has none).
@@ -194,10 +211,10 @@ fn is_past_declared_size(err: &std::io::Error) -> bool {
             .contains("larger than its declared uncompressed size")
 }
 
-/// Whether `err` is a [`RejectedZip`] (permanent) rather than an IO or
-/// transient failure worth retrying.
+/// Whether `err` is a [`RejectedZip`] or [`RejectedForNow`] (permanent for
+/// these bytes) rather than an IO or transient failure worth retrying.
 pub(crate) fn is_rejected(err: &anyhow::Error) -> bool {
-    err.downcast_ref::<RejectedZip>().is_some()
+    err.downcast_ref::<RejectedZip>().is_some() || err.downcast_ref::<RejectedForNow>().is_some()
 }
 
 /// Extracts every regular-file entry of the zip at `zip_path` directly into
@@ -341,10 +358,14 @@ pub(crate) enum Extraction {
 ///    marker. No extraction, no IO beyond reading the marker.
 /// 2. Present but unmarked (written by a version before PL-6) and every
 ///    zip entry is on disk at exactly its recorded size: marks it complete.
-/// 3. Otherwise extracts into `storage_dir/.tmp-<dir_name>` (a stale one
+/// 3. Rejected before with a [`RejectedZip`] (this exact zip, these caps;
+///    see [`REJECTED_RECORD_PREFIX`]): that rejection again, with nothing
+///    extracted.
+/// 4. Otherwise extracts into `storage_dir/.tmp-<dir_name>` (a stale one
 ///    from a crash is removed first), runs `check` on the extracted
-///    directory (an `Err` -- a [`RejectedZip`] for a permanent problem --
-///    removes it and is returned), fsyncs every file, writes the marker,
+///    directory (an `Err` -- a [`RejectedZip`] or [`RejectedForNow`] for a
+///    permanent problem -- removes it and is returned; a [`RejectedZip`] is
+///    also recorded for step 3), fsyncs every file, writes the marker,
 ///    fsyncs the directory, and renames it into place. A pre-existing
 ///    unmarked (so incomplete) final directory is first renamed aside and
 ///    removed after the swap. `storage_dir` is on one volume, so each rename
@@ -367,6 +388,20 @@ pub(crate) fn ensure_extracted(
         return Ok((files, Extraction::Adopted));
     }
 
+    // A zip already rejected (by a previous run: the in-memory quarantine
+    // does not survive a restart) is not extracted and checked again.
+    let key = ZipKey::of(zip_path, limits);
+    if let Some(key) = &key
+        && let Some(reason) = read_rejection(storage_dir, dir_name, key)
+    {
+        tracing::warn!(
+            zip = %key.name,
+            record = %rejection_path(storage_dir, dir_name).display(),
+            "zip delivery was rejected before this process started; not extracting it again (remove the record to check it again)"
+        );
+        return Err(RejectedZip(format!("{reason} (rejected before; not extracted again)")).into());
+    }
+
     std::fs::create_dir_all(storage_dir)?;
     let temp_dir = storage_dir.join(format!("{TEMP_DIR_PREFIX}{dir_name}"));
     if temp_dir.exists() {
@@ -385,6 +420,15 @@ pub(crate) fn ensure_extracted(
             // attempt.
             if let Err(cleanup) = std::fs::remove_dir_all(&temp_dir) {
                 tracing::warn!(error = ?cleanup, path = ?temp_dir, "failed to remove a failed extraction's scratch directory");
+            }
+            // Remembered only while the zip is the one that was read: a
+            // new upload that started meanwhile is checked on its own.
+            if let Some(rejected) = err.downcast_ref::<RejectedZip>()
+                && let Some(key) = key
+                && ZipKey::of(zip_path, limits).as_ref() == Some(&key)
+                && let Err(write) = write_rejection(storage_dir, dir_name, &key, &rejected.0)
+            {
+                tracing::warn!(error = ?write, zip = %key.name, "failed to record the rejected zip delivery; a restart will extract and check it again");
             }
             return Err(err);
         }
@@ -413,6 +457,108 @@ pub(crate) fn ensure_extracted(
 /// Where [`ensure_extracted`] moves an incomplete final directory it is
 /// about to replace. Hidden, so neither discovery nor pruning ever sees it.
 const STALE_DIR_PREFIX: &str = ".stale-";
+
+/// `storage_dir/.rejected-<dir_name>`: a zip [`ensure_extracted`] rejected
+/// with a [`RejectedZip`], so a restart does not extract (up to
+/// [`ExtractLimits::max_total_bytes`]) and check it again. One
+/// tab-separated line: the zip's name, size and exact mtime (Unix
+/// nanoseconds), the [`ExtractLimits`] it was judged under, and the reason.
+/// A file (hidden), so delivery discovery, pruning and
+/// [`adopt_legacy_deliveries`] (which look at directories) never see it.
+/// Removing it has the zip checked again at the next start.
+const REJECTED_RECORD_PREFIX: &str = ".rejected-";
+
+/// How many rejection records are kept; older ones are removed when a new
+/// one is written.
+const REJECTED_RECORDS_KEPT: usize = 8;
+
+/// What a rejection record is keyed on: the zip as it was read, and the
+/// caps it was judged against (raising a cap has it checked again).
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct ZipKey {
+    name: String,
+    bytes: u64,
+    mtime_nanos: u128,
+    limits: ExtractLimits,
+}
+
+impl ZipKey {
+    /// The key of the zip at `zip_path` now; `None` when it can't be read.
+    fn of(zip_path: &Path, limits: ExtractLimits) -> Option<Self> {
+        let metadata = std::fs::metadata(zip_path).ok()?;
+        Some(Self {
+            name: zip_path.file_name()?.to_string_lossy().into_owned(),
+            bytes: metadata.len(),
+            mtime_nanos: unix_nanos(metadata.modified().ok()?)?,
+            limits,
+        })
+    }
+
+    fn fields(&self) -> String {
+        format!(
+            "{}\t{}\t{}\t{}\t{}",
+            self.name,
+            self.bytes,
+            self.mtime_nanos,
+            self.limits.max_total_bytes,
+            self.limits.max_entries
+        )
+    }
+}
+
+fn rejection_path(storage_dir: &Path, dir_name: &str) -> PathBuf {
+    storage_dir.join(format!("{REJECTED_RECORD_PREFIX}{dir_name}"))
+}
+
+/// The reason recorded for `key`, when `dir_name`'s rejection record is for
+/// exactly that zip under those caps. Anything else (no record, another
+/// zip, an unreadable record) is `None`: the zip is extracted and checked.
+fn read_rejection(storage_dir: &Path, dir_name: &str, key: &ZipKey) -> Option<String> {
+    let contents = std::fs::read_to_string(rejection_path(storage_dir, dir_name)).ok()?;
+    let line = contents.trim_end_matches('\n');
+    let (fields, reason) = line.rsplit_once('\t')?;
+    (fields == key.fields()).then(|| reason.to_string())
+}
+
+/// Writes `dir_name`'s rejection record (atomically), then removes all but
+/// the newest [`REJECTED_RECORDS_KEPT`] records.
+fn write_rejection(
+    storage_dir: &Path,
+    dir_name: &str,
+    key: &ZipKey,
+    reason: &str,
+) -> anyhow::Result<()> {
+    let path = rejection_path(storage_dir, dir_name);
+    let temp = storage_dir.join(format!(
+        "{TEMP_DIR_PREFIX}{REJECTED_RECORD_PREFIX}{dir_name}"
+    ));
+    {
+        let mut out = std::fs::File::create(&temp)?;
+        let reason = reason.replace(['\t', '\n', '\r'], " ");
+        writeln!(out, "{}\t{reason}", key.fields())?;
+        out.sync_all()?;
+    }
+    std::fs::rename(&temp, &path)?;
+    fsync_dir(storage_dir)?;
+
+    let mut records: Vec<PathBuf> = std::fs::read_dir(storage_dir)?
+        .filter_map(Result::ok)
+        .filter(|entry| {
+            entry
+                .file_name()
+                .to_str()
+                .and_then(|name| name.strip_prefix(REJECTED_RECORD_PREFIX))
+                .is_some_and(is_delivery_dir_name)
+        })
+        .map(|entry| entry.path())
+        .collect();
+    records.sort();
+    let excess = records.len().saturating_sub(REJECTED_RECORDS_KEPT);
+    for old in &records[..excess] {
+        std::fs::remove_file(old)?;
+    }
+    Ok(())
+}
 
 /// Takes the delivery directory `loser` was accepted into out of service:
 /// the other source's different copy won a disagreement
@@ -1095,7 +1241,128 @@ mod tests {
         )
         .unwrap_err();
         assert!(is_rejected(&err));
+        assert_eq!(
+            names_in(storage.path()),
+            [".rejected-20260903T172830Z"],
+            "only the rejection record"
+        );
+    }
+
+    /// A [`RejectedZip`] is recorded, so the same zip (same name, size,
+    /// mtime and caps) is not extracted or checked again, e.g. after a
+    /// restart; another upload, or raised caps, are.
+    #[test]
+    fn a_rejected_zip_is_not_extracted_again() {
+        let dir = tempfile::tempdir().unwrap();
+        let zip_path = fixture_zip(dir.path());
+        let storage = tempfile::tempdir().unwrap();
+        let name = "20260903T172830Z";
+        let limits = ExtractLimits::default();
+        let err = ensure_extracted(&zip_path, storage.path(), name, limits, |_| {
+            Err(RejectedZip("MCA record 2 is longer than 256 bytes".to_string()).into())
+        })
+        .unwrap_err();
+        assert!(is_rejected(&err));
+
+        let checked = std::cell::Cell::new(false);
+        let err = ensure_extracted(&zip_path, storage.path(), name, limits, |_| {
+            checked.set(true);
+            Ok(())
+        })
+        .unwrap_err();
+        assert!(is_rejected(&err), "{err:?}");
+        assert!(!checked.get(), "not extracted and checked again");
+        assert_eq!(
+            err.to_string(),
+            "zip delivery rejected: MCA record 2 is longer than 256 bytes (rejected before; not extracted again)"
+        );
+        assert_eq!(names_in(storage.path()), [".rejected-20260903T172830Z"]);
+
+        // Other caps: checked again (and accepted).
+        let raised = ExtractLimits {
+            max_entries: limits.max_entries + 1,
+            ..limits
+        };
+        let (_, how) =
+            ensure_extracted(&zip_path, storage.path(), name, raised, |_| Ok(())).unwrap();
+        assert_eq!(how, Extraction::Extracted);
+
+        // A new upload with another mtime under the same directory name
+        // (same second) is checked on its own.
+        let storage = tempfile::tempdir().unwrap();
+        ensure_extracted(&zip_path, storage.path(), name, limits, |_| {
+            Err(RejectedZip("bad".to_string()).into())
+        })
+        .unwrap_err();
+        let file = std::fs::File::options()
+            .write(true)
+            .open(&zip_path)
+            .unwrap();
+        let mtime = file.metadata().unwrap().modified().unwrap();
+        file.set_modified(mtime + Duration::from_millis(1)).unwrap();
+        drop(file);
+        let (_, how) =
+            ensure_extracted(&zip_path, storage.path(), name, limits, |_| Ok(())).unwrap();
+        assert_eq!(how, Extraction::Extracted);
+    }
+
+    /// A [`RejectedForNow`] (a threshold, or a comparison with another
+    /// delivery) is not recorded: the next attempt checks it again.
+    #[test]
+    fn a_rejection_for_now_is_checked_again() {
+        let dir = tempfile::tempdir().unwrap();
+        let zip_path = fixture_zip(dir.path());
+        let storage = tempfile::tempdir().unwrap();
+        let name = "20260903T172830Z";
+        let limits = ExtractLimits::default();
+        let err = ensure_extracted(&zip_path, storage.path(), name, limits, |_| {
+            Err(RejectedForNow("fell from 10 to 1".to_string()).into())
+        })
+        .unwrap_err();
+        assert!(is_rejected(&err));
+        assert_eq!(err.to_string(), "zip delivery rejected: fell from 10 to 1");
         assert_eq!(names_in(storage.path()), [] as [String; 0]);
+        let (_, how) =
+            ensure_extracted(&zip_path, storage.path(), name, limits, |_| Ok(())).unwrap();
+        assert_eq!(how, Extraction::Extracted);
+    }
+
+    /// Only the newest [`REJECTED_RECORDS_KEPT`] records are kept, and a
+    /// record that does not match exactly (or is garbled) is ignored.
+    #[test]
+    fn rejection_records_are_bounded_and_matched_exactly() {
+        let dir = tempfile::tempdir().unwrap();
+        let zip_path = fixture_zip(dir.path());
+        let storage = tempfile::tempdir().unwrap();
+        let key = ZipKey::of(&zip_path, ExtractLimits::default()).unwrap();
+        for day in 1..=10 {
+            let name = format!("202609{day:02}T000000Z");
+            write_rejection(storage.path(), &name, &key, "a\treason\nover lines").unwrap();
+        }
+        let names = names_in(storage.path());
+        assert_eq!(names.len(), REJECTED_RECORDS_KEPT, "{names:?}");
+        assert_eq!(names[0], ".rejected-20260903T000000Z");
+        assert_eq!(
+            read_rejection(storage.path(), "20260910T000000Z", &key).as_deref(),
+            Some("a reason over lines")
+        );
+        let other = ZipKey {
+            bytes: key.bytes + 1,
+            ..key.clone()
+        };
+        assert_eq!(
+            read_rejection(storage.path(), "20260910T000000Z", &other),
+            None
+        );
+        assert_eq!(
+            read_rejection(storage.path(), "20260901T000000Z", &key),
+            None
+        );
+        std::fs::write(storage.path().join(".rejected-20260910T000000Z"), "garbage").unwrap();
+        assert_eq!(
+            read_rejection(storage.path(), "20260910T000000Z", &key),
+            None
+        );
     }
 
     /// The content check sees the extracted files before the marker, and a
@@ -1114,12 +1381,12 @@ mod tests {
             |extracted| {
                 assert!(extracted.join("RJTTF942MCA.txt").is_file());
                 assert!(!extracted.join(COMPLETE_MARKER).exists());
-                Err(RejectedZip("not CIF".to_string()).into())
+                Err(RejectedForNow("too few schedules".to_string()).into())
             },
         )
         .unwrap_err();
         assert!(is_rejected(&err));
-        assert_eq!(err.to_string(), "zip delivery rejected: not CIF");
+        assert_eq!(err.to_string(), "zip delivery rejected: too few schedules");
         assert_eq!(names_in(storage.path()), [] as [String; 0]);
 
         let (_, how) = ensure_extracted(
