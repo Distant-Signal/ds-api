@@ -35,8 +35,9 @@
 //! age, under a session advisory lock so only one process builds; stores
 //! it gzip-compressed in `planner_snapshots`, keyed by [`version_for`]; and
 //! every api process loads the stored row instead of building. Until one is
-//! loaded (or with `TRIP_PLAN_SNAPSHOT_ENABLED` off), graphs are built from
-//! Postgres as before.
+//! loaded, while the installed one is older than the cache's max age (see
+//! [`current`]), or with `TRIP_PLAN_SNAPSHOT_ENABLED` off, graphs are built
+//! from Postgres as before.
 
 use std::collections::HashMap;
 use std::io::Read;
@@ -525,14 +526,31 @@ pub struct Installed {
 
 static INSTALLED: LazyLock<RwLock<Option<Arc<Installed>>>> = LazyLock::new(RwLock::default);
 
+/// Whether a snapshot built at `built_at` is younger than `max_age` at
+/// `now` (one built in the future counts as not fresh).
+fn is_fresh(built_at: DateTime<Utc>, max_age: Duration, now: DateTime<Utc>) -> bool {
+    (now - built_at).to_std().is_ok_and(|age| age < max_age)
+}
+
 /// The installed snapshot when it is the one for `marker` and `networks`
-/// (and so matches the graph being built).
-pub fn current(marker: &GraphMarker, networks: &[String]) -> Option<Arc<Installed>> {
+/// (and so matches the graph being built) and younger than `max_age` (the
+/// graph cache's). An older one is not used: a graph built from it would
+/// be cached as fresh for another `max_age`, so whatever the max age is
+/// there to catch (a publish one product of which failed, reference data
+/// no marker covers) could stay stale for twice as long; the graph is read
+/// from Postgres instead until the prewarm refreshes the snapshot.
+pub fn current(
+    marker: &GraphMarker,
+    networks: &[String],
+    max_age: Duration,
+) -> Option<Arc<Installed>> {
     let installed = INSTALLED
         .read()
         .unwrap_or_else(std::sync::PoisonError::into_inner)
         .clone()?;
-    (installed.version == version_for(marker, networks)).then_some(installed)
+    (installed.version == version_for(marker, networks)
+        && is_fresh(installed.built_at, max_age, Utc::now()))
+    .then_some(installed)
 }
 
 fn install(installed: Installed) {
@@ -578,16 +596,11 @@ pub async fn ensure(
     max_age: Duration,
 ) -> Result<Outcome> {
     let version = version_for(marker, networks);
-    let fresh = |built_at: DateTime<Utc>| {
-        (Utc::now() - built_at)
-            .to_std()
-            .is_ok_and(|age| age < max_age)
-    };
-    if current(marker, networks).is_some_and(|installed| fresh(installed.built_at)) {
+    if current(marker, networks, max_age).is_some() {
         return Ok(Outcome::Current);
     }
     if let Some(stored) = load(pool, &version).await?
-        && fresh(stored.built_at)
+        && is_fresh(stored.built_at, max_age, Utc::now())
     {
         let started = Instant::now();
         let snapshot = tokio::task::spawn_blocking(move || decode(&stored.bytes)).await??;
@@ -806,6 +819,48 @@ mod tests {
         );
         assert_eq!(inputs.modes["C1"], ServiceMode::from_db_str("bus"));
         assert!(inputs.transit.is_none());
+    }
+
+    #[test]
+    fn freshness_is_an_age_under_the_max() {
+        let now = Utc::now();
+        let hour = Duration::from_secs(3600);
+        assert!(is_fresh(now, hour, now));
+        assert!(is_fresh(now - chrono::Duration::minutes(59), hour, now));
+        assert!(!is_fresh(now - chrono::Duration::hours(1), hour, now));
+        assert!(!is_fresh(now - chrono::Duration::hours(7), hour, now));
+        assert!(!is_fresh(now, Duration::ZERO, now));
+        assert!(
+            !is_fresh(now + chrono::Duration::minutes(1), hour, now),
+            "built in the future"
+        );
+    }
+
+    /// An installed snapshot past the max age is not current, so a graph
+    /// built after the max age (before the prewarm refreshes the snapshot)
+    /// reads Postgres instead of being cached as fresh from stale inputs.
+    #[test]
+    fn an_installed_snapshot_past_the_max_age_is_not_current() {
+        let marker = GraphMarker::default();
+        let hour = Duration::from_secs(3600);
+        install(Installed {
+            version: version_for(&marker, &[]),
+            built_at: Utc::now() - chrono::Duration::hours(7),
+            snapshot: sample(),
+        });
+        assert!(current(&marker, &[], hour).is_none());
+        assert!(current(&marker, &[], Duration::from_secs(8 * 3600)).is_some());
+        install(Installed {
+            version: version_for(&marker, &[]),
+            built_at: Utc::now(),
+            snapshot: sample(),
+        });
+        assert!(current(&marker, &[], hour).is_some());
+        assert!(
+            current(&marker, &["tfl".to_string()], hour).is_none(),
+            "another version"
+        );
+        uninstall_for_tests();
     }
 
     #[test]
