@@ -65,13 +65,25 @@ use crate::pattern::{FilePattern, Routing};
 const SOURCE: &str = "bucket";
 pub(crate) const ACCESS_REVOKED_METRIC: &str = "schedule_feed_source_access_revoked";
 pub(crate) const LAST_NEW_OBJECT_METRIC: &str = "schedule_feed_source_last_new_object_seconds";
+/// Per-`kind` siblings of [`LAST_NEW_OBJECT_METRIC`] (which stays as it
+/// was, with no `kind`): when and how big the last new object of each
+/// kind was, and how many were downloaded. Same name as
+/// [`LAST_NEW_OBJECT_METRIC`], one more label.
+pub(crate) const LAST_OBJECT_BYTES_METRIC: &str = "schedule_feed_source_last_object_bytes";
+pub(crate) const DELIVERIES_METRIC: &str = "schedule_feed_source_deliveries_total";
+/// `kind` of the per-kind metrics: the routing's verdict, a CIF timetable
+/// or a CORPUS file.
+pub(crate) const OBJECT_KINDS: [&str; 2] = ["cif", "corpus"];
 pub(crate) const ERRORS_METRIC: &str = "schedule_feed_source_errors_total";
 pub(crate) const UNEXPECTED_METRIC: &str = "schedule_feed_source_unexpected_objects_total";
 pub(crate) const DOWNLOAD_CAPPED_METRIC: &str = "schedule_feed_source_download_capped";
 pub(crate) const DOWNLOADED_BYTES_METRIC: &str = "schedule_feed_source_downloaded_bytes_total";
 pub(crate) const POLL_DURATION_METRIC: &str = "schedule_feed_source_poll_duration_seconds";
 /// `kind` of [`ERRORS_METRIC`]. `DistantSignalScheduleBucketReadErrors`
-/// reads every kind but `auth`.
+/// reads every kind but `auth`. `auth` is both a revoked grant (which
+/// also sets [`ACCESS_REVOKED_METRIC`] to 1) and a transient token
+/// exchange failure (which leaves it at 0), so `auth` errors while
+/// `access_revoked` is 0 are the transient ones.
 pub(crate) const ERROR_KINDS: [&str; 6] = ["auth", "list", "get", "verify", "delete", "size"];
 /// `reason` of [`UNEXPECTED_METRIC`].
 pub(crate) const UNEXPECTED_REASONS: [&str; 3] = ["name", "size", "unroutable"];
@@ -235,6 +247,15 @@ impl BucketSource {
         let seen = read_seen(&dirs.seen);
         if let Some(newest) = seen.iter().map(|s| s.time_created).max() {
             set_last_new_object(newest);
+        }
+        for kind in OBJECT_KINDS {
+            let newest = seen
+                .iter()
+                .filter(|s| object_kind(&settings.routing, &s.name) == kind)
+                .max_by_key(|s| s.time_created);
+            if let Some(newest) = newest {
+                set_last_object(kind, newest.time_created, newest.bytes);
+            }
         }
         remove_partials(&dirs.root);
         Self {
@@ -525,6 +546,10 @@ impl BucketSource {
             tracing::error!(error = %err, "failed to persist the bucket's seen ledger; a restart may download this object once more");
         }
         set_last_new_object(object.time_created);
+        let kind = object_kind(&self.settings.routing, &object.name);
+        set_last_object(kind, object.time_created, object.size);
+        metrics::counter!(ds_runtime::metrics::metric_name(DELIVERIES_METRIC), "source" => SOURCE, "kind" => kind)
+            .increment(1);
         tracing::info!(
             object = %shown(&object.name),
             generation = object.generation,
@@ -742,6 +767,29 @@ fn set_last_new_object(at: DateTime<Utc>) {
         .set(at.timestamp() as f64);
 }
 
+/// The `kind` label of an object name, by the routing that accepted it:
+/// CORPUS files are `corpus`, everything else `cif`.
+fn object_kind(routing: &Routing, name: &str) -> &'static str {
+    if routing.is_corpus(name) {
+        "corpus"
+    } else {
+        "cif"
+    }
+}
+
+/// The per-kind gauges: [`LAST_NEW_OBJECT_METRIC`] with a `kind`, and the
+/// object's size.
+#[expect(
+    clippy::cast_precision_loss,
+    reason = "a Unix timestamp and an object size stay far below 2^52"
+)]
+fn set_last_object(kind: &'static str, at: DateTime<Utc>, bytes: u64) {
+    metrics::gauge!(ds_runtime::metrics::metric_name(LAST_NEW_OBJECT_METRIC), "source" => SOURCE, "kind" => kind)
+        .set(at.timestamp() as f64);
+    metrics::gauge!(ds_runtime::metrics::metric_name(LAST_OBJECT_BYTES_METRIC), "source" => SOURCE, "kind" => kind)
+        .set(bytes as f64);
+}
+
 /// Every bucket metric at 0, so the alerts' `increase()` sees the first
 /// event.
 pub(crate) fn register_metrics() {
@@ -749,6 +797,14 @@ pub(crate) fn register_metrics() {
     gauge(ACCESS_REVOKED_METRIC).set(0.0);
     gauge(DOWNLOAD_CAPPED_METRIC).set(0.0);
     gauge(LAST_NEW_OBJECT_METRIC).set(0.0);
+    for kind in OBJECT_KINDS {
+        metrics::gauge!(ds_runtime::metrics::metric_name(LAST_NEW_OBJECT_METRIC), "source" => SOURCE, "kind" => kind)
+            .set(0.0);
+        metrics::gauge!(ds_runtime::metrics::metric_name(LAST_OBJECT_BYTES_METRIC), "source" => SOURCE, "kind" => kind)
+            .set(0.0);
+        metrics::counter!(ds_runtime::metrics::metric_name(DELIVERIES_METRIC), "source" => SOURCE, "kind" => kind)
+            .increment(0);
+    }
     for kind in ERROR_KINDS {
         metrics::counter!(ds_runtime::metrics::metric_name(ERRORS_METRIC), "source" => SOURCE, "kind" => kind)
             .increment(0);
@@ -1049,6 +1105,88 @@ pub(crate) mod tests {
         assert_eq!(std::fs::read_dir(archive).unwrap().count(), 1);
     }
 
+    /// The rendered Prometheus line for `series`, if any.
+    fn sample(rendered: &str, series: &str) -> Option<String> {
+        rendered
+            .lines()
+            .find_map(|l| l.strip_prefix(series))
+            .map(|v| v.trim().to_owned())
+    }
+
+    #[tokio::test]
+    async fn per_kind_metrics_follow_each_download_and_survive_a_restart() {
+        let recorder = metrics_exporter_prometheus::PrometheusBuilder::new().build_recorder();
+        let handle = recorder.handle();
+        let _guard = metrics::set_default_local_recorder(&recorder);
+        let cif = "distant_signal_schedule_feed_source_last_new_object_seconds{source=\"bucket\",kind=\"cif\"} ";
+        let cif_bytes = "distant_signal_schedule_feed_source_last_object_bytes{source=\"bucket\",kind=\"cif\"} ";
+        let corpus_bytes = "distant_signal_schedule_feed_source_last_object_bytes{source=\"bucket\",kind=\"corpus\"} ";
+        let cif_n =
+            "distant_signal_schedule_feed_source_deliveries_total{source=\"bucket\",kind=\"cif\"} ";
+        let corpus_n = "distant_signal_schedule_feed_source_deliveries_total{source=\"bucket\",kind=\"corpus\"} ";
+        let corpus = "distant_signal_schedule_feed_source_last_new_object_seconds{source=\"bucket\",kind=\"corpus\"} ";
+        let plain =
+            "distant_signal_schedule_feed_source_last_new_object_seconds{source=\"bucket\"} ";
+
+        let f = Fixture::new().await;
+        let zip_at = f.created(Duration::from_secs(120));
+        let corpus_at = f.created(Duration::from_secs(60));
+        f.bucket.put("timetable_full.zip", b"zip-bytes", 1, zip_at);
+        let mut source = f.source(Fixture::settings());
+        let r = handle.render();
+        assert_eq!(sample(&r, cif).as_deref(), Some("0"));
+        assert_eq!(sample(&r, corpus_n).as_deref(), Some("0"));
+        source.poll_once().await;
+        f.bucket
+            .put("CORPUSExtract.json.gz", b"corpus", 2, corpus_at);
+        f.bucket.put("NLC20261009.xml.gz", b"nlc", 3, corpus_at);
+        source.poll_once().await;
+        let r = handle.render();
+        let secs = |at: DateTime<Utc>| format!("{}", at.timestamp());
+        assert_eq!(
+            sample(&r, cif).unwrap().split('.').next().unwrap(),
+            secs(zip_at)
+        );
+        assert_eq!(
+            sample(&r, corpus).unwrap().split('.').next().unwrap(),
+            secs(corpus_at)
+        );
+        assert_eq!(sample(&r, cif_bytes).as_deref(), Some("9"));
+        assert_eq!(sample(&r, cif_n).as_deref(), Some("1"));
+        assert_eq!(sample(&r, corpus_n).as_deref(), Some("2"));
+        // The unlabelled gauge is the newest of either kind.
+        assert_eq!(
+            sample(&r, plain).unwrap().split('.').next().unwrap(),
+            secs(corpus_at)
+        );
+
+        // A restart restores the gauges from the ledger; the counter
+        // starts again, as a counter does.
+        drop(source);
+        let recorder = metrics_exporter_prometheus::PrometheusBuilder::new().build_recorder();
+        let handle = recorder.handle();
+        let _guard = metrics::set_default_local_recorder(&recorder);
+        let _restarted = f.source(Fixture::settings());
+        let r = handle.render();
+        assert_eq!(
+            sample(&r, cif).unwrap().split('.').next().unwrap(),
+            secs(zip_at)
+        );
+        assert_eq!(sample(&r, cif_bytes).as_deref(), Some("9"));
+        let restored: u32 = sample(&r, corpus_bytes)
+            .unwrap()
+            .split('.')
+            .next()
+            .unwrap()
+            .parse()
+            .unwrap();
+        assert!(
+            restored == 6 || restored == 3,
+            "the newest corpus object's size"
+        );
+        assert_eq!(sample(&r, cif_n).as_deref(), Some("0"));
+    }
+
     #[tokio::test]
     async fn a_new_generation_is_a_new_delivery() {
         let f = Fixture::new().await;
@@ -1284,6 +1422,8 @@ pub(crate) mod tests {
                 DOWNLOAD_CAPPED_METRIC,
                 DOWNLOADED_BYTES_METRIC,
                 POLL_DURATION_METRIC,
+                LAST_OBJECT_BYTES_METRIC,
+                DELIVERIES_METRIC,
                 crate::sources::DISAGREEMENT_METRIC,
             ],
             [
@@ -1294,6 +1434,8 @@ pub(crate) mod tests {
                 "schedule_feed_source_download_capped",
                 "schedule_feed_source_downloaded_bytes_total",
                 "schedule_feed_source_poll_duration_seconds",
+                "schedule_feed_source_last_object_bytes",
+                "schedule_feed_source_deliveries_total",
                 "schedule_feed_source_disagreement_total",
             ]
         );

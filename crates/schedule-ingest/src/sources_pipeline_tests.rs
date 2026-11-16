@@ -492,6 +492,16 @@ fn every_source_metric_is_registered_at_zero() {
         "distant_signal_schedule_feed_source_last_new_object_seconds{source=\"bucket\"} 0".into(),
         "distant_signal_schedule_feed_source_downloaded_bytes_total{source=\"bucket\"} 0".into(),
     ];
+    for kind in crate::bucket::OBJECT_KINDS {
+        for name in ["last_new_object_seconds", "last_object_bytes"] {
+            expected.push(format!(
+                "distant_signal_schedule_feed_source_{name}{{source=\"bucket\",kind=\"{kind}\"}} 0"
+            ));
+        }
+        expected.push(format!(
+            "distant_signal_schedule_feed_source_deliveries_total{{source=\"bucket\",kind=\"{kind}\"}} 0"
+        ));
+    }
     for kind in crate::bucket::ERROR_KINDS {
         expected.push(format!(
             "distant_signal_schedule_feed_source_errors_total{{source=\"bucket\",kind=\"{kind}\"}} 0"
