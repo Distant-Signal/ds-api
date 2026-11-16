@@ -3150,7 +3150,7 @@
             ]
           },
           "headcode": {
-            "description": "The CIF `BS` Train Identity -- the 4-character signalling headcode\n(e.g. `\"1S00\"`) -- read from the published schedule\n(`schedule_destination_departures.headcode`), not from TRUST. `None`\nwhen no row carries one or the rows disagree.",
+            "description": "The CIF `BS` Train Identity -- the 4-character signalling headcode\n(e.g. `\"1S00\"`) -- read from the published schedule\n(`schedule_destination_departures.headcode`), not from TRUST. `None`\nwhen no row carries one or the rows disagree. The one exception is a\nlive-only train (a `trains` row with no schedule row at all, such as a\nlate STP or VSTP working absent from the full timetable): its headcode\nis the one embedded in `train_id`, the\nonly identity it has. A CIF headcode is never overridden, and\nschedule rows that disagree stay `None`.",
             "type": [
               "string",
               "null"

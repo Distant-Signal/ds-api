@@ -80,7 +80,12 @@ pub struct PublicTrainState {
     /// The CIF `BS` Train Identity -- the 4-character signalling headcode
     /// (e.g. `"1S00"`) -- read from the published schedule
     /// (`schedule_destination_departures.headcode`), not from TRUST. `None`
-    /// when no row carries one or the rows disagree.
+    /// when no row carries one or the rows disagree. The one exception is a
+    /// live-only train (a `trains` row with no schedule row at all, such as a
+    /// late STP or VSTP working absent from the full timetable): its headcode
+    /// is the one embedded in `train_id`, the
+    /// only identity it has. A CIF headcode is never overridden, and
+    /// schedule rows that disagree stay `None`.
     pub headcode: Option<String>,
     #[ts(as = "Option<crate::ts_values::JourneyStatus>")]
     #[schemars(with = "Option<crate::ts_values::JourneyStatus>")]
@@ -242,6 +247,21 @@ pub async fn is_known_scheduled_train(
     Ok(row.is_some())
 }
 
+/// A TRUST train id's headcode as SQL over `tr` (`trains`): characters 3 to 6
+/// of the 10-character id (`161Z721T16` is headcode `1Z72`: a 2-digit prefix,
+/// the headcode, then 4 more characters), only when it has the headcode's
+/// shape and `tr` is live-only (no `schedule_destination_departures` or
+/// `schedule_services` row for the uid and date). `NULL` otherwise, so the
+/// CIF headcode, or its absence, always wins for a scheduled train.
+pub(crate) const LIVE_ONLY_HEADCODE_SQL: &str = "\
+    (CASE WHEN length(tr.train_id) = 10 \
+           AND upper(substr(tr.train_id, 3, 4)) ~ '^[0-9][A-Z][0-9][0-9]$' \
+           AND NOT EXISTS (SELECT 1 FROM schedule_destination_departures x \
+                            WHERE x.train_uid = tr.train_uid AND x.service_date = tr.service_date) \
+           AND NOT EXISTS (SELECT 1 FROM schedule_services y \
+                            WHERE y.uid = tr.train_uid AND y.service_date = tr.service_date) \
+          THEN upper(substr(tr.train_id, 3, 4)) END)";
+
 /// Public, unscoped read for `(train_uid, service_date)` -- no
 /// `AuthenticatedUser`/ownership check anywhere in this call path. Reads
 /// `trains` directly (joined with the re-pointed `train_current_state` via
@@ -253,13 +273,16 @@ pub async fn get_public_train_state(
     train_uid: &str,
     service_date: NaiveDate,
 ) -> anyhow::Result<Option<PublicTrainState>> {
-    let row = sqlx::query_as::<_, PublicTrainState>(
+    let row = sqlx::query_as::<_, PublicTrainState>(&format!(
         "SELECT tr.id AS trains_id, tr.train_uid, tr.service_date, tr.origin_crs, so.name AS origin_name, \
                 tr.destination_crs, sd.name AS destination_name, tr.scheduled_departure, \
                 tr.calling_points, tr.train_id, \
-                (SELECT CASE WHEN COUNT(DISTINCT sdd.headcode) = 1 THEN MIN(sdd.headcode) END \
-                   FROM schedule_destination_departures sdd \
-                  WHERE sdd.train_uid = tr.train_uid AND sdd.service_date = tr.service_date) AS headcode, \
+                COALESCE( \
+                    (SELECT CASE WHEN COUNT(DISTINCT sdd.headcode) = 1 THEN MIN(sdd.headcode) END \
+                       FROM schedule_destination_departures sdd \
+                      WHERE sdd.train_uid = tr.train_uid AND sdd.service_date = tr.service_date), \
+                    {LIVE_ONLY_HEADCODE_SQL} \
+                ) AS headcode, \
                 tr.skipped_stations, tr.platform, tr.planned_platform, \
                 cs.status, cs.last_reported_location, cs.last_event_type, cs.delay_minutes, \
                 cs.delay_minutes AS working_delay_minutes, \
@@ -269,7 +292,7 @@ pub async fn get_public_train_state(
          LEFT JOIN stations so ON so.crs = UPPER(tr.origin_crs)::bpchar \
          LEFT JOIN stations sd ON sd.crs = UPPER(tr.destination_crs)::bpchar \
          WHERE tr.train_uid = $1 AND tr.service_date = $2",
-    )
+    ))
     .bind(train_uid)
     .bind(service_date)
     .fetch_optional(pool)
@@ -306,13 +329,16 @@ pub async fn get_public_train_states_for_line(
     if train_uids.is_empty() {
         return Ok(Vec::new());
     }
-    let rows = sqlx::query_as::<_, PublicTrainState>(
+    let rows = sqlx::query_as::<_, PublicTrainState>(&format!(
         "SELECT tr.id AS trains_id, tr.train_uid, tr.service_date, tr.origin_crs, so.name AS origin_name, \
                 tr.destination_crs, sd.name AS destination_name, tr.scheduled_departure, \
                 tr.calling_points, tr.train_id, \
-                (SELECT CASE WHEN COUNT(DISTINCT sdd.headcode) = 1 THEN MIN(sdd.headcode) END \
-                   FROM schedule_destination_departures sdd \
-                  WHERE sdd.train_uid = tr.train_uid AND sdd.service_date = tr.service_date) AS headcode, \
+                COALESCE( \
+                    (SELECT CASE WHEN COUNT(DISTINCT sdd.headcode) = 1 THEN MIN(sdd.headcode) END \
+                       FROM schedule_destination_departures sdd \
+                      WHERE sdd.train_uid = tr.train_uid AND sdd.service_date = tr.service_date), \
+                    {LIVE_ONLY_HEADCODE_SQL} \
+                ) AS headcode, \
                 tr.skipped_stations, tr.platform, tr.planned_platform, \
                 cs.status, cs.last_reported_location, cs.last_event_type, cs.delay_minutes, \
                 cs.delay_minutes AS working_delay_minutes, \
@@ -322,7 +348,7 @@ pub async fn get_public_train_states_for_line(
          LEFT JOIN stations so ON so.crs = UPPER(tr.origin_crs)::bpchar \
          LEFT JOIN stations sd ON sd.crs = UPPER(tr.destination_crs)::bpchar \
          WHERE tr.train_uid = ANY($1) AND tr.service_date = $2",
-    )
+    ))
     .bind(train_uids)
     .bind(service_date)
     .fetch_all(pool)
@@ -488,6 +514,74 @@ mod db_tests {
         let json = serde_json::to_value(&state).unwrap();
         assert!(json.as_object().unwrap().contains_key("headcode") && json["headcode"].is_null());
 
+        sqlx::query("DELETE FROM schedule_destination_departures WHERE train_uid = $1")
+            .bind(uid)
+            .execute(&pool)
+            .await
+            .ok();
+        sqlx::query("DELETE FROM trains WHERE id = $1")
+            .bind(trains_id)
+            .execute(&pool)
+            .await
+            .ok();
+    }
+
+    #[tokio::test]
+    #[ignore = "requires a live database; run with `DATABASE_URL=... cargo test -p api \
+                get_public_train_state_falls_back_to_the_trust_headcode_for_live_only_trains -- --ignored --test-threads=1`"]
+    async fn get_public_train_state_falls_back_to_the_trust_headcode_for_live_only_trains() {
+        let pool = connect().await;
+        let service_date: NaiveDate = "2026-09-08".parse().unwrap();
+        let cases = [
+            ("TEST-LIVE-ONLY-A", "161Z721T16", Some("1Z72")),
+            ("TEST-LIVE-ONLY-B", "161z721T16", Some("1Z72")),
+            ("TEST-LIVE-ONLY-C", "1Z72", None),
+            ("TEST-LIVE-ONLY-D", "16XZ721T16", None),
+            ("TEST-LIVE-ONLY-E", "161Z721T16X", None),
+        ];
+        for (uid, train_id, expected) in cases {
+            let trains_id = find_or_create_train(&pool, uid, service_date)
+                .await
+                .expect("seed a trains row");
+            mark_train_resolved(&pool, trains_id, train_id)
+                .await
+                .expect("mark_train_resolved");
+            let state = get_public_train_state(&pool, uid, service_date)
+                .await
+                .expect("get_public_train_state")
+                .expect("row should be found");
+            assert_eq!(state.headcode.as_deref(), expected, "{train_id}");
+            assert_eq!(state.train_id.as_deref(), Some(train_id));
+            sqlx::query("DELETE FROM trains WHERE id = $1")
+                .bind(trains_id)
+                .execute(&pool)
+                .await
+                .ok();
+        }
+
+        // A CIF headcode is never overridden by the TRUST id's.
+        let uid = "TEST-LIVE-ONLY-CIF";
+        let trains_id = find_or_create_train(&pool, uid, service_date)
+            .await
+            .expect("seed a trains row");
+        mark_train_resolved(&pool, trains_id, "161Z721T16")
+            .await
+            .expect("mark_train_resolved");
+        sqlx::query(
+            "INSERT INTO schedule_destination_departures \
+                (service_date, destination_crs, scheduled, train_uid, origin_crs, headcode) \
+             VALUES ($1, 'EDB', '12:00:00', $2, 'KGX', '1S00')",
+        )
+        .bind(service_date)
+        .bind(uid)
+        .execute(&pool)
+        .await
+        .expect("seed a schedule row");
+        let state = get_public_train_state(&pool, uid, service_date)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(state.headcode.as_deref(), Some("1S00"));
         sqlx::query("DELETE FROM schedule_destination_departures WHERE train_uid = $1")
             .bind(uid)
             .execute(&pool)

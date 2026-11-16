@@ -4907,6 +4907,142 @@ mod db_tests {
         clear_board_services(&pool, date).await;
     }
 
+    /// Seeds a `trains` row for `uid` on `date` with TRUST id `train_id`,
+    /// and, when given, the origin, destination and departure it holds.
+    async fn seed_live_train(
+        pool: &PgPool,
+        date: chrono::NaiveDate,
+        uid: &str,
+        train_id: &str,
+        held: Option<(&str, &str, chrono::NaiveTime)>,
+    ) {
+        let id = crate::data::trains::find_or_create_train(pool, uid, date)
+            .await
+            .expect("seed a trains row");
+        crate::data::trains::mark_train_resolved(pool, id, train_id)
+            .await
+            .expect("mark_train_resolved");
+        if let Some((origin, destination, time)) = held {
+            sqlx::query(
+                "UPDATE trains SET origin_crs = $2, destination_crs = $3, \
+                        scheduled_departure = $4 WHERE id = $1",
+            )
+            .bind(id)
+            .bind(origin)
+            .bind(destination)
+            .bind(crate::data::eta_blend::london_to_utc(date.and_time(time)))
+            .execute(pool)
+            .await
+            .expect("seed the trains row's schedule columns");
+        }
+    }
+
+    #[tokio::test]
+    #[ignore = "requires DATABASE_URL"]
+    async fn trains_by_headcode_finds_live_only_trains_by_their_trust_id() {
+        let (pool, _guards) = connect().await;
+        let date = seed_boards(&pool).await;
+        let other = date + chrono::Duration::days(1);
+        let ten = chrono::NaiveTime::from_hms_opt(10, 0, 0).unwrap();
+        let uids = [
+            "LIVE01", "LIVE02", "LIVE03", "LIVE04", "LIVE05", "LIVE06", "BRDA01",
+        ];
+        sqlx::query("DELETE FROM trains WHERE train_uid = ANY($1)")
+            .bind(uids.map(str::to_string).to_vec())
+            .execute(&pool)
+            .await
+            .unwrap();
+        // Live-only: TRUST 161Z721T16 carries headcode 1Z72.
+        seed_live_train(
+            &pool,
+            date,
+            "LIVE01",
+            "161Z721T16",
+            Some(("BRI", "PAD", ten)),
+        )
+        .await;
+        // Live-only holding nothing but its id: null fields, listed last.
+        seed_live_train(&pool, date, "LIVE02", "161z721T16", None).await;
+        // Another headcode, another date, and ids that are not 10 characters
+        // or whose characters 3 to 6 are not a headcode.
+        seed_live_train(&pool, date, "LIVE03", "161Z731T16", None).await;
+        seed_live_train(&pool, other, "LIVE01", "161Z721T17", None).await;
+        seed_live_train(&pool, date, "LIVE04", "1Z72", None).await;
+        seed_live_train(&pool, date, "LIVE05", "16XZ721T16", None).await;
+        seed_live_train(&pool, date, "LIVE06", "161Z721T16X", None).await;
+        // A scheduled train's TRUST id never adds a second row for it.
+        seed_live_train(&pool, date, "BRDA01", "991A10MF07", None).await;
+
+        let (status, body) = get(
+            &pool,
+            &format!("/trains/by-headcode?headcode=1z72&date={date}"),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        let json: Value = serde_json::from_str(&body).unwrap();
+        let rows = json["results"].as_array().unwrap();
+        let uids_found: Vec<&str> = rows.iter().map(|r| r["uid"].as_str().unwrap()).collect();
+        assert_eq!(uids_found, ["LIVE01", "LIVE02"], "{body}");
+        assert_eq!(rows[0]["identity"], "1Z72");
+        assert_eq!(rows[0]["stationCrs"], "BRI");
+        assert_eq!(rows[0]["originCrs"], "BRI");
+        assert_eq!(rows[0]["destinationCrs"], "PAD");
+        assert_eq!(rows[0]["scheduled"], "10:00");
+        assert_eq!(rows[1]["identity"], "1Z72");
+        assert!(rows[1]["originCrs"].is_null() && rows[1]["destinationCrs"].is_null());
+        assert!(rows[1]["scheduled"].is_null(), "{body}");
+
+        // Date filtering: the other date's row is its own.
+        let (_, body) = get(
+            &pool,
+            &format!("/trains/by-headcode?headcode=1Z72&date={other}"),
+        )
+        .await;
+        let json: Value = serde_json::from_str(&body).unwrap();
+        let found: Vec<&str> = json["results"]
+            .as_array()
+            .map(|rows| rows.iter().filter_map(|r| r["uid"].as_str()).collect())
+            .unwrap_or_default();
+        assert!(
+            found.len() <= 1 && found.iter().all(|uid| *uid == "LIVE01"),
+            "{body}"
+        );
+
+        // The CIF match is returned once, from the schedule.
+        let (status, body) = get(
+            &pool,
+            &format!("/trains/by-headcode?headcode=1A10&date={date}"),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        let json: Value = serde_json::from_str(&body).unwrap();
+        let rows = json["results"].as_array().unwrap();
+        assert_eq!(rows.len(), 1, "{body}");
+        assert_eq!(rows[0]["uid"], "BRDA01");
+        assert_eq!(rows[0]["scheduled"], "08:00");
+
+        // No match.
+        let (_, body) = get(
+            &pool,
+            &format!("/trains/by-headcode?headcode=9Z99&date={date}"),
+        )
+        .await;
+        assert_eq!(
+            serde_json::from_str::<Value>(&body).unwrap()["results"]
+                .as_array()
+                .unwrap()
+                .as_slice(),
+            [] as [Value; 0]
+        );
+
+        sqlx::query("DELETE FROM trains WHERE train_uid = ANY($1)")
+            .bind(uids.map(str::to_string).to_vec())
+            .execute(&pool)
+            .await
+            .unwrap();
+        clear_board_services(&pool, date).await;
+    }
+
     #[tokio::test]
     #[ignore = "requires DATABASE_URL"]
     async fn trains_boards_are_a_404_for_an_unpublished_date() {
