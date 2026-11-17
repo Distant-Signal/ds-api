@@ -269,15 +269,53 @@ impl From<GroupDetailRow> for GroupDetail {
     }
 }
 
-/// `false` if no group has that id -- the route maps this to `404`.
-/// Permission checking (only `admin`/`owner` may rename) is the caller's
-/// job, same split as `custom_lines::update_custom_line`.
-pub async fn rename_group(pool: &PgPool, group_id: &str, new_name: &str) -> Result<bool> {
-    let result = sqlx::query("UPDATE groups SET name = $2 WHERE id = $1")
-        .bind(group_id)
-        .bind(new_name)
-        .execute(pool)
-        .await?;
+/// SQL predicate: `$user` is an `admin` or the `owner` of group `$group`
+/// (`GroupRole::can_manage`). Carried by the mutating statements below so a
+/// race or a refactor of the route's own check cannot bypass it.
+const MANAGER_OF: &str = "EXISTS (SELECT 1 FROM group_members m \
+     WHERE m.group_id = {group} AND m.user_id = {user} AND m.role IN ('owner', 'admin'))";
+
+/// SQL predicate: `$user` is the `owner` of group `$group`
+/// (`GroupRole::is_owner`).
+const OWNER_OF: &str = "EXISTS (SELECT 1 FROM group_members m \
+     WHERE m.group_id = {group} AND m.user_id = {user} AND m.role = 'owner')";
+
+fn predicate(template: &str, group: &str, user: &str) -> String {
+    template.replace("{group}", group).replace("{user}", user)
+}
+
+/// The caller no longer holds the role the statement needs (their role
+/// changed, or they left, after the route's own check). The route maps this
+/// to the same `403` its check gives.
+#[derive(Debug)]
+pub struct NotPermitted;
+
+impl std::fmt::Display for NotPermitted {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("the caller does not hold the required role in this group")
+    }
+}
+
+impl std::error::Error for NotPermitted {}
+
+/// `false` if no group has that id, or `actor_user_id` is not an `admin` or
+/// the `owner` of it (checked in the `UPDATE` itself) -- the route maps this
+/// to `404`. The route checks the role first for its `404`/`403` split.
+pub async fn rename_group(
+    pool: &PgPool,
+    group_id: &str,
+    actor_user_id: &str,
+    new_name: &str,
+) -> Result<bool> {
+    let result = sqlx::query(&format!(
+        "UPDATE groups SET name = $3 WHERE id = $1 AND {}",
+        predicate(MANAGER_OF, "$1", "$2")
+    ))
+    .bind(group_id)
+    .bind(actor_user_id)
+    .bind(new_name)
+    .execute(pool)
+    .await?;
     Ok(result.rows_affected() > 0)
 }
 
@@ -285,11 +323,18 @@ pub async fn rename_group(pool: &PgPool, group_id: &str, new_name: &str) -> Resu
 /// `group_trains`/`group_invite_links` (Task 1's migration) means nothing
 /// else needs deleting here -- same "the FK graph does the cleanup" shape
 /// as `train_tracking::delete_tracked_train`.
-pub async fn delete_group(pool: &PgPool, group_id: &str) -> Result<bool> {
-    let result = sqlx::query("DELETE FROM groups WHERE id = $1")
-        .bind(group_id)
-        .execute(pool)
-        .await?;
+///
+/// Only the group's `owner` (`actor_user_id`, checked in the `DELETE`
+/// itself) may delete it: `false` otherwise.
+pub async fn delete_group(pool: &PgPool, group_id: &str, actor_user_id: &str) -> Result<bool> {
+    let result = sqlx::query(&format!(
+        "DELETE FROM groups WHERE id = $1 AND {}",
+        predicate(OWNER_OF, "$1", "$2")
+    ))
+    .bind(group_id)
+    .bind(actor_user_id)
+    .execute(pool)
+    .await?;
     Ok(result.rows_affected() > 0)
 }
 
@@ -374,14 +419,23 @@ pub async fn list_members(pool: &PgPool, group_id: &str) -> Result<Vec<GroupMemb
 /// isn't currently a plain `member` -- already `admin` or `owner`, or not
 /// a member at all -- so this can never accidentally "promote" the owner
 /// row itself (its `role` is never `'member'`). Permission checking (only
-/// `owner` may promote, per spec §3) is the route's job.
-pub async fn promote_to_admin(pool: &PgPool, group_id: &str, target_user_id: &str) -> Result<bool> {
-    let result = sqlx::query(
+/// `owner` may promote, per spec §3) is the route's job, repeated in the
+/// `UPDATE` (`actor_user_id` must be the group's `owner`) so a race cannot
+/// bypass it.
+pub async fn promote_to_admin(
+    pool: &PgPool,
+    group_id: &str,
+    actor_user_id: &str,
+    target_user_id: &str,
+) -> Result<bool> {
+    let result = sqlx::query(&format!(
         "UPDATE group_members SET role = 'admin' \
-         WHERE group_id = $1 AND user_id = $2 AND role = 'member'",
-    )
+         WHERE group_id = $1 AND user_id = $2 AND role = 'member' AND {}",
+        predicate(OWNER_OF, "$1", "$3")
+    ))
     .bind(group_id)
     .bind(target_user_id)
+    .bind(actor_user_id)
     .execute(pool)
     .await?;
     Ok(result.rows_affected() > 0)
@@ -401,13 +455,23 @@ pub async fn promote_to_admin(pool: &PgPool, group_id: &str, target_user_id: &st
 /// can never be removed or demoted by a co-admin, protecting against
 /// being locked out of a group you created"), and this is where that
 /// promise is kept at the data layer.
-pub async fn demote_to_member(pool: &PgPool, group_id: &str, target_user_id: &str) -> Result<bool> {
-    let result = sqlx::query(
+///
+/// Like `promote_to_admin`, the `UPDATE` also requires `actor_user_id` to
+/// be the group's `owner`.
+pub async fn demote_to_member(
+    pool: &PgPool,
+    group_id: &str,
+    actor_user_id: &str,
+    target_user_id: &str,
+) -> Result<bool> {
+    let result = sqlx::query(&format!(
         "UPDATE group_members SET role = 'member' \
-         WHERE group_id = $1 AND user_id = $2 AND role = 'admin'",
-    )
+         WHERE group_id = $1 AND user_id = $2 AND role = 'admin' AND {}",
+        predicate(OWNER_OF, "$1", "$3")
+    ))
     .bind(group_id)
     .bind(target_user_id)
+    .bind(actor_user_id)
     .execute(pool)
     .await?;
     Ok(result.rows_affected() > 0)
@@ -692,6 +756,21 @@ pub async fn rotate_invite_link(
     user_id: &str,
 ) -> Result<InviteLink> {
     let mut tx = pool.begin().await?;
+    // `user_id` must still be an `admin` or the `owner`: checked here, in
+    // the transaction that writes, not only by the route. `FOR SHARE` keeps
+    // the row from changing role until this commits.
+    let manager: Option<i32> = sqlx::query_scalar(
+        "SELECT 1 FROM group_members \
+         WHERE group_id = $1 AND user_id = $2 AND role IN ('owner', 'admin') FOR SHARE",
+    )
+    .bind(group_id)
+    .bind(user_id)
+    .fetch_optional(&mut *tx)
+    .await?;
+    if manager.is_none() {
+        tx.rollback().await?;
+        return Err(NotPermitted.into());
+    }
     sqlx::query(
         "UPDATE group_invite_links SET revoked_at = NOW() \
          WHERE group_id = $1 AND revoked_at IS NULL",
@@ -724,12 +803,21 @@ pub async fn rotate_invite_link(
 /// Idempotent: `false` if there was nothing active to revoke -- the route
 /// still returns `204` either way (revoking an already-revoked/expired
 /// link is not an error).
-pub async fn revoke_invite_link(pool: &PgPool, group_id: &str) -> Result<bool> {
-    let result = sqlx::query(
+///
+/// Only an `admin` or the `owner` (`actor_user_id`, checked in the
+/// `UPDATE`) revokes anything.
+pub async fn revoke_invite_link(
+    pool: &PgPool,
+    group_id: &str,
+    actor_user_id: &str,
+) -> Result<bool> {
+    let result = sqlx::query(&format!(
         "UPDATE group_invite_links SET revoked_at = NOW() \
-         WHERE group_id = $1 AND revoked_at IS NULL",
-    )
+         WHERE group_id = $1 AND revoked_at IS NULL AND {}",
+        predicate(MANAGER_OF, "$1", "$2")
+    ))
     .bind(group_id)
+    .bind(actor_user_id)
     .execute(pool)
     .await?;
     Ok(result.rows_affected() > 0)
@@ -3042,7 +3130,9 @@ mod db_tests {
         .expect("create group_invite_links");
 
         // Delete the group
-        let deleted = delete_group(&pool, &group_id).await.expect("delete group");
+        let deleted = delete_group(&pool, &group_id, "TEST-GROUPS-DELETE-OWNER")
+            .await
+            .expect("delete group");
         assert!(deleted);
 
         // Assert group_members cascaded
@@ -3105,9 +3195,14 @@ mod db_tests {
         .await
         .expect("seed member");
 
-        let promoted = promote_to_admin(&pool, &group_id, "TEST-GROUPS-PROMOTE-MEMBER")
-            .await
-            .expect("promote");
+        let promoted = promote_to_admin(
+            &pool,
+            &group_id,
+            "TEST-GROUPS-PROMOTE-OWNER",
+            "TEST-GROUPS-PROMOTE-MEMBER",
+        )
+        .await
+        .expect("promote");
         assert!(promoted);
         let role = get_member_role(&pool, &group_id, "TEST-GROUPS-PROMOTE-MEMBER")
             .await
@@ -3143,9 +3238,14 @@ mod db_tests {
         // to reach via the real route (Task 7 gates this to owner-only and
         // never targets the caller's own row this way), but this pins the
         // data layer's own defense-in-depth independent of that.
-        let promoted = promote_to_admin(&pool, &group_id, "TEST-GROUPS-PROMOTE-OWNER-2")
-            .await
-            .expect("promote attempt");
+        let promoted = promote_to_admin(
+            &pool,
+            &group_id,
+            "TEST-GROUPS-PROMOTE-OWNER-2",
+            "TEST-GROUPS-PROMOTE-OWNER-2",
+        )
+        .await
+        .expect("promote attempt");
         assert!(!promoted);
         let role = get_member_role(&pool, &group_id, "TEST-GROUPS-PROMOTE-OWNER-2")
             .await
@@ -3179,9 +3279,14 @@ mod db_tests {
             .await
             .expect("seed admin");
 
-        let demoted = demote_to_member(&pool, &group_id, "TEST-GROUPS-DEMOTE-ADMIN")
-            .await
-            .expect("demote");
+        let demoted = demote_to_member(
+            &pool,
+            &group_id,
+            "TEST-GROUPS-DEMOTE-OWNER",
+            "TEST-GROUPS-DEMOTE-ADMIN",
+        )
+        .await
+        .expect("demote");
         assert!(demoted);
         let role = get_member_role(&pool, &group_id, "TEST-GROUPS-DEMOTE-ADMIN")
             .await
@@ -3223,9 +3328,14 @@ mod db_tests {
         // ever move the owner row off `'owner'`. The route gates this to
         // owner-only and refuses an owner target outright; this pins the
         // data layer's own defense-in-depth independent of that.
-        let demoted = demote_to_member(&pool, &group_id, "TEST-GROUPS-DEMOTE-OWNER-2")
-            .await
-            .expect("demote attempt");
+        let demoted = demote_to_member(
+            &pool,
+            &group_id,
+            "TEST-GROUPS-DEMOTE-OWNER-2",
+            "TEST-GROUPS-DEMOTE-OWNER-2",
+        )
+        .await
+        .expect("demote attempt");
         assert!(!demoted);
         let role = get_member_role(&pool, &group_id, "TEST-GROUPS-DEMOTE-OWNER-2")
             .await
@@ -3268,9 +3378,14 @@ mod db_tests {
         // data layer standing on its own: a direct caller (or the route
         // losing the race between that read and this write) gets an
         // honest "nothing changed" instead of a phantom role change.
-        let demoted = demote_to_member(&pool, &group_id, "TEST-GROUPS-DEMOTE-PLAIN")
-            .await
-            .expect("demote attempt");
+        let demoted = demote_to_member(
+            &pool,
+            &group_id,
+            "TEST-GROUPS-DEMOTE-OWNER-3",
+            "TEST-GROUPS-DEMOTE-PLAIN",
+        )
+        .await
+        .expect("demote attempt");
         assert!(!demoted);
         let role = get_member_role(&pool, &group_id, "TEST-GROUPS-DEMOTE-PLAIN")
             .await
@@ -3712,12 +3827,12 @@ mod db_tests {
             .expect("rotate");
 
         assert!(
-            revoke_invite_link(&pool, &group_id)
+            revoke_invite_link(&pool, &group_id, "TEST-GROUPS-INVITE-OWNER-2")
                 .await
                 .expect("first revoke")
         );
         assert!(
-            !revoke_invite_link(&pool, &group_id)
+            !revoke_invite_link(&pool, &group_id, "TEST-GROUPS-INVITE-OWNER-2")
                 .await
                 .expect("second revoke is a no-op")
         );
@@ -3784,7 +3899,9 @@ mod db_tests {
         let link = rotate_invite_link(&pool, &group_id, "TEST-GROUPS-JOIN-OWNER-2")
             .await
             .expect("rotate");
-        revoke_invite_link(&pool, &group_id).await.expect("revoke");
+        revoke_invite_link(&pool, &group_id, "TEST-GROUPS-JOIN-OWNER-2")
+            .await
+            .expect("revoke");
 
         assert_eq!(
             resolve_invite_link(&pool, link.token.as_deref().unwrap())
@@ -6260,7 +6377,11 @@ mod db_tests {
             .await
             .expect("grant");
 
-        assert!(delete_group(&pool, &group_id).await.expect("delete group"));
+        assert!(
+            delete_group(&pool, &group_id, "TEST-GRANT-GDEL-OWNER")
+                .await
+                .expect("delete group")
+        );
         let grants: (i64,) =
             sqlx::query_as("SELECT COUNT(*) FROM custom_line_group_grants WHERE group_id = $1")
                 .bind(&group_id)
@@ -6410,6 +6531,77 @@ mod db_tests {
             &["TEST-GRANT-LIST-OWNER", "TEST-GRANT-LIST-MEMBER"],
         )
         .await;
+    }
+
+    /// The role predicates live in the mutating statements: a caller who
+    /// is not (or no longer) the right role changes nothing, whatever the
+    /// route checked beforehand.
+    #[tokio::test]
+    #[ignore = "requires a live database; run with `DATABASE_URL=... cargo test -p api \
+                group_mutations_carry_their_role_predicate -- --ignored --test-threads=1`"]
+    async fn group_mutations_carry_their_role_predicate() {
+        let owner = "TEST-GROUPS-PRED-OWNER";
+        let admin = "TEST-GROUPS-PRED-ADMIN";
+        let member = "TEST-GROUPS-PRED-MEMBER";
+        let pool = connect().await;
+        for user in [owner, admin, member] {
+            seed_user(&pool, user).await;
+        }
+        let group_id = create_group(&pool, "Predicate Test", owner)
+            .await
+            .expect("create group");
+        for (user, role) in [(admin, "admin"), (member, "member")] {
+            sqlx::query("INSERT INTO group_members (group_id, user_id, role) VALUES ($1, $2, $3)")
+                .bind(&group_id)
+                .bind(user)
+                .bind(role)
+                .execute(&pool)
+                .await
+                .expect("seed member");
+        }
+
+        // A plain member renames, revokes and rotates nothing.
+        assert!(
+            !rename_group(&pool, &group_id, member, "Nope")
+                .await
+                .unwrap()
+        );
+        assert!(!revoke_invite_link(&pool, &group_id, member).await.unwrap());
+        let err = rotate_invite_link(&pool, &group_id, member)
+            .await
+            .expect_err("a member may not rotate");
+        assert!(err.downcast_ref::<NotPermitted>().is_some());
+        // An admin renames but neither deletes, promotes nor demotes.
+        assert!(
+            rename_group(&pool, &group_id, admin, "Renamed")
+                .await
+                .unwrap()
+        );
+        assert!(!delete_group(&pool, &group_id, admin).await.unwrap());
+        assert!(
+            !promote_to_admin(&pool, &group_id, admin, member)
+                .await
+                .unwrap()
+        );
+        assert!(
+            !demote_to_member(&pool, &group_id, admin, admin)
+                .await
+                .unwrap()
+        );
+        // The owner does all of it.
+        assert!(
+            promote_to_admin(&pool, &group_id, owner, member)
+                .await
+                .unwrap()
+        );
+        assert!(
+            demote_to_member(&pool, &group_id, owner, member)
+                .await
+                .unwrap()
+        );
+        assert!(delete_group(&pool, &group_id, owner).await.unwrap());
+
+        cleanup(&pool, &[owner, admin, member]).await;
     }
 }
 

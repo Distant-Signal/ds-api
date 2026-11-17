@@ -323,16 +323,57 @@ pub async fn resolve(
     accepted_revision_id: Option<i64>,
     dismiss_reason: Option<&str>,
 ) -> anyhow::Result<bool> {
+    resolve_as(
+        conn,
+        break_id,
+        None,
+        status,
+        accepted_revision_id,
+        dismiss_reason,
+    )
+    .await
+}
+
+/// [`resolve`] for a user-initiated change: the `UPDATE` itself requires
+/// the break to belong to `owner_user_id`, so the route's own ownership
+/// check cannot be bypassed by a race or a later refactor.
+pub async fn resolve_for_owner(
+    conn: &mut sqlx::PgConnection,
+    break_id: i64,
+    owner_user_id: &str,
+    status: &str,
+    dismiss_reason: Option<&str>,
+) -> anyhow::Result<bool> {
+    resolve_as(
+        conn,
+        break_id,
+        Some(owner_user_id),
+        status,
+        None,
+        dismiss_reason,
+    )
+    .await
+}
+
+async fn resolve_as(
+    conn: &mut sqlx::PgConnection,
+    break_id: i64,
+    owner_user_id: Option<&str>,
+    status: &str,
+    accepted_revision_id: Option<i64>,
+    dismiss_reason: Option<&str>,
+) -> anyhow::Result<bool> {
     let result = sqlx::query(
         "UPDATE journey_breaks SET status = $2, resolved_at = now(), \
              accepted_revision_id = COALESCE($3, accepted_revision_id), \
              dismiss_reason = COALESCE($4, dismiss_reason) \
-         WHERE id = $1 AND status = 'open'",
+         WHERE id = $1 AND status = 'open' AND ($5::text IS NULL OR user_id = $5)",
     )
     .bind(break_id)
     .bind(status)
     .bind(accepted_revision_id)
     .bind(dismiss_reason)
+    .bind(owner_user_id)
     .execute(&mut *conn)
     .await?;
     let resolved = result.rows_affected() == 1;

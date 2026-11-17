@@ -324,7 +324,7 @@ async fn rename_group(
     let name = validate_group_name(&req.name).map_err(|msg| (StatusCode::BAD_REQUEST, msg))?;
     require_role(&app, &group_id, &user.id, GroupRole::can_manage).await?;
 
-    let renamed = groups::rename_group(&app.database, &group_id, &name)
+    let renamed = groups::rename_group(&app.database, &group_id, &user.id, &name)
         .await
         .map_err(internal_error("rename group"))?;
     if !renamed {
@@ -340,7 +340,7 @@ async fn delete_group(
 ) -> Result<StatusCode, (StatusCode, String)> {
     require_role(&app, &group_id, &user.id, GroupRole::is_owner).await?;
 
-    let deleted = groups::delete_group(&app.database, &group_id)
+    let deleted = groups::delete_group(&app.database, &group_id, &user.id)
         .await
         .map_err(internal_error("delete group"))?;
     if !deleted {
@@ -444,7 +444,7 @@ async fn promote_member(
         ));
     }
 
-    let promoted = groups::promote_to_admin(&app.database, &group_id, &target_user_id)
+    let promoted = groups::promote_to_admin(&app.database, &group_id, &user.id, &target_user_id)
         .await
         .map_err(internal_error("promote member"))?;
     if !promoted {
@@ -526,7 +526,7 @@ async fn demote_member(
         return Err(rejection);
     }
 
-    let demoted = groups::demote_to_member(&app.database, &group_id, &target_user_id)
+    let demoted = groups::demote_to_member(&app.database, &group_id, &user.id, &target_user_id)
         .await
         .map_err(internal_error("demote member"))?;
     if !demoted {
@@ -550,7 +550,17 @@ async fn create_invite_link(
     require_role(&app, &group_id, &user.id, GroupRole::can_manage).await?;
     let link = groups::rotate_invite_link(&app.database, &group_id, &user.id)
         .await
-        .map_err(internal_error("create invite link"))?;
+        .map_err(|err| {
+            if err.downcast_ref::<groups::NotPermitted>().is_some() {
+                // The role changed after the check above: the same answer.
+                (
+                    StatusCode::FORBIDDEN,
+                    "you don't have permission to do that in this group".to_string(),
+                )
+            } else {
+                internal_error("create invite link")(err)
+            }
+        })?;
     Ok(Json(link))
 }
 
@@ -560,7 +570,7 @@ async fn revoke_invite_link(
     Path(group_id): Path<String>,
 ) -> Result<StatusCode, (StatusCode, String)> {
     require_role(&app, &group_id, &user.id, GroupRole::can_manage).await?;
-    groups::revoke_invite_link(&app.database, &group_id)
+    groups::revoke_invite_link(&app.database, &group_id, &user.id)
         .await
         .map_err(internal_error("revoke invite link"))?;
     Ok(StatusCode::NO_CONTENT)
