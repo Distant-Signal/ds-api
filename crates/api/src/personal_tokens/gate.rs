@@ -23,10 +23,23 @@ pub const POLL_INTERVAL_HEADER: &str = "ds-poll-interval";
 /// The largest body the envelope buffers (spec §5.2).
 const MAX_ENVELOPE_BODY: usize = 4 * 1024 * 1024;
 
+/// What [`strip_ambient_credentials`] removed, for the gate: a test token
+/// sent with a session cookie is refused (`crate::auth::test_auth`). Only
+/// that middleware inserts it; no client can set a request extension.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct StrippedCredentials {
+    pub session_cookie: bool,
+}
+
 /// Removes every ambient credential and client-chosen address before
 /// anything else on this listener sees the request: no cookie can
 /// authenticate here, and no handler can read an `X-Real-IP` a client set.
 pub async fn strip_ambient_credentials(mut request: Request, next: Next) -> Response {
+    let session_cookie =
+        crate::auth::parse_cookie(request.headers(), crate::auth::SESSION_COOKIE_NAME).is_some();
+    request
+        .extensions_mut()
+        .insert(StrippedCredentials { session_cookie });
     let headers = request.headers_mut();
     headers.remove(header::COOKIE);
     headers.remove(crate::rate_limit::REAL_IP_HEADER);
@@ -92,7 +105,7 @@ fn invalid_token() -> Response {
     )
 }
 
-fn rate_limited(retry_after: Duration) -> Response {
+pub(crate) fn rate_limited(retry_after: Duration) -> Response {
     let secs = retry_after.as_secs() + u64::from(retry_after.subsec_nanos() > 0);
     let mut response = error_response(
         StatusCode::TOO_MANY_REQUESTS,
@@ -179,16 +192,13 @@ pub async fn token_gate(State(app): State<App>, mut request: Request, next: Next
             Instant::now(),
         )
     });
-    // Charges the failure bucket, then refuses.
-    let fail = |reason: Rejection, token_id: Option<i64>, response: Response| {
+    // For a failed authentication: when the failure bucket is full, the
+    // wait for the rate-limited response (the failure is not charged);
+    // otherwise charges the bucket and returns `None`.
+    let charge_failure = || {
         if let Some(wait) = over_budget {
             note_rate_limited("personal_auth_failure");
-            return reject(
-                Rejection::RateLimitedAuth,
-                token_id,
-                client,
-                rate_limited(wait),
-            );
+            return Some(wait);
         }
         if let Some(key) = failure_bucket {
             let _ = tokens.limiter.check_all(
@@ -200,8 +210,42 @@ pub async fn token_gate(State(app): State<App>, mut request: Request, next: Next
                 Instant::now(),
             );
         }
+        None
+    };
+    // Charges the failure bucket (or answers 429 when it is full), then
+    // refuses.
+    let fail = |reason: Rejection, token_id: Option<i64>, response: Response| {
+        if let Some(wait) = charge_failure() {
+            return reject(
+                Rejection::RateLimitedAuth,
+                token_id,
+                client,
+                rate_limited(wait),
+            );
+        }
         reject(reason, token_id, client, response)
     };
+
+    // Test credentials (`crate::auth::test_auth`): a bearer in any
+    // `Authorization` header naming their issuer or audience takes their
+    // path, which refuses it unless the feature is on and every check
+    // passes. It never reaches the personal-token lookup below.
+    if tokens.test_auth.named_in(request.headers()) {
+        let session_cookie = request
+            .extensions()
+            .get::<StrippedCredentials>()
+            .is_some_and(|stripped| stripped.session_cookie);
+        return crate::auth::test_auth::serve(
+            &tokens.test_auth,
+            session_cookie,
+            request,
+            next,
+            route,
+            &matched,
+            charge_failure,
+        )
+        .await;
+    }
 
     let Some(bearer) = crate::auth::bearer_token(request.headers()) else {
         return fail(Rejection::Missing, None, invalid_token());

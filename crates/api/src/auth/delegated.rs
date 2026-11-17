@@ -905,6 +905,20 @@ impl<S: RequiredScope> FromRequestParts<App> for DelegatedOrSessionUser<S> {
         if let Some(token) = parts.extensions.get::<DelegatedToken>().cloned() {
             return resolve_delegated::<S>(app, &token).await;
         }
+        // Test credentials' sandbox principal has no user, so no route
+        // that needs one (`crate::auth::test_auth`). The token gate already
+        // refuses these routes; this is the last line.
+        if parts
+            .extensions
+            .get::<crate::auth::test_auth::TestPrincipal>()
+            .is_some()
+        {
+            return Err(error_response(
+                StatusCode::FORBIDDEN,
+                "insufficient_scope",
+                "test credentials read reference data only",
+            ));
+        }
         // The token listener's gate verified a personal token. Its scope is
         // checked again here, the last line if a route is ever mounted
         // without its `TOKEN_ROUTES` entry.

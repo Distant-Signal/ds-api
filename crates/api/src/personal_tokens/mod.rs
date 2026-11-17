@@ -25,6 +25,10 @@
 //!
 //! On every other listener a `dsp_` bearer is refused before anything else
 //! looks at it ([`refuse_on_main_listener`]).
+//!
+//! Test credentials (`crate::auth::test_auth`, off by default) are a second,
+//! narrower credential on this listener only: the gate hands a bearer that
+//! names their issuer to `test_auth::serve`.
 
 pub mod gate;
 pub mod openapi;
@@ -458,12 +462,16 @@ pub enum BucketKey {
 pub struct PersonalTokens {
     pub settings: PersonalTokenSettings,
     pub limiter: KeyedLimiter<BucketKey>,
+    /// Test credentials, accepted only on this listener
+    /// (`crate::auth::test_auth`, docs/test-auth.md). `Default` is off.
+    pub test_auth: std::sync::Arc<crate::auth::test_auth::TestAuth>,
 }
 
 impl std::fmt::Debug for PersonalTokens {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("PersonalTokens")
             .field("settings", &self.settings)
+            .field("test_auth", &self.test_auth)
             .finish_non_exhaustive()
     }
 }
@@ -473,7 +481,15 @@ impl PersonalTokens {
         Self {
             settings,
             limiter: KeyedLimiter::default(),
+            test_auth: std::sync::Arc::default(),
         }
+    }
+
+    /// With test credentials (`crate::auth::test_auth`).
+    #[must_use]
+    pub fn with_test_auth(mut self, test_auth: crate::auth::test_auth::TestAuth) -> Self {
+        self.test_auth = std::sync::Arc::new(test_auth);
+        self
     }
 
     pub fn enabled(&self) -> bool {
