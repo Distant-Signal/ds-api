@@ -142,7 +142,7 @@ async fn create(h: &Harness, raw: &str, scopes: &[&str]) -> (StatusCode, Value) 
     )
     .await;
     if status == StatusCode::CREATED {
-        assert_eq!(headers[header::CACHE_CONTROL], "no-store");
+        assert_eq!(headers[header::CACHE_CONTROL], "private, no-store");
     }
     (status, body)
 }
@@ -177,7 +177,7 @@ async fn a_created_token_reads_within_its_scopes_only() {
     assert_eq!(stored, crate::personal_tokens::token::hash(&token).to_vec());
 
     // The page lists it, without the token.
-    let (status, _, list) = send(
+    let (status, list_headers, list) = send(
         &h.main,
         "GET",
         "/public/account/personal-tokens",
@@ -186,6 +186,7 @@ async fn a_created_token_reads_within_its_scopes_only() {
     )
     .await;
     assert_eq!(status, StatusCode::OK);
+    assert_eq!(list_headers[header::CACHE_CONTROL], "private, no-store");
     assert_eq!(list["apiBaseUrl"], "https://ds-api.example.invalid");
     assert_eq!(list["tokens"].as_array().unwrap().len(), 1);
     assert!(!list.to_string().contains(&token));

@@ -15,7 +15,7 @@ Keep it in step with `crates/api/src/data/account.rs` and `crates/api/src/data/r
 | `GET /public/account/export` (frontend: `/api/account/export`, the "Download my data" link on `/account`) | Returns every row of personal data held about the caller as one JSON file (UK GDPR Arts. 15 and 20). |
 | `DELETE /public/account` (frontend: `/account` → "Delete my account") | Deletes the account and all personal data in one transaction (Art. 17). |
 
-The export is `data::account::export_account`. It is sent with `Content-Disposition: attachment` and `Cache-Control: no-store`.
+The export is `data::account::export_account`. It is sent with `Content-Disposition: attachment` and `Cache-Control: private, no-store`.
 
 - Each row is the table's own columns (snake_case).
 - Credentials are left out and listed in the file's `omitted` field:

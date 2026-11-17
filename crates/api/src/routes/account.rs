@@ -157,7 +157,10 @@ async fn export_account(State(app): State<App>, user: AuthenticatedUser) -> Resp
         HeaderValue::from_str(&format!("attachment; filename=\"{filename}\""))
             .expect("filename is ASCII"),
     );
-    headers.insert(header::CACHE_CONTROL, HeaderValue::from_static("no-store"));
+    headers.insert(
+        header::CACHE_CONTROL,
+        HeaderValue::from_static("private, no-store"),
+    );
     response
 }
 
@@ -540,7 +543,7 @@ mod db_tests {
         );
         assert_eq!(
             res.headers().get(header::CACHE_CONTROL).unwrap(),
-            "no-store"
+            "private, no-store"
         );
         let body = axum::body::to_bytes(res.into_body(), usize::MAX)
             .await

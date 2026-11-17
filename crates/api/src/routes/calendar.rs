@@ -148,9 +148,10 @@ async fn disable(State(app): State<App>, user: AuthenticatedUser, headers: Heade
 
 fn no_store(response: impl IntoResponse) -> Response {
     let mut response = response.into_response();
-    response
-        .headers_mut()
-        .insert(header::CACHE_CONTROL, HeaderValue::from_static("no-store"));
+    response.headers_mut().insert(
+        header::CACHE_CONTROL,
+        HeaderValue::from_static("private, no-store"),
+    );
     response
 }
 

@@ -176,9 +176,10 @@ async fn list_tokens(State(app): State<App>, user: AuthenticatedUser) -> Respons
         tokens,
     })
     .into_response();
-    response
-        .headers_mut()
-        .insert(header::CACHE_CONTROL, HeaderValue::from_static("no-store"));
+    response.headers_mut().insert(
+        header::CACHE_CONTROL,
+        HeaderValue::from_static("private, no-store"),
+    );
     response
 }
 
@@ -282,9 +283,10 @@ async fn create_token(
                 }),
             )
                 .into_response();
-            response
-                .headers_mut()
-                .insert(header::CACHE_CONTROL, HeaderValue::from_static("no-store"));
+            response.headers_mut().insert(
+                header::CACHE_CONTROL,
+                HeaderValue::from_static("private, no-store"),
+            );
             response
         }
         Ok(CreateOutcome::TooMany) => error_response(
