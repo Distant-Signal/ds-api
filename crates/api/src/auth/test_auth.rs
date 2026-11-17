@@ -350,11 +350,7 @@ impl TestAuth {
         if claims.sub.is_empty() {
             return Err(Refusal::Invalid);
         }
-        if !claims
-            .groups
-            .iter()
-            .any(|group| *group == self.settings.required_group)
-        {
+        if !claims.groups.contains(&self.settings.required_group) {
             return Err(Refusal::MissingGroup);
         }
         Ok(claims)
