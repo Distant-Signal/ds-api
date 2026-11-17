@@ -774,10 +774,19 @@ pub(super) async fn get_trains_arrivals(
 /// no schedule row at all (a late STP or VSTP working the full timetable
 /// lacks), whose TRUST train id embeds the headcode
 /// ([`crate::data::trains::LIVE_ONLY_HEADCODE_SQL`]). Each is a search row at
-/// whatever the `trains` row holds (origin, destination, departure), `null`
-/// where it holds nothing; no stops are invented. Trains with schedule rows
-/// are excluded here (the schedule query returns them), so the two never
-/// overlap.
+/// whatever the `trains` row holds (destination, departure), `null` where
+/// it holds nothing; no stops are invented. A row is at the train's origin
+/// (`stationCrs`, a CRS on every by-headcode row), so a train whose `trains`
+/// row holds no origin is left out rather than served with an empty
+/// `stationCrs`. Trains with schedule rows are excluded here (the schedule
+/// query returns them), so the two never overlap.
+///
+/// The route is unauthenticated and not rate limited, so the query rejects
+/// on the TRUST id's characters first (`upper(substr(...)) = $2`, cheap)
+/// and only runs [`LIVE_ONLY_HEADCODE_SQL`]'s shape check and its two
+/// `NOT EXISTS` probes for the date's few rows that pass; without it every
+/// `trains` row of the date paid for both. The full expression is still
+/// compared, so the answer is the same.
 async fn live_only_headcode_rows(
     app: &App,
     service_date: chrono::NaiveDate,
@@ -786,14 +795,17 @@ async fn live_only_headcode_rows(
     #[derive(sqlx::FromRow)]
     struct LiveOnly {
         train_uid: String,
-        origin_crs: Option<String>,
+        origin_crs: String,
         destination_crs: Option<String>,
         scheduled_departure: Option<chrono::DateTime<chrono::Utc>>,
     }
     let live: Vec<LiveOnly> = sqlx::query_as(&format!(
         "SELECT tr.train_uid, tr.origin_crs, tr.destination_crs, tr.scheduled_departure \
          FROM trains tr \
-         WHERE tr.service_date = $1 AND {LIVE_ONLY_HEADCODE_SQL} = $2 \
+         WHERE tr.service_date = $1 \
+           AND upper(substr(tr.train_id, 3, 4)) = $2 \
+           AND tr.origin_crs IS NOT NULL AND tr.origin_crs <> '' \
+           AND {LIVE_ONLY_HEADCODE_SQL} = $2 \
          ORDER BY tr.scheduled_departure NULLS LAST, tr.train_uid \
          LIMIT $3",
     ))
@@ -823,13 +835,7 @@ async fn live_only_headcode_rows(
                 "scheduled": time.map(|t| t.format("%H:%M:%S").to_string()),
                 "headcode": headcode,
             });
-            (
-                sort,
-                train.train_uid,
-                raw,
-                train.origin_crs.unwrap_or_default(),
-                day_offset,
-            )
+            (sort, train.train_uid, raw, train.origin_crs, day_offset)
         })
         .collect())
 }
