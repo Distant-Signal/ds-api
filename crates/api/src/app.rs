@@ -108,6 +108,15 @@ fn ensure_sso_and_internal_oauth_clients_differ(
     clippy::missing_fields_in_debug,
     reason = "deliberately prints placeholders and omits clients and secrets; see above"
 )]
+/// Refuses to start when `SESSION_RECENT_LOGIN_MINUTES` is outside 1..=1440.
+fn ensure_recent_login_window_in_range(minutes: i64) -> Result<()> {
+    ensure!(
+        (1..=1440).contains(&minutes),
+        "session_recent_login_minutes (SESSION_RECENT_LOGIN_MINUTES) must be between 1 and 1440"
+    );
+    Ok(())
+}
+
 impl std::fmt::Debug for AppState {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("AppState")
@@ -206,10 +215,7 @@ impl AppState {
              make_interval(days => ...), which requires an i32",
         )?;
         crate::data::users::SessionLifetime::try_from_config(&config)?;
-        ensure!(
-            (1..=1440).contains(&config.session_recent_login_minutes),
-            "session_recent_login_minutes (SESSION_RECENT_LOGIN_MINUTES) must be between 1 and 1440"
-        );
+        ensure_recent_login_window_in_range(config.session_recent_login_minutes)?;
 
         // Account continuity (docs/connected-apps.md): off unless a claim
         // name is set; a name the user could edit refuses to start.

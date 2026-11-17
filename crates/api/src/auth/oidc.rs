@@ -676,7 +676,7 @@ impl OidcClient {
         );
         if force_reauth {
             request = request
-                .add_prompt(openidconnect::core::CoreAuthPrompt::Login)
+                .add_prompt(CoreAuthPrompt::Login)
                 .set_max_age(std::time::Duration::ZERO);
         }
         let (url, csrf_state, nonce) = request

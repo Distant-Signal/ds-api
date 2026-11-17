@@ -2148,6 +2148,10 @@ mod db_tests {
     /// caller's `created_at`, and the calendar feed link and personal
     /// tokens are revoked only when asked.
     #[tokio::test]
+    #[expect(
+        clippy::too_many_lines,
+        reason = "one linear seed, reissue and assert scenario; splitting it would scatter its shared state"
+    )]
     #[ignore = "requires a live database; run with `cargo test -p api \
                 reissue_keeps_the_login_time -- --ignored --test-threads=1`"]
     async fn reissue_keeps_the_login_time_and_revokes_credentials_only_when_asked() {
