@@ -7262,7 +7262,7 @@ mod once_mode_tests {
     #[tokio::test]
     async fn a_lock_lost_before_the_final_chunk_never_sends_it() {
         let sink = FakePublishSink::new();
-        let rows: Vec<serde_json::Value> = (0..(2 * PUBLISH_CHUNK_ROWS + 1))
+        let rows: Vec<serde_json::Value> = (0..=(2 * PUBLISH_CHUNK_ROWS))
             .map(|seq| serde_json::json!({ "seq": seq }))
             .collect();
         sink.lose_run_lock_after(2);
