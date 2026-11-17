@@ -787,6 +787,10 @@ pub async fn track_known_train_on_its_own(
             created: false,
         });
     }
+    // A new journey is made here, so the journey cap applies even when the
+    // user holds a legacy subscription to the train that no journey uses
+    // (the route's early check on the pool skips it for a train already
+    // tracked): stricter than that check, and only at the cap.
     crate::data::quota::ensure_journey_room(&mut tx, user_id).await?;
     if !crate::data::quota::tracks_train(&mut tx, user_id, trains_id).await? {
         crate::data::quota::ensure_pin_room_for_date(&mut tx, user_id, service_date).await?;

@@ -17,6 +17,15 @@
 //! wait on each other. Keep a lock short: take it as the transaction
 //! begins its writes, never across an external call or a pool query.
 //!
+//! **Waiting.** A request that finds the lock held waits for it on its own
+//! pool connection, bounded by the pool's `statement_timeout` (60s; the
+//! holder's own idle-in-transaction timeout is 30s), after which it fails
+//! as any timed-out statement does. A holder's transaction is a few
+//! statements long, so a wait is milliseconds. Postgres's deadlock detector
+//! covers advisory locks too, so a cycle that slipped through would abort
+//! one transaction rather than hang. Two transactions that hold only quota
+//! locks and take them in [`Kind`] order cannot form one.
+//!
 //! The locks are keyed `quota:<kind>:<id>`, an `hashtext` of which is the
 //! advisory key; a collision only makes two unrelated quotas wait for each
 //! other.

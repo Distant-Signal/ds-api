@@ -574,19 +574,21 @@ async fn post_restore(
         Ok(tx) => tx,
         Err(err) => return internal("start transaction")(err.into()),
     };
+    // The quota locks first, before any row lock (crate::data::quota's lock
+    // order).
+    let has_new_trains = !new_train_pairs.is_empty();
+    if let Err(err) = crate::data::quota::lock_user(&mut tx, &user.id, true, has_new_trains).await {
+        return internal("take the quota locks")(err);
+    }
     // Off the list first, so of two concurrent saves only one goes ahead.
     match recently_deleted::take(&mut tx, &user.id, id, retention_days).await {
         Ok(true) => {}
         Ok(false) => return not_found(),
         Err(err) => return internal("take a recently deleted journey")(err),
     }
-    // The caps again, counted on this transaction under the user's quota
-    // locks, so concurrent saves cannot all pass the reads on the pool
-    // above (review L10). Same answers as those.
-    let has_new_trains = !new_train_pairs.is_empty();
-    if let Err(err) = crate::data::quota::lock_user(&mut tx, &user.id, true, has_new_trains).await {
-        return internal("take the quota locks")(err);
-    }
+    // The caps again, counted on this transaction, so concurrent saves
+    // cannot all pass the reads on the pool above (review L10). Same
+    // answers as those.
     match crate::data::quota::ensure_journey_room(&mut tx, &user.id).await {
         Ok(()) => {}
         Err(err) if err.is::<crate::data::quota::Exceeded>() => {
