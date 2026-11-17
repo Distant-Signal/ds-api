@@ -95,6 +95,9 @@ pub struct BreakRow {
     pub fault: String,
     pub severity: i16,
     pub trigger_leg_id: Option<i64>,
+    /// `journey_legs.public_id` of `trigger_leg_id` (DS-534), read in the
+    /// same statement (see `BREAK_COLUMNS`); `None` with it.
+    pub trigger_leg_public_id: Option<String>,
     pub trigger_trains_id: Option<i64>,
     pub break_position: i32,
     pub fingerprint: String,
@@ -114,7 +117,9 @@ const BREAK_COLUMNS: &str = "id, journey_id, user_id, detected_at, cause, fault,
      trigger_leg_id, trigger_trains_id, break_position, fingerprint, status, suggestions, \
      suggestions_at, confirmations, notified_at, notified_severity, opened_at, opened_via, \
      resolved_at, accepted_revision_id, \
-     (SELECT j.public_id FROM journeys j WHERE j.id = journey_id) AS journey_public_id";
+     (SELECT j.public_id FROM journeys j WHERE j.id = journey_id) AS journey_public_id, \
+     (SELECT l.public_id FROM journey_legs l WHERE l.id = trigger_leg_id) \
+         AS trigger_leg_public_id";
 
 /// A detected break, before it is stored.
 #[derive(Debug, Clone, PartialEq, Eq)]

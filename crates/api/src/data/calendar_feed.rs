@@ -80,6 +80,16 @@ pub(crate) fn set_enabled_for_tests(enabled: bool) {
     ENABLED.store(enabled, Ordering::Relaxed);
 }
 
+/// A journey created at or after this instant (Unix seconds,
+/// 2026-11-25T00:00:00Z) is named in calendars by its public id
+/// (`journey-j_...@host`); an earlier one keeps `journey-{id}@host`, so an
+/// event's UID never changes (a changed UID would show every upcoming event
+/// twice in a subscriber's calendar) and the numeric UIDs age out as those
+/// journeys are travelled: the feed lists only journeys that have not set
+/// off. A few days after the public-id release is deployed, so a journey
+/// made between an earlier constant and the deploy would not change UID once.
+pub const PUBLIC_UID_FROM_UNIX: i64 = 1_795_564_800;
+
 /// What an event is made from, and no more.
 #[derive(Debug, Clone, PartialEq, Eq)]
 #[expect(
@@ -88,6 +98,11 @@ pub(crate) fn set_enabled_for_tests(enabled: bool) {
 )]
 pub struct JourneyFacts {
     pub id: i64,
+    /// `journeys.public_id`.
+    pub public_id: String,
+    /// When the journey was made: which form its event UID takes
+    /// ([`PUBLIC_UID_FROM_UNIX`]).
+    pub created_at: DateTime<Utc>,
     pub departs_at: Option<DateTime<Utc>>,
     pub origin: String,
     pub destination: String,
@@ -114,6 +129,20 @@ pub struct JourneyFacts {
     /// `journey_tickets::leg_delay_repays` requires. Without one there is no
     /// reminder, for a delay or a cancellation.
     pub delay_repay_applies: bool,
+}
+
+impl JourneyFacts {
+    /// What names the journey in an event UID and a download's file name: its
+    /// public id when it was created at or after [`PUBLIC_UID_FROM_UNIX`],
+    /// else its numeric id (also when it has no public id).
+    #[must_use]
+    pub fn uid_key(&self) -> String {
+        if self.created_at.timestamp() >= PUBLIC_UID_FROM_UNIX && !self.public_id.is_empty() {
+            self.public_id.clone()
+        } else {
+            self.id.to_string()
+        }
+    }
 }
 
 /// [`JourneyFacts::delay_repay_applies`] from the last train leg's uid and
@@ -143,6 +172,8 @@ impl From<&JourneyListItem> for JourneyFacts {
         );
         Self {
             id: item.id,
+            public_id: item.public_id.clone(),
+            created_at: item.created_at,
             departs_at: item.departs_at,
             origin: name(&item.first_origin_name, &item.first_origin_crs),
             destination: name(&item.last_destination_name, &item.last_destination_crs),
@@ -188,7 +219,7 @@ pub fn journey_event(facts: &JourneyFacts, site: &Site, since: DateTime<Utc>) ->
         return None;
     }
     Some(Event {
-        uid: format!("journey-{}@{}", facts.id, site.host),
+        uid: format!("journey-{}@{}", facts.uid_key(), site.host),
         start: When::At(departs_at),
         end: facts.planned_end.filter(|end| *end > departs_at),
         summary: format!("Journey: {} to {}", facts.origin, facts.destination),
@@ -269,7 +300,7 @@ pub fn claim_reminder(facts: &JourneyFacts, site: &Site, today: NaiveDate) -> Op
         facts.origin, facts.destination, rule.window_days
     );
     Some(Event {
-        uid: format!("claim-{}@{}", facts.id, site.host),
+        uid: format!("claim-{}@{}", facts.uid_key(), site.host),
         start: When::Day(deadline),
         end: None,
         summary: format!(
@@ -406,6 +437,8 @@ mod tests {
     fn facts() -> JourneyFacts {
         JourneyFacts {
             id: 7,
+            public_id: "j_00000000000000000000000000000007".to_string(),
+            created_at: Utc.with_ymd_and_hms(2026, 11, 1, 9, 0, 0).unwrap(),
             departs_at: Some(Utc.with_ymd_and_hms(2026, 11, 10, 8, 30, 0).unwrap()),
             origin: "York".to_string(),
             destination: "London Kings Cross".to_string(),
@@ -456,6 +489,42 @@ mod tests {
         assert!(event.description.contains("powered by NationalRail"));
         assert!(event.description.contains("not affiliated"));
         assert!(!event.description.contains("Powered by TfL"));
+    }
+
+    #[test]
+    fn the_cutover_is_the_documented_instant() {
+        assert_eq!(
+            PUBLIC_UID_FROM_UNIX,
+            Utc.with_ymd_and_hms(2026, 11, 25, 0, 0, 0)
+                .unwrap()
+                .timestamp()
+        );
+    }
+
+    /// A journey made before the cutover keeps its numeric UID (so its event
+    /// is not replaced in a subscriber's calendar); one made at or after it
+    /// is named by its public id, in the event and in the claim reminder.
+    #[test]
+    fn the_uid_is_numeric_before_the_cutover_and_the_public_id_from_it() {
+        let cutover = DateTime::<Utc>::from_timestamp(PUBLIC_UID_FROM_UNIX, 0).unwrap();
+        let mut f = facts();
+        f.created_at = cutover - Duration::seconds(1);
+        assert_eq!(f.uid_key(), "7");
+        assert_eq!(
+            journey_event(&f, &site(), since()).unwrap().uid,
+            "journey-7@ds.example"
+        );
+        f.created_at = cutover;
+        assert_eq!(f.uid_key(), "j_00000000000000000000000000000007");
+        assert_eq!(
+            journey_event(&f, &site(), since()).unwrap().uid,
+            "journey-j_00000000000000000000000000000007@ds.example"
+        );
+        f.created_at = cutover + Duration::days(30);
+        assert_eq!(f.uid_key(), "j_00000000000000000000000000000007");
+        // Without a public id (it was not read) the numeric one stands.
+        f.public_id = String::new();
+        assert_eq!(f.uid_key(), "7");
     }
 
     #[test]

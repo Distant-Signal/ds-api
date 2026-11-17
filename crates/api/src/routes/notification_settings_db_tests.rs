@@ -729,6 +729,36 @@ async fn a_device_is_deleted_by_its_public_id_or_its_numeric_one() {
     assert!(first_public.starts_with("d_"), "{first_public}");
     let router = router(pool.clone());
 
+    // The device list carries the opaque id beside the numeric one.
+    let (status, devices) = call(
+        &router,
+        "GET",
+        "/public/notifications/devices",
+        Some(&token),
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{devices}");
+    let listed: Vec<(i64, String)> = devices
+        .as_array()
+        .expect("a list")
+        .iter()
+        .map(|device| {
+            (
+                device["id"].as_i64().expect("id"),
+                device["publicId"].as_str().expect("publicId").to_string(),
+            )
+        })
+        .collect();
+    assert!(
+        listed.contains(&(first, first_public.clone())),
+        "{listed:?}"
+    );
+    assert!(
+        listed.contains(&(second, second_public.clone())),
+        "{listed:?}"
+    );
+
     let mut denied = Vec::new();
     for (token, id) in [
         (&other_token, first_public.clone()),
@@ -792,6 +822,24 @@ async fn a_tracked_train_is_named_by_its_public_id_or_its_numeric_one() {
     let public = public_id_of(&pool, "train_subscriptions", tracking_id).await;
     assert!(public.starts_with("t_"), "{public}");
     let router = router(pool.clone());
+
+    // The train's own read and the list carry the opaque id beside the
+    // numeric one.
+    let (status, state) = call(
+        &router,
+        "GET",
+        &format!("/Train/{public}"),
+        Some(&token),
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{state}");
+    assert_eq!(state["id"], tracking_id);
+    assert_eq!(state["publicId"], public.as_str());
+    let (status, list) = call(&router, "GET", "/Train/mine", Some(&token), None).await;
+    assert_eq!(status, StatusCode::OK, "{list}");
+    assert_eq!(list[0]["id"], tracking_id);
+    assert_eq!(list[0]["publicId"], public.as_str());
 
     for id in [public.clone(), tracking_id.to_string()] {
         for enabled in [false, true] {

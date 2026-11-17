@@ -31,9 +31,67 @@ now have an opaque id and the numeric one is **deprecated**.
   is expected, is a `400`).
 - **`404` is uniform**, as for journeys: an id nobody has, someone else's,
   and a numeric id nobody owns answer the same `404`.
+- `POST /Journeys/{id}/replan/preview` takes either form in `fromLegId` too.
+- **Responses add the opaque id next to the numeric one**, named as for
+  journeys: `publicId` on the object itself, `<thing>PublicId` for a
+  reference and `...PublicIds` arrays in the same order as the numeric ones.
+  - Legs: `publicId` beside `id` on a journey leg (`GET /Journeys/{id}`,
+    `/v1/Journeys/{id}`); `legPublicId` beside `legId` on the journeys list
+    (`GET /Journeys/mine`, `/v1/Journeys/mine`), `POST /Journeys`, `POST
+    /Journeys/{id}/legs`, `POST /Journeys/itinerary` (the answer and each of
+    its `legs`) and the reliability trains (`null` for a replaced train);
+    `legPublicIds` beside `legIds` on the template `materialize` answer;
+    `newLegPublicIds` beside `newLegIds` on the replace, accept and revert
+    answer; `triggerLegPublicId` beside `triggerLegId` on the break and the
+    journey's `openBreak`; on the alternatives (`ReplanSuggestion`)
+    `throughLegPublicId` and `rejoinsLegPublicId`, on the set `fromLegPublicId`,
+    on its `trigger` `legPublicId` (filled each time a set is served: a leg's
+    id is as short-lived as its plan); `sourceLegPublicId` beside
+    `sourceLegId` on `GET /Journeys/{id}/revisions` legs (`null` when the leg
+    no longer exists, as a replaced leg does not); and
+    `replacesLegPublicIds` beside `replacesLegIds`, whose entries are empty
+    strings for legs that have been replaced and so no longer exist.
+  - Tracked trains: `publicId` beside `id` on `GET /Train/mine` and
+    `GET /Train/{trackingId}` (also the `trackedTrainState` of a journey
+    leg); `trackingPublicId` beside `trackingId` on `POST /Journeys`, `POST
+    /Journeys/{id}/legs`, `POST /Journeys/itinerary`, `POST
+    /Journeys/irish-train`, `POST /Train/track` and `POST
+    /Train/by-uid/{uid}/{date}/track`; `trainSubscriptionPublicId` beside
+    `trainSubscriptionId` on the group and shared trains and on the journeys
+    list.
+  - Devices: `publicId` beside `id` on `GET /notifications/devices`.
+  - `journeyIds` is filled only on the owner's `GET /Train/{trackingId}`,
+    never on a journey's or a group's view of a train.
+  - ICS event identifiers: a journey created before 2026-11-25T00:00:00Z
+    keeps `UID:journey-{id}@host` (and `claim-{id}@host` for its Delay Repay
+    reminder), so no event is replaced in a subscriber's calendar; one
+    created at or after it uses `journey-{publicId}@host` (and
+    `claim-{publicId}@host`). The single-journey download's file name
+    follows: `journey-{publicId}.ics` for a new journey, `journey-{id}.ics`
+    for an older one. The feed lists only journeys that have not set off, so
+    the numeric UIDs age out.
+- **Not changed yet:** the numeric ids stay in every response, including the
+  anonymous `GET /Journeys/shared/{token}`; journey templates, template legs,
+  breaks, tickets, webhooks, personal tokens and the other numeric ids that
+  are not a journey, leg, tracked train or device are a later wave; so is
+  `trainsId` on the train responses.
 - **Counter.** `distant_signal_legacy_id_requests_total{kind}` counts the
   requests that named an object by its numeric id (`kind` is `journey`,
-  `leg`, `tracking` or `device`). It is the evidence for stage 3 below.
+  `leg`, `tracking` or `device`; registered at 0). It is the evidence for
+  stage 3 below.
+- **Plan** (journeys included): stage 1c, the website, the notifier and
+  DS-MCP move to the opaque ids. Stage 2a: the anonymous share view stops
+  returning numeric ids, tracked-train ids and the template id (the numeric
+  fields become optional in the types). Stage 2b: no response returns the
+  numeric `id`, `journeyId`, `journeyIds`, `singleLegJourneyIds`, `legId`,
+  `legIds`, `newLegIds`, `replacesLegIds`, `trackingId`,
+  `trainSubscriptionId` or a device's `id` (breaking, `/v1` and delegated
+  included); not before the website that reads the opaque ids has been
+  deployed for 7 days, DS-MCP is released on them and the personal-token
+  OpenAPI document has shown this notice for the same 7 days. Stage 3: numeric
+  ids are refused (`400`) once `distant_signal_legacy_id_requests_total` has
+  been flat at zero for 30 days; old notifications, bookmarks and downloaded
+  `.ics` files that carry numeric ids stop resolving then.
 
 ## 2026-11-17: Alternatives can start from another station and say what the train did
 

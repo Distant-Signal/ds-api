@@ -421,15 +421,24 @@ pub(crate) enum AddJourneyLegRequest {
     Untracked(UntrackedLegRequest),
 }
 
+#[expect(
+    clippy::struct_field_names,
+    reason = "a wire response: the camelCase names are the contract"
+)]
 #[derive(Debug, Serialize, ts_rs::TS)]
 #[ts(rename = "AddJourneyLegResponse")]
 #[serde(rename_all = "camelCase")]
 pub(crate) struct AddLegResponse {
+    // Deprecated (DS-534): use `leg_public_id`.
     leg_id: i64,
+    // The new leg's opaque id.
+    leg_public_id: String,
     /// `Some` only for a `knownTrain`-mode leg -- mirrors
     /// `CreateJourneyResponse::tracking_id`'s own `None`-for-window
     /// convention exactly.
     tracking_id: Option<i64>,
+    // `tracking_id`'s opaque id (DS-534); `null` with it.
+    tracking_public_id: Option<String>,
 }
 
 /// No live database needed -- pure wire-format deserialization, unlike
@@ -828,9 +837,14 @@ pub(crate) struct CreateJourneyResponse {
     journey_id: i64,
     // The new journey's opaque id.
     journey_public_id: String,
+    // Deprecated (DS-534): use `leg_public_id`.
     leg_id: i64,
+    // The first leg's opaque id.
+    leg_public_id: String,
     /// `None` only for a `window`-mode leg -- no train is bound yet.
     tracking_id: Option<i64>,
+    // `tracking_id`'s opaque id (DS-534); `null` with it.
+    tracking_public_id: Option<String>,
     /// Mirrors `train::TrackPinResponse::resolution_status` for a
     /// `pin`-mode leg; `None` for `knownTrain`/`window` modes, neither of
     /// which has an equivalent synchronous-match-attempt outcome to report
@@ -1008,7 +1022,9 @@ async fn post_journey(
                 journey_id,
                 journey_public_id: journey_public_id(&app, journey_id).await?,
                 leg_id,
+                leg_public_id: leg_public_id(&app, leg_id).await?,
                 tracking_id: Some(tracking_id),
+                tracking_public_id: Some(tracking_public_id(&app, tracking_id).await?),
                 resolution_status: Some(resolution_status),
             }))
         }
@@ -1098,7 +1114,9 @@ async fn post_journey(
                 journey_id,
                 journey_public_id: journey_public_id(&app, journey_id).await?,
                 leg_id,
+                leg_public_id: leg_public_id(&app, leg_id).await?,
                 tracking_id: Some(tracking_id),
+                tracking_public_id: Some(tracking_public_id(&app, tracking_id).await?),
                 resolution_status: None,
             }))
         }
@@ -1138,7 +1156,9 @@ async fn post_journey(
                 journey_id,
                 journey_public_id: journey_public_id(&app, journey_id).await?,
                 leg_id,
+                leg_public_id: leg_public_id(&app, leg_id).await?,
                 tracking_id: None,
+                tracking_public_id: None,
                 resolution_status: None,
             }))
         }
@@ -1157,7 +1177,9 @@ async fn post_journey(
                 journey_id,
                 journey_public_id: journey_public_id(&app, journey_id).await?,
                 leg_id,
+                leg_public_id: leg_public_id(&app, leg_id).await?,
                 tracking_id: None,
+                tracking_public_id: None,
                 resolution_status: None,
             }))
         }
@@ -1268,7 +1290,9 @@ async fn post_journey_leg(
 
             Ok(Json(AddLegResponse {
                 leg_id,
+                leg_public_id: leg_public_id(&app, leg_id).await?,
                 tracking_id: Some(tracking_id),
+                tracking_public_id: Some(tracking_public_id(&app, tracking_id).await?),
             }))
         }
         AddJourneyLegRequest::Window {
@@ -1326,7 +1350,9 @@ async fn post_journey_leg(
 
             Ok(Json(AddLegResponse {
                 leg_id,
+                leg_public_id: leg_public_id(&app, leg_id).await?,
                 tracking_id: None,
+                tracking_public_id: None,
             }))
         }
         AddJourneyLegRequest::Untracked(request) => {
@@ -1343,7 +1369,9 @@ async fn post_journey_leg(
             let leg_id = added_leg_or_error(added)?;
             Ok(Json(AddLegResponse {
                 leg_id,
+                leg_public_id: leg_public_id(&app, leg_id).await?,
                 tracking_id: None,
+                tracking_public_id: None,
             }))
         }
     }
@@ -1453,6 +1481,26 @@ pub(crate) async fn journey_public_id(
     crate::data::journey_public_id::public_id(&app.database, journey_id)
         .await
         .map_err(internal_error("read the journey's public id"))
+}
+
+/// A leg's opaque id for a response (DS-534).
+pub(crate) async fn leg_public_id(app: &App, leg_id: i64) -> Result<String, (StatusCode, String)> {
+    crate::data::public_id::public_id::<crate::data::public_id::Leg, _>(&app.database, leg_id)
+        .await
+        .map_err(internal_error("read the leg's public id"))
+}
+
+/// A tracked train's opaque id for a response (DS-534).
+pub(crate) async fn tracking_public_id(
+    app: &App,
+    tracking_id: i64,
+) -> Result<String, (StatusCode, String)> {
+    crate::data::public_id::public_id::<crate::data::public_id::Tracking, _>(
+        &app.database,
+        tracking_id,
+    )
+    .await
+    .map_err(internal_error("read the tracked train's public id"))
 }
 
 fn internal_error(operation: &'static str) -> impl Fn(anyhow::Error) -> (StatusCode, String) {
@@ -1674,7 +1722,11 @@ pub(crate) struct ShareLinkResponse {
 #[derive(Debug, Serialize, ts_rs::TS, schemars::JsonSchema)]
 #[serde(rename_all = "camelCase")]
 pub(crate) struct JourneyLegDetailResponse {
+    // Deprecated (DS-534): use `public_id`.
     id: i64,
+    // The leg's opaque id, which every leg route accepts
+    // (`data::public_id`).
+    public_id: String,
     origin_crs: Option<String>,
     /// `None` whenever `origin_crs` is `None`, or there is no `stations`
     /// reference row for the code (a real, if rare, gap) -- see
@@ -1754,7 +1806,11 @@ pub(crate) struct JourneyLegDetailResponse {
     /// The legs of the plan before the latest change that this leg
     /// replaced (additive, 2026-10-23); empty for a leg the latest change
     /// kept or for a journey never changed.
+    // Deprecated (DS-534): use `replaces_leg_public_ids`.
     replaces_leg_ids: Vec<i64>,
+    // `replaces_leg_ids`' opaque ids, in the same order. A replaced leg no
+    // longer exists, so its entry is usually empty.
+    replaces_leg_public_ids: Vec<String>,
     /// A timetabled untracked leg's network ride, as saved (DS-237,
     /// additive): its network (`tfl`), its line's local id (`victoria`)
     /// and its headsign; `null` on every other leg.
@@ -2251,6 +2307,13 @@ async fn build_journey_detail_response(
     let leg_rows = journeys::list_legs_for_journey(&app.database, journey_id)
         .await
         .map_err(internal_error("list journey legs"))?;
+    let leg_ids: Vec<i64> = leg_rows.iter().map(|leg| leg.id).collect();
+    let leg_public_ids = crate::data::public_id::public_ids::<crate::data::public_id::Leg, _>(
+        &app.database,
+        &leg_ids,
+    )
+    .await
+    .map_err(internal_error("read leg public ids"))?;
 
     // Everything a leg needs from the database beyond its own row is read
     // in batches for the whole journey up front: every tracked state in one
@@ -2455,6 +2518,7 @@ async fn build_journey_detail_response(
             .map(|(departure, arrival)| journeys::untracked_status(departure, arrival, now));
         legs.push(JourneyLegDetailResponse {
             id: leg.id,
+            public_id: crate::data::public_id::lookup(&leg_public_ids, leg.id),
             origin_crs: leg.origin_crs,
             origin_name: leg.origin_name.or(leg.origin_place),
             destination_crs: leg.destination_crs,
@@ -2479,6 +2543,7 @@ async fn build_journey_detail_response(
             search_filters: leg.search_filters.map(|filters| filters.0),
             connection,
             replaces_leg_ids: Vec::new(),
+            replaces_leg_public_ids: Vec::new(),
             transit_network: leg.transit_network,
             transit_line_id: leg.transit_line_id,
             headsign: leg.headsign,
@@ -2520,9 +2585,18 @@ async fn build_journey_detail_response(
         now,
     )
     .await;
+    let replaced_ids: Vec<i64> = replan.replaces.values().flatten().copied().collect();
+    let replaced_public_ids = crate::data::public_id::public_ids::<crate::data::public_id::Leg, _>(
+        &app.database,
+        &replaced_ids,
+    )
+    .await
+    .map_err(internal_error("read replaced leg public ids"))?;
     for leg in &mut legs {
         if let Some(replaced) = replan.replaces.get(&leg.id) {
             leg.replaces_leg_ids.clone_from(replaced);
+            leg.replaces_leg_public_ids =
+                crate::data::public_id::lookup_all(&replaced_public_ids, replaced);
         }
     }
 
@@ -3919,6 +3993,33 @@ mod db_tests {
                 .expect("read the leg");
         assert!(leg_public_id.starts_with("l_"), "{leg_public_id}");
         assert_eq!(leg_public_id.len(), 34);
+
+        // Responses carry the opaque id beside the numeric one.
+        assert_eq!(created["legId"], leg_id);
+        assert_eq!(created["legPublicId"], leg_public_id.as_str());
+        let (status, detail) = request(
+            router.clone(),
+            format!("/Journeys/{journey_id}"),
+            Some(&owner_token),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(detail["legs"][0]["id"], leg_id);
+        assert_eq!(detail["legs"][0]["publicId"], leg_public_id.as_str());
+        assert_eq!(
+            detail["legs"][0]["replacesLegPublicIds"],
+            serde_json::json!([])
+        );
+        let (status, list) = request(
+            router.clone(),
+            "/Journeys/mine".to_string(),
+            Some(&owner_token),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(list[0]["legId"], leg_id);
+        assert_eq!(list[0]["legPublicId"], leg_public_id.as_str());
+        assert!(list[0]["trainSubscriptionPublicId"].is_null());
 
         // A train that cannot be a train id is refused with a 400 once the
         // handler has found the leg: that is the answer for the owner by

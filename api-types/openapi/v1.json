@@ -987,11 +987,20 @@
               "null"
             ]
           },
+          "publicId": {
+            "type": "string"
+          },
           "replacesLegIds": {
             "description": "The legs of the plan before the latest change that this leg\nreplaced (additive, 2026-10-23); empty for a leg the latest change\nkept or for a journey never changed.",
             "items": {
               "format": "int64",
               "type": "integer"
+            },
+            "type": "array"
+          },
+          "replacesLegPublicIds": {
+            "items": {
+              "type": "string"
             },
             "type": "array"
           },
@@ -1084,11 +1093,13 @@
         },
         "required": [
           "id",
+          "publicId",
           "serviceDate",
           "matchMode",
           "windowSearched",
           "kind",
-          "replacesLegIds"
+          "replacesLegIds",
+          "replacesLegPublicIds"
         ],
         "type": "object"
       },
@@ -1323,6 +1334,9 @@
             "format": "int64",
             "type": "integer"
           },
+          "legPublicId": {
+            "type": "string"
+          },
           "lineName": {
             "type": [
               "string",
@@ -1452,6 +1466,12 @@
               "null"
             ]
           },
+          "trainSubscriptionPublicId": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
           "trainUid": {
             "type": [
               "string",
@@ -1513,6 +1533,7 @@
           "createdAt",
           "createdVia",
           "legId",
+          "legPublicId",
           "serviceDate",
           "firstServiceDate",
           "legCount",
@@ -2686,6 +2707,12 @@
             "format": "int64",
             "type": [
               "integer",
+              "null"
+            ]
+          },
+          "triggerLegPublicId": {
+            "type": [
+              "string",
               "null"
             ]
           }
@@ -3948,6 +3975,9 @@
             ],
             "description": "A predicted late start from the incoming train (DS-127,\n`ds_store::trains::predicted_start`), served as `predictedStart`:\n`null` unless the train has no TRUST report yet, is within 3 hours\nof departure, has a previous working whose delay the booked\nturnaround cannot absorb, and the origin's board shows no time of\nits own. Filled by `routes::train::attach_journey_stops(_public)`."
           },
+          "publicId": {
+            "type": "string"
+          },
           "resolutionStatus": {
             "$ref": "#/components/schemas/ResolutionStatus"
           },
@@ -4077,6 +4107,7 @@
         },
         "required": [
           "id",
+          "publicId",
           "serviceDate",
           "resolutionStatus",
           "scheduleSkippedStations",

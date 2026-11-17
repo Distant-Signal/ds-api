@@ -91,13 +91,13 @@ export type AccessLegEnd = "origin" | "destination" | "both";
  */
 export type AccessResponse = { origin: StopAccess | null, destination: StopAccess | null, };
 
-export type AddJourneyLegResponse = { legId: number, 
+export type AddJourneyLegResponse = { legId: number, legPublicId: string, 
 /**
  * `Some` only for a `knownTrain`-mode leg -- mirrors
  * `CreateJourneyResponse::tracking_id`'s own `None`-for-window
  * convention exactly.
  */
-trackingId: number | null, };
+trackingId: number | null, trackingPublicId: string | null, };
 
 /**
  * `POST /JourneyTemplates/{id}/extra-dates`'s body.
@@ -176,7 +176,7 @@ export type BreakOpenedVia = "push" | "in_app";
 /**
  * A break with its suggestions, as the break routes answer.
  */
-export type BreakResponse = { id: number, journeyId: number, journeyPublicId: string, cause: BreakCause, fault: BreakFault, severity: number, status: BreakStatus, triggerLegId: number | null, detectedAt: string, openedVia: BreakOpenedVia | null, 
+export type BreakResponse = { id: number, journeyId: number, journeyPublicId: string, cause: BreakCause, fault: BreakFault, severity: number, status: BreakStatus, triggerLegId: number | null, triggerLegPublicId: string | null, detectedAt: string, openedVia: BreakOpenedVia | null, 
 /**
  * Why the fault is what it is, when the data overrode the traveller
  * (§14 Q5): "Your earlier train was late, so this counts as a missed
@@ -408,11 +408,11 @@ platform?: string | null, plannedPlatform?: string | null, } | { "mode": "knownT
 
 export type CreateJourneyRequest = { customName?: string | null, leg: CreateJourneyLegRequest, };
 
-export type CreateJourneyResponse = { journeyId: number, journeyPublicId: string, legId: number, 
+export type CreateJourneyResponse = { journeyId: number, journeyPublicId: string, legId: number, legPublicId: string, 
 /**
  * `None` only for a `window`-mode leg -- no train is bound yet.
  */
-trackingId: number | null, 
+trackingId: number | null, trackingPublicId: string | null, 
 /**
  * Mirrors `train::TrackPinResponse::resolution_status` for a
  * `pin`-mode leg; `None` for `knownTrain`/`window` modes, neither of
@@ -1081,7 +1081,7 @@ export type GroupSummary = { id: string, name: string, role: GroupRole, memberCo
  * query may join `tracked_train_tickets` or select
  * `train_subscriptions.notifications_enabled`/`tracked_at`.
  */
-export type GroupTrain = { trainSubscriptionId: number, pinOriginCrs: string | null, pinDestinationCrs: string | null, pinOriginName: string | null, pinDestinationName: string | null, pinScheduledDeparture: string | null, serviceDate: string, resolutionStatus: ResolutionStatus, trainUid: string | null, status: JourneyStatus | null, 
+export type GroupTrain = { trainSubscriptionId: number, trainSubscriptionPublicId: string, pinOriginCrs: string | null, pinDestinationCrs: string | null, pinOriginName: string | null, pinDestinationName: string | null, pinScheduledDeparture: string | null, serviceDate: string, resolutionStatus: ResolutionStatus, trainUid: string | null, status: JourneyStatus | null, 
 /**
  * The delay at the sharer's own stop (their pin destination), against
  * the public timetable; see `TrackedTrainState::delay_minutes`.
@@ -1402,11 +1402,11 @@ originStopId?: string | null, destinationStopId?: string | null,
  */
 transitNetwork?: string | null, transitLineId?: string | null, headsign?: string | null, };
 
-export type ItineraryLegResponse = { legId: number, 
+export type ItineraryLegResponse = { legId: number, legPublicId: string, 
 /**
  * `None` (`null`) for an untracked leg, which tracks no train.
  */
-trackingId: number | null, 
+trackingId: number | null, trackingPublicId: string | null, 
 /**
  * `train` or `untracked`. Absent from a response stored before
  * 2026-10-20 and replayed (always a train leg then).
@@ -1429,7 +1429,7 @@ operatorFilter?: OperatorFilterRequest | null, };
  * `onCreated` handler takes either: `legId` is the first leg's,
  * `trackingId` the first TRAIN leg's (an itinerary always has one).
  */
-export type ItineraryResponse = { journeyId: number, journeyPublicId: string, legId: number, trackingId: number, resolutionStatus: ResolutionStatus | null, legs: Array<ItineraryLegResponse>, createdVia: string, };
+export type ItineraryResponse = { journeyId: number, journeyPublicId: string, legId: number, legPublicId: string, trackingId: number, trackingPublicId: string, resolutionStatus: ResolutionStatus | null, legs: Array<ItineraryLegResponse>, createdVia: string, };
 
 export type JoinPreview = { groupId: string, groupName: string, memberCount: number, };
 
@@ -1524,7 +1524,7 @@ suggestionsMuted?: boolean,
  */
 operatorFilter?: JourneyOperatorFilter, };
 
-export type JourneyLegDetailResponse = { id: number, originCrs: string | null, 
+export type JourneyLegDetailResponse = { id: number, publicId: string, originCrs: string | null, 
 /**
  * `None` whenever `origin_crs` is `None`, or there is no `stations`
  * reference row for the code (a real, if rare, gap) -- see
@@ -1601,7 +1601,7 @@ connection?: LegConnection | null | null,
  * replaced (additive, 2026-10-23); empty for a leg the latest change
  * kept or for a journey never changed.
  */
-replacesLegIds: Array<number>, 
+replacesLegIds: Array<number>, replacesLegPublicIds: Array<string>, 
 /**
  * A timetabled untracked leg's network ride, as saved (DS-237,
  * additive): its network (`tfl`), its line's local id (`victoria`)
@@ -1649,7 +1649,7 @@ export type JourneyListItem = { id: number, publicId: string, customName: string
  * (§5.5a), so its list needs this. Absent on a followed journey's row:
  * how its owner saved it is not the follower's business.
  */
-createdVia?: string, legId: number, originCrs: string | null, destinationCrs: string | null, 
+createdVia?: string, legId: number, legPublicId: string, originCrs: string | null, destinationCrs: string | null, 
 /**
  * The current leg's own `journey_legs.service_date` -- the date the
  * traveller is travelling, NOT `created_at` (the date they set the
@@ -1687,7 +1687,7 @@ firstServiceDate: string,
 /**
  * How many legs the journey has.
  */
-legCount: number, matchMode: MatchMode, trainSubscriptionId: number | null, resolutionStatus: ResolutionStatus | null, status: JourneyStatus | null, 
+legCount: number, matchMode: MatchMode, trainSubscriptionId: number | null, trainSubscriptionPublicId: string | null, resolutionStatus: ResolutionStatus | null, status: JourneyStatus | null, 
 /**
  * The delay at the passenger's own stop, against the PUBLIC timetable
  * (`data::stop_delay`, design doc §9 decision 2): the current leg's destination. `None` until
@@ -2851,7 +2851,7 @@ export type MaterializeTemplateRequest = {
  */
 serviceDate: string, };
 
-export type MaterializeTemplateResponse = { journeyId: number, journeyPublicId: string, legIds: Array<number>, };
+export type MaterializeTemplateResponse = { journeyId: number, journeyPublicId: string, legIds: Array<number>, legPublicIds: Array<string>, };
 
 /**
  * `POST /Journeys/{id}/move`'s body.
@@ -2980,7 +2980,7 @@ export type NotificationPreferencesUpdate = { journeySuggestions?: boolean, line
 /**
  * The open break as `GET /Journeys/{id}` serves it.
  */
-export type OpenBreakSummary = { id: number, cause: BreakCause, fault: BreakFault, severity: number, triggerLegId: number | null, detectedAt: string, suggestionsReady: boolean, stale: boolean, 
+export type OpenBreakSummary = { id: number, cause: BreakCause, fault: BreakFault, severity: number, triggerLegId: number | null, triggerLegPublicId: string | null, detectedAt: string, suggestionsReady: boolean, stale: boolean, 
 /**
  * The sheet's headline facts, when suggestions are stored: where, to
  * where, and the best option's arrival.
@@ -3586,7 +3586,7 @@ cancellation: Cancellation | null, serviceMode: ServiceMode, liveTracking: boole
 /**
  * One of a user's devices with push on, for the Notifications page.
  */
-export type PushDevice = { id: number, 
+export type PushDevice = { id: number, publicId: string, 
 /**
  * "Chrome on Android"; `None` when it could not be worked out.
  */
@@ -3895,7 +3895,7 @@ export type ReliabilityTrain = { journeyId: number, journeyPublicId: string,
 /**
  * The current plan's leg; `null` for a replaced booked train.
  */
-legId: number | null, trainUid: string | null, serviceDate: string, originCrs: string | null, destinationCrs: string | null, destinationName: string | null, 
+legId: number | null, legPublicId: string | null, trainUid: string | null, serviceDate: string, originCrs: string | null, destinationCrs: string | null, destinationName: string | null, 
 /**
  * The public delay at the leg's destination, in minutes; `null` when
  * not known, or for a cancellation.
@@ -3941,7 +3941,7 @@ export type ReplaceResponse = { journeyId: number, journeyPublicId: string,
 /**
  * The revision now current (1 when revision 1 was refreshed).
  */
-revisionNo: number, newLegIds: Array<number>, 
+revisionNo: number, newLegIds: Array<number>, newLegPublicIds: Array<string>, 
 /**
  * The revision an Undo goes back to; `None` when the change refreshed
  * the booked plan (nothing to undo to).
@@ -3964,11 +3964,11 @@ delayMinutes: number | null,
 /**
  * The last current leg this alternative replaces.
  */
-throughLegId: number, 
+throughLegId: number, throughLegPublicId: string, 
 /**
  * The later booked leg it gets you to in time for, kept (§5.5).
  */
-rejoinsLegId: number | null, legs: Array<ReplanSuggestionLeg>, cost: number, fit: Fit | null, fitLabel: string | null, fitReason: string | null, picks: Array<Pick>, pickLabels: Array<string>, 
+rejoinsLegId: number | null, rejoinsLegPublicId: string | null, legs: Array<ReplanSuggestionLeg>, cost: number, fit: Fit | null, fitLabel: string | null, fitReason: string | null, picks: Array<Pick>, pickLabels: Array<string>, 
 /**
  * One of the (at most three) cards; the rest are "More options".
  */
@@ -4076,7 +4076,7 @@ export type RevisionFault = "operator" | "user" | "none" | "unknown";
 /**
  * One revision leg as served by `GET /Journeys/{id}/revisions`.
  */
-export type RevisionLeg = { position: number, sourceLegId: number | null, kind: JourneyLegKind, trainUid: string | null, serviceDate: string, atocCode: string | null, originCrs: string | null, originName: string | null, destinationCrs: string | null, destinationName: string | null, bookedDeparture: string | null, bookedArrival: string | null, transitMode: TransitMode | null, originPlace: string | null, destinationPlace: string | null, lineName: string | null, plannedDeparture: string | null, plannedArrival: string | null, ticketIds: Array<number>, fate: RevisionLegFate, 
+export type RevisionLeg = { position: number, sourceLegId: number | null, sourceLegPublicId: string | null, kind: JourneyLegKind, trainUid: string | null, serviceDate: string, atocCode: string | null, originCrs: string | null, originName: string | null, destinationCrs: string | null, destinationName: string | null, bookedDeparture: string | null, bookedArrival: string | null, transitMode: TransitMode | null, originPlace: string | null, destinationPlace: string | null, lineName: string | null, plannedDeparture: string | null, plannedArrival: string | null, ticketIds: Array<number>, fate: RevisionLegFate, 
 /**
  * An untracked leg's stops and network ride (DS-237, additive), so
  * going back to this plan keeps them; `null` otherwise and on a
@@ -4400,7 +4400,7 @@ irishTrain: IrishTrain | null, serviceMode?: ServiceMode, liveTracking?: boolean
  * all -- so no future edit may widen it past what the group detail page
  * already shows the same member.
  */
-export type SharedTrain = { groupId: string, groupName: string, trainSubscriptionId: number, pinOriginCrs: string | null, pinDestinationCrs: string | null, pinOriginName: string | null, pinDestinationName: string | null, pinScheduledDeparture: string | null, serviceDate: string, resolutionStatus: ResolutionStatus, trainUid: string | null, status: JourneyStatus | null, 
+export type SharedTrain = { groupId: string, groupName: string, trainSubscriptionId: number, trainSubscriptionPublicId: string, pinOriginCrs: string | null, pinDestinationCrs: string | null, pinOriginName: string | null, pinDestinationName: string | null, pinScheduledDeparture: string | null, serviceDate: string, resolutionStatus: ResolutionStatus, trainUid: string | null, status: JourneyStatus | null, 
 /**
  * The delay at the sharer's own stop (their pin destination), against
  * the public timetable; see `TrackedTrainState::delay_minutes`.
@@ -4740,7 +4740,7 @@ fingerprint: string,
 /**
  * The first leg replaced.
  */
-fromLegId: number, originCrs: string, originName: string | null, destinationCrs: string, destinationName: string | null, departAfter: string, 
+fromLegId: number, fromLegPublicId: string, originCrs: string, originName: string | null, destinationCrs: string, destinationName: string | null, departAfter: string, 
 /**
  * The booked arrival at the destination (the compensation baseline's).
  */
@@ -5041,7 +5041,7 @@ fromStation?: string, };
  * `POST /Journeys/irish-train`'s response: the one-leg journey and the
  * tracked train (`GET /Train/{trackingId}`).
  */
-export type TrackIrishTrainResponse = { journeyId: number, journeyPublicId: string, trackingId: number, };
+export type TrackIrishTrainResponse = { journeyId: number, journeyPublicId: string, trackingId: number, trackingPublicId: string, };
 
 /**
  * Pin-creation payload for `POST /Train/track` (`crates/api/src/routes/train.rs`).
@@ -5088,7 +5088,7 @@ platform?: string | null,
  */
 planned_platform?: string | null, };
 
-export type TrackPinResponse = { trackingId: number, resolutionStatus: ResolutionStatus, 
+export type TrackPinResponse = { trackingId: number, trackingPublicId: string, resolutionStatus: ResolutionStatus, 
 /**
  * The one-leg journey the pin now belongs to (DS-124). Additive
  * (2026-10-22).
@@ -5106,7 +5106,7 @@ journeyId: number, journeyPublicId: string, };
  * `TrackedTrainTicket` -- never sent between Rust services, only
  * serialized to JSON for the frontend.
  */
-export type TrackedTrainListItem = { id: number, serviceDate: string, 
+export type TrackedTrainListItem = { id: number, publicId: string, serviceDate: string, 
 /**
  * `Option`, not `String` -- see `TrackedTrainState::pin_origin_crs`'s
  * own doc comment for the full reasoning. `GET /Train/mine` returns
@@ -5228,7 +5228,7 @@ irishTrain: IrishTrain | null, serviceMode: ServiceMode, liveTracking: boolean, 
  * since dead code carrying a latent cross-user leak serves no purpose
  * sitting around waiting to be reconnected.
  */
-export type TrackedTrainState = { id: number, serviceDate: string, 
+export type TrackedTrainState = { id: number, publicId: string, serviceDate: string, 
 /**
  * `Option`, not `String`. `20260906130000_nullable_pin_columns.sql`
  * dropped this column's `NOT NULL`, and
@@ -6241,7 +6241,7 @@ modes?: Array<string>, };
  * The train whose leg no longer works, as the sheet and the push name it
  * ("the 10:16 to Charing Cross").
  */
-export type TriggerTrain = { legId: number, 
+export type TriggerTrain = { legId: number, legPublicId: string, 
 /**
  * Its timetabled departure from the leg's boarding station.
  */

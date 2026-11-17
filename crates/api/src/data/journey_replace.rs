@@ -104,7 +104,12 @@ pub struct ReplaceResponse {
     pub journey_public_id: String,
     /// The revision now current (1 when revision 1 was refreshed).
     pub revision_no: i32,
+    // Deprecated (DS-534): use `new_leg_public_ids`.
     pub new_leg_ids: Vec<i64>,
+    // `new_leg_ids`' opaque ids, in the same order. Absent from a response
+    // stored before DS-534, which an `Idempotency-Key` replay still reads.
+    #[serde(default)]
+    pub new_leg_public_ids: Vec<String>,
     /// The revision an Undo goes back to; `None` when the change refreshed
     /// the booked plan (nothing to undo to).
     pub undo_revision_no: Option<i32>,
@@ -387,10 +392,16 @@ pub async fn replace(pool: &PgPool, replacement: &Replacement<'_>) -> anyhow::Re
             .bind(journey_id)
             .fetch_one(&mut *tx)
             .await?;
+    let leg_public_ids = crate::data::public_id::public_ids::<crate::data::public_id::Leg, _>(
+        &mut *tx,
+        &new_leg_ids,
+    )
+    .await?;
     let response = ReplaceResponse {
         journey_id,
         journey_public_id,
         revision_no,
+        new_leg_public_ids: crate::data::public_id::lookup_all(&leg_public_ids, &new_leg_ids),
         new_leg_ids,
         undo_revision_no: revision_id.and(previous_no),
     };

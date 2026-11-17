@@ -253,7 +253,10 @@ pub(crate) async fn journey_calendar(
         Ok(events) => events,
         Err(err) => return database_error("read the operator")(err),
     };
-    let disposition = format!("attachment; filename=\"journey-{journey_id}.ics\"");
+    // Named as the event's UID is: by the public id for a journey made since
+    // the cutover, else by its number.
+    let key = calendar_feed::JourneyFacts::from(row).uid_key();
+    let disposition = format!("attachment; filename=\"journey-{key}.ics\"");
     no_store(calendar_response(
         document(&site, events, "Distant Signal journey"),
         &[(header::CONTENT_DISPOSITION, disposition)],

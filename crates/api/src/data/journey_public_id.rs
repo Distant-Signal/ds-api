@@ -51,7 +51,7 @@ pub fn is_public_id(s: &str) -> bool {
 /// # Errors
 /// The query failed.
 pub async fn public_ids(pool: &PgPool, ids: &[i64]) -> anyhow::Result<HashMap<i64, String>> {
-    public_id::public_ids::<Journey>(pool, ids).await
+    public_id::public_ids::<Journey, _>(pool, ids).await
 }
 
 /// The public id of one journey, empty if it does not exist. Takes any

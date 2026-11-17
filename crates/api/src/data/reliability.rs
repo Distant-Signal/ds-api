@@ -65,6 +65,9 @@ pub struct ReliabilityTrain {
     pub journey_public_id: String,
     /// The current plan's leg; `null` for a replaced booked train.
     pub leg_id: Option<i64>,
+    // `leg_id`'s opaque id; `null` with it. Filled by [`for_user`] after
+    // [`assemble`].
+    pub leg_public_id: Option<String>,
     pub train_uid: Option<String>,
     pub service_date: NaiveDate,
     pub origin_crs: Option<String>,
@@ -389,6 +392,17 @@ pub async fn for_user(
             .cloned()
             .unwrap_or_default();
     }
+    let leg_ids: Vec<i64> = response
+        .trains
+        .iter()
+        .filter_map(|train| train.leg_id)
+        .collect();
+    let leg_public_ids =
+        crate::data::public_id::public_ids::<crate::data::public_id::Leg, _>(pool, &leg_ids)
+            .await?;
+    for train in &mut response.trains {
+        train.leg_public_id = crate::data::public_id::lookup_opt(&leg_public_ids, train.leg_id);
+    }
     Ok(response)
 }
 
@@ -470,6 +484,7 @@ fn trains(readings: &Readings, runs: &HashMap<i64, LegRun>) -> Vec<ReliabilityTr
             journey_id: leg.journey_id,
             journey_public_id: String::new(),
             leg_id: Some(leg.leg_id),
+            leg_public_id: None,
             train_uid: leg.train_uid.clone(),
             service_date: leg.service_date,
             origin_crs: leg.origin_crs.clone(),
@@ -498,6 +513,7 @@ fn trains(readings: &Readings, runs: &HashMap<i64, LegRun>) -> Vec<ReliabilityTr
             journey_id: row.journey_id,
             journey_public_id: String::new(),
             leg_id: None,
+            leg_public_id: None,
             train_uid: row.train_uid.clone(),
             service_date: row.service_date,
             origin_crs: row.origin_crs.clone(),

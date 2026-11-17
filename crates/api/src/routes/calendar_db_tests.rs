@@ -84,7 +84,36 @@ async fn seed_journey(pool: &PgPool, user: &str) -> i64 {
         create_journey_with_untracked_leg(pool, user, Some("Secret home to work"), &leg)
             .await
             .expect("seed journey");
+    // Made before the public-id UID cutover, whatever day the tests run, so
+    // its UID is the numeric one these tests read.
+    backdate(pool, journey_id).await;
     journey_id
+}
+
+/// Backdates a journey to before `calendar_feed::PUBLIC_UID_FROM_UNIX`.
+async fn backdate(pool: &PgPool, journey_id: i64) {
+    sqlx::query("UPDATE journeys SET created_at = '2026-11-01T09:00:00Z' WHERE id = $1")
+        .bind(journey_id)
+        .execute(pool)
+        .await
+        .expect("backdate the journey");
+}
+
+/// Makes a journey created after the cutover: its UID and file name are
+/// its public id.
+async fn seed_new_journey(pool: &PgPool, user: &str) -> (i64, String) {
+    let journey_id = seed_journey(pool, user).await;
+    sqlx::query("UPDATE journeys SET created_at = '2099-01-01T09:00:00Z' WHERE id = $1")
+        .bind(journey_id)
+        .execute(pool)
+        .await
+        .expect("make the journey new");
+    let public_id: String = sqlx::query_scalar("SELECT public_id FROM journeys WHERE id = $1")
+        .bind(journey_id)
+        .fetch_one(pool)
+        .await
+        .expect("read the public id");
+    (journey_id, public_id)
 }
 
 async fn send(
@@ -391,6 +420,61 @@ async fn every_calendar_route_is_404_while_the_feature_is_off() {
     }
     calendar_feed::set_enabled_for_tests(true);
     cleanup(&pool, "TEST-CAL-D").await;
+}
+
+/// DS-534: a journey made before the cutover keeps `journey-{id}@host` and
+/// one made after it is `journey-{publicId}@host`, in the feed and in the
+/// single-journey download, whose file name follows.
+#[tokio::test]
+#[ignore = "requires a live database; run with `DATABASE_URL=... cargo test -p api calendar_db_tests -- --ignored --test-threads=1`"]
+async fn a_new_journeys_event_is_named_by_its_public_id() {
+    calendar_feed::set_enabled_for_tests(true);
+    let pool = connect().await;
+    cleanup(&pool, "TEST-CAL-P").await;
+    let app = router(pool.clone());
+    let raw = seed_user(&pool, "TEST-CAL-P1").await;
+    let old = seed_journey(&pool, "TEST-CAL-P1").await;
+    let (new, new_public) = seed_new_journey(&pool, "TEST-CAL-P1").await;
+    let c = cookie(&raw);
+    let (_, _, body) = send(
+        &app,
+        "POST",
+        "/public/account/calendar-feed",
+        &[("cookie", &c), ("origin", ORIGIN)],
+    )
+    .await;
+    let token = serde_json::from_str::<Value>(&body).unwrap()["token"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    let (status, _, feed) = send(&app, "GET", &format!("/public/calendar/{token}.ics"), &[]).await;
+    assert_eq!(status, StatusCode::OK, "{feed}");
+    assert!(feed.contains(&format!("UID:journey-{old}@example.invalid")));
+    assert!(feed.contains(&format!("UID:journey-{new_public}@example.invalid")));
+    assert!(!feed.contains(&format!("UID:journey-{new}@")));
+
+    for (id, key) in [
+        (old.to_string(), old.to_string()),
+        (new_public.clone(), new_public.clone()),
+    ] {
+        let (status, headers, ics) = send(
+            &app,
+            "GET",
+            &format!("/Journeys/{id}/calendar.ics"),
+            &[("cookie", &c)],
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{ics}");
+        assert_eq!(
+            headers[header::CONTENT_DISPOSITION],
+            format!("attachment; filename=\"journey-{key}.ics\"").as_str()
+        );
+        assert!(
+            ics.contains(&format!("UID:journey-{key}@example.invalid")),
+            "{ics}"
+        );
+    }
+    cleanup(&pool, "TEST-CAL-P").await;
 }
 
 /// Review 2026-11 (C5): a feed reads past the journeys list's 100-row

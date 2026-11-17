@@ -459,7 +459,13 @@ pub async fn prepare_replacement(
 #[serde(rename_all = "camelCase")]
 pub struct RevisionLeg {
     pub position: i32,
+    // Deprecated (DS-534): use `source_leg_public_id`.
     pub source_leg_id: Option<i64>,
+    // `source_leg_id`'s opaque id, read when the revisions are served (a
+    // revision does not store it): `null` when the leg no longer exists,
+    // as a replaced leg does not.
+    #[sqlx(default)]
+    pub source_leg_public_id: Option<String>,
     #[ts(as = "crate::ts_values::JourneyLegKind")]
     pub kind: String,
     pub train_uid: Option<String>,
@@ -542,7 +548,13 @@ pub async fn list_revisions(pool: &PgPool, journey_id: i64) -> anyhow::Result<Ve
     .bind(&ids)
     .fetch_all(pool)
     .await?;
-    for leg in legs {
+    let source_ids: Vec<i64> = legs.iter().filter_map(|leg| leg.source_leg_id).collect();
+    let source_public_ids =
+        crate::data::public_id::public_ids::<crate::data::public_id::Leg, _>(pool, &source_ids)
+            .await?;
+    for mut leg in legs {
+        leg.source_leg_public_id =
+            crate::data::public_id::lookup_opt(&source_public_ids, leg.source_leg_id);
         if let Some(revision) = revisions.iter_mut().find(|r| r.id == leg.revision_id) {
             revision.legs.push(leg);
         }
