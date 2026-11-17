@@ -52,6 +52,55 @@ holds nothing back. `cleared_at` needs ds-core's
 Nothing is stamped when the journey cannot be judged (no live timings) or
 is all travelled: unknown is not healthy.
 
+## "I missed this train"
+
+The traveller's own word that they did not get on a train. It opens no
+break; it shows alternatives (`GET /Journeys/{id}/legs/{legId}/alternatives?cause=missed`),
+and taking one (`POST .../replace` with `cause: missed`) records the leg as
+missed in a revision of its own (reason `replace`, cause `user_missed`,
+fault from the data, never from the tap).
+
+**What "travelled" means.** Two facts that used to be one:
+
+- *The train arrived* (`trainArrived`, `LegArrival::arrived`): the train
+  reached the leg's alighting station, by `travel_order::train_arrived_sql`
+  (TRUST's reported arrival, else the timetabled arrival plus the live delay,
+  else plus 30 minutes). It orders the lists, decides a journey is past and
+  freezes "Choose another train". A cancelled train is never counted as
+  having arrived while the miss window below is open.
+- *The miss window is open* (`journey_breaks::miss_window_open`): the leg's
+  service date has not yet ended at 04:00 London the next morning (the rule
+  that expires breaks). It is the only guard for the causes `missed`,
+  `cancelled` and `connection`, whatever the train did. A missed train very
+  often runs on to its destination without the traveller, so DS data never
+  blocks the request: the traveller is the authority on whether they boarded.
+
+| Request | Refused when | Answer |
+|---|---|---|
+| alternatives or replace, cause `missed`, `cancelled`, `connection`, or with a break open on the leg | the first leg's window has closed | `409 miss_window_closed` ("It's too late to change this journey.") |
+| alternatives or replace, cause `choice` (no break open) | a replaced leg's train has arrived | `409 leg_travelled` ("This leg is already travelled.") |
+| revert, repeat, a regular journey's plan | a replaced leg's train has arrived | `409 leg_travelled` |
+
+A replace over several legs (`throughLegId`, or an accepted break's range)
+under the window is judged by its first leg only: later legs of the range
+that have already run are replaced too and are `not_used` in the earlier
+plan, where the whole replace used to be refused.
+
+Where the browser sees the message only, a delegated client sees the code
+as well.
+
+**Integrity.** Nothing outside DS is touched: Delay Repay is advisory and DS
+submits no claim; the booked plan is revision 1, which is append-only apart
+from the fate stamp on the leg. The data, not the request, decides fault
+(`missed_fault`: the railway's only when the change onto the leg already
+broke on live times), so a late miss cannot make a claim. A user-fault miss
+moves the compensation baseline to the replacement plan, as any
+passenger-fault change does; the booked plan is still stored. The miss is
+counted as `api_journey_missed_total{state}` for audit, labelled by what the
+train had done when the traveller said so: `before_departure`, `departed`
+or `arrived`. DS does not remember a miss when no other train is taken (no
+leg-level missed record): the leg stays as booked.
+
 ## Metrics
 
 | Metric | Labels |
@@ -62,6 +111,7 @@ is all travelled: unknown is not healthy.
 | `api_journey_break_suggestions_total` | `result` (`found`, `none`, `error`) |
 | `api_journey_break_opened_total` | `via` (`push`, `in_app`) |
 | `api_journey_replan_accepted_total` | `via`, `rank`, `pick`, `fit` |
+| `api_journey_missed_total` | `state` (`before_departure`, `departed`, `arrived`) |
 | `api_journey_replan_stale_total` | |
 | `api_journey_breaks_sweep_seconds` | |
 | `notifier_journey_break_notice_total` | `result` (`sent`, `opt_out`, `muted`, `not_worse`, `acted`, `unconfirmed`, `in_app`) |

@@ -42,7 +42,7 @@ use crate::data::journey_alternatives::{
 };
 use crate::data::journey_breaks::{self, BreakRow, Cause, Detected, LegFacts};
 use crate::data::journey_feasibility::{self, JourneyTimings, LegTiming, TrainLegTiming};
-use crate::data::journey_replace::{self, Replaced, Replacement};
+use crate::data::journey_replace::{self, Freeze, Replaced, Replacement};
 use crate::data::journey_revisions::{self, Reason, RevisionMeta};
 use crate::data::{journeys, train_tracking};
 use crate::routes::journey_itinerary::RouteError;
@@ -272,7 +272,7 @@ pub(crate) async fn analyse(
     let timings = journey_feasibility::journey_timings(&app.database, &inputs, now).await;
     let leg_ids: Vec<i64> = legs.iter().map(|leg| leg.id).collect();
     let mut conn = app.database.acquire().await?;
-    let travelled = journey_breaks::travelled_legs(&mut conn, &leg_ids).await?;
+    let arrivals = journey_breaks::leg_arrivals(&mut conn, &leg_ids, now).await?;
     drop(conn);
     let facts = legs
         .iter()
@@ -285,7 +285,12 @@ pub(crate) async fn analyse(
                 .as_ref()
                 .is_some_and(|s| s.status.as_deref() == Some("cancelled")),
             skipped: boards.skipped(leg, state.as_ref()),
-            travelled: travelled.contains(&leg.id),
+            travelled: arrivals
+                .iter()
+                .any(|arrival| arrival.id == leg.id && arrival.travelled(now)),
+            arrived: arrivals
+                .iter()
+                .any(|arrival| arrival.id == leg.id && arrival.train_ran()),
         })
         .collect();
     Ok(Analysis {
@@ -1016,7 +1021,7 @@ async fn detail_extras_inner(
     {
         let ids: Vec<i64> = legs.iter().map(|l| l.id).collect();
         let mut conn = pool.acquire().await?;
-        let travelled = journey_breaks::travelled_legs(&mut conn, &ids).await?;
+        let arrivals = journey_breaks::leg_arrivals(&mut conn, &ids, now).await?;
         drop(conn);
         let facts: Vec<LegFacts> = legs
             .iter()
@@ -1026,7 +1031,12 @@ async fn detail_extras_inner(
                 trains_id: leg.trains_id,
                 whole_cancelled: leg.cancelled,
                 skipped: leg.skipped,
-                travelled: travelled.contains(&leg.id),
+                travelled: arrivals
+                    .iter()
+                    .any(|arrival| arrival.id == leg.id && arrival.travelled(now)),
+                arrived: arrivals
+                    .iter()
+                    .any(|arrival| arrival.id == leg.id && arrival.train_ran()),
             })
             .collect();
         if let Some(found) = journey_breaks::detect(&facts, &timings.timings, &timings.connections)
@@ -1106,6 +1116,41 @@ fn plan_cause(ask: AskCause, open: Option<&BreakRow>, leg_id: i64) -> (String, S
     }
 }
 
+/// `api_journey_missed_total{state}`: a train the traveller said they missed
+/// and then took another for (`POST .../replace` with `cause: missed`), by
+/// what the train had done when they said so, for judging the feature and
+/// for audit: `before_departure`, `departed` (left, not yet at its
+/// destination) or `arrived` (ran to the leg's alighting station).
+pub(crate) const MISSED_METRIC: &str = "api_journey_missed_total";
+
+/// The `state` labels of [`MISSED_METRIC`].
+const MISSED_STATES: [&str; 3] = ["before_departure", "departed", "arrived"];
+
+/// Registers [`MISSED_METRIC`] at 0 at startup, so an alert's `increase()`
+/// sees the first one after a restart.
+pub fn register_metrics() {
+    for state in MISSED_STATES {
+        metrics::counter!(ds_runtime::metrics::metric_name(MISSED_METRIC), "state" => state)
+            .increment(0);
+    }
+}
+
+/// What train leg `index` had done at `analysis.now`, as a
+/// [`MISSED_STATES`] label. A leg with no live timing (a pinned leg with
+/// no train yet) has not left as far as DS knows.
+fn missed_state_of(analysis: &Analysis, index: usize) -> &'static str {
+    if analysis.facts[index].arrived {
+        "arrived"
+    } else if analysis
+        .timing(index)
+        .is_some_and(|timing| timing.live_dep <= analysis.now)
+    {
+        "departed"
+    } else {
+        "before_departure"
+    }
+}
+
 /// Who is at fault for missing train leg `index` (§4.2, §14 Q5): the
 /// railway when the change onto it no longer works on live times, else the
 /// traveller. A first leg has no change onto it, so it is always the
@@ -1143,9 +1188,6 @@ async fn get_alternatives(
                 .iter()
                 .position(|leg| leg.id == leg_id)
                 .ok_or_else(not_found)?;
-            if analysis.facts[index].travelled {
-                return Err(leg_travelled());
-            }
             let open = journey_breaks::open_break(&app.database, journey_id)
                 .await
                 .map_err(internal("read break"))?;
@@ -1153,6 +1195,14 @@ async fn get_alternatives(
                 .as_ref()
                 .is_some_and(|b| b.trigger_leg_id == Some(leg_id));
             let ask = params.cause.unwrap_or(AskCause::Choice);
+            // "I missed this train", cancelled and a missed connection are
+            // judged by the miss window, not by the train's arrival: a
+            // missed train very often runs on to its destination without
+            // the traveller. "Choose another train" keeps the arrival
+            // freeze.
+            if let Some(refusal) = leg_refusal(&analysis, index, ask, on_leg) {
+                return Err(refusal);
+            }
             let (cause, mut fault) = plan_cause(ask, open.as_ref(), leg_id);
             if !on_leg && ask == AskCause::Missed {
                 fault = missed_fault(&analysis, index).to_string();
@@ -1176,6 +1226,32 @@ async fn get_alternatives(
             Ok(Json(set).into_response())
         }
         .await,
+    )
+}
+
+/// Why leg `index` cannot be replanned for `ask`, if it cannot: `409
+/// leg_travelled` for a free choice once its train has arrived, `409
+/// miss_window_closed` for any other cause (or with a break open on the
+/// leg) once its window has closed.
+fn leg_refusal(
+    analysis: &Analysis,
+    index: usize,
+    ask: AskCause,
+    break_on_leg: bool,
+) -> Option<RouteError> {
+    if ask == AskCause::Choice && !break_on_leg {
+        analysis.facts[index].travelled.then(leg_travelled)
+    } else {
+        (!journey_breaks::miss_window_open(analysis.legs[index].service_date, analysis.now))
+            .then(miss_window_closed)
+    }
+}
+
+pub(crate) fn miss_window_closed() -> RouteError {
+    RouteError::coded(
+        StatusCode::CONFLICT,
+        "miss_window_closed",
+        "It's too late to change this journey.",
     )
 }
 
@@ -1512,6 +1588,7 @@ pub(crate) fn replaced_response(outcome: Replaced) -> Result<Response, RouteErro
             "throughLegId comes before the leg being replaced.",
         )),
         Replaced::Travelled => Err(leg_travelled()),
+        Replaced::MissWindowClosed => Err(miss_window_closed()),
         Replaced::AtCap => Err(RouteError::coded(
             StatusCode::BAD_REQUEST,
             "too_many_legs",
@@ -1710,6 +1787,7 @@ async fn post_accept(
                     idempotency: idempotency
                         .as_ref()
                         .map(|(key, hash)| (key.as_str(), hash.as_str())),
+                    freeze: Freeze::MissWindow,
                     regular: None,
                 },
             )
@@ -1798,6 +1876,12 @@ async fn post_replace(
                 .await
                 .map_err(internal("read break"))?
                 .filter(|row| row.trigger_leg_id == Some(leg_id));
+            let freeze = if open.is_none() && body.cause == AskCause::Choice {
+                Freeze::Arrived
+            } else {
+                Freeze::MissWindow
+            };
+            let mut missed_state = None;
             let (meta, fate) = if let Some(row) = &open {
                 (
                     RevisionMeta {
@@ -1823,6 +1907,7 @@ async fn post_replace(
                         .iter()
                         .position(|leg| leg.id == leg_id)
                         .ok_or_else(not_found)?;
+                    missed_state = Some(missed_state_of(&analysis, index));
                     missed_fault(&analysis, index).to_string()
                 } else if fault == "user" {
                     fault
@@ -1865,11 +1950,19 @@ async fn post_replace(
                     idempotency: idempotency
                         .as_ref()
                         .map(|(key, hash)| (key.as_str(), hash.as_str())),
+                    freeze,
                     regular: None,
                 },
             )
             .await
             .map_err(internal("replace legs"))?;
+            if let (Replaced::Done { .. }, Some(state)) = (&outcome, missed_state) {
+                metrics::counter!(
+                    ds_runtime::metrics::metric_name(MISSED_METRIC),
+                    "state" => state
+                )
+                .increment(1);
+            }
             replaced_response(outcome)
         }
         .await,
@@ -2096,6 +2189,7 @@ async fn post_revert(
                     idempotency: idempotency
                         .as_ref()
                         .map(|(key, hash)| (key.as_str(), hash.as_str())),
+                    freeze: Freeze::Arrived,
                     regular: None,
                 },
             )

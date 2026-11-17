@@ -141,6 +141,7 @@ async fn post_accept(
                     trigger_fate: "not_used",
                     now,
                     idempotency: None,
+                    freeze: journey_replace::Freeze::Arrived,
                     regular: Some(RegularWrite {
                         plan: &accepted,
                         status: "committed",

@@ -497,37 +497,107 @@ pub async fn suggestions_muted(pool: &PgPool, journey_id: i64) -> anyhow::Result
     Ok(row.is_some_and(|(muted,)| muted))
 }
 
-/// The legs of `leg_ids` that are already travelled (frozen, §11): an
-/// untracked leg whose planned arrival has passed; a train leg whose train
-/// reached its alighting station, by `travel_order`'s rule.
-pub async fn travelled_legs(
+/// When the window to say a leg of service date `service_date` went wrong
+/// closes: 04:00 London the morning after that date, the rule
+/// [`expire_finished`] ends breaks by. `None` only for a date the calendar
+/// cannot add a day to.
+pub fn miss_window_closes_at(service_date: chrono::NaiveDate) -> Option<DateTime<Utc>> {
+    let morning = service_date
+        .succ_opt()?
+        .and_time(chrono::NaiveTime::from_hms_opt(4, 0, 0)?);
+    crate::data::eta_blend::london_to_utc(morning)
+}
+
+/// Whether the traveller may still say a leg of service date
+/// `service_date` went wrong (missed, cancelled, a connection missed) at
+/// `now`: until 04:00 London the morning after the date, whatever the
+/// train did (docs/journey-breaks.md, "I missed this train"). A leg whose
+/// window cannot be worked out counts as closed.
+pub fn miss_window_open(service_date: chrono::NaiveDate, now: DateTime<Utc>) -> bool {
+    miss_window_closes_at(service_date).is_some_and(|closes| now < closes)
+}
+
+/// One leg as [`leg_arrivals`] reads it.
+#[derive(Debug, Clone, PartialEq, Eq, sqlx::FromRow)]
+pub struct LegArrival {
+    pub id: i64,
+    pub service_date: chrono::NaiveDate,
+    /// An untracked leg whose planned arrival has passed, or a train leg
+    /// whose train reached its alighting station, by `travel_order`'s
+    /// rule. Says nothing about a cancelled train: see [`Self::travelled`].
+    pub arrived: bool,
+    /// The leg's train is cancelled (`train_current_state.status`).
+    pub cancelled: bool,
+}
+
+impl LegArrival {
+    /// Frozen for ordering and break detection (§11): arrived, and not a
+    /// cancelled train still inside its miss window. A cancelled train
+    /// never ran to its destination, so its timetabled arrival passing is
+    /// no reason to stop offering another way while the window is open.
+    pub fn travelled(&self, now: DateTime<Utc>) -> bool {
+        self.arrived && !(self.cancelled && miss_window_open(self.service_date, now))
+    }
+
+    /// The train ran to the leg's alighting station: arrived and not
+    /// cancelled. What a missed-train request reports to the app as
+    /// `arrived` (a fact for a confirmation, never a refusal).
+    pub fn train_ran(&self) -> bool {
+        self.arrived && !self.cancelled
+    }
+}
+
+/// Each of `leg_ids` judged at `now`: whether it has arrived, by
+/// `travel_order`'s rule, and whether its train is cancelled.
+pub async fn leg_arrivals(
     conn: &mut sqlx::PgConnection,
     leg_ids: &[i64],
-) -> anyhow::Result<Vec<i64>> {
+    now: DateTime<Utc>,
+) -> anyhow::Result<Vec<LegArrival>> {
     if leg_ids.is_empty() {
         return Ok(Vec::new());
     }
-    let arrived = crate::data::travel_order::train_arrived_sql(
+    let arrived = crate::data::travel_order::train_arrived_sql_at(
         "tr.id",
         "tr.train_uid",
         "tr.service_date",
         "COALESCE(jl.destination_crs, ts.pin_destination_crs, tr.destination_crs)",
         "cs.delay_minutes",
+        "$2::timestamptz",
     );
     let sql = format!(
-        "SELECT jl.id FROM journey_legs jl \
+        "SELECT jl.id, jl.service_date, \
+                (CASE \
+                    WHEN jl.kind = 'untracked' THEN COALESCE(jl.planned_arrival <= $2::timestamptz, FALSE) \
+                    WHEN tr.id IS NULL THEN FALSE \
+                    ELSE {arrived} END) AS arrived, \
+                COALESCE(jl.kind <> 'untracked' AND cs.status = 'cancelled', FALSE) AS cancelled \
+         FROM journey_legs jl \
          LEFT JOIN train_subscriptions ts ON ts.id = jl.train_subscription_id \
          LEFT JOIN trains tr ON tr.id = ts.trains_id \
          LEFT JOIN train_current_state cs ON cs.trains_id = tr.id \
-         WHERE jl.id = ANY($1) AND CASE \
-             WHEN jl.kind = 'untracked' THEN COALESCE(jl.planned_arrival <= now(), FALSE) \
-             WHEN tr.id IS NULL THEN FALSE \
-             ELSE {arrived} END"
+         WHERE jl.id = ANY($1)"
     );
-    Ok(sqlx::query_scalar(&sql)
+    Ok(sqlx::query_as(&sql)
         .bind(leg_ids)
+        .bind(now)
         .fetch_all(&mut *conn)
         .await?)
+}
+
+/// The legs of `leg_ids` that are already travelled (frozen, §11) at `now`:
+/// see [`LegArrival::travelled`].
+pub async fn travelled_legs(
+    conn: &mut sqlx::PgConnection,
+    leg_ids: &[i64],
+    now: DateTime<Utc>,
+) -> anyhow::Result<Vec<i64>> {
+    Ok(leg_arrivals(conn, leg_ids, now)
+        .await?
+        .into_iter()
+        .filter(|leg| leg.travelled(now))
+        .map(|leg| leg.id)
+        .collect())
 }
 
 /// Ends open breaks whose journey is over (§11): every leg dated before
@@ -569,8 +639,12 @@ pub struct LegFacts {
     /// The train no longer calls at the leg's boarding or alighting stop
     /// (the departure board says so).
     pub skipped: bool,
-    /// Already travelled: frozen, never a break (§11).
+    /// Already travelled: frozen, never a break (§11). A cancelled train
+    /// is not travelled while its miss window is open.
     pub travelled: bool,
+    /// The train ran to the leg's alighting station ([`LegArrival::train_ran`]):
+    /// a fact for the app, not a freeze.
+    pub arrived: bool,
 }
 
 /// A break found by [`detect`].
@@ -723,6 +797,86 @@ mod tests {
             relies_on_late_departure: None,
             next_timetabled: None,
         })
+    }
+
+    fn day(y: i32, m: u32, d: u32) -> chrono::NaiveDate {
+        chrono::NaiveDate::from_ymd_opt(y, m, d).unwrap()
+    }
+
+    #[test]
+    fn the_miss_window_closes_at_four_the_morning_after_the_service_date() {
+        use chrono::TimeZone;
+        // BST: 04:00 London is 03:00 UTC.
+        let date = day(2026, 7, 10);
+        let closes = Utc.with_ymd_and_hms(2026, 7, 11, 3, 0, 0).unwrap();
+        assert_eq!(miss_window_closes_at(date), Some(closes));
+        assert!(miss_window_open(
+            date,
+            closes - chrono::Duration::minutes(1)
+        ));
+        assert!(!miss_window_open(date, closes));
+        // Long after the train has run: still open on the day itself.
+        assert!(miss_window_open(
+            date,
+            Utc.with_ymd_and_hms(2026, 7, 10, 22, 0, 0).unwrap()
+        ));
+        // GMT: 04:00 London is 04:00 UTC.
+        let winter = day(2026, 12, 10);
+        assert_eq!(
+            miss_window_closes_at(winter),
+            Some(Utc.with_ymd_and_hms(2026, 12, 11, 4, 0, 0).unwrap())
+        );
+    }
+
+    #[test]
+    fn the_miss_window_holds_across_the_clock_changes() {
+        use chrono::TimeZone;
+        // Clocks go forward at 01:00 UTC on 2026-03-29 (the night of the
+        // 28th): 04:00 London on the 29th is 03:00 UTC.
+        assert_eq!(
+            miss_window_closes_at(day(2026, 3, 28)),
+            Some(Utc.with_ymd_and_hms(2026, 3, 29, 3, 0, 0).unwrap())
+        );
+        // Clocks go back at 01:00 UTC on 2026-10-25: 04:00 London on the
+        // 25th is 04:00 UTC, and the 25th's own window ends on the 26th.
+        assert_eq!(
+            miss_window_closes_at(day(2026, 10, 24)),
+            Some(Utc.with_ymd_and_hms(2026, 10, 25, 4, 0, 0).unwrap())
+        );
+        assert_eq!(
+            miss_window_closes_at(day(2026, 10, 25)),
+            Some(Utc.with_ymd_and_hms(2026, 10, 26, 4, 0, 0).unwrap())
+        );
+    }
+
+    #[test]
+    fn a_cancelled_train_is_not_travelled_while_its_window_is_open() {
+        use chrono::TimeZone;
+        let date = day(2026, 7, 10);
+        let inside = Utc.with_ymd_and_hms(2026, 7, 10, 20, 0, 0).unwrap();
+        let after = Utc.with_ymd_and_hms(2026, 7, 11, 3, 0, 0).unwrap();
+        let cancelled = LegArrival {
+            id: 1,
+            service_date: date,
+            arrived: true,
+            cancelled: true,
+        };
+        assert!(!cancelled.travelled(inside));
+        assert!(!cancelled.train_ran());
+        assert!(cancelled.travelled(after));
+        // A train that ran stays travelled, window or not, and ran.
+        let ran = LegArrival {
+            cancelled: false,
+            ..cancelled
+        };
+        assert!(ran.travelled(inside));
+        assert!(ran.train_ran());
+        // Not arrived: never travelled.
+        let under_way = LegArrival {
+            arrived: false,
+            ..ran
+        };
+        assert!(!under_way.travelled(after));
     }
 
     fn facts(leg_id: i64) -> LegFacts {

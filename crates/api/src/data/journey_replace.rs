@@ -46,9 +46,27 @@ pub struct Replacement<'a> {
     /// An `Idempotency-Key` and the request's hash: a repeat answers with
     /// the first response (`journey_idempotency_keys`).
     pub idempotency: Option<(&'a str, &'a str)>,
+    /// What stops the replacement: see [`Freeze`].
+    pub freeze: Freeze,
     /// A regular journey's day planned by the plan sweep, or picked by its
     /// accept route: written in the same transaction (see [`RegularWrite`]).
     pub regular: Option<RegularWrite<'a>>,
+}
+
+/// What a replacement may not touch (§11, amended DS-534).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Freeze {
+    /// Any replaced leg whose train has arrived (or an untracked leg whose
+    /// planned arrival has passed) refuses it: [`Replaced::Travelled`]. A
+    /// free choice of another train, a revert, a repeat and a regular
+    /// journey's plan.
+    Arrived,
+    /// Only the miss window of the first replaced leg refuses it
+    /// ([`Replaced::MissWindowClosed`]): "I missed this train", a
+    /// cancelled train, a missed connection and an accepted break. A later
+    /// leg in the replaced range that has already run is replaced too and
+    /// its fate in the earlier plan is `not_used`.
+    MissWindow,
 }
 
 /// What a regular journey's plan (regular journeys spec 2026-11-06 §6.2)
@@ -99,8 +117,10 @@ pub enum Replaced {
     NotFound,
     /// `through_leg_id` comes before `from_leg_id`.
     BadRange,
-    /// A replaced leg is already travelled (frozen, §11).
+    /// A replaced leg is already travelled (frozen, §11): [`Freeze::Arrived`].
     Travelled,
+    /// The first replaced leg's miss window has closed: [`Freeze::MissWindow`].
+    MissWindowClosed,
     /// The journey would have more than [`MAX_LEGS_PER_JOURNEY`] legs.
     AtCap,
     /// The same `Idempotency-Key` with a different request.
@@ -123,6 +143,7 @@ struct LegRow {
     id: i64,
     leg_order: i32,
     train_subscription_id: Option<i64>,
+    service_date: chrono::NaiveDate,
 }
 
 /// Replaces `from_leg_id ..= through_leg_id` of the journey with `legs`.
@@ -142,6 +163,7 @@ pub async fn replace(pool: &PgPool, replacement: &Replacement<'_>) -> anyhow::Re
         trigger_fate,
         now,
         idempotency,
+        freeze,
         ref regular,
     } = *replacement;
     let mut tx = pool.begin().await?;
@@ -179,7 +201,7 @@ pub async fn replace(pool: &PgPool, replacement: &Replacement<'_>) -> anyhow::Re
         }
     }
     let current: Vec<LegRow> = sqlx::query_as(
-        "SELECT id, leg_order, train_subscription_id FROM journey_legs \
+        "SELECT id, leg_order, train_subscription_id, service_date FROM journey_legs \
          WHERE journey_id = $1 ORDER BY leg_order FOR UPDATE",
     )
     .bind(journey_id)
@@ -198,11 +220,20 @@ pub async fn replace(pool: &PgPool, replacement: &Replacement<'_>) -> anyhow::Re
     };
     let replaced = &current[from..=through];
     let replaced_ids: Vec<i64> = replaced.iter().map(|leg| leg.id).collect();
-    if !crate::data::journey_breaks::travelled_legs(&mut tx, &replaced_ids)
-        .await?
-        .is_empty()
-    {
-        return Ok(Replaced::Travelled);
+    match freeze {
+        Freeze::Arrived => {
+            if !crate::data::journey_breaks::travelled_legs(&mut tx, &replaced_ids, now)
+                .await?
+                .is_empty()
+            {
+                return Ok(Replaced::Travelled);
+            }
+        }
+        Freeze::MissWindow => {
+            if !crate::data::journey_breaks::miss_window_open(replaced[0].service_date, now) {
+                return Ok(Replaced::MissWindowClosed);
+            }
+        }
     }
     let remaining = current.len() - replaced.len() + legs.len();
     if i64::try_from(remaining).unwrap_or(i64::MAX) > MAX_LEGS_PER_JOURNEY || remaining == 0 {

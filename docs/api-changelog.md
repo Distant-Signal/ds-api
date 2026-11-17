@@ -3,6 +3,37 @@
 Changes to the Distant Signal (DS) HTTP API that a client such as DS-MCP
 needs to know about. Newest first. Field names are as served (camelCase).
 
+## 2026-11-17: "I missed this train" no longer waits for the train to arrive
+
+**Behaviour change** (DS-534, the missed-train redesign, part 1); no new field, migration or grant. Additive for every client; nothing a client calls changes shape.
+
+- `GET /Journeys/{id}/legs/{legId}/alternatives?cause=missed|cancelled|connection`
+  and `POST .../replace` with those causes (or with a break open on the
+  leg) are judged by a *miss window* instead of by the train's arrival: open
+  until 04:00 London the morning after the leg's service date. Before, they
+  were refused with `409 leg_travelled` once the train had reached the leg's
+  alighting station (or 30 minutes after its timetabled arrival), which is
+  exactly when someone who got to the station too late asks. DS data never
+  blocks a missed request: the traveller says whether they boarded.
+- New `409 miss_window_closed` ("It's too late to change this journey.")
+  once the window has closed, for those same causes. `cause=choice` ("Choose
+  another train") with no break open keeps `409 leg_travelled` once the train
+  has arrived, as do revert, repeat and a regular journey's plan.
+- A replace over several legs (`throughLegId`, or an accepted break's
+  range) for those causes is judged by its first leg's window only. Later
+  legs of the range that have already run are replaced too and are
+  `not_used` in the earlier plan; before, the whole replace was refused
+  with `409 leg_travelled`.
+- A cancelled train is never counted as having arrived while its miss window
+  is open. Before, `leg_travelled` (and the break detector's "already
+  travelled") applied to a cancelled train 30 minutes after its timetabled
+  arrival: "Find another way" was refused and no cancelled or missed
+  connection break was opened. Break detection and the alternatives now
+  work on it until the window closes.
+- New counter `api_journey_missed_total{state=before_departure|departed|arrived}`
+  (`distant_signal_` prefix; registered at 0), one per accepted `cause:
+  missed` replacement, by what the train had done when the traveller said so.
+
 ## 2026-11-17: Cookie mutations need a same-origin signal; push endpoints with userinfo refused
 
 **Behaviour change** (DS-534, round-2 security assessment); no field, migration or grant change. Not part of the 2026-11-17 deploy 2.

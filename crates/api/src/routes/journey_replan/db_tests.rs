@@ -201,6 +201,61 @@ async fn break_count(pool: &PgPool, journey_id: i64) -> i64 {
         .expect("count breaks")
 }
 
+/// One more ZRC to ZRD train, `uid`, leaving at `dep` and arriving at
+/// `arr` (both `HH:MM` on the fixture day), for a search made after the
+/// first three have run.
+async fn seed_late_train(pool: &PgPool, uid: &str, dep: &str, arr: &str) {
+    exec(
+        pool,
+        &format!(
+            "INSERT INTO schedule_calling_points_full \
+                 (service_date, uid, seq, tiploc, kind, booked_departure, public_departure, \
+                  booked_arrival, public_arrival, day_offset, can_board, can_alight) VALUES \
+             ('{DATE}', '{uid}', 1, 'RPTSTC', 'origin', '{dep}', '{dep}', NULL, NULL, 0, TRUE, TRUE), \
+             ('{DATE}', '{uid}', 2, 'RPTSTD', 'terminate', NULL, NULL, '{arr}', '{arr}', 0, TRUE, TRUE)"
+        ),
+    )
+    .await;
+    exec(
+        pool,
+        &format!(
+            "INSERT INTO schedule_destination_departures \
+                 (service_date, destination_crs, scheduled, train_uid, origin_crs, \
+                  destination_arrival, operator_atoc, public_departure, \
+                  public_destination_arrival) \
+             VALUES ('{DATE}', 'ZRD', '{dep}', '{uid}', 'ZRC', '{arr}', 'GR', '{dep}', '{arr}')"
+        ),
+    )
+    .await;
+    exec(
+        pool,
+        &format!(
+            "INSERT INTO schedule_services (service_date, uid, mode, stp, operator_atoc) \
+             VALUES ('{DATE}', '{uid}', 'train', 'P', 'GR')"
+        ),
+    )
+    .await;
+}
+
+/// The instant `hour:minute` London, `days` after the fixture day.
+fn london_at(days: i64, hour: u32, minute: u32) -> chrono::DateTime<chrono::Utc> {
+    let local = (date() + chrono::Duration::days(days))
+        .and_hms_opt(hour, minute, 0)
+        .expect("time");
+    crate::data::eta_blend::london_to_utc(local).expect("a London time")
+}
+
+/// The body of a `POST .../replace` taking `uid` for the leg.
+fn replace_body(cause: &str, uid: &str) -> Value {
+    serde_json::json!({
+        "cause": cause,
+        "legs": [{
+            "trainUid": uid, "serviceDate": DATE,
+            "originCrs": "ZRC", "destinationCrs": "ZRD"
+        }]
+    })
+}
+
 fn router(pool: PgPool) -> axum::Router {
     crate::app::Router::new()
         .merge(crate::routes::journeys::router())
@@ -2161,4 +2216,205 @@ async fn an_operator_filter_on_someone_elses_journey_is_a_404_whatever_its_codes
         .await;
         assert_eq!(status, StatusCode::NOT_FOUND, "{id}: {body}");
     }
+}
+
+/// "I missed this train" after the train has run on to its destination
+/// (DS-534): the miss window, not the train's arrival, decides, so the
+/// alternatives come and taking one is recorded as a miss. "Choose another
+/// train" on the same leg is still refused.
+#[tokio::test]
+#[ignore = "requires a live database: DATABASE_URL"]
+async fn a_train_missed_after_it_ran_on_to_its_destination_is_still_replaced() {
+    let _now = pin_now();
+    let pool = connect().await;
+    let _cleanup = cleanup(&pool).await;
+    seed_timetable(&pool).await;
+    seed_late_train(&pool, "RP0006", "12:45", "13:45").await;
+    let token = seed_session(&pool, USER).await;
+    let router = router(pool.clone());
+    let (journey_id, leg_id) = create_journey(&router, &token).await;
+
+    // 12:30 London: RP0001 reached ZRD at 11:00 (and its 30 minutes of
+    // grace are over), so it has arrived.
+    let _later = crate::routes::pin_london_now_for_tests(london_at(0, 12, 30));
+    let alternatives = format!("/Journeys/{journey_id}/legs/{leg_id}/alternatives");
+    let (status, body) = call(
+        &router,
+        "GET",
+        &format!("{alternatives}?cause=choice"),
+        Some(&token),
+        None,
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::CONFLICT, "{body}");
+    assert_eq!(body, "This leg is already travelled.");
+    let (status, found) = call(
+        &router,
+        "GET",
+        &format!("{alternatives}?cause=missed"),
+        Some(&token),
+        None,
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{found}");
+    let offered: Vec<&str> = found["suggestions"]
+        .as_array()
+        .expect("suggestions")
+        .iter()
+        .filter_map(|s| s["legs"][0]["trainUid"].as_str())
+        .collect();
+    assert!(offered.contains(&"RP0006"), "{found}");
+
+    // A free choice of another train is still refused on replace; the
+    // miss is taken.
+    let replace = format!("/Journeys/{journey_id}/legs/{leg_id}/replace");
+    let (status, body) = call(
+        &router,
+        "POST",
+        &replace,
+        Some(&token),
+        Some(replace_body("choice", "RP0006")),
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::CONFLICT, "{body}");
+    assert_eq!(body, "This leg is already travelled.");
+    let (status, replaced) = call(
+        &router,
+        "POST",
+        &replace,
+        Some(&token),
+        Some(replace_body("missed", "RP0006")),
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{replaced}");
+    assert_eq!(replaced["revisionNo"], 2, "{replaced}");
+    let (_, history) = call(
+        &router,
+        "GET",
+        &format!("/Journeys/{journey_id}/revisions"),
+        Some(&token),
+        None,
+        None,
+    )
+    .await;
+    let revisions = history["revisions"].as_array().expect("revisions");
+    assert_eq!(revisions[0]["cause"], "user_missed", "{history}");
+    assert_eq!(revisions[0]["fault"], "user", "{history}");
+    assert_eq!(revisions[1]["legs"][0]["trainUid"], "RP0001", "{history}");
+    assert_eq!(revisions[1]["legs"][0]["fate"], "missed", "{history}");
+    assert_eq!(break_count(&pool, journey_id).await, 0);
+}
+
+/// The miss window ends at 04:00 London the morning after the leg's
+/// service date, whatever the train did (DS-534).
+#[tokio::test]
+#[ignore = "requires a live database: DATABASE_URL"]
+async fn a_miss_is_refused_once_the_window_has_closed() {
+    let _now = pin_now();
+    let pool = connect().await;
+    let _cleanup = cleanup(&pool).await;
+    seed_timetable(&pool).await;
+    let token = seed_session(&pool, USER).await;
+    let router = router(pool.clone());
+    let (journey_id, leg_id) = create_journey(&router, &token).await;
+
+    // 04:30 the morning after: closed, for every cause that uses the window.
+    let _closed = crate::routes::pin_london_now_for_tests(london_at(1, 4, 30));
+    let alternatives = format!("/Journeys/{journey_id}/legs/{leg_id}/alternatives");
+    let replace = format!("/Journeys/{journey_id}/legs/{leg_id}/replace");
+    for cause in ["missed", "cancelled", "connection"] {
+        let (status, body) = call(
+            &router,
+            "GET",
+            &format!("{alternatives}?cause={cause}"),
+            Some(&token),
+            None,
+            None,
+        )
+        .await;
+        assert_eq!(status, StatusCode::CONFLICT, "{cause}: {body}");
+        assert_eq!(body, "It's too late to change this journey.", "{cause}");
+        let (status, body) = call(
+            &router,
+            "POST",
+            &replace,
+            Some(&token),
+            Some(replace_body(cause, "RP0002")),
+            None,
+        )
+        .await;
+        assert_eq!(status, StatusCode::CONFLICT, "{cause}: {body}");
+        assert_eq!(body, "It's too late to change this journey.", "{cause}");
+    }
+    let revisions: i64 =
+        sqlx::query_scalar("SELECT count(*) FROM journey_revisions WHERE journey_id = $1")
+            .bind(journey_id)
+            .fetch_one(&pool)
+            .await
+            .expect("count revisions");
+    assert_eq!(revisions, 1, "nothing was replaced");
+
+    // 03:30 the same morning: still open.
+    let _open = crate::routes::pin_london_now_for_tests(london_at(1, 3, 30));
+    let (status, replaced) = call(
+        &router,
+        "POST",
+        &replace,
+        Some(&token),
+        Some(replace_body("missed", "RP0002")),
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{replaced}");
+}
+
+/// A cancelled train never counts as arrived for the window: its
+/// timetabled arrival plus 30 minutes passing neither refuses "Find another
+/// way" nor stops the page opening the break (DS-534).
+#[tokio::test]
+#[ignore = "requires a live database: DATABASE_URL"]
+async fn a_cancelled_train_past_its_arrival_still_gets_a_break_and_alternatives() {
+    let _now = pin_now();
+    let pool = connect().await;
+    let _cleanup = cleanup(&pool).await;
+    seed_timetable(&pool).await;
+    seed_late_train(&pool, "RP0006", "12:45", "13:45").await;
+    let token = seed_session(&pool, USER).await;
+    let router = router(pool.clone());
+    let (journey_id, leg_id) = create_journey(&router, &token).await;
+    exec(
+        &pool,
+        &format!(
+            "INSERT INTO train_current_state (trains_id, status) \
+             SELECT id, 'cancelled' FROM trains WHERE service_date = '{DATE}' AND train_uid = 'RP0001'"
+        ),
+    )
+    .await;
+
+    let _later = crate::routes::pin_london_now_for_tests(london_at(0, 12, 30));
+    let (status, found) = call(
+        &router,
+        "GET",
+        &format!("/Journeys/{journey_id}/legs/{leg_id}/alternatives?cause=cancelled"),
+        Some(&token),
+        None,
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{found}");
+    let (_, detail) = call(
+        &router,
+        "GET",
+        &format!("/Journeys/{journey_id}"),
+        Some(&token),
+        None,
+        None,
+    )
+    .await;
+    assert_eq!(detail["openBreak"]["cause"], "cancelled", "{detail}");
+    assert_eq!(detail["openBreak"]["triggerLegId"], leg_id, "{detail}");
 }

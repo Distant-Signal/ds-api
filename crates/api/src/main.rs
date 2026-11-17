@@ -514,6 +514,8 @@ async fn server_main() -> anyhow::Result<()> {
         api::edge::register_panic_metric();
         // The trip-plan graph builds' counter and timing (DS-225).
         routes::trips::register_graph_metrics();
+        // "I missed this train" confirmations, by what the train had done.
+        routes::journey_replan::register_metrics();
         // Usage analytics' feature and event counters at 0 (DS-190).
         api::usage_events::register();
         tokio::spawn(data::db_health::probe_loop(app.database.clone()));

@@ -440,13 +440,16 @@ async fn move_journey(
             trigger_fate: "not_used",
             now,
             idempotency: None,
+            freeze: journey_replace::Freeze::Arrived,
             regular: None,
         },
     )
     .await
     .map_err(internal("move journey"))?;
     match outcome {
-        journey_replace::Replaced::Travelled => return Err(started()),
+        journey_replace::Replaced::Travelled | journey_replace::Replaced::MissWindowClosed => {
+            return Err(started());
+        }
         journey_replace::Replaced::Done { .. } => {
             sqlx::query(
                 "UPDATE journeys SET regular_plan = NULL, regular_plan_status = NULL, \
