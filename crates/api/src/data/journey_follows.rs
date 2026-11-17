@@ -87,8 +87,12 @@ impl FollowRow {
     fn into_followed_from(self) -> (i64, FollowedFrom) {
         let followed = match self.group_id {
             Some(group_id) => {
-                let owner =
-                    users::MemberDisplay::of(self.owner_name, self.owner_username, &self.owner_id);
+                let owner = users::MemberDisplay::of(
+                    self.owner_name,
+                    self.owner_username,
+                    &group_id,
+                    &self.owner_id,
+                );
                 FollowedFrom {
                     via: FollowVia::Group,
                     owner_name: owner.label,

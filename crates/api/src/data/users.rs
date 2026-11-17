@@ -109,66 +109,63 @@ fn shareable(value: Option<&str>) -> Option<&str> {
 }
 
 /// Domain separation for `anonymous_tag`, so the digest this app renders
-/// can never coincide with some other digest of the same user id computed
-/// for an unrelated purpose (a cache key, an `ETag`) and turn one into an
-/// oracle for the other.
-const ANONYMOUS_TAG_DOMAIN: &str = "network-rail-status/member-display-tag/v1:";
+/// can never coincide with some other digest of the same ids computed for
+/// an unrelated purpose (a cache key, an `ETag`) and turn one into an
+/// oracle for the other. `v2` (DS-534) added the group to the input: `v1`
+/// hashed the account id alone, so one account wore the same tag in every
+/// group.
+const ANONYMOUS_TAG_DOMAIN: &str = "network-rail-status/member-display-tag/v2:";
 
-/// Six lowercase hex characters that are the same for one user every time
-/// and different between users -- the thing that makes two members who BOTH
-/// render as the generic placeholder tell apart as "A member (#a1b2c3)" and
-/// "A member (#d4e5f6)" rather than as two identical rows.
+/// Six lowercase hex characters that are the same for one user in one
+/// group every time and different between users -- the thing that makes
+/// two members who BOTH render as the generic placeholder tell apart as
+/// "A member (#a1b2c3)" and "A member (#d4e5f6)" rather than as two
+/// identical rows.
 ///
-/// Derived from `users.id` -- the opaque OIDC subject -- and from nothing
-/// else. That is the whole privacy argument, and it is deliberately not an
-/// argument about the hash being strong:
+/// Derived from the group's id and `users.id` (the opaque OIDC subject),
+/// and from nothing else:
 ///
-/// * Everyone who can see a tag can ALREADY see the id it came from. The
-///   id is a field of the very same JSON (`GroupMember.user_id`,
-///   `GroupTrain.added_by`, `GroupDetail.owner_id` -- the frontend needs
-///   it to key rows and to gate the remove/promote buttons), and that JSON
-///   is reachable by every member of the group, not only by the ones whose
-///   rendered page happens to carry the id: `routes::groups::list_members`
-///   gates on `require_member` with no role check, and the frontend's
-///   same-origin `/api/[...path]` proxy will forward a plain member's own
-///   `GET /api/groups/{id}/members` straight to it. A value computed from
-///   nothing but a field its whole audience can already fetch tells that
-///   audience nothing new, whatever the function is: the tag is strictly
-///   less informative than the `userId` it is derived from.
-/// * Email, name and username are not inputs. There is therefore no
-///   candidate-email dictionary to run against the tag at all: hashing a
-///   guessed address produces nothing comparable to it. This is the
-///   [[feedback-no-email-exposure]] rule applied to the derivation and not
-///   only to the rendered string -- the tag must not be a roundabout way of
-///   shipping an address, so an address never enters it.
+/// * Per group (DS-534). The tag used to be a function of the account id
+///   alone, so two groups' member lists could be joined on it and it was
+///   a stable cross-group identifier now that the account id itself is no
+///   longer sent to other members. The group id is a random token, so the
+///   same person has an unrelated tag in every group. Everyone who sees a
+///   tag already knows the group id; the account id is not shown to them.
+/// * Not `group_members.public_id`, on purpose: that row is deleted when a
+///   member leaves, but a custom line's grant (`granted_by`) outlives the
+///   grantor's membership, and its attribution must still resolve to the
+///   same tag as before they left. `(group id, account id)` is on every
+///   attributed row, always, and is also stable if the member leaves and
+///   is re-added (their tag does not change; only their `memberId` does).
+/// * Email, name and username are not inputs, so there is no
+///   candidate-email dictionary to run against the tag (the
+///   [[feedback-no-email-exposure]] rule applied to the derivation).
 /// * SHA-256 truncated to 24 bits is one-way in the only direction that
-///   matters here anyway: ~16.7M subjects share any given tag, so the tag
-///   pins down no individual even for someone who can enumerate subjects.
+///   matters: ~16.7M subjects share any given tag, so the tag pins down
+///   no individual even for someone who can enumerate subjects.
 ///
 /// Six characters, hex, always rendered inside "(#...)": short enough to
 /// scan down a member list, and visibly a machine token rather than a name
 /// a reader might mistake for the person's actual one.
 ///
 /// Collisions are possible and harmless: two colliding members render
-/// identically, which is exactly the pre-fix behaviour for that pair and
-/// no worse -- nothing keys off the tag, it is a display string. Know the
-/// real numbers before leaning on it, though: 24 bits is 16.7M values, so
-/// by the birthday bound a group of ~20 members has roughly a 1-in-90,000
-/// chance of any collision at all, while ~4,800 members in one group would
-/// be an even-money bet. That is comfortable for the friend/family-sized
-/// groups this feature is for and NOT comfortable for an org-wide one.
-/// Widening it (4 bytes, or base32 rather than hex) is a display change
-/// rather than a correctness fix, but is not free either: the tag is also
-/// what a member recognises another member by across visits, so changing
-/// the derivation renames everybody at once.
+/// identically, which is exactly the pre-tag behaviour for that pair and
+/// no worse -- nothing keys off the tag, it is a display string. The tag
+/// space is unchanged at 24 bits (16.7M values), so by the birthday bound
+/// a group of ~20 members has roughly a 1-in-90,000 chance of any
+/// collision at all, while ~4,800 members in one group would be an
+/// even-money bet: comfortable for friend/family-sized groups and not for
+/// an org-wide one. Every member's tag changed once when `v2` shipped.
 #[expect(
     clippy::format_collect,
     reason = "short strings off the hot path; format! reads clearer"
 )]
-fn anonymous_tag(user_id: &str) -> String {
+fn anonymous_tag(group_id: &str, user_id: &str) -> String {
     use sha2::{Digest, Sha256};
 
-    let digest = Sha256::digest(format!("{ANONYMOUS_TAG_DOMAIN}{user_id}").as_bytes());
+    // A NUL between the two ids: neither can contain one, so two
+    // different (group, user) pairs can never concatenate to the same input.
+    let digest = Sha256::digest(format!("{ANONYMOUS_TAG_DOMAIN}{group_id}\0{user_id}").as_bytes());
     digest[..3]
         .iter()
         .map(|byte| format!("{byte:02x}"))
@@ -199,9 +196,14 @@ pub struct MemberDisplay {
 }
 
 impl MemberDisplay {
-    pub fn of(name: Option<String>, username: Option<String>, user_id: &str) -> Self {
+    pub fn of(
+        name: Option<String>,
+        username: Option<String>,
+        group_id: &str,
+        user_id: &str,
+    ) -> Self {
         let label = display_label(name, username);
-        let tag = label.is_none().then(|| anonymous_tag(user_id));
+        let tag = label.is_none().then(|| anonymous_tag(group_id, user_id));
         MemberDisplay { label, tag }
     }
 }
@@ -316,6 +318,7 @@ mod tests {
         MemberDisplay::of(
             name.map(str::to_string),
             username.map(str::to_string),
+            "group-1",
             user_id,
         )
     }
@@ -370,7 +373,7 @@ mod tests {
         let third = display(Some("a@b.com"), None, "user-1").tag;
         assert_eq!(first, second);
         assert_eq!(second, third);
-        assert_eq!(first, Some(anonymous_tag("user-1")));
+        assert_eq!(first, Some(anonymous_tag("group-1", "user-1")));
     }
 
     /// Short, lowercase hex, and unmistakably not a person's name -- the
@@ -379,7 +382,7 @@ mod tests {
     #[test]
     fn the_tag_is_six_lowercase_hex_characters() {
         for user_id in ["user-1", "", "3f2504e0-4f89-11d3-9a0c-0305e82c3301", "ß🙂"] {
-            let tag = anonymous_tag(user_id);
+            let tag = anonymous_tag("group-1", user_id);
             assert_eq!(tag.len(), 6, "tag for {user_id:?} was {tag:?}");
             assert!(
                 tag.chars()
@@ -414,10 +417,27 @@ mod tests {
         // rendered value is 24 bits of digest, not an encoding of the
         // input, so it is neither the id nor any prefix/suffix of it.
         let user_id = "rider@example.com-as-a-subject";
-        let tag = anonymous_tag(user_id);
+        let tag = anonymous_tag("group-1", user_id);
         assert!(!tag.contains('@'));
         assert!(!user_id.contains(&tag));
         assert!(!tag.contains("rider"));
+    }
+
+    /// DS-534: the same account has an unrelated tag in each group, so two
+    /// groups' member lists cannot be joined on it, and the tag does not
+    /// depend on anything that changes when a member leaves and is re-added.
+    #[test]
+    fn the_same_user_has_a_different_tag_in_every_group() {
+        let tags: std::collections::HashSet<String> = (0..50)
+            .map(|i| anonymous_tag(&format!("group-{i}"), "user-1"))
+            .collect();
+        assert_eq!(tags.len(), 50);
+        assert_eq!(
+            anonymous_tag("group-1", "user-1"),
+            anonymous_tag("group-1", "user-1")
+        );
+        // The two ids cannot be shifted across the separator.
+        assert_ne!(anonymous_tag("ab", "c"), anonymous_tag("a", "bc"));
     }
 
     /// Different ids give different tags in the small-group case this is
@@ -426,7 +446,7 @@ mod tests {
     #[test]
     fn nearby_user_ids_do_not_collide() {
         let tags: std::collections::HashSet<String> = (0..50)
-            .map(|i| anonymous_tag(&format!("user-{i}")))
+            .map(|i| anonymous_tag("group-1", &format!("user-{i}")))
             .collect();
         assert_eq!(tags.len(), 50);
     }
