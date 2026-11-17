@@ -517,6 +517,7 @@ async fn server_main() -> anyhow::Result<()> {
         data::public_id::register_metrics();
         // The trip-plan graph builds' counter and timing (DS-225).
         routes::trips::register_graph_metrics();
+        routes::trips::register_replan_metrics();
         // "I missed this train" confirmations, by what the train had done.
         routes::journey_replan::register_metrics();
         // Usage analytics' feature and event counters at 0 (DS-190).

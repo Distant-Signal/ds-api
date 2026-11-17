@@ -15,6 +15,8 @@ use crate::test_support::{FixtureCleanup, assert_synthetic_date};
 const USER: &str = "TEST-REPLAN-USER";
 const OTHER: &str = "TEST-REPLAN-OTHER";
 const DATE: &str = "2099-05-05";
+/// The day after [`DATE`]: for the searches that run past its midnight.
+const NEXT_DATE: &str = "2099-05-06";
 
 fn date() -> NaiveDate {
     let date: NaiveDate = DATE.parse().expect("date");
@@ -58,6 +60,10 @@ async fn cleanup(pool: &PgPool) -> FixtureCleanup {
         format!("DELETE FROM schedule_calling_points_full WHERE service_date = '{DATE}'"),
         format!("DELETE FROM schedule_destination_departures WHERE service_date = '{DATE}'"),
         format!("DELETE FROM schedule_services WHERE service_date = '{DATE}'"),
+        format!("DELETE FROM trains WHERE service_date = '{NEXT_DATE}'"),
+        format!("DELETE FROM schedule_calling_points_full WHERE service_date = '{NEXT_DATE}'"),
+        format!("DELETE FROM schedule_destination_departures WHERE service_date = '{NEXT_DATE}'"),
+        format!("DELETE FROM schedule_services WHERE service_date = '{NEXT_DATE}'"),
         "DELETE FROM tiploc_crs WHERE tiploc IN ('RPTSTC', 'RPTSTD', 'RPTSTE')".to_string(),
     ]);
     FixtureCleanup::new(pool, statements).await
@@ -3104,5 +3110,334 @@ async fn a_stored_set_is_served_with_the_legs_opaque_ids_and_empty_ones_for_gone
             "{current}"
         );
         assert!(later["rejoinsLegPublicId"].is_null(), "{current}");
+    }
+}
+
+fn next_date() -> NaiveDate {
+    let date: NaiveDate = NEXT_DATE.parse().expect("date");
+    assert_synthetic_date(date);
+    date
+}
+
+/// One more ZRC to ZRD train, `uid`, on `service_date` (`DATE` or
+/// `NEXT_DATE`), leaving at `dep` and arriving at `arr` (`HH:MM`).
+/// `day_offset` is how many days past `service_date` both times fall: 1 for
+/// a train that leaves after midnight but still belongs to that date.
+async fn seed_train_on(
+    pool: &PgPool,
+    service_date: &str,
+    uid: &str,
+    dep: &str,
+    arr: &str,
+    day_offset: u8,
+) {
+    exec(
+        pool,
+        &format!(
+            "INSERT INTO schedule_calling_points_full \
+                 (service_date, uid, seq, tiploc, kind, booked_departure, public_departure, \
+                  booked_arrival, public_arrival, day_offset, can_board, can_alight) VALUES \
+             ('{service_date}', '{uid}', 1, 'RPTSTC', 'origin', '{dep}', '{dep}', NULL, NULL, {day_offset}, TRUE, TRUE), \
+             ('{service_date}', '{uid}', 2, 'RPTSTD', 'terminate', NULL, NULL, '{arr}', '{arr}', {day_offset}, TRUE, TRUE)"
+        ),
+    )
+    .await;
+    exec(
+        pool,
+        &format!(
+            "INSERT INTO schedule_destination_departures \
+                 (service_date, destination_crs, scheduled, train_uid, origin_crs, \
+                  destination_arrival, operator_atoc, public_departure, \
+                  public_destination_arrival, day_offset, destination_arrival_day_offset) \
+             VALUES ('{service_date}', 'ZRD', '{dep}', '{uid}', 'ZRC', '{arr}', 'GR', '{dep}', \
+                     '{arr}', {day_offset}, {day_offset})"
+        ),
+    )
+    .await;
+    exec(
+        pool,
+        &format!(
+            "INSERT INTO schedule_services (service_date, uid, mode, stp, operator_atoc) \
+             VALUES ('{service_date}', '{uid}', 'train', 'P', 'GR')"
+        ),
+    )
+    .await;
+}
+
+/// `GET .../alternatives?cause=missed` for the journey's leg: the set.
+async fn missed_alternatives(
+    router: &axum::Router,
+    token: &str,
+    journey_id: i64,
+    leg_id: i64,
+) -> Value {
+    let (status, found) = call(
+        router,
+        "GET",
+        &format!("/Journeys/{journey_id}/legs/{leg_id}/alternatives?cause=missed"),
+        Some(token),
+        None,
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{found}");
+    found
+}
+
+/// Each suggestion's first train: `(trainUid, serviceDate)`.
+fn first_trains(found: &Value) -> Vec<(String, String)> {
+    found["suggestions"]
+        .as_array()
+        .expect("suggestions")
+        .iter()
+        .map(|suggestion| {
+            let leg = &suggestion["legs"][0];
+            (
+                leg["trainUid"].as_str().expect("trainUid").to_string(),
+                leg["serviceDate"]
+                    .as_str()
+                    .expect("serviceDate")
+                    .to_string(),
+            )
+        })
+        .collect()
+}
+
+/// The suggestion whose first train is `uid`.
+fn suggestion_on<'a>(found: &'a Value, uid: &str) -> &'a Value {
+    found["suggestions"]
+        .as_array()
+        .expect("suggestions")
+        .iter()
+        .find(|suggestion| suggestion["legs"][0]["trainUid"] == uid)
+        .unwrap_or_else(|| panic!("{uid} in {found}"))
+}
+
+fn instant_of(value: &Value) -> chrono::DateTime<chrono::Utc> {
+    value
+        .as_str()
+        .and_then(|text| text.parse().ok())
+        .unwrap_or_else(|| panic!("an instant, got {value}"))
+}
+
+/// A search after the fixture day's midnight is on that day's clock (minutes
+/// past 1440) and also looks at the next day's trains: a traveller who
+/// missed the last train of the night is offered the first of the morning,
+/// with its own service date and times. Replacing with it, and undoing that,
+/// work across the two dates.
+#[tokio::test]
+#[ignore = "requires a live database: DATABASE_URL"]
+#[expect(
+    clippy::too_many_lines,
+    reason = "test code: one scenario, read top to bottom"
+)]
+async fn a_miss_after_midnight_is_offered_the_next_mornings_trains() {
+    let _now = pin_now();
+    let pool = connect().await;
+    let _cleanup = cleanup(&pool).await;
+    seed_timetable(&pool).await;
+    // The last train of the evening, and a night train that leaves at 00:20,
+    // both on the fixture day; the next day's first two trains.
+    seed_late_train(&pool, "RP0006", "23:50", "23:59").await;
+    seed_train_on(&pool, DATE, "RPO001", "00:20", "01:20", 1).await;
+    seed_train_on(&pool, NEXT_DATE, "RPN001", "05:00", "06:00", 0).await;
+    seed_train_on(&pool, NEXT_DATE, "RPN002", "05:30", "06:30", 0).await;
+    let token = seed_session(&pool, USER).await;
+    let router = router(pool.clone());
+    let (journey_id, leg_id) = create_journey(&router, &token).await;
+
+    // 00:10 the next morning: the night train still to come on the fixture
+    // day, then the next day's trains, from one search over both.
+    let _night = crate::routes::pin_london_now_for_tests(london_at(1, 0, 10));
+    let found = missed_alternatives(&router, &token, journey_id, leg_id).await;
+    let offered = first_trains(&found);
+    for (uid, service_date) in [("RPO001", DATE), ("RPN001", NEXT_DATE)] {
+        assert!(
+            offered
+                .iter()
+                .any(|(u, d)| (u.as_str(), d.as_str()) == (uid, service_date)),
+            "{uid} on {service_date} in {found}"
+        );
+    }
+    assert_eq!(
+        instant_of(&suggestion_on(&found, "RPO001")["departure"]),
+        london_at(1, 0, 20),
+        "{found}"
+    );
+
+    // 03:30: only the next day's trains are left, with their own service
+    // date and instants (05:00 on the 6th, not the 5th).
+    let _morning = crate::routes::pin_london_now_for_tests(london_at(1, 3, 30));
+    let found = missed_alternatives(&router, &token, journey_id, leg_id).await;
+    assert_eq!(found["originCrs"], "ZRC", "{found}");
+    assert_eq!(
+        found["leg"],
+        serde_json::json!({ "departed": true, "arrived": true }),
+        "{found}"
+    );
+    let offered = first_trains(&found);
+    assert!(!offered.is_empty(), "{found}");
+    for (uid, service_date) in &offered {
+        assert_eq!(service_date, NEXT_DATE, "{uid} in {found}");
+        assert!(uid.starts_with("RPN"), "{uid} in {found}");
+    }
+    let uids: Vec<&str> = offered.iter().map(|(uid, _)| uid.as_str()).collect();
+    assert!(
+        uids.contains(&"RPN001") && uids.contains(&"RPN002"),
+        "{found}"
+    );
+    let first = suggestion_on(&found, "RPN001");
+    assert_eq!(
+        instant_of(&first["departure"]),
+        london_at(1, 5, 0),
+        "{found}"
+    );
+    assert_eq!(instant_of(&first["arrival"]), london_at(1, 6, 0), "{found}");
+    let leg = &first["legs"][0];
+    assert_eq!(instant_of(&leg["departure"]), london_at(1, 5, 0), "{found}");
+    assert_eq!(instant_of(&leg["arrival"]), london_at(1, 6, 0), "{found}");
+    assert_eq!(
+        instant_of(&leg["scheduledDeparture"]),
+        london_at(1, 5, 0),
+        "{found}"
+    );
+
+    // Taking it replaces the leg with one dated the next day, as a missed
+    // train: its own revision, the missed leg kept in the history.
+    let (status, replaced) = call(
+        &router,
+        "POST",
+        &format!("/Journeys/{journey_id}/legs/{leg_id}/replace"),
+        Some(&token),
+        Some(serde_json::json!({
+            "cause": "missed",
+            "legs": [{
+                "trainUid": "RPN001", "serviceDate": NEXT_DATE,
+                "originCrs": "ZRC", "destinationCrs": "ZRD"
+            }]
+        })),
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{replaced}");
+    assert_eq!(replaced["revisionNo"], 2, "{replaced}");
+    let leg_dates = || async {
+        sqlx::query_scalar::<_, NaiveDate>(
+            "SELECT service_date FROM journey_legs WHERE journey_id = $1 ORDER BY leg_order",
+        )
+        .bind(journey_id)
+        .fetch_all(&pool)
+        .await
+        .expect("leg dates")
+    };
+    assert_eq!(leg_dates().await, [next_date()]);
+    let kept: Vec<(String, NaiveDate)> = sqlx::query_as(
+        "SELECT l.train_uid, l.service_date FROM journey_revisions r \
+         JOIN journey_revision_legs l ON l.revision_id = r.id \
+         WHERE r.journey_id = $1 ORDER BY r.revision_no, l.position",
+    )
+    .bind(journey_id)
+    .fetch_all(&pool)
+    .await
+    .expect("revision legs");
+    assert_eq!(
+        kept,
+        [
+            ("RP0001".to_string(), date()),
+            ("RPN001".to_string(), next_date())
+        ]
+    );
+    let (_, history) = call(
+        &router,
+        "GET",
+        &format!("/Journeys/{journey_id}/revisions"),
+        Some(&token),
+        None,
+        None,
+    )
+    .await;
+    assert_eq!(history["revisions"][0]["cause"], "user_missed", "{history}");
+    assert_eq!(
+        history["revisions"][1]["legs"][0]["fate"], "missed",
+        "{history}"
+    );
+
+    // The change is dated to the pinned clock (revisions take the database's
+    // own time), then the Undo brings back the original leg on its own date.
+    sqlx::query(
+        "UPDATE journey_revisions SET created_at = $2 WHERE journey_id = $1 AND revision_no = 2",
+    )
+    .bind(journey_id)
+    .bind(london_at(1, 3, 30))
+    .execute(&pool)
+    .await
+    .expect("date the change");
+    let (status, reverted) = call(
+        &router,
+        "POST",
+        &format!("/Journeys/{journey_id}/revisions/1/revert"),
+        Some(&token),
+        None,
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{reverted}");
+    assert_eq!(leg_dates().await, [date()]);
+}
+
+/// Before midnight on the fixture day the search is as it was: its own
+/// day's trains only, though the next day has a timetable.
+#[tokio::test]
+#[ignore = "requires a live database: DATABASE_URL"]
+async fn a_miss_before_midnight_is_not_offered_the_next_days_trains() {
+    let _now = pin_now();
+    let pool = connect().await;
+    let _cleanup = cleanup(&pool).await;
+    seed_timetable(&pool).await;
+    seed_late_train(&pool, "RP0006", "23:50", "23:59").await;
+    seed_train_on(&pool, NEXT_DATE, "RPN001", "05:00", "06:00", 0).await;
+    let token = seed_session(&pool, USER).await;
+    let router = router(pool.clone());
+    let (journey_id, leg_id) = create_journey(&router, &token).await;
+
+    // 23:30: the 23:50 is the only train left; the 05:00 next morning is
+    // left out.
+    let _evening = crate::routes::pin_london_now_for_tests(london_at(0, 23, 30));
+    let found = missed_alternatives(&router, &token, journey_id, leg_id).await;
+    let offered = first_trains(&found);
+    assert!(!offered.is_empty(), "{found}");
+    for (uid, service_date) in &offered {
+        assert_eq!(
+            (uid.as_str(), service_date.as_str()),
+            ("RP0006", DATE),
+            "{found}"
+        );
+    }
+}
+
+/// Past midnight with nothing published for the next day: the fixture day's
+/// own night train is offered and the search does not fail.
+#[tokio::test]
+#[ignore = "requires a live database: DATABASE_URL"]
+async fn a_miss_after_midnight_with_no_timetable_for_the_next_day_gets_the_days_own_trains() {
+    let _now = pin_now();
+    let pool = connect().await;
+    let _cleanup = cleanup(&pool).await;
+    seed_timetable(&pool).await;
+    seed_train_on(&pool, DATE, "RPO001", "00:20", "01:20", 1).await;
+    let token = seed_session(&pool, USER).await;
+    let router = router(pool.clone());
+    let (journey_id, leg_id) = create_journey(&router, &token).await;
+
+    let _night = crate::routes::pin_london_now_for_tests(london_at(1, 0, 10));
+    let found = missed_alternatives(&router, &token, journey_id, leg_id).await;
+    let offered = first_trains(&found);
+    assert!(!offered.is_empty(), "{found}");
+    for (uid, service_date) in &offered {
+        assert_eq!(
+            (uid.as_str(), service_date.as_str()),
+            ("RPO001", DATE),
+            "{found}"
+        );
     }
 }

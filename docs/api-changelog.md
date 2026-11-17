@@ -3,6 +3,36 @@
 Changes to the Distant Signal (DS) HTTP API that a client such as DS-MCP
 needs to know about. Newest first. Field names are as served (camelCase).
 
+## 2026-11-18: after midnight, a journey's alternatives include the next service date's trains
+
+Additive behaviour (DS-534); no field, migration or grant change, and the
+generated types are untouched.
+
+- `GET /Journeys/{id}/legs/{legId}/alternatives`, `POST .../replan/preview`,
+  `POST .../replan/accept`'s re-plan and the break sweep's suggestions search
+  a service date on its own clock. Past that date's midnight (the search
+  starts at 00:00 or later the next morning, which the miss window allows
+  until 04:00) they used to see only the leg's own date, so a traveller who
+  missed the last train at 23:50 was offered nothing when the next one was
+  at 05:00 the next morning. They now also search the next service date from
+  the same moment, as `/Trips/plan?acrossMidnight=true` does, and merge the
+  two plans: more alternatives, none removed.
+- The extra suggestions' first train carries `serviceDate` of the next day
+  (`legs[].serviceDate`), with `departure`/`arrival` (and `scheduledDeparture`
+  and `scheduledArrival`) as the real instants. A client replaces with it as
+  with any other: `POST .../legs/{legId}/replace` with that `serviceDate`
+  (inside the 28-day tracking horizon, as before); the journey's leg is then
+  dated the next day and its own miss window runs to 04:00 the morning after
+  that date. The original leg's window, `leg.departed` and `leg.arrived`,
+  `originCrs` and the idempotency hash are as before.
+- Only searches that start past midnight on the leg's date do this; a search
+  made before midnight is unchanged and does not see the next morning's
+  trains (a separate decision). With no timetable published for the next
+  date the search is the leg's own date's, as before. A regular journey's
+  plan sweep never crosses midnight.
+- `distant_signal_api_replan_across_midnight_total` counts the searches that
+  loaded the next date's graph.
+
 ## 2026-11-18: `?before=` takes a leg's opaque id; an idempotent replace retried by opaque id
 
 Additive (DS-534); no field, migration or grant change.

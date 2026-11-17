@@ -445,6 +445,32 @@ pub(crate) enum AskCause {
     Choice,
 }
 
+/// A journey alternatives' search (`ReplanQuery::depart_after`) that also
+/// looks at the next service date once past `date`'s midnight, so a traveller
+/// who misses the last train of the night is offered the first one of the
+/// morning. Only these searches ask: the regular journeys plan sweep builds
+/// its queries itself and never crosses midnight.
+fn across_midnight_query(
+    origin: String,
+    destination: String,
+    date: NaiveDate,
+    depart_after_min: u32,
+    results: &'static str,
+    max_changes: u32,
+    operator_rule: Option<trip_planner::OperatorRule>,
+) -> ReplanQuery {
+    ReplanQuery::depart_after(
+        origin,
+        destination,
+        date,
+        depart_after_min,
+        results,
+        max_changes,
+        operator_rule,
+    )
+    .across_midnight()
+}
+
 /// How many next departures are searched one by one besides the options
 /// set (a Pareto set keeps only the earliest arrival per number of changes,
 /// so the next few trains, what a traveller who just missed one wants to
@@ -622,7 +648,7 @@ pub(crate) async fn plan_suggestions(
     let mut plans: Vec<Planned> = Vec::new();
     let main = crate::routes::trips::plan_for_journey(
         app,
-        &ReplanQuery::depart_after(
+        &across_midnight_query(
             origin.clone(),
             destination.clone(),
             date,
@@ -646,7 +672,7 @@ pub(crate) async fn plan_suggestions(
     let excluded_uid = timing.map(|t| t.uid.clone());
     let next = next_departures(
         app,
-        ReplanQuery::depart_after(
+        across_midnight_query(
             origin.clone(),
             destination.clone(),
             date,
@@ -681,7 +707,7 @@ pub(crate) async fn plan_suggestions(
         let deadline = next_timing.live_dep - Duration::minutes(i64::from(change));
         let rejoin = crate::routes::trips::plan_for_journey(
             app,
-            &ReplanQuery::depart_after(
+            &across_midnight_query(
                 origin.clone(),
                 next_board,
                 date,
@@ -728,7 +754,7 @@ pub(crate) async fn plan_suggestions(
     if !same_operators.is_empty() {
         let same = next_departures(
             app,
-            ReplanQuery::depart_after(
+            across_midnight_query(
                 origin.clone(),
                 destination.clone(),
                 date,
@@ -758,7 +784,7 @@ pub(crate) async fn plan_suggestions(
     if let Some(filter) = operator_filter.as_ref().filter(|f| f.mode == "prefer") {
         let preferred = next_departures(
             app,
-            ReplanQuery::depart_after(
+            across_midnight_query(
                 origin.clone(),
                 destination.clone(),
                 date,
@@ -803,7 +829,7 @@ pub(crate) async fn plan_suggestions(
     if filter_rule.is_some() && plans.is_empty() {
         let fallback = next_departures(
             app,
-            ReplanQuery::depart_after(
+            across_midnight_query(
                 origin.clone(),
                 destination.clone(),
                 date,
@@ -2584,6 +2610,24 @@ async fn put_operator_filter(
 #[cfg(test)]
 mod wire_tests {
     use super::*;
+
+    #[test]
+    fn the_alternatives_searches_ask_to_cross_midnight() {
+        let query = across_midnight_query(
+            "ZRC".to_string(),
+            "ZRD".to_string(),
+            "2099-05-05".parse().unwrap(),
+            1650,
+            "fastest",
+            3,
+            None,
+        );
+        assert!(query.across_midnight);
+        assert_eq!(
+            query.next_date_searched(),
+            Some("2099-05-06".parse().unwrap())
+        );
+    }
 
     #[test]
     fn a_replace_answer_names_the_undo_revision() {
