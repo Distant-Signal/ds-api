@@ -33,6 +33,7 @@ of neighbouring ids. Journeys now have an opaque `publicId`; the numeric
   beside `journeyId` on `POST /Journeys`, `POST /Journeys/itinerary`, `POST
   /Journeys/irish-train`, tracking a train by pin and `POST
   /Train/by-uid/{uid}/{date}/track`, the template `materialize` response, the
+  saved-again answer of Recently deleted (`restore`), the
   replace, accept and revert answer (`ReplaceResponse`), breaks, `GET
   /Journeys/reliability` (trains and journeys), and the group and shared
   journey rows. `journeyPublicIds` and `singleLegJourneyPublicIds` beside

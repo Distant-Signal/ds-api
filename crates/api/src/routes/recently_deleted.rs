@@ -223,6 +223,8 @@ pub(crate) struct RestoredLeg {
 pub(crate) struct RestoreResponse {
     /// The new journey.
     journey_id: i64,
+    // Deprecated (DS-534): `journey_id`. This is the new journey's opaque id.
+    journey_public_id: String,
     legs: Vec<RestoredLeg>,
 }
 
@@ -652,6 +654,12 @@ async fn post_restore(
         return internal("commit the saved journey")(err.into());
     }
 
+    let journey_public_id =
+        match crate::data::journey_public_id::public_id(&app.database, journey_id).await {
+            Ok(public_id) => public_id,
+            Err(err) => return internal("read the journey's public id")(err),
+        };
+
     // Best effort, after the commit, as `POST /Journeys/itinerary` does.
     for (leg_index, trains_id, train_uid, service_date) in &trains {
         if let Some(&(_, Some(tracking_id))) = created.get(*leg_index) {
@@ -683,6 +691,7 @@ async fn post_restore(
         StatusCode::CREATED,
         Json(RestoreResponse {
             journey_id,
+            journey_public_id,
             legs: report,
         }),
     )

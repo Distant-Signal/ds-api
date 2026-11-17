@@ -4005,7 +4005,7 @@ export type RestoreDeletedJourneyResponse = {
 /**
  * The new journey.
  */
-journeyId: number, legs: Array<RestoredLeg>, };
+journeyId: number, journeyPublicId: string, legs: Array<RestoredLeg>, };
 
 /**
  * One leg in `POST .../restore`'s body.
