@@ -179,7 +179,7 @@ fn validate_notification_update(
                 return Err("Quiet hours can't start and end at the same time.".to_string());
             }
             let timezone = quiet.timezone.trim();
-            if timezone.parse::<chrono_tz::Tz>().is_err() {
+            if common::zone::Zone::parse(timezone).is_none() {
                 return Err("That time zone isn't one we know.".to_string());
             }
             Some(Some(notification_settings::QuietHours {

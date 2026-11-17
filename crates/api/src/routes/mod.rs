@@ -120,12 +120,17 @@ where
 ///
 /// Test builds can pin it per thread with [`pin_london_now_for_tests`], so a
 /// db test no longer depends on the wall clock (DB review 2026-09-27 B4).
-pub(crate) fn london_now() -> chrono::DateTime<chrono_tz::Tz> {
+///
+/// The offset is London's at that instant and is fixed once read: to add a
+/// duration, or to compare wall-clock values across a clock change, convert
+/// to UTC first (`.to_utc()`) and read London again with
+/// `common::zone::london_local`.
+pub(crate) fn london_now() -> chrono::DateTime<chrono::FixedOffset> {
     #[cfg(test)]
     if let Some(pinned) = PINNED_NOW.with(std::cell::Cell::get) {
-        return pinned.with_timezone(&chrono_tz::Europe::London);
+        return common::zone::london_local(pinned);
     }
-    chrono::Utc::now().with_timezone(&chrono_tz::Europe::London)
+    common::zone::london_local(chrono::Utc::now())
 }
 
 #[cfg(test)]

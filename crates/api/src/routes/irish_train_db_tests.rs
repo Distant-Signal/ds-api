@@ -36,9 +36,7 @@ async fn connect() -> PgPool {
 
 /// Dublin's today, as the route reads it.
 fn today() -> chrono::NaiveDate {
-    crate::routes::london_now()
-        .with_timezone(&chrono_tz::Europe::Dublin)
-        .date_naive()
+    common::zone::dublin_local(crate::routes::london_now().to_utc()).date_naive()
 }
 
 fn cleanup_statements() -> Vec<String> {

@@ -2512,7 +2512,7 @@ mod db_tests {
         // `attempt_schedule_match`'s `london_to_utc` conversion will look for
         // them, whatever day this test actually runs on.
         let scheduled_departure = chrono::Utc::now();
-        let london_now = scheduled_departure.with_timezone(&chrono_tz::Europe::London);
+        let london_now = common::zone::london_local(scheduled_departure);
         let service_date = london_now.date_naive();
         let booked_departure = london_now.format("%H:%M").to_string();
 
@@ -3645,9 +3645,7 @@ mod db_tests {
         let pool = connect().await;
         let _trains = crate::test_support::fixture_trains_cleanup(&pool).await;
         let train_uid = "TEST-STOP-BOARD";
-        let london = |at: chrono::DateTime<chrono::Utc>| {
-            at.with_timezone(&chrono_tz::Europe::London).naive_local()
-        };
+        let london = common::zone::london_naive;
         let now = chrono::SubsecRound::trunc_subsecs(chrono::Utc::now(), 0);
         let origin_at = london(now + chrono::Duration::minutes(60));
         let sub_at = london(now + chrono::Duration::minutes(70));
@@ -4636,7 +4634,7 @@ mod db_tests {
             "/Train/track".to_string(),
             Some(&token),
             serde_json::json!({
-                "service_date": departure.with_timezone(&chrono_tz::Europe::London).date_naive(),
+                "service_date": common::zone::london_date(departure),
                 "origin_crs": "WAT",
                 "scheduled_departure": departure.to_rfc3339(),
             }),
@@ -4993,7 +4991,7 @@ mod db_tests {
         // date would drift in and out of tolerance depending on when this
         // test runs.
         let departure = chrono::Utc::now();
-        let london_now = departure.with_timezone(&chrono_tz::Europe::London);
+        let london_now = common::zone::london_local(departure);
         let service_date = london_now.date_naive();
         let booked_departure = london_now.format("%H:%M").to_string();
 

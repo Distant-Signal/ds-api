@@ -5898,12 +5898,8 @@ mod db_tests {
         .await;
         assert_eq!(status, StatusCode::OK, "{added:?}");
 
-        let expected = chrono::TimeZone::from_local_datetime(
-            &chrono_tz::Europe::London,
-            &date.and_hms_opt(6, 25, 0).unwrap(),
-        )
-        .unwrap()
-        .with_timezone(&chrono::Utc);
+        let expected =
+            common::zone::london_to_utc_earliest(date.and_hms_opt(6, 25, 0).unwrap()).unwrap();
         let (_, detail) = request(
             router.clone(),
             format!("/Journeys/{journey_id}"),

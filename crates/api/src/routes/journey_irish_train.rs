@@ -22,7 +22,7 @@ use axum::body::Bytes;
 use axum::extract::State;
 use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
-use chrono::{DateTime, NaiveDate, NaiveTime, TimeZone, Utc};
+use chrono::{DateTime, NaiveDate, NaiveTime, Utc};
 use common::island_of_ireland::{IslandOfIrelandNetwork, tracking};
 use serde::{Deserialize, Serialize};
 
@@ -82,9 +82,7 @@ pub(crate) async fn post_irish_train(
 /// through `london_now`, which a test can pin: the two zones share their
 /// offsets, but the date is said in the zone it means.
 fn dublin_today() -> NaiveDate {
-    crate::routes::london_now()
-        .with_timezone(&chrono_tz::Europe::Dublin)
-        .date_naive()
+    common::zone::dublin_local(crate::routes::london_now().to_utc()).date_naive()
 }
 
 /// The request, checked: the code, a date of Dublin's today or yesterday,
@@ -130,10 +128,7 @@ fn validate(
 /// `Origintime` on the train's date, in Europe/Dublin.
 fn origin_departure(history: &TrainHistory) -> Option<DateTime<Utc>> {
     let time = NaiveTime::parse_from_str(history.origin_time.as_deref()?, "%H:%M").ok()?;
-    chrono_tz::Europe::Dublin
-        .from_local_datetime(&history.train_date.and_time(time))
-        .earliest()
-        .map(|at| at.with_timezone(&Utc))
+    common::zone::dublin_to_utc_earliest(history.train_date.and_time(time))
 }
 
 async fn track(app: &App, user_id: &str, body: &[u8]) -> Result<Response, RouteError> {

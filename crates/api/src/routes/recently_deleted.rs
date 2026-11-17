@@ -288,9 +288,7 @@ fn classify(leg: &SummaryLeg, london_today: NaiveDate) -> Planned {
                 destination_stop_id: leg.destination_stop_id.clone(),
             };
         }
-        let day = departure
-            .with_timezone(&chrono_tz::Europe::London)
-            .date_naive();
+        let day = common::zone::london_date(departure);
         return Planned::LeftOut(if too_old(day, london_today) {
             Reason::TooOld
         } else if train_tracking::beyond_tracking_horizon(day, london_today) {
@@ -701,7 +699,6 @@ async fn post_restore(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use chrono::TimeZone;
 
     fn today() -> NaiveDate {
         NaiveDate::from_ymd_opt(2099, 6, 10).unwrap()
@@ -720,10 +717,13 @@ mod tests {
 
     fn walk(day: u32, arrival: bool) -> SummaryLeg {
         let at = |minute| {
-            chrono_tz::Europe::London
-                .with_ymd_and_hms(2099, 6, day, 9, minute, 0)
-                .unwrap()
-                .with_timezone(&Utc)
+            common::zone::london_to_utc_earliest(
+                NaiveDate::from_ymd_opt(2099, 6, day)
+                    .unwrap()
+                    .and_hms_opt(9, minute, 0)
+                    .unwrap(),
+            )
+            .unwrap()
         };
         SummaryLeg {
             kind: Some("untracked".to_string()),

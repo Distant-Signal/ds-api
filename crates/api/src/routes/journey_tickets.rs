@@ -268,7 +268,7 @@ fn prefill(
         departure_date: ticket.current_departure_date,
         departure_date_matches_leg: ticket
             .current_departure_date
-            .map(|at| at.with_timezone(&chrono_tz::Europe::London).date_naive() == leg_date),
+            .map(|at| common::zone::london_date(at) == leg_date),
         prefill_token,
     }
 }
@@ -986,6 +986,47 @@ mod tests {
             delay_repay_destination((None, None), &state).map(|(crs, _)| crs),
             Some("ABD".into())
         );
+    }
+
+    /// The date check reads the pass's departure on London's calendar, not
+    /// UTC's: the last hour of a summer UTC day is already London's next
+    /// day, and in winter the two calendars agree. Expectations are from the
+    /// IANA rules (python zoneinfo).
+    #[test]
+    fn the_wallet_pass_date_check_reads_london_time() {
+        let pass_at = |instant: &str| ticket_extraction::PartialTicket {
+            operator: None,
+            ticket_type: None,
+            origin_crs: None,
+            destination_crs: None,
+            current_departure_date: Some(instant.parse().unwrap()),
+            source: "pkpass-semantics",
+        };
+        // (instant, leg date, matches)
+        let cases = [
+            // BST: 23:30Z is 00:30 on the next London day.
+            ("2026-06-30T22:59:00Z", "2026-06-30", true),
+            ("2026-06-30T23:00:00Z", "2026-06-30", false),
+            ("2026-06-30T23:00:00Z", "2026-07-01", true),
+            ("2026-06-30T23:30:00Z", "2026-07-01", true),
+            // GMT: the calendars agree.
+            ("2026-01-15T23:30:00Z", "2026-01-15", true),
+            ("2026-01-15T23:30:00Z", "2026-01-16", false),
+            // The clock changes themselves.
+            ("2026-03-28T23:30:00Z", "2026-03-28", true),
+            ("2026-03-29T00:30:00Z", "2026-03-29", true),
+            ("2026-03-29T23:00:00Z", "2026-03-30", true),
+            ("2026-10-24T23:00:00Z", "2026-10-25", true),
+            ("2026-10-25T23:30:00Z", "2026-10-25", true),
+        ];
+        for (instant, leg_date, matches) in cases {
+            let got = prefill(&pass_at(instant), leg_date.parse().unwrap(), "t".into());
+            assert_eq!(
+                got.departure_date_matches_leg,
+                Some(matches),
+                "{instant} against leg date {leg_date}"
+            );
+        }
     }
 
     #[test]

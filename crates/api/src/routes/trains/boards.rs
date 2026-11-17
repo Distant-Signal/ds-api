@@ -818,9 +818,7 @@ async fn live_only_headcode_rows(
     Ok(live
         .into_iter()
         .map(|train| {
-            let local = train
-                .scheduled_departure
-                .map(|at| at.with_timezone(&chrono_tz::Europe::London));
+            let local = train.scheduled_departure.map(common::zone::london_local);
             let day_offset = local
                 .map_or(0, |at| (at.date_naive() - service_date).num_days())
                 .max(0);
