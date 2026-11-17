@@ -40,7 +40,12 @@ impl DeliveredFile {
     /// Streams the file at `path` through SHA-256 (the CIF zip, ~77 MB, is
     /// never held in memory).
     pub(crate) fn hash_file(name: &str, path: &Path) -> std::io::Result<Self> {
-        let mut file = std::fs::File::open(path)?;
+        Self::hash_reader(name, std::fs::File::open(path)?)
+    }
+
+    /// Streams `reader` to its end through SHA-256 (the CIF zip, through
+    /// the one handle it is then extracted from).
+    pub(crate) fn hash_reader(name: &str, mut file: impl Read) -> std::io::Result<Self> {
         let mut hasher = Sha256::new();
         let mut buf = vec![0u8; 1 << 20];
         let mut total: u64 = 0;

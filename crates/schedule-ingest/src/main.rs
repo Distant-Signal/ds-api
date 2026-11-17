@@ -701,9 +701,33 @@ async fn run_scan_cycle(
 
     let dir_name = delivery::delivery_dir_name(zip_mtime);
 
-    // Provenance: the zip's SHA-256 as read now. A size different from the
-    // stable snapshot's means a new upload has started; wait for it.
-    let delivered = match audit::DeliveredFile::hash_file(&zip_filename, &zip_path) {
+    // Provenance: the zip's SHA-256 as read now, through the one handle it
+    // is extracted from below, so a newer version renamed over the name
+    // meanwhile (the bucket lane's hand-off) is never extracted under this
+    // one's hash and ledger entry. The handle must be the snapshot's
+    // version (same mtime and size); a size different from the stable
+    // snapshot's after hashing means a new upload has started; wait for it.
+    let opened = std::fs::File::open(&zip_path).and_then(|file| {
+        let metadata = file.metadata()?;
+        Ok((file, metadata.modified()?, metadata.len()))
+    });
+    let zip_file = match opened {
+        Ok((file, mtime, len))
+            if mtime == zip_mtime
+                && snapshot.0.get(&zip_filename).map(|&(_, l)| l) == Some(len) =>
+        {
+            file
+        }
+        Ok(_) => {
+            tracing::info!(zip = %zip_filename, "zip delivery changed since the directory was scanned (a new upload?); retrying next cycle");
+            return Ok(());
+        }
+        Err(err) => {
+            tracing::error!(error = %err, zip = %zip_filename, "failed to read the zip delivery to hash it; retrying next cycle");
+            return Ok(());
+        }
+    };
+    let delivered = match audit::DeliveredFile::hash_reader(&zip_filename, &zip_file) {
         Ok(delivered) => delivered,
         Err(err) => {
             tracing::error!(error = %err, zip = %zip_filename, "failed to read the zip delivery to hash it; retrying next cycle");
@@ -781,7 +805,8 @@ async fn run_scan_cycle(
         );
         cif_check::write_stats(extracted, &stats)
     };
-    let extracted = match delivery::ensure_extracted(
+    let extracted = match delivery::ensure_extracted_from(
+        &zip_file,
         &zip_path,
         &config.storage_dir,
         &dir_name,
