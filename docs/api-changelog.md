@@ -89,6 +89,36 @@ unchanged.
   for the alternatives (up to four since DS-398), and `regularPlan`'s
   doc up to four alternatives; docs only.
 
+## 2026-11-17: Security hardening
+
+No request or response shape changes (DS-534); behaviour for ordinary
+clients is unchanged. New limits are generous and aimed at abuse.
+
+- Responses to requests carrying a session cookie or an `Authorization`
+  header, and any response that sets a cookie, are sent with
+  `Cache-Control: private, no-store` unless the route sets its own (the
+  public reference routes keep theirs).
+- `GET /public/auth/callback` answers a failed login (an `error` from the
+  identity provider, or a failed code exchange) with a `303` back to the
+  site with `login=failed` appended, not a `502`.
+- `POST /public/auth/backchannel-logout` refuses a body over 32 KiB (`413`)
+  and a `logout_token` over 16 KiB (`400`); a JWT `kid` over 128 bytes is
+  malformed, and the unknown-`kid` cache is capped.
+- Personal-token listener: a full failed-authentication bucket no longer
+  refuses a request carrying a valid token; requests that fail to
+  authenticate while it is full still get `429`. The api warns at startup
+  when `PERSONAL_TOKENS_TRUST_CF_CONNECTING_IP` is not set.
+- Rate limiter: a full key table evicts the keys that recover soonest
+  instead of being cleared. New `API_RATE_LIMIT_TRUSTED_PROXIES`
+  (comma-separated CIDRs, default empty = any direct caller, as before):
+  when set, `X-Real-IP` is believed only from a peer in those ranges.
+- Group rename, delete, promote, demote and invite rotate/revoke, journey
+  share-link extend/revoke and break dismissal check the caller's role or
+  ownership inside the write itself as well as in the route.
+- A handler panic answers a plain `500` (no detail) instead of dropping the
+  connection; `POST /Journeys/irish-train`'s date check no longer panics on
+  the largest date.
+
 ## 2026-11-16: Stops for live-only trains
 
 Additive (DS-534), behind two api settings that default off; no migration,
