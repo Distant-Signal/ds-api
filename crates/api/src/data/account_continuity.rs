@@ -268,7 +268,13 @@ pub async fn login(
             }
             None => None,
         };
+        // A concurrent first login of this user (a second tab) re-keyed the
+        // account while this one waited on its row lock: the account now
+        // has this sub, so this login is the ordinary path. Taking it as a
+        // re-key would delete the sessions the first login just created.
+        let raced = by_discord.as_deref() == Some(new_sub);
         let by_primary: Option<(String, Option<String>)> = match claims.primary_sub.as_deref() {
+            _ if raced => None,
             Some(primary) if primary != new_sub => {
                 sqlx::query_as("SELECT id, discord_id FROM users WHERE id = $1 FOR UPDATE")
                     .bind(primary)
@@ -278,7 +284,7 @@ pub async fn login(
             _ => None,
         };
         let chosen = choose(
-            by_discord.as_deref(),
+            by_discord.as_deref().filter(|_| !raced),
             by_primary
                 .as_ref()
                 .map(|(id, stored)| (id.as_str(), stored.as_deref())),
