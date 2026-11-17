@@ -1323,7 +1323,11 @@ async fn poll_once(
 
 /// The delivery a cycle would publish now, if any: the newest complete one
 /// on the PVC ([`discovery::latest_complete_delivery`]), unless it is the
-/// one `state` says is processed (the marker) or settled. The one rule
+/// one `state` says is processed (the marker) or settled, or older than
+/// the marker (the marker is ahead of the PVC: the newer directory is gone,
+/// and publishing the older delivery would replace newer reference data with
+/// older). Delivery directory names are UTC timestamps, so they order as
+/// strings, as [`discovery::latest_complete_delivery`] already relies on. The one rule
 /// [`poll_once`] and a check run ([`run_check`]) share; it lists
 /// directories and opens none of the delivery's files.
 fn delivery_to_publish(
@@ -1338,6 +1342,19 @@ fn delivery_to_publish(
         tracing::debug!(
             delivery = %delivery.dir_name,
             "no new delivery since last successful parse; nothing to do"
+        );
+        return Ok(None);
+    }
+    if let Some(processed) = state
+        .last_processed_delivery
+        .as_deref()
+        .filter(|processed| delivery.dir_name.as_str() < *processed)
+    {
+        tracing::warn!(
+            delivery = %delivery.dir_name,
+            processed,
+            "the newest complete delivery on the PVC is older than the last published one; \
+             not republishing older data (clear the completion marker to force it)"
         );
         return Ok(None);
     }
@@ -7483,34 +7500,37 @@ mod check_mode_tests {
     }
 
     /// The marker names a delivery newer than any on the PVC (the newer
-    /// directory was removed). The rule is the publish run's own (a
-    /// delivery other than the marker's is new), so the check reports the
-    /// one on the PVC as waiting, exactly when a publish run would publish
-    /// it: the two never disagree.
+    /// directory was removed). Publishing the older one would replace newer
+    /// reference data with older, so neither a check nor a publish run
+    /// treats it as new: the check exits 0 and the publish run does nothing.
+    /// A newer delivery landing afterwards is still picked up.
     #[tokio::test]
-    async fn a_marker_ahead_of_the_pvc_gives_the_publish_runs_answer() {
+    async fn a_marker_ahead_of_the_pvc_is_not_a_waiting_delivery() {
         let sink = FakePublishSink::new().with_last_completed(Some(NEWER));
         let storage = tempfile::tempdir().unwrap();
         write_fixture_delivery(storage.path(), DELIVERY);
         let config = config(storage.path());
 
         let result = run_check(&sink, &config).await;
-        assert_eq!(
-            result.unwrap(),
-            RunOutcome::DeliveryWaiting {
-                delivery: DELIVERY.to_owned()
-            }
-        );
+        assert_eq!(status(&result), 0, "{result:?}");
+        assert_eq!(result.unwrap(), RunOutcome::Done);
         assert_eq!(endpoints(&sink), CHECK_CALLS);
 
         sink.reset();
         let mut state = once_state(&sink, &config).await.unwrap();
         assert_eq!(
             poll_once(&sink, &config, &mut state).await.unwrap(),
-            CycleReport::Published {
-                delivery: DELIVERY.to_owned()
-            },
-            "a publish run publishes the delivery the check reported"
+            CycleReport::NothingNew,
+            "a publish run does not republish the older delivery either"
+        );
+
+        const NEWEST: &str = "20261102T210000Z";
+        write_fixture_delivery(storage.path(), NEWEST);
+        assert_eq!(
+            run_check(&sink, &config).await.unwrap(),
+            RunOutcome::DeliveryWaiting {
+                delivery: NEWEST.to_owned()
+            }
         );
     }
 
