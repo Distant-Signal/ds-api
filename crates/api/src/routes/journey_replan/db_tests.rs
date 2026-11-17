@@ -1862,3 +1862,62 @@ async fn an_accept_after_a_re_plan_starts_from_the_fresh_sets_leg() {
     assert_eq!(uids, ["RP0001", "RP0005"], "{detail}");
     assert_eq!(detail["legs"][0]["id"], legs[0], "{detail}");
 }
+
+/// Saving an itinerary never holds its transaction's connection while it
+/// waits for another (review J8): with a pool of one connection the save,
+/// and its replay, still go through.
+#[tokio::test]
+#[ignore = "requires a live database: DATABASE_URL"]
+async fn an_itinerary_saves_on_a_pool_of_one_connection() {
+    let _now = pin_now();
+    let pool = connect().await;
+    let _cleanup = cleanup(&pool).await;
+    seed_timetable(&pool).await;
+    let token = seed_session(&pool, USER).await;
+    let database_url = std::env::var("DATABASE_URL").expect("DATABASE_URL");
+    let one = sqlx::postgres::PgPoolOptions::new()
+        .max_connections(1)
+        .acquire_timeout(std::time::Duration::from_secs(5))
+        .connect(&database_url)
+        .await
+        .expect("connect");
+    let router = router(one);
+    let body = serde_json::json!({
+        "legs": [{
+            "trainUid": "RP0001", "serviceDate": DATE,
+            "originCrs": "ZRC", "destinationCrs": "ZRD"
+        }]
+    });
+    let (status, first) = call(
+        &router,
+        "POST",
+        "/Journeys/itinerary",
+        Some(&token),
+        Some(body.clone()),
+        Some("one-connection"),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{first}");
+    let (status, again) = call(
+        &router,
+        "POST",
+        "/Journeys/itinerary",
+        Some(&token),
+        Some(body),
+        Some("one-connection"),
+    )
+    .await;
+    assert_eq!((status, &again), (StatusCode::OK, &first));
+    let (status, other) = call(
+        &router,
+        "POST",
+        "/Journeys/itinerary",
+        Some(&token),
+        Some(serde_json::json!({
+            "legs": [{ "trainUid": "RP0002", "serviceDate": DATE }]
+        })),
+        Some("one-connection"),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CONFLICT, "{other}");
+}
