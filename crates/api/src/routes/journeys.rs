@@ -1204,7 +1204,15 @@ async fn post_journey_leg(
     Query(query): Query<AddLegQuery>,
     Json(request): Json<AddJourneyLegRequest>,
 ) -> Result<Json<AddLegResponse>, (StatusCode, String)> {
-    let before = query.before;
+    let before = match &query.before {
+        Some(before) => Some(
+            before
+                .resolve(&app.database)
+                .await
+                .map_err(|err| internal_error("resolve the leg to add before")(err.into()))?,
+        ),
+        None => None,
+    };
     match request {
         AddJourneyLegRequest::KnownTrain {
             train_uid,
@@ -1403,13 +1411,15 @@ fn added_leg_or_error<T>(outcome: journeys::AddLegOutcome<T>) -> Result<T, (Stat
 
 /// `POST /Journeys/{journeyId}/legs`'s query: `before={legId}` inserts the
 /// new leg in front of that leg (spec 2026-10-20 §2.3), moving it and the
-/// legs after it one place down; absent appends, as before. Unknown keys
-/// are refused, so a typo can't silently append.
+/// legs after it one place down; absent appends, as before. The leg is
+/// named by its `publicId` or its deprecated numeric `id` (DS-534); an
+/// unknown public id is the same 404 as a leg that is not this journey's.
+/// Unknown keys are refused, so a typo can't silently append.
 #[derive(Debug, Default, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct AddLegQuery {
     #[serde(default)]
-    before: Option<i64>,
+    before: Option<crate::data::public_id::LegRef>,
 }
 
 /// `PUT /Journeys/{journeyId}/legs/{legId}`: replaces an untracked leg's
@@ -6144,6 +6154,108 @@ mod db_tests {
         )
         .await;
         assert_eq!(status, StatusCode::BAD_REQUEST);
+
+        cleanup_user(&pool, user).await;
+        cleanup_user(&pool, stranger).await;
+    }
+
+    /// `?before=` takes the leg's `publicId` as well as its numeric id
+    /// (DS-534): the leg is inserted in front of it, an unknown public id
+    /// is the same 404 as an unknown number, someone else's leg is a 404,
+    /// and anything that is neither form is a 400.
+    #[tokio::test]
+    #[ignore = "requires a live database: DATABASE_URL=... cargo test -p api \
+                untracked_legs_ -- --ignored --test-threads=1"]
+    async fn a_leg_can_be_inserted_before_one_named_by_its_public_id() {
+        let pool = connect().await;
+        let user = "TEST-ROUTE-BEFORE-PUBLIC";
+        let stranger = "TEST-ROUTE-BEFORE-PUBLIC-OTHER";
+        cleanup_user(&pool, user).await;
+        cleanup_user(&pool, stranger).await;
+        let token = seed_session(&pool, user).await;
+        let stranger_token = seed_session(&pool, stranger).await;
+        let router = test_router(test_app(pool.clone()));
+
+        let (_, created) = post_json(
+            router.clone(),
+            "/Journeys".to_string(),
+            Some(&token),
+            serde_json::json!({ "leg": untracked_leg("walk", 60, 70) }),
+        )
+        .await;
+        let journey_id = created["journeyId"].as_i64().unwrap();
+        let walk_id = created["legId"].as_i64().unwrap();
+        let walk_public_id = created["legPublicId"].as_str().unwrap().to_string();
+        let (_, other) = post_json(
+            router.clone(),
+            "/Journeys".to_string(),
+            Some(&stranger_token),
+            serde_json::json!({ "leg": untracked_leg("walk", 60, 70) }),
+        )
+        .await;
+        let other_public_id = other["legPublicId"].as_str().unwrap().to_string();
+
+        let (status, inserted) = post_json(
+            router.clone(),
+            format!("/Journeys/{journey_id}/legs?before={walk_public_id}"),
+            Some(&token),
+            untracked_leg("tube", 20, 50),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{inserted:?}");
+        let tube_id = inserted["legId"].as_i64().unwrap();
+        let (_, detail) = request(
+            router.clone(),
+            format!("/Journeys/{journey_id}"),
+            Some(&token),
+        )
+        .await;
+        let order: Vec<i64> = detail["legs"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|leg| leg["id"].as_i64().unwrap())
+            .collect();
+        assert_eq!(order, [tube_id, walk_id]);
+
+        // An unknown public id, and another traveller's leg: 404, nothing
+        // added.
+        for before in [
+            "l_00000000000000000000000000000000".to_string(),
+            other_public_id,
+        ] {
+            let (status, body) = post_json(
+                router.clone(),
+                format!("/Journeys/{journey_id}/legs?before={before}"),
+                Some(&token),
+                untracked_leg("tube", 20, 50),
+            )
+            .await;
+            assert_eq!(status, StatusCode::NOT_FOUND, "{before}: {body:?}");
+        }
+
+        // Neither a number nor a leg id: another kind's id, a short id.
+        for before in ["t_00000000000000000000000000000000", "l_0000", "nope", ""] {
+            let (status, body) = post_json(
+                router.clone(),
+                format!("/Journeys/{journey_id}/legs?before={before}"),
+                Some(&token),
+                untracked_leg("tube", 20, 50),
+            )
+            .await;
+            assert_eq!(status, StatusCode::BAD_REQUEST, "{before:?}: {body:?}");
+            assert!(
+                body.to_string().contains("a leg id is a number or a l_ id"),
+                "{before:?}: {body:?}"
+            );
+        }
+        let legs: i64 =
+            sqlx::query_scalar("SELECT COUNT(*) FROM journey_legs WHERE journey_id = $1")
+                .bind(journey_id)
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        assert_eq!(legs, 2, "only the one insert went through");
 
         cleanup_user(&pool, user).await;
         cleanup_user(&pool, stranger).await;

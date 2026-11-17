@@ -3,6 +3,57 @@
 Changes to the Distant Signal (DS) HTTP API that a client such as DS-MCP
 needs to know about. Newest first. Field names are as served (camelCase).
 
+## 2026-11-18: `?before=` takes a leg's opaque id; an idempotent replace retried by opaque id
+
+Additive (DS-534); no field, migration or grant change.
+
+- `POST /Journeys/{id}/legs?before={legId}` ("add a leg at the start" and
+  before any other leg) takes the leg's `publicId` (`l_...`) as well as its
+  numeric `id`: the last query parameter that took only a number. An
+  unknown `l_` id is the same `404` as an unknown number
+  (`no journey leg with that id to add before`), another traveller's leg is
+  a `404`, and a value that is neither form (a `t_` id, a short id, text,
+  an empty value) is a `400` whose message says `a leg id is a number or a
+  l_ id`. A numeric `before` is counted in
+  `distant_signal_legacy_id_requests_total{kind="leg"}`.
+- **Every place that takes a journey, leg, tracked-train or device id now
+  takes the opaque form** (stage 3 can refuse numbers): the paths
+  `{journeyId}`, `{legId}`, `{trackingId}`, `{trainSubscriptionId}` and a
+  device's `{id}` on every route including `/v1` and the delegated
+  routes; the bodies `throughLegId` (`replace`), `fromLegId`
+  (`replan/preview`), `trainSubscriptionId` (`POST /groups/{id}/trains`)
+  and `journeyId` (`POST /groups/{id}/journeys`, and `POST /JourneyTemplates`
+  `fromJourney`); and now the `before` query. The numeric ids that remain
+  are not one of those four kinds and are a later wave: journey templates
+  (`/JourneyTemplates/{id}`), a break (`{breakId}`, `breakId` in the
+  `replan/preview` and `replan/accept` bodies), a revision number, a
+  recently deleted journey's record (`/Journeys/recently-deleted/{id}`),
+  tickets (`/Train/tickets/{ticketId}`), time away periods, webhooks and
+  personal tokens.
+- **A retry of `POST .../legs/{legId}/replace` that names the replaced legs
+  by their `l_` ids is the same request.** A replace deletes the legs it
+  replaces, so a retry made after the first request went through could no
+  longer look the `l_` id up (in the path or `throughLegId`) and was a
+  `409 idempotency_conflict` instead of the replayed answer, the case an
+  `Idempotency-Key` exists for. The api now keeps each replaced leg's
+  opaque id with the stored response, so a retry by opaque ids, by numbers
+  or by one then the other replays the first response (nothing is written
+  twice). A different request under the same key, and an `l_` id the key
+  never replaced, are still `409`. The stored ids are never served.
+- **Do not rely on `replacesLegPublicIds`.** A leg a replacement replaced
+  no longer exists, so every entry of `replacesLegPublicIds` (beside
+  `replacesLegIds` on `GET /Journeys/{id}` legs) is an empty string, by
+  design, and `sourceLegPublicId` of a revision leg is `null` for the same
+  reason. Use the revisions (`GET /Journeys/{id}/revisions`, each leg's
+  `trainUid` and `fate`) to read what a plan replaced. Stage 2b may drop
+  `replacesLegIds` and `replacesLegPublicIds` together.
+- A stored break's suggestions carry no opaque leg ids (older ones never
+  did); they are filled when the break or the alternatives are served,
+  with one lookup for the whole set. A leg that no longer exists leaves its
+  `throughLegPublicId`, `legPublicId` or `fromLegPublicId` as `""` (and
+  `rejoinsLegPublicId` as `null`): a client that needs one re-plans
+  (`POST /Journeys/{id}/replan/preview`) rather than reading a stored set.
+
 ## 2026-11-18: `DELETE /groups/{id}` can refuse a group that has changed
 
 Additive (DS-534); no field, migration or grant change. Older callers keep

@@ -46,7 +46,7 @@ use crate::data::journey_replace::{self, Freeze, Replaced, Replacement};
 use crate::data::journey_revisions::{self, Reason, RevisionMeta};
 use crate::data::{journeys, train_tracking};
 use crate::routes::journey_itinerary::RouteError;
-use crate::routes::journey_ref::{BreakParam, JourneyId, LegId, RevisionParam};
+use crate::routes::journey_ref::{BreakParam, JourneyId, LegId, LegParam, RevisionParam};
 use crate::routes::trips::{ReplanQuery, ReplanSlot};
 
 pub fn router() -> Router {
@@ -1961,6 +1961,54 @@ struct ReplaceHashBody<'a> {
     through_leg_id: Option<i64>,
 }
 
+/// The leg ids of a replace, settled for hashing under its
+/// `Idempotency-Key` (DS-534).
+///
+/// A replace deletes the legs it replaces. A retry that names one by its
+/// `l_` id (in the path or as `throughLegId`) after the first request went
+/// through finds no row, so the id resolves to nothing and the retry would
+/// hash as a different request: a 409 instead of the replay. The first
+/// request stored each replaced leg's opaque id beside its internal id
+/// with its response ([`journey_replace::replaced_legs`]); an id that
+/// resolved to nothing is looked up there, and so hashes as the internal id
+/// the first request hashed. With no key, or an id the key never replaced,
+/// the ids are returned as resolved.
+async fn replaced_by_this_key(
+    app: &App,
+    user_id: &str,
+    headers: &HeaderMap,
+    (leg_id, raw_leg_id): (i64, &str),
+    (through_leg_id, through_ref): (Option<i64>, Option<&crate::data::public_id::LegRef>),
+) -> Result<(i64, Option<i64>), RouteError> {
+    use crate::data::public_id::{NO_SUCH_ROW, PublicRef};
+
+    let leg_is_gone = leg_id == NO_SUCH_ROW;
+    let through_is_gone = through_leg_id == Some(NO_SUCH_ROW);
+    let key = headers
+        .get("idempotency-key")
+        .and_then(|value| value.to_str().ok())
+        .map(str::trim)
+        .filter(|key| !key.is_empty());
+    let Some(key) = key.filter(|_| leg_is_gone || through_is_gone) else {
+        return Ok((leg_id, through_leg_id));
+    };
+    let replaced = journey_replace::replaced_legs(&app.database, user_id, key)
+        .await
+        .map_err(internal("read the replaced legs"))?;
+    let leg_id = if leg_is_gone {
+        replaced.get(raw_leg_id).copied().unwrap_or(leg_id)
+    } else {
+        leg_id
+    };
+    let through_leg_id = match (through_leg_id, through_ref) {
+        (Some(NO_SUCH_ROW), Some(PublicRef::Public(public_id, _))) => {
+            Some(replaced.get(public_id).copied().unwrap_or(NO_SUCH_ROW))
+        }
+        (through, _) => through,
+    };
+    Ok((leg_id, through_leg_id))
+}
+
 /// `POST /Journeys/{id}/legs/{legId}/replace` `{cause, legs, throughLegId?}`
 /// (optional `Idempotency-Key`): replaces the leg (through `throughLegId`)
 /// with `legs`, each as `POST /Journeys/itinerary` takes them. With a break
@@ -1976,6 +2024,7 @@ async fn post_replace(
     user: AuthenticatedUser,
     JourneyId(journey_id): JourneyId,
     LegId(leg_id): LegId,
+    Path(LegParam { leg_id: raw_leg_id }): Path<LegParam>,
     headers: HeaderMap,
     Json(body): Json<ReplaceBody>,
 ) -> Response {
@@ -1990,6 +2039,14 @@ async fn post_replace(
                 ),
                 None => None,
             };
+            let (leg_id, through_leg_id) = replaced_by_this_key(
+                &app,
+                &user.id,
+                &headers,
+                (leg_id, &raw_leg_id),
+                (through_leg_id, body.through_leg_id.as_ref()),
+            )
+            .await?;
             let idempotency = idempotency(
                 &headers,
                 &(

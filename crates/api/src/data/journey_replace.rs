@@ -176,7 +176,7 @@ pub async fn replace(pool: &PgPool, replacement: &Replacement<'_>) -> anyhow::Re
         match crate::data::delegated::claim_idempotency_key(&mut tx, user_id, key, hash).await? {
             crate::data::delegated::IdempotencyClaim::Fresh => {}
             crate::data::delegated::IdempotencyClaim::Replay(response) => {
-                return Ok(Replaced::Replay(response));
+                return Ok(Replaced::Replay(without_replaced_legs(response)));
             }
             crate::data::delegated::IdempotencyClaim::Conflict => {
                 return Ok(Replaced::IdempotencyConflict);
@@ -273,6 +273,18 @@ pub async fn replace(pool: &PgPool, replacement: &Replacement<'_>) -> anyhow::Re
 
     let from_order = replaced[0].leg_order;
     let through_order = replaced[replaced.len() - 1].leg_order;
+    // What an `Idempotency-Key` retry needs to recognise a replaced leg it
+    // is named by its opaque id after the row is gone (see
+    // `replaced_legs`).
+    let replaced_public_ids = if idempotency.is_some() {
+        crate::data::public_id::public_ids::<crate::data::public_id::Leg, _>(
+            &mut *tx,
+            &replaced_ids,
+        )
+        .await?
+    } else {
+        std::collections::HashMap::new()
+    };
     sqlx::query("DELETE FROM journey_legs WHERE id = ANY($1)")
         .bind(&replaced_ids)
         .execute(&mut *tx)
@@ -406,13 +418,19 @@ pub async fn replace(pool: &PgPool, replacement: &Replacement<'_>) -> anyhow::Re
         undo_revision_no: revision_id.and(previous_no),
     };
     if let Some((key, _)) = idempotency {
-        crate::data::delegated::record_idempotent_response(
-            &mut tx,
-            user_id,
-            key,
-            &serde_json::to_value(&response)?,
-        )
-        .await?;
+        let mut stored = serde_json::to_value(&response)?;
+        if let Some(object) = stored.as_object_mut() {
+            object.insert(
+                REPLACED_LEGS_KEY.to_string(),
+                serde_json::Value::Object(
+                    replaced_public_ids
+                        .iter()
+                        .map(|(id, public_id)| (public_id.clone(), serde_json::Value::from(*id)))
+                        .collect(),
+                ),
+            );
+        }
+        crate::data::delegated::record_idempotent_response(&mut tx, user_id, key, &stored).await?;
     }
     tx.commit().await?;
     Ok(Replaced::Done {
@@ -439,7 +457,61 @@ pub async fn replay(
     .bind(request_hash)
     .fetch_optional(pool)
     .await?;
-    Ok(row.and_then(|(response,)| response))
+    Ok(row
+        .and_then(|(response,)| response)
+        .map(without_replaced_legs))
+}
+
+/// The key, inside a stored replace response, of the replaced legs' opaque
+/// ids mapped to their internal ids. A replace deletes the legs it
+/// replaces, so a retry that names one by its `l_` id can no longer look it
+/// up; this is what lets it be recognised as the same request. Never
+/// served: [`without_replaced_legs`] takes it off a replay.
+const REPLACED_LEGS_KEY: &str = "replacedLegs";
+
+/// `response` as the first request answered it.
+fn without_replaced_legs(mut response: serde_json::Value) -> serde_json::Value {
+    if let Some(object) = response.as_object_mut() {
+        object.remove(REPLACED_LEGS_KEY);
+    }
+    response
+}
+
+/// The legs the replace stored under `Idempotency-Key` `key` replaced,
+/// opaque id to internal id (empty when there is no such key, no response
+/// yet, or a response stored before this was kept).
+///
+/// A retry after the replace went through names the replaced legs by ids
+/// that no longer resolve (their rows are deleted), which would hash as a
+/// different request. The handler asks here first, and hashes the internal
+/// ids this gives back.
+///
+/// # Errors
+/// The query failed.
+pub async fn replaced_legs(
+    pool: &PgPool,
+    user_id: &str,
+    key: &str,
+) -> anyhow::Result<std::collections::HashMap<String, i64>> {
+    let row: Option<(Option<serde_json::Value>,)> = sqlx::query_as(
+        "SELECT response FROM journey_idempotency_keys \
+         WHERE user_id = $1 AND idempotency_key = $2",
+    )
+    .bind(user_id)
+    .bind(key)
+    .fetch_optional(pool)
+    .await?;
+    Ok(row
+        .and_then(|(response,)| response)
+        .and_then(|response| match response.get(REPLACED_LEGS_KEY) {
+            Some(serde_json::Value::Object(map)) => Some(
+                map.iter()
+                    .filter_map(|(public_id, id)| Some((public_id.clone(), id.as_i64()?)))
+                    .collect(),
+            ),
+            _ => None,
+        })
+        .unwrap_or_default())
 }
 
 /// Of `candidates` (new subscriptions), the first whose train has the same
