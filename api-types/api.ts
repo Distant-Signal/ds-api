@@ -116,6 +116,22 @@ export type AffectedRoute = { from: string, to: string, };
 export type AlternativesCause = "missed" | "cancelled" | "connection" | "choice";
 
 /**
+ * What the replaced leg's train had done (the facts a "did you really miss
+ * it?" check shows; DS data never blocks the traveller's word).
+ */
+export type AlternativesLegFacts = { 
+/**
+ * The train has left the leg's boarding station (its live departure
+ * has passed). A leg with no train yet has not.
+ */
+departed: boolean, 
+/**
+ * The train ran to the leg's alighting station (never true for a
+ * cancelled train).
+ */
+arrived: boolean, };
+
+/**
  * `journey_templates.auto_commit_rule` (its CHECK constraint).
  */
 export type AutoCommitRule = "earliest" | "nearest_to_now";
@@ -4744,7 +4760,14 @@ suggestions: Array<ReplanSuggestion>,
 /**
  * Set by the route on read: stored suggestions that need a re-plan.
  */
-stale: boolean, };
+stale: boolean, 
+/**
+ * What the leg's train had done when `GET .../alternatives` planned
+ * these, so the app can word a confirmation for "I missed this train"
+ * (DS-534). Facts only: they never refuse a request. `null` on a
+ * break's stored suggestions.
+ */
+leg: AlternativesLegFacts | null, };
 
 /**
  * The body of `409 suggestion_stale`: the coded error, with the break's

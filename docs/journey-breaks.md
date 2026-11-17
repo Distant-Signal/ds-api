@@ -89,6 +89,23 @@ plan, where the whole replace used to be refused.
 Where the browser sees the message only, a delegated client sees the code
 as well.
 
+**Where it searches from.** By default the leg's own boarding station,
+at the later of "now" and when the traveller could board (the previous
+leg's live arrival plus the change time): right for someone who arrived late
+at that station. `alternatives?from=<CRS>` searches from another station
+instead (the traveller is elsewhere); the code must be a station DS knows
+(`400 invalid_station` otherwise), the time floor and the searches to the
+destination and back onto a later leg are unchanged. The set's
+`trigger.originName` stays the leg's boarding station; its `originCrs` and
+`originName` are where the search started.
+
+**What the app can show.** The set carries `leg: {departed, arrived}`:
+whether the train has left the boarding station (its live departure has
+passed) and whether it ran to the alighting station (never for a cancelled
+train). They are facts for a soft confirmation ("This train has already
+reached X. Only use this if you didn't get on it."), never a refusal. `leg`
+is `null` on a break's stored suggestions.
+
 **Integrity.** Nothing outside DS is touched: Delay Repay is advisory and DS
 submits no claim; the booked plan is revision 1, which is append-only apart
 from the fate stamp on the leg. The data, not the request, decides fault

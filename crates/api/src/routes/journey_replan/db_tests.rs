@@ -2418,3 +2418,116 @@ async fn a_cancelled_train_past_its_arrival_still_gets_a_break_and_alternatives(
     assert_eq!(detail["openBreak"]["cause"], "cancelled", "{detail}");
     assert_eq!(detail["openBreak"]["triggerLegId"], leg_id, "{detail}");
 }
+
+/// `?from=` moves where the search starts (DS-534): from the leg's own
+/// boarding station by default, from the station the traveller names
+/// otherwise; a code that is not a station is a 400.
+#[tokio::test]
+#[ignore = "requires a live database: DATABASE_URL"]
+async fn alternatives_can_be_searched_from_another_station() {
+    let _now = pin_now();
+    let pool = connect().await;
+    let _cleanup = cleanup(&pool).await;
+    seed_timetable(&pool).await;
+    seed_onward(&pool).await;
+    let token = seed_session(&pool, USER).await;
+    let router = router(pool.clone());
+    let (journey_id, legs) = create_started_two_leg_journey(&pool, &router, &token).await;
+    let alternatives = format!("/Journeys/{journey_id}/legs/{}/alternatives", legs[0]);
+
+    // By default: from the leg's boarding station, ZRC.
+    let (status, found) = call(
+        &router,
+        "GET",
+        &format!("{alternatives}?cause=missed"),
+        Some(&token),
+        None,
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{found}");
+    assert_eq!(found["originCrs"], "ZRC", "{found}");
+
+    // From ZRD, where the traveller is: only trains leaving there.
+    let (status, found) = call(
+        &router,
+        "GET",
+        &format!("{alternatives}?cause=missed&from=zrd"),
+        Some(&token),
+        None,
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{found}");
+    assert_eq!(found["originCrs"], "ZRD", "{found}");
+    let suggestions = found["suggestions"].as_array().expect("suggestions");
+    assert!(!suggestions.is_empty(), "{found}");
+    for suggestion in suggestions {
+        assert_eq!(suggestion["legs"][0]["originCrs"], "ZRD", "{found}");
+    }
+    let offered: Vec<&str> = suggestions
+        .iter()
+        .filter_map(|s| s["legs"][0]["trainUid"].as_str())
+        .collect();
+    assert!(offered.contains(&"RP0004"), "{found}");
+
+    // Not three letters, and three letters that are no station.
+    for from in ["ZR", "ZRDD", "Z1D", "QQQ"] {
+        let (status, body) = call(
+            &router,
+            "GET",
+            &format!("{alternatives}?cause=missed&from={from}"),
+            Some(&token),
+            None,
+            None,
+        )
+        .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{from}: {body}");
+    }
+}
+
+/// The set says what the leg's train has done (DS-534): not left, left but
+/// not arrived, arrived. Facts only: all three still answer 200 for a miss.
+#[tokio::test]
+#[ignore = "requires a live database: DATABASE_URL"]
+async fn the_alternatives_say_whether_the_train_has_left_and_arrived() {
+    let _now = pin_now();
+    let pool = connect().await;
+    let _cleanup = cleanup(&pool).await;
+    seed_timetable(&pool).await;
+    seed_late_train(&pool, "RP0006", "12:45", "13:45").await;
+    let token = seed_session(&pool, USER).await;
+    let router = router(pool.clone());
+    let (journey_id, leg_id) = create_journey(&router, &token).await;
+    let uri = format!("/Journeys/{journey_id}/legs/{leg_id}/alternatives?cause=missed");
+
+    // 08:00: RP0001 leaves at 10:00.
+    let (status, found) = call(&router, "GET", &uri, Some(&token), None, None).await;
+    assert_eq!(status, StatusCode::OK, "{found}");
+    assert_eq!(
+        found["leg"],
+        serde_json::json!({ "departed": false, "arrived": false }),
+        "{found}"
+    );
+
+    // 10:15: it left on time and is on its way.
+    let _under_way = crate::routes::pin_london_now_for_tests(london_at(0, 10, 15));
+    seed_live(&pool, "RP0001", "en_route", 0, "2099-05-05T09:14:00Z").await;
+    let (status, found) = call(&router, "GET", &uri, Some(&token), None, None).await;
+    assert_eq!(status, StatusCode::OK, "{found}");
+    assert_eq!(
+        found["leg"],
+        serde_json::json!({ "departed": true, "arrived": false }),
+        "{found}"
+    );
+
+    // 12:30: it has reached ZRD.
+    let _later = crate::routes::pin_london_now_for_tests(london_at(0, 12, 30));
+    let (status, found) = call(&router, "GET", &uri, Some(&token), None, None).await;
+    assert_eq!(status, StatusCode::OK, "{found}");
+    assert_eq!(
+        found["leg"],
+        serde_json::json!({ "departed": true, "arrived": true }),
+        "{found}"
+    );
+}
