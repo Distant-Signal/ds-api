@@ -91,7 +91,11 @@ fn validate(
             "Train codes are 1 to 8 letters and digits, like A120.".to_string(),
         )
     })?;
-    if request.service_date != today && request.service_date + chrono::Days::new(1) != today {
+    // Checked arithmetic: `service_date` is the caller's, and `NaiveDate::MAX`
+    // plus a day panics.
+    if request.service_date != today
+        && request.service_date.checked_add_days(chrono::Days::new(1)) != Some(today)
+    {
         return Err(RouteError::Legacy(
             StatusCode::BAD_REQUEST,
             "You can track a train running today or yesterday.".to_string(),
@@ -245,6 +249,18 @@ mod tests {
                 "{bad}"
             );
         }
+    }
+
+    #[test]
+    fn the_largest_date_is_refused_rather_than_overflowing() {
+        let request = format!(
+            r#"{{"trainCode":"A120","serviceDate":"{}"}}"#,
+            NaiveDate::MAX
+        );
+        assert!(matches!(
+            validate(&body(&request), date("2026-11-06")),
+            Err(RouteError::Legacy(StatusCode::BAD_REQUEST, _))
+        ));
     }
 
     #[test]

@@ -86,7 +86,7 @@ ts-rs = { version = "=12.0.1", default-features = false, features = ["serde-comp
 tokio = { version = "1.52.3", features = ["rt-multi-thread", "macros", "sync", "fs", "net", "tracing", "time", "process", "io-util", "signal"] }
 toml = { version = "1.1.2", features = ["serde"] }
 tower = "0.5.3"
-tower-http = { version = "0.6.10", features = ["cors", "limit", "normalize-path", "timeout", "trace"] }
+tower-http = { version = "0.6.10", features = ["catch-panic", "cors", "limit", "normalize-path", "timeout", "trace"] }
 tracing = "0.1.44"
 trip-planner = { path = "../trip-planner" }
 trust-schema = { workspace = true }

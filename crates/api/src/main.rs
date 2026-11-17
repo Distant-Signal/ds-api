@@ -554,6 +554,9 @@ async fn server_main() -> anyhow::Result<()> {
         .layer(axum::middleware::from_fn(
             api::personal_tokens::refuse_on_main_listener,
         ))
+        // A panicking handler answers 500 (no detail) rather than dropping
+        // the connection. See `api::edge::catch_panic_layer`.
+        .layer(api::edge::catch_panic_layer())
         // `private, no-store` on personal responses that set no
         // Cache-Control of their own. See `api::cache_control`.
         .layer(axum::middleware::from_fn(
@@ -567,6 +570,7 @@ async fn server_main() -> anyhow::Result<()> {
         (
             addr.to_string(),
             api::personal_tokens::router(&app, &edge_settings)
+                .layer(api::edge::catch_panic_layer())
                 .layer(axum::middleware::from_fn(
                     api::cache_control::default_private,
                 ))
