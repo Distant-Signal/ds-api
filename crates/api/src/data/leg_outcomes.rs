@@ -16,12 +16,25 @@
 //! recorded once, when its train is over ([`decide`]):
 //!
 //! - the train has reported at the leg's destination: the measured delay;
-//! - the train has terminated (`completed`): the measured delay, else the
-//!   last forecast (its report there never came);
+//! - the train has terminated (`completed`): the measured delay, else no
+//!   delay (its report there never came; a forecast is never recorded,
+//!   because a reader cannot tell it from a measurement);
 //! - the train was cancelled, once its service date is past (a same-day
-//!   reinstatement is still possible): cancelled;
-//! - two days after the service date, whatever is known by then, which is
-//!   nothing when no train was ever matched or its data is already gone.
+//!   reinstatement is still possible): cancelled, with the measured delay
+//!   when it reported at the leg's destination before the cancellation
+//!   (it was cancelled after the passenger got off, so readers take the
+//!   pair as "arrived": `journey_tickets::with_recorded`);
+//! - two days after the service date, whatever has been measured by then,
+//!   which is nothing when no train was ever matched or its data is
+//!   already gone.
+//!
+//! Only a delay measured at the leg's own destination is recorded: a leg
+//! with no destination is recorded with no delay, never the delay at
+//! wherever the train last reported.
+//!
+//! Rows recorded before 2026-11-17 may hold a forecast as the delay of a
+//! terminated train that never reported at the destination; nothing in
+//! the row tells those apart, so they read as measured.
 //!   This is also the backfill: the first passes record every leg dated
 //!   before the columns existed, the ones whose trains are still held with
 //!   their outcome.
@@ -105,11 +118,11 @@ pub(crate) fn decide(
             cancelled: Some(false),
         },
         Some("completed") => Decision::Record {
-            delay_minutes: delay.map(|d| d.minutes),
+            delay_minutes: None,
             cancelled: Some(false),
         },
         _ if stale => Decision::Record {
-            delay_minutes: delay.map(|d| d.minutes),
+            delay_minutes: None,
             cancelled: status.map(|_| false),
         },
         _ => Decision::Wait,
@@ -172,7 +185,11 @@ async fn record_batch(pool: &PgPool, legs: &[LegFacts], today: NaiveDate) -> any
             leg.service_date,
             leg.destination_crs.as_deref(),
             leg.working_delay_minutes,
-        ) {
+        )
+        // No stop to measure at means no measurement, never the delay at
+        // wherever the train last reported (`stop_delay::target`'s fallback).
+        .filter(|target| target.stop_crs.is_some())
+        {
             positions.push(index);
             targets.push(target);
         }
@@ -295,12 +312,18 @@ mod tests {
         );
     }
 
+    /// Review 2026-11 (C4): a forecast is never recorded, so it can never
+    /// be read back as a measured delay once the train's data is pruned.
     #[test]
-    fn a_terminated_train_falls_back_to_the_forecast() {
+    fn a_terminated_train_with_no_report_at_the_destination_records_no_delay() {
         let today = d(TODAY);
         assert_eq!(
-            decide(today, today, true, Some("completed"), Some(forecast(16))),
-            record(Some(16), Some(false))
+            decide(today, today, true, Some("completed"), Some(forecast(14))),
+            record(None, Some(false))
+        );
+        assert_eq!(
+            decide(today, today, true, Some("completed"), Some(measured(14))),
+            record(Some(14), Some(false))
         );
         assert_eq!(
             decide(today, today, true, Some("completed"), None),
@@ -345,7 +368,8 @@ mod tests {
         let stale = d("2026-11-04");
         assert_eq!(
             decide(stale, today, true, Some("en_route"), Some(forecast(12))),
-            record(Some(12), Some(false))
+            record(None, Some(false)),
+            "a forecast is not a measurement"
         );
         assert_eq!(
             decide(stale, today, true, None, None),
@@ -523,6 +547,20 @@ mod db_tests {
         )
         .await;
         let future = seed_leg(&pool, today + chrono::Days::new(1), true, Some(tomorrow)).await;
+        // No destination anywhere (leg, pin or train): the arrival at RDG is
+        // just where the train last reported, not the leg's end.
+        let t = seed_train(&pool, "LEGOUT8", days(1), Some("completed"), Some(22)).await;
+        sqlx::query("UPDATE trains SET destination_crs = NULL WHERE id = $1")
+            .bind(t)
+            .execute(&pool)
+            .await
+            .unwrap();
+        let nowhere = seed_leg(&pool, days(1), true, Some(t)).await;
+        sqlx::query("UPDATE journey_legs SET destination_crs = NULL WHERE id = $1")
+            .bind(nowhere)
+            .execute(&pool)
+            .await
+            .unwrap();
 
         let first = record_final_arrivals(&pool, today).await.unwrap();
         assert!(first >= 5, "{first}");
@@ -543,6 +581,11 @@ mod db_tests {
         );
         assert_eq!(recorded(&pool, never_matched).await, WAITING);
         assert_eq!(recorded(&pool, future).await, WAITING);
+        assert_eq!(
+            recorded(&pool, nowhere).await,
+            (None, Some(false), true),
+            "no destination, no delay"
+        );
 
         // Written once: a later report changes nothing recorded.
         sqlx::query(
