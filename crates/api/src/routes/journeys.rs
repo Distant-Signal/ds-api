@@ -1544,6 +1544,11 @@ pub(crate) struct JourneyDetailResponse {
     /// `journey_replan::DetailExtras`.
     #[serde(flatten)]
     replan: super::journey_replan::DetailExtras,
+    /// Whether the journey has an open break (`openBreak` is not `null`),
+    /// for a reader who is not given the break itself: the share-link view
+    /// serves `openBreak: null` and `disrupted: true`. Additive
+    /// (2026-11-17).
+    disrupted: bool,
     /// The journey's currently-active unlisted share link, if any --
     /// `Some` only when `is_owner` is `true` (see `build_journey_detail_response`).
     /// A non-owner (a fellow group member, or a visitor who reached this
@@ -2094,9 +2099,35 @@ async fn journey_by_share_token(
         )
     })?;
 
-    Ok(Json(
-        build_journey_detail_response(app, journey_id, false).await?,
-    ))
+    let mut detail = build_journey_detail_response(app, journey_id, false).await?;
+    trim_for_share_link(&mut detail);
+    Ok(Json(detail))
+}
+
+/// What a share-link visitor never gets, on top of everything
+/// `build_journey_detail_response` already withholds from a non-owner: the
+/// owner's own metadata. A link is a bearer token that gets pasted into
+/// chats and read by people the owner never picked one by one, so the
+/// public view carries the journey itself (trains, times, stops, status)
+/// and not how the owner set it up:
+///
+/// - each train's `customName`, a label the owner typed;
+/// - each leg's `searchFilters`, the owner's saved picks (operator, where
+///   the train starts, terminates or calls);
+/// - the open break's detail (`cause`, `fault`, the suggestions' summary):
+///   `openBreak` is `null` and `disrupted` says only that the journey has
+///   one.
+///
+/// A fellow group member reads through `get_journey`, not this, and keeps
+/// all three, as does the owner.
+fn trim_for_share_link(detail: &mut JourneyDetailResponse) {
+    for leg in &mut detail.legs {
+        leg.search_filters = None;
+        if let Some(state) = &mut leg.tracked_train_state {
+            state.custom_name = None;
+        }
+    }
+    detail.disrupted = detail.replan.open_break.take().is_some();
 }
 
 /// Each of the owner's train legs' ticket details and Delay Repay estimate
@@ -2509,6 +2540,7 @@ async fn build_journey_detail_response(
     };
     Ok(JourneyDetailResponse {
         id: summary.id,
+        disrupted: replan.open_break.is_some(),
         custom_name: summary.custom_name,
         created_at: summary.created_at,
         created_via: is_owner.then_some(summary.created_via),
@@ -6772,6 +6804,104 @@ mod db_tests {
                 .await
                 .expect("cleanup fixture group");
         }
+        cleanup_user(&pool, owner_id).await;
+    }
+
+    /// DS-534: the public share view carries the journey, not the owner's
+    /// metadata. The owner's own read of the same journey keeps all of it.
+    #[tokio::test]
+    #[ignore = "requires a live database; run with `cargo test -p api \
+                get_journey_by_share_token_omits_the_owners_private_metadata \
+                -- --ignored --test-threads=1`"]
+    async fn get_journey_by_share_token_omits_the_owners_private_metadata() {
+        let pool = connect().await;
+        let _trains = crate::test_support::fixture_trains_cleanup(&pool).await;
+        let owner_id = "TEST-ROUTE-SHARE-TRIM-OWNER";
+        let owner_token = seed_session(&pool, owner_id).await;
+        let router = test_router(test_app(pool.clone()));
+
+        let (_, created) = post_json(
+            router.clone(),
+            "/Journeys".to_string(),
+            Some(&owner_token),
+            serde_json::json!({
+                "leg": { "mode": "knownTrain", "trainUid": "TRIM01", "serviceDate": "2026-09-22" }
+            }),
+        )
+        .await;
+        let journey_id = created["journeyId"].as_i64().expect("journeyId present");
+        let tracking_id = created["trackingId"].as_i64().expect("trackingId present");
+
+        let (_, owner_before) = request(
+            router.clone(),
+            format!("/Journeys/{journey_id}"),
+            Some(&owner_token),
+        )
+        .await;
+        let leg_id = owner_before["legs"][0]["id"].as_i64().expect("leg id");
+
+        sqlx::query("UPDATE train_subscriptions SET custom_name = 'Mum train' WHERE id = $1")
+            .bind(tracking_id)
+            .execute(&pool)
+            .await
+            .expect("name the train");
+        sqlx::query(
+            "UPDATE journey_legs SET search_filters = '{\"operator\":\"GR\"}'::jsonb WHERE id = $1",
+        )
+        .bind(leg_id)
+        .execute(&pool)
+        .await
+        .expect("set the leg's filters");
+        sqlx::query(
+            "INSERT INTO journey_breaks (journey_id, user_id, cause, fault, severity, \
+                 trigger_leg_id, break_position, fingerprint) \
+             VALUES ($1, $2, 'user_missed', 'user', 1, $3, 1, '')",
+        )
+        .bind(journey_id)
+        .bind(owner_id)
+        .bind(leg_id)
+        .execute(&pool)
+        .await
+        .expect("open a break");
+
+        let (status, body) = post_json(
+            router.clone(),
+            format!("/Journeys/{journey_id}/share-link"),
+            Some(&owner_token),
+            serde_json::json!({}),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "create share link: {body:?}");
+        let token = body["token"].as_str().expect("token present").to_string();
+
+        // The owner keeps all of it.
+        let (status, owner) = request(
+            router.clone(),
+            format!("/Journeys/{journey_id}"),
+            Some(&owner_token),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(
+            owner["legs"][0]["trackedTrainState"]["customName"],
+            "Mum train"
+        );
+        assert_eq!(owner["legs"][0]["searchFilters"]["operator"], "GR");
+        assert_eq!(owner["openBreak"]["cause"], "user_missed");
+        assert_eq!(owner["disrupted"], true);
+
+        // A link holder gets the journey and a bare disruption flag.
+        let (status, public) = request(router, format!("/Journeys/shared/{token}"), None).await;
+        assert_eq!(status, StatusCode::OK, "resolve share token: {public:?}");
+        assert!(public["legs"][0]["trackedTrainState"]["customName"].is_null());
+        assert!(public["legs"][0]["searchFilters"].is_null());
+        assert!(public["openBreak"].is_null());
+        assert_eq!(public["disrupted"], true);
+        assert_eq!(public["legs"][0]["trackedTrainState"]["trainUid"], "TRIM01");
+        let text = public.to_string();
+        assert!(!text.contains("Mum train"), "{text}");
+        assert!(!text.contains("user_missed"), "{text}");
+
         cleanup_user(&pool, owner_id).await;
     }
 
