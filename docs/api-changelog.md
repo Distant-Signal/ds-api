@@ -3,6 +3,37 @@
 Changes to the Distant Signal (DS) HTTP API that a client such as DS-MCP
 needs to know about. Newest first. Field names are as served (camelCase).
 
+## 2026-11-17: Calendar feed, Delay Repay, custom line and token fixes
+
+Behaviour fixes (DS-534); no field, migration or grant change.
+
+- A re-keyed account (a first `ds-sso` login matched to an older account)
+  keeps its calendar feed: the old feed address keeps working, and
+  `GET`/`DELETE /public/account/calendar-feed` see and revoke it.
+- The calendar feed has no Delay Repay reminder for a journey whose last
+  train is an Iarnród Éireann train or has no destination, late or
+  cancelled. It now reads up to 500 journeys (the journeys list's cap is
+  100), so planned journeys no longer push out last week's journeys or a
+  reminder from up to 28 days ago.
+- A leg's `delayRepay` (`GET /Journeys/{id}`) and `GET
+  /Journeys/reliability`: a train cancelled after it reported at the
+  leg's destination is no longer `outcome: notReached` once its train
+  data is pruned; it keeps its measured delay and estimate.
+- A leg's recorded outcome never holds a forecast now: a train that
+  terminated without reporting at the leg's destination, or a leg with no
+  destination, records no delay (it used to record the forecast, or the
+  delay wherever the train last reported, which read back as measured).
+- `POST /public/lines` (custom lines): a new line's `id` is the slug of
+  its name plus a random suffix (`custom-my-commute-k3x9q2ab`) instead of
+  the bare slug with `-2`, `-3` on a clash, which showed that another user
+  had a line of that name. Existing ids are unchanged; treat an id as
+  opaque.
+- Ticket upload: the operator, station and ticket type text read from a
+  `.pkpass` is cut to 200 characters; a pass with a huge text field was a
+  `500`.
+- Personal API tokens: a `403 insufficient_scope` is charged to the
+  token's own rate bucket, so a token past it gets `429 rate_limited`.
+
 ## 2026-11-17: Journey break and replan fixes
 
 Behaviour fixes (DS-534); no field, migration or grant change.
