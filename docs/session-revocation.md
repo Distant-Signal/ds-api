@@ -43,7 +43,7 @@ over to the session it reissues, and nothing else moves it, so a stolen
 cookie cannot freshen itself. The site satisfies it by sending the user to
 `/api/auth/login?reauth=1&return_to=...`, which asks the identity provider
 for `prompt=login` and `max_age=0`. Authentik honours both, and does not
-need any setting for it. The callback also refuses a re-authentication
+need any setting for it. The callback also refuses (redirecting with `login=failed`, no new session) a re-authentication
 whose ID token's `auth_time` is outside the window (a provider that
 ignored the prompt) or that is for a different account than the browser's
 session. A provider that sends no `auth_time` is accepted on the strength

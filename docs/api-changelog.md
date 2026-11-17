@@ -147,7 +147,7 @@ Response shapes are unchanged.
 - `GET /public/auth/login` accepts `reauth=1` (or `true`): the provider is
   sent `prompt=login` and `max_age=0` (OIDC Core 3.1.2.1), so it asks the
   user to authenticate again even with a live provider session. The
-  callback refuses (`403`) when the ID token's `auth_time` is older than
+  callback refuses (a redirect with `login=failed`, no new session) when the ID token's `auth_time` is older than
   the recent-login window, or when the login is for a different account
   than the session the browser carried. A token without `auth_time` is
   accepted: the prompt is then the only control. `return_to` is validated

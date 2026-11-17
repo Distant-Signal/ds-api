@@ -223,6 +223,27 @@ fn login_failed_redirect(target: &str) -> Response {
     Redirect::to(&location).into_response()
 }
 
+/// [`login_failed_redirect`] for a callback whose login state is already
+/// consumed: it goes to the stored `return_to` (re-validated) or the
+/// operator's fallback, and clears the login-state cookie too.
+#[expect(
+    clippy::expect_used,
+    reason = "cookie header values are built from header-safe ASCII"
+)]
+fn consumed_login_failed(app: &App, stored_return_to: Option<&str>) -> Response {
+    let target = post_login_target(stored_return_to, &app.config.sso_post_login_redirect_url);
+    let mut response = login_failed_redirect(&target);
+    response.headers_mut().append(
+        header::SET_COOKIE,
+        HeaderValue::from_str(&auth::clear_cookie_header(
+            auth::LOGIN_STATE_COOKIE_NAME,
+            cookie_secure(app),
+        ))
+        .expect("cookie header value is always valid ASCII"),
+    );
+    response
+}
+
 /// Deliberately carries NO `Origin`/`Referer` check, unlike `login` and
 /// `logout` in this same module (2026-09-25 Low-severity auth-core
 /// review). The whole point of this route is that the browser arrives
@@ -347,21 +368,7 @@ async fn callback(
         Ok(result) => result,
         Err(err) => {
             tracing::warn!(error = ?err, "OIDC code exchange failed");
-            let target = post_login_target(
-                stored.return_to.as_deref(),
-                &app.config.sso_post_login_redirect_url,
-            );
-            // The login state is already consumed: clear its cookie too.
-            let mut response = login_failed_redirect(&target);
-            response.headers_mut().append(
-                header::SET_COOKIE,
-                HeaderValue::from_str(&auth::clear_cookie_header(
-                    auth::LOGIN_STATE_COOKIE_NAME,
-                    cookie_secure(&app),
-                ))
-                .expect("cookie header value is always valid ASCII"),
-            );
-            return response;
+            return consumed_login_failed(&app, stored.return_to.as_deref());
         }
     };
 
@@ -385,7 +392,7 @@ async fn callback(
         let window = chrono::Duration::minutes(app.config.session_recent_login_minutes);
         if !auth::oidc::auth_time_is_fresh(auth_time, chrono::Utc::now(), window) {
             tracing::warn!("re-authentication refused: the provider's auth_time is stale");
-            return (StatusCode::FORBIDDEN, "re-authentication was not completed").into_response();
+            return consumed_login_failed(&app, stored.return_to.as_deref());
         }
         if let Some(prior) = auth::parse_cookie(&headers, auth::SESSION_COOKIE_NAME) {
             match users::get_session_with_user(&app.database, &auth::hash_session_token(&prior))
@@ -393,11 +400,7 @@ async fn callback(
             {
                 Ok(Some(prior_user)) if prior_user.id != identity.sub => {
                     tracing::warn!("re-authentication refused: a different account");
-                    return (
-                        StatusCode::FORBIDDEN,
-                        "re-authentication was for a different account",
-                    )
-                        .into_response();
+                    return consumed_login_failed(&app, stored.return_to.as_deref());
                 }
                 Ok(_) => {}
                 Err(err) => {
