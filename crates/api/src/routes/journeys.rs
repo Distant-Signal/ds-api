@@ -3771,7 +3771,6 @@ mod db_tests {
         .await;
         assert_eq!(status, StatusCode::OK);
         let journey_id = created["journeyId"].as_i64().expect("journeyId present");
-        let leg_id = created["legId"].as_i64().expect("legId present");
         let public_id = created["journeyPublicId"]
             .as_str()
             .expect("journeyPublicId present")
@@ -3810,15 +3809,16 @@ mod db_tests {
         assert_eq!(list[0]["id"], journey_id);
         assert_eq!(list[0]["publicId"], public_id.as_str());
 
-        // A sub-resource by either id.
+        // A sub-resource by either id (one that reads nothing outside the
+        // journey, so the answer is the id's and not a search's).
         for id in [journey_id.to_string(), public_id.clone()] {
             let (status, _) = request(
                 router.clone(),
-                format!("/Journeys/{id}/legs/{leg_id}/candidates"),
+                format!("/Journeys/{id}/revisions"),
                 Some(&owner_token),
             )
             .await;
-            assert_eq!(status, StatusCode::OK, "candidates by {id}");
+            assert_eq!(status, StatusCode::OK, "revisions by {id}");
         }
 
         // 404 uniformity: someone else's journey by either id, a public id
