@@ -7,6 +7,10 @@
 //! | `DELETE /Journeys/{id}/legs/{legId}/ticket` | Remove them |
 //! | `POST /Journeys/{id}/legs/{legId}/ticket/pkpass` | Read an Apple Wallet pass into a prefill (nothing saved) |
 //!
+//! The prefill carries a `prefillToken` (`ticket_prefill`); a save with
+//! `source: "wallet"` is accepted only with it, so the source and the
+//! departure say a pass really was read for the leg.
+//!
 //! All three are the owner's only, cookie sessions only, 404 for anyone
 //! else. `GET /Journeys/{id}` serves each of the owner's train legs'
 //! `ticket` and `delayRepay` ([`leg_delay_repays`]): the estimate needs no
@@ -63,13 +67,18 @@ pub(crate) struct LegTicketBody {
     /// Absent, `null` or blank: no name.
     #[serde(default)]
     name: Option<String>,
-    /// `wallet` when the details came from a Wallet pass prefill;
-    /// `manual` when absent.
+    /// `wallet` when the details came from a Wallet pass prefill (with its
+    /// `prefillToken`, or when re-saving a ticket already saved from a
+    /// pass); `manual` when absent.
     #[serde(default)]
     source: Option<TicketSource>,
     /// The prefill's departure, kept with a `wallet` source only.
     #[serde(default)]
     departure_date: Option<DateTime<Utc>>,
+    /// The `prefillToken` the pass upload for this leg answered with; what
+    /// a `wallet` source and `departureDate` are checked against.
+    #[serde(default)]
+    prefill_token: Option<String>,
 }
 
 fn not_found() -> (StatusCode, String) {
@@ -85,6 +94,43 @@ const NO_TRAIN_MESSAGE: &str = "Pick this leg's train first, then add your ticke
 /// The 400 for a one-company ticket on a train whose company isn't known.
 const NO_OPERATOR_MESSAGE: &str = "We don't know which company runs this train yet, so we \
     can't save the ticket as valid on that company only.";
+
+/// The 400 for a `wallet` source with nothing to show a pass was read.
+const WALLET_UNPROVEN_MESSAGE: &str = "Add the Wallet pass to this leg again, or save the \
+    ticket without it.";
+
+/// Whether a `wallet` save has its proof: the token the pass upload for this
+/// leg gave (same departure, unexpired), or a ticket already saved from a
+/// pass whose departure is unchanged (a rename, say).
+async fn wallet_proven(
+    app: &App,
+    user_id: &str,
+    leg_id: i64,
+    subscription_id: i64,
+    body: &LegTicketBody,
+) -> Result<bool, (StatusCode, String)> {
+    if let Some(token) = &body.prefill_token
+        && crate::ticket_prefill::verify(
+            &app.config.sso_client_secret,
+            user_id,
+            leg_id,
+            body.departure_date,
+            token,
+            Utc::now(),
+        )
+    {
+        return Ok(true);
+    }
+    Ok(
+        leg_tickets::for_subscriptions(&app.database, user_id, &[subscription_id])
+            .await
+            .map_err(internal_error("read ticket details"))?
+            .remove(&subscription_id)
+            .is_some_and(|saved| {
+                saved.source == TicketSource::Wallet && saved.departure_date == body.departure_date
+            }),
+    )
+}
 
 async fn put_leg_ticket(
     State(app): State<App>,
@@ -109,6 +155,11 @@ async fn put_leg_ticket(
                 service_date,
             } => (subscription_id, train_uid, service_date),
         };
+    if body.source == Some(TicketSource::Wallet)
+        && !wallet_proven(&app, &user.id, leg_id, subscription_id, &body).await?
+    {
+        return Err((StatusCode::BAD_REQUEST, WALLET_UNPROVEN_MESSAGE.to_string()));
+    }
     let operator_code = if body.operator_only {
         let code = match train_uid.as_deref() {
             Some(uid) => {
@@ -187,11 +238,16 @@ pub(crate) struct LegTicketPrefill {
     /// Whether that departure is on the leg's own date (London); `null`
     /// when the pass gives none.
     departure_date_matches_leg: Option<bool>,
+    /// Send this back with `source: "wallet"` and the `departureDate` above
+    /// to save the pass's details as from a pass; good for an hour, for
+    /// this leg only.
+    prefill_token: String,
 }
 
 fn prefill(
     ticket: &ticket_extraction::PartialTicket,
     leg_date: chrono::NaiveDate,
+    prefill_token: String,
 ) -> LegTicketPrefill {
     let text = ticket
         .ticket_type
@@ -210,6 +266,7 @@ fn prefill(
         departure_date_matches_leg: ticket
             .current_departure_date
             .map(|at| at.with_timezone(&chrono_tz::Europe::London).date_naive() == leg_date),
+        prefill_token,
     }
 }
 
@@ -231,7 +288,14 @@ async fn post_leg_ticket_pkpass(
         LegLookup::Train { service_date, .. } => service_date,
     };
     let ticket = handle_pkpass_upload(&TICKET_PARSER, multipart).await?;
-    Ok(Json(prefill(&ticket, leg_date)))
+    let token = crate::ticket_prefill::issue(
+        &app.config.sso_client_secret,
+        &user.id,
+        leg_id,
+        ticket.current_departure_date,
+        Utc::now(),
+    );
+    Ok(Json(prefill(&ticket, leg_date, token)))
 }
 
 /// Read the file, pre-check it, parse it in a child process.
@@ -926,11 +990,11 @@ mod tests {
             current_departure_date: Some(fixed_instant()),
             source: "pkpass-semantics",
         };
-        let same_day = prefill(&pass, "2026-08-29".parse().unwrap());
+        let same_day = prefill(&pass, "2026-08-29".parse().unwrap(), "t".into());
         assert_eq!(same_day.ticket_type, TicketType::Return);
         assert!(same_day.operator_only);
         assert_eq!(same_day.departure_date_matches_leg, Some(true));
-        let other_day = prefill(&pass, "2026-08-30".parse().unwrap());
+        let other_day = prefill(&pass, "2026-08-30".parse().unwrap(), "t".into());
         assert_eq!(other_day.departure_date_matches_leg, Some(false));
         let bare = prefill(
             &ticket_extraction::PartialTicket {
@@ -939,6 +1003,7 @@ mod tests {
                 ..pass
             },
             "2026-08-29".parse().unwrap(),
+            "t".into(),
         );
         assert_eq!(bare.ticket_type, TicketType::Unknown);
         assert!(!bare.operator_only);

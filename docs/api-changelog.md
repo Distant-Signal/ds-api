@@ -44,6 +44,31 @@ No migration, grant or schema change (DS-534, review L10).
   sharing something already shared still answers `204`. No group is near it
   today (the largest has a dozen).
 
+## 2026-11-17: Itinerary idempotency and Wallet ticket provenance
+
+Security assessment findings (DS-534). One additive field each way and one
+stricter check; no migration or grant change.
+
+- `POST /Journeys/itinerary` with a browser session honours an
+  `Idempotency-Key` (optional there, 1 to 200 visible ASCII characters), as
+  a delegated client's always did: per user, remembered 24 hours, a repeat
+  with the same body returns the first response (`200`) and creates
+  nothing, a concurrent duplicate waits and gets the same answer, and the
+  same key with another body, or after it was used on another route, is
+  `409 idempotency_conflict`. Without the key each request saves a journey,
+  as before. The key's hash now also names the route, so a key a delegated
+  client claimed in the 24 hours before this release and retries after it
+  is a `409` rather than a replay.
+- `POST /Journeys/{id}/legs/{legId}/ticket/pkpass` answers with a new
+  `prefillToken` (valid for an hour, for that leg and that `departureDate`
+  only). `PUT .../ticket` takes it back as `prefillToken`, and accepts
+  `source: "wallet"` only with a matching token, or when re-saving a ticket
+  already saved from a pass with the same `departureDate`; otherwise it is a
+  `400`. `source: "manual"` (or none) is always accepted. A client built
+  before this release saves a fresh pass's details as `400` until it sends
+  the token (distant-signal's `LegTicketDetails` does once it takes the
+  api-types of this release).
+
 ## 2026-11-17: Calendar feed, Delay Repay, custom line and token fixes
 
 Behaviour fixes (DS-534); no field, migration or grant change.
