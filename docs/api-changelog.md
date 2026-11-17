@@ -3,6 +3,36 @@
 Changes to the Distant Signal (DS) HTTP API that a client such as DS-MCP
 needs to know about. Newest first. Field names are as served (camelCase).
 
+## 2026-11-17: Review fixes: boards, stop points, line trains, groups
+
+No migration, grant or schema change (DS-534). Response shapes are
+unchanged.
+
+- `GET /public/trains/by-headcode`: a live-only train whose `trains` row
+  holds no origin is no longer listed. Such a row had `stationCrs: ""`;
+  every row now has a real `stationCrs`. The query also rejects rows on
+  the TRUST id first, so its cost no longer grows with the date's
+  `trains` rows.
+- `GET /StopPoint/{crs}/Disruption`: the code is normalised, so `wat`
+  answers as `WAT` does (it was a `404` "no line coverage").
+- `GET /public/lines/{id}/trains?view=summary`: a window that cannot hold
+  anything is a `400` (`from` the next morning with an earlier `to`, such
+  as `from=26:00&to=01:00`, or `to=00:00` alone), not an empty `200`.
+- `GET /public/stations/{crs}/schedule-departures`: the ten departures are
+  the next ten by the time shown (`scheduled`, the public time else the
+  working one), in that order. They were the next ten by working time,
+  which could drop a train shown earlier than one listed.
+- `GET /public/stations/index`: while a refresh is running, the previous
+  answer is served at once; a failed load is retried after 10 seconds,
+  the previous answer (else the same `503`/`500`) being served meanwhile.
+- `POST /groups/{id}/trains` and `/groups/{id}/journeys`: a share racing
+  the sharer's removal from the group is a `404` and stores nothing.
+- Delegated calls: a request the client's bucket refuses no longer spends
+  the user's own bucket.
+- `POST /Journeys/{id}/regular-plan/accept`: `index`'s doc now says 1 to 4
+  for the alternatives (up to four since DS-398), and `regularPlan`'s
+  doc up to four alternatives; docs only.
+
 ## 2026-11-16: Stops for live-only trains
 
 Additive (DS-534), behind two api settings that default off; no migration,

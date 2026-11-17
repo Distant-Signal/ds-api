@@ -1,6 +1,6 @@
 //! `POST /Journeys/{id}/regular-plan/accept` (regular journeys spec
 //! 2026-11-06 §6.4): the one-tap pick of a regular journey's day. The plan
-//! sweep (`regular_plan_sweep`) stores the choice and up to two
+//! sweep (`regular_plan_sweep`) stores the choice and up to four
 //! alternatives on the occurrence (`GET /Journeys/{id}`'s `regularPlan`);
 //! this replaces every leg of the journey with the one picked, as auto mode
 //! would, in one transaction (`journey_replace::replace`). The legs it
@@ -46,7 +46,8 @@ pub fn router() -> Router {
 #[ts(rename = "RegularPlanAcceptRequest")]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub(crate) struct AcceptBody {
-    /// 0: the choice; 1 and 2: the alternatives, in order.
+    /// 0: the choice; 1 to 4: the alternatives, in order (up to
+    /// `regular_plan::MAX_ALTERNATIVES`, four, since DS-398).
     index: u8,
     /// `regularPlan.plannedAt` as read: a 409 when the plan changed since.
     planned_at: DateTime<Utc>,

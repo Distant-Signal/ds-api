@@ -785,7 +785,7 @@
                 "type": "null"
               }
             ],
-            "description": "The day's train the regular journeys plan sweep chose for this\noccurrence: the choice, up to two alternatives and where it stands.\nOwner only; `null` for anyone else and when it was never planned.\nAdditive (2026-11-06)."
+            "description": "The day's train the regular journeys plan sweep chose for this\noccurrence: the choice, up to four alternatives and where it stands.\nOwner only; `null` for anyone else and when it was never planned.\nAdditive (2026-11-06)."
           },
           "revisionCount": {
             "description": "How many plans the journey has had (1: only the booked one).",

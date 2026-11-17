@@ -1390,7 +1390,7 @@ canFollow?: boolean,
 sourceTemplateId: number | null, 
 /**
  * The day's train the regular journeys plan sweep chose for this
- * occurrence: the choice, up to two alternatives and where it stands.
+ * occurrence: the choice, up to four alternatives and where it stands.
  * Owner only; `null` for anyone else and when it was never planned.
  * Additive (2026-11-06).
  */
@@ -3647,7 +3647,8 @@ acceptedIndex: number | null, };
  */
 export type RegularPlanAcceptRequest = { 
 /**
- * 0: the choice; 1 and 2: the alternatives, in order.
+ * 0: the choice; 1 to 4: the alternatives, in order (up to
+ * `regular_plan::MAX_ALTERNATIVES`, four, since DS-398).
  */
 index: number, 
 /**

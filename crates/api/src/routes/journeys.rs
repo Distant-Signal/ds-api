@@ -1569,7 +1569,7 @@ pub(crate) struct JourneyDetailResponse {
     /// deleted. Additive (2026-11-06).
     source_template_id: Option<i64>,
     /// The day's train the regular journeys plan sweep chose for this
-    /// occurrence: the choice, up to two alternatives and where it stands.
+    /// occurrence: the choice, up to four alternatives and where it stands.
     /// Owner only; `null` for anyone else and when it was never planned.
     /// Additive (2026-11-06).
     regular_plan: Option<crate::data::regular_plan::RegularPlanResponse>,

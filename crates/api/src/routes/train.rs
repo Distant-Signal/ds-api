@@ -1635,12 +1635,14 @@ fn unsuperseded(
 /// train.originCrs ? 'schedule_matched' : 'pending'`) was tried here and
 /// removed (final whole-branch review, Finding 3): `GET
 /// /public/trains/search` results link straight to `/train/{uid}/{date}`,
-/// which `get_by_uid_and_date` above serves for a not-yet-seen train by
-/// calling the BARE `find_or_create_train` (not the schedule-match
-/// version) after `is_known_scheduled_train` has already confirmed the
-/// train really is a CIF-published schedule for that day -- so the
-/// resulting row has `origin_crs: None`/`train_id: None` even though the
-/// identity is provably real. Excluding a genuinely-unknown/`pending`
+/// which `get_by_uid_and_date` above serves for a not-yet-seen train once
+/// `is_known_scheduled_train` has confirmed it is a CIF-published schedule
+/// for that day. Since 2026-10-06 that view is built read-only
+/// (`schedule_only_public_state`, `trainsId: 0`, no `trains` row written),
+/// with `train_id: None` and, when the read-only schedule match finds
+/// nothing, `origin_crs: None`, even though the identity is provably real;
+/// and a `trains` row that live data created can likewise lack an origin
+/// (a live-only train, 2026-11-16). Excluding a genuinely-unknown/`pending`
 /// train (design doc §1's stated reasoning: no reliable way to know which
 /// CIF schedule a real-world service corresponds to without a known
 /// identity) doesn't apply on this route -- the identity here is the
