@@ -3,6 +3,28 @@
 Changes to the Distant Signal (DS) HTTP API that a client such as DS-MCP
 needs to know about. Newest first. Field names are as served (camelCase).
 
+## 2026-11-18: `DELETE /groups/{id}` can refuse a group that has changed
+
+Additive (DS-534); no field, migration or grant change. Older callers keep
+the unconditional delete, so the order of deploys does not matter.
+
+- `DELETE /groups/{id}` takes an optional query parameter
+  `expectedMemberCount` (an integer): how many members, the owner included,
+  the caller was shown (`memberCount` of `GET /groups/{id}`). When it is
+  given and the group's member count is different at the moment of the
+  delete (read under the same lock as the delete, so a join cannot slip in
+  between), the route answers `409` and deletes nothing:
+  `{"error":"group_changed","message":"This group has changed since you opened it. Check who is in it before deleting.","memberCount":<current>}`
+  (`application/json`; clients match on `error`). A value that is not an
+  integer is a `400`.
+- Without the parameter nothing changes: the owner's delete is
+  unconditional and `204`. Authorisation is unchanged (owner only: `403` for
+  another member, `404` for a non-member), and a non-owner never sees a
+  count. A retried delete is still `404`.
+- Why: a client that asks a sole owner to confirm deleting a group nobody
+  else is in (see below) would otherwise delete a group someone joined in
+  the meantime.
+
 ## 2026-11-18: Opaque leg, tracking and device ids (stage 1 of 3)
 
 Additive (DS-534); needs ds-core v0.17.0's `public_id` migrations on
