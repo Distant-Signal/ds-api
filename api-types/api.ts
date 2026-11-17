@@ -1036,9 +1036,9 @@ isMe: boolean, displayName: string | null,
  * whose `IdP` gives this app no showable name for anybody (Entra ID,
  * where `preferred_username` is the email-shaped UPN) renders "A
  * member (#a1b2c3)" per member instead of the same "A member" on
- * every single row. Derived from `user_id`, which this struct already
- * carries in the clear, and never from an email -- see
- * `users::MemberDisplay`.
+ * every single row. Derived from this group's id and the member's
+ * account id, so the same person has a different tag in every group,
+ * and never from an email -- see `users::MemberDisplay`.
  */
 displayTag: string | null, role: GroupRole, joinedAt: string, };
 

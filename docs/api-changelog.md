@@ -51,6 +51,31 @@ of neighbouring ids. Journeys now have an opaque `publicId`; the numeric
   `singleLegJourneyIds` (a breaking change, announced here first). Stage 3:
   stop accepting numeric ids on the routes.
 
+## 2026-11-17: Per-group member tags
+
+Behavioural, no field or type change; no migration or grant (DS-534). The
+anonymous tag shown beside a member who has no showable name (`displayTag`
+on `GET /groups/{id}/members`, `ownerTag` on `GET /groups/{id}`,
+`addedByTag` on the shared trains, journeys and journey-follow
+attributions, `grantedByTag` on shared custom lines) was a hash of the
+member's account id, so one person wore the same tag in every group and two
+groups' member lists could be joined on it.
+
+It is now a hash of the group's id and the account id. The format is
+unchanged: six lowercase hex characters (24 bits, so the collision odds in
+one group are exactly what they were: about 1 in 90,000 for 20 members). The
+same person has an unrelated tag in each group; the caller sees their own
+tag as everyone else does; the tag is stable while the account is a member
+and also across leaving and being re-added (unlike `memberId`, which is new
+for a new membership). It is derived from the group id and not from
+`memberId` because a custom line's grant outlives its grantor's membership,
+so the grantor's `memberId` is gone while their `grantedByTag` must still
+resolve.
+
+Every displayed tag changes once on this release, a one-time reshuffle. A
+client must treat the tag as an opaque display string, never store or
+compare it across groups or releases.
+
 ## 2026-11-17: Opaque member ids in group responses
 
 Additive (DS-534 assessment L12); needs ds-core v0.16.0's
@@ -82,7 +107,9 @@ Deprecated, removed in a later release once the frontend has moved:
 caller's own and are `null` for everybody else. They are typed
 `string | null`. A client that sent another member's `userId` to the member
 routes must send `memberId`: an account id other than the caller's gets
-`404`. The tag (`displayTag`, `addedByTag`) is unchanged.
+`404`. The tag (`displayTag`, `addedByTag`, `ownerTag`, `grantedByTag`)
+was unchanged by this; it now changes per group, see 2026-11-17 "Per-group
+member tags".
 
 ## 2026-11-17: Revoke the share and invite links on "log out other sessions"
 

@@ -277,7 +277,8 @@ impl From<GroupDetailRow> for GroupDetail {
         // Same helper as the member list and shared-train attribution:
         // name-else-username, never an email, a blank is not a label --
         // and the same distinguishing tag when none of that yields one.
-        let owner = users::MemberDisplay::of(row.owner_name, row.owner_username, &row.owner_id);
+        let owner =
+            users::MemberDisplay::of(row.owner_name, row.owner_username, &row.id, &row.owner_id);
         GroupDetail {
             id: row.id,
             name: row.name,
@@ -366,6 +367,7 @@ pub async fn delete_group(pool: &PgPool, group_id: &str, actor_user_id: &str) ->
 /// a column that is never read can never be leaked by a later edit.
 #[derive(Debug, Clone, sqlx::FromRow)]
 struct GroupMemberRow {
+    group_id: String,
     user_id: String,
     public_id: String,
     name: Option<String>,
@@ -403,9 +405,9 @@ pub struct GroupMember {
     /// whose `IdP` gives this app no showable name for anybody (Entra ID,
     /// where `preferred_username` is the email-shaped UPN) renders "A
     /// member (#a1b2c3)" per member instead of the same "A member" on
-    /// every single row. Derived from `user_id`, which this struct already
-    /// carries in the clear, and never from an email -- see
-    /// `users::MemberDisplay`.
+    /// every single row. Derived from this group's id and the member's
+    /// account id, so the same person has a different tag in every group,
+    /// and never from an email -- see `users::MemberDisplay`.
     pub display_tag: Option<String>,
     pub role: GroupRole,
     pub joined_at: DateTime<Utc>,
@@ -418,7 +420,7 @@ impl From<GroupMemberRow> for GroupMember {
         // for the user actually sends) is not a label, and used to render
         // as an empty member row. See that type's own doc comment, and
         // `display_name_collapse_tests` below.
-        let display = users::MemberDisplay::of(row.name, row.username, &row.user_id);
+        let display = users::MemberDisplay::of(row.name, row.username, &row.group_id, &row.user_id);
         GroupMember {
             user_id: None,
             member_id: row.public_id,
@@ -442,7 +444,7 @@ pub async fn list_members(
     viewer_user_id: &str,
 ) -> Result<Vec<GroupMember>> {
     let rows: Vec<GroupMemberRow> = sqlx::query_as(
-        "SELECT gm.user_id, gm.public_id, u.name, u.username, gm.role, gm.joined_at \
+        "SELECT gm.group_id, gm.user_id, gm.public_id, u.name, u.username, gm.role, gm.joined_at \
          FROM group_members gm \
          JOIN users u ON u.id = gm.user_id \
          WHERE gm.group_id = $1 \
@@ -1412,6 +1414,7 @@ pub async fn remove_journey_from_group(
 
 #[derive(Debug, Clone, sqlx::FromRow)]
 struct GroupTrainRow {
+    group_id: String,
     train_subscription_id: i64,
     pin_origin_crs: Option<String>,
     pin_destination_crs: Option<String>,
@@ -1531,8 +1534,12 @@ impl crate::data::stop_delay::PublicDelayFields for GroupTrain {
 
 impl From<GroupTrainRow> for GroupTrain {
     fn from(row: GroupTrainRow) -> Self {
-        let added_by =
-            users::MemberDisplay::of(row.added_by_name, row.added_by_username, &row.added_by);
+        let added_by = users::MemberDisplay::of(
+            row.added_by_name,
+            row.added_by_username,
+            &row.group_id,
+            &row.added_by,
+        );
         GroupTrain {
             train_subscription_id: row.train_subscription_id,
             pin_origin_crs: row.pin_origin_crs,
@@ -1574,6 +1581,7 @@ impl From<GroupTrainRow> for GroupTrain {
 
 #[derive(Debug, Clone, sqlx::FromRow)]
 struct GroupJourneyRow {
+    group_id: String,
     journey_id: i64,
     journey_public_id: String,
     custom_name: Option<String>,
@@ -1741,8 +1749,12 @@ impl crate::data::stop_delay::PublicDelayFields for GroupJourney {
 
 impl From<GroupJourneyRow> for GroupJourney {
     fn from(row: GroupJourneyRow) -> Self {
-        let added_by =
-            users::MemberDisplay::of(row.added_by_name, row.added_by_username, &row.added_by);
+        let added_by = users::MemberDisplay::of(
+            row.added_by_name,
+            row.added_by_username,
+            &row.group_id,
+            &row.added_by,
+        );
         GroupJourney {
             journey_id: row.journey_id,
             journey_public_id: row.journey_public_id,
@@ -2003,7 +2015,7 @@ where
 /// violate.
 pub async fn list_group_trains(pool: &PgPool, group_id: &str) -> Result<Vec<GroupTrain>> {
     let rows: Vec<GroupTrainRow> = sqlx::query_as(
-        "SELECT gt.train_subscription_id, \
+        "SELECT gt.group_id, gt.train_subscription_id, \
                 COALESCE(ts.pin_origin_crs, tr.origin_crs) AS pin_origin_crs, \
                 COALESCE(ts.pin_destination_crs, tr.destination_crs) AS pin_destination_crs, \
                 COALESCE(so.name, tr.origin_name) AS pin_origin_name, \
@@ -2080,7 +2092,7 @@ static LIST_GROUP_JOURNEYS_SQL: std::sync::LazyLock<String> = std::sync::LazyLoc
     );
     format!(
         "WITH {ranked} \
-         SELECT gj.journey_id, j.public_id AS journey_public_id, j.custom_name, \
+         SELECT gj.group_id, gj.journey_id, j.public_id AS journey_public_id, j.custom_name, \
                 (SELECT COUNT(*) FROM journey_legs jl2 WHERE jl2.journey_id = j.id) AS leg_count, \
                 COALESCE(ts.pin_origin_crs, tr.origin_crs) AS pin_origin_crs, \
                 COALESCE(ts.pin_destination_crs, tr.destination_crs) AS pin_destination_crs, \
@@ -2287,8 +2299,12 @@ impl crate::data::stop_delay::PublicDelayFields for SharedTrain {
 
 impl From<SharedTrainRow> for SharedTrain {
     fn from(row: SharedTrainRow) -> Self {
-        let added_by =
-            users::MemberDisplay::of(row.added_by_name, row.added_by_username, &row.added_by);
+        let added_by = users::MemberDisplay::of(
+            row.added_by_name,
+            row.added_by_username,
+            &row.group_id,
+            &row.added_by,
+        );
         SharedTrain {
             group_id: row.group_id,
             group_name: row.group_name,
@@ -2575,8 +2591,12 @@ impl crate::data::stop_delay::PublicDelayFields for SharedJourney {
 
 impl From<SharedJourneyRow> for SharedJourney {
     fn from(row: SharedJourneyRow) -> Self {
-        let added_by =
-            users::MemberDisplay::of(row.added_by_name, row.added_by_username, &row.added_by);
+        let added_by = users::MemberDisplay::of(
+            row.added_by_name,
+            row.added_by_username,
+            &row.group_id,
+            &row.added_by,
+        );
         SharedJourney {
             group_id: row.group_id,
             group_name: row.group_name,
@@ -2682,8 +2702,12 @@ pub async fn shared_journey_groups(
     let mut by_journey: std::collections::HashMap<i64, Vec<SharedVia>> =
         std::collections::HashMap::new();
     for row in rows {
-        let added_by =
-            users::MemberDisplay::of(row.added_by_name, row.added_by_username, &row.added_by);
+        let added_by = users::MemberDisplay::of(
+            row.added_by_name,
+            row.added_by_username,
+            &row.group_id,
+            &row.added_by,
+        );
         by_journey
             .entry(row.journey_id)
             .or_default()
@@ -2913,6 +2937,7 @@ pub async fn remove_custom_line_grant(
 
 #[derive(Debug, Clone, sqlx::FromRow)]
 struct GroupCustomLineRow {
+    group_id: String,
     line_id: String,
     line_name: String,
     granted_by: String,
@@ -2960,6 +2985,7 @@ impl From<GroupCustomLineRow> for GroupCustomLine {
         let granted_by = users::MemberDisplay::of(
             row.granted_by_name,
             row.granted_by_username,
+            &row.group_id,
             &row.granted_by,
         );
         GroupCustomLine {
@@ -2992,7 +3018,7 @@ pub async fn list_group_custom_lines(
     group_id: &str,
 ) -> Result<Vec<GroupCustomLine>> {
     let rows: Vec<GroupCustomLineRow> = sqlx::query_as(
-        "SELECT g.line_id, cl.name AS line_name, \
+        "SELECT g.group_id, g.line_id, cl.name AS line_name, \
                 g.granted_by, u.name AS granted_by_name, u.username AS granted_by_username \
          FROM custom_line_group_grants g \
          JOIN custom_lines cl ON cl.id = g.line_id \
@@ -3052,6 +3078,7 @@ impl From<SharedCustomLineRow> for SharedCustomLine {
         let granted_by = users::MemberDisplay::of(
             row.granted_by_name,
             row.granted_by_username,
+            &row.group_id,
             &row.granted_by,
         );
         SharedCustomLine {
@@ -7091,6 +7118,7 @@ mod custom_line_grant_wire_shape_tests {
     #[test]
     fn granted_by_name_falls_back_to_username_and_never_to_an_email() {
         let row = |name: Option<&str>, username: Option<&str>| GroupCustomLineRow {
+            group_id: "group-1".to_string(),
             line_id: "custom-x".to_string(),
             line_name: "X".to_string(),
             granted_by: "user-1".to_string(),
@@ -7130,6 +7158,7 @@ mod custom_line_grant_wire_shape_tests {
     #[test]
     fn granted_by_tag_is_set_only_when_there_is_no_showable_name() {
         let row = |name: Option<&str>| GroupCustomLineRow {
+            group_id: "group-1".to_string(),
             line_id: "custom-x".to_string(),
             line_name: "X".to_string(),
             granted_by: "user-1".to_string(),
@@ -7696,6 +7725,7 @@ mod display_name_collapse_tests {
 
     fn member_row(name: Option<&str>, username: Option<&str>) -> GroupMemberRow {
         GroupMemberRow {
+            group_id: "group-1".to_string(),
             user_id: "user-1".to_string(),
             public_id: "member-1".to_string(),
             name: name.map(str::to_string),
@@ -7707,6 +7737,7 @@ mod display_name_collapse_tests {
 
     fn train_row(name: Option<&str>, username: Option<&str>) -> GroupTrainRow {
         GroupTrainRow {
+            group_id: "group-1".to_string(),
             train_subscription_id: 1,
             pin_origin_crs: None,
             pin_destination_crs: None,
@@ -7928,7 +7959,21 @@ mod display_name_collapse_tests {
         assert_eq!(shared("user-1").added_by_tag, shared("user-1").added_by_tag);
     }
 
-    /// The tag is per-USER, not per-row: the same person shows the same
+    /// DS-534: the tag is per group. One account in two groups wears two
+    /// unrelated tags, so the groups' member lists cannot be joined on it.
+    #[test]
+    fn one_user_has_a_different_tag_in_each_group() {
+        let tag_in = |group: &str| {
+            let mut member = member_row(Some("upn@example.com"), Some("upn@example.com"));
+            member.group_id = group.to_string();
+            GroupMember::from(member).display_tag
+        };
+        assert!(tag_in("group-1").is_some());
+        assert_ne!(tag_in("group-1"), tag_in("group-2"));
+        assert_eq!(tag_in("group-1"), tag_in("group-1"));
+    }
+
+    /// The tag is per-USER-per-group, not per-row: the same person shows the same
     /// suffix in the member list and in every train they shared, which is
     /// the entire point -- "who added this?" has to be answerable by
     /// matching the credit against a row of the member list.
