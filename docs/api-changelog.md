@@ -3,6 +3,39 @@
 Changes to the Distant Signal (DS) HTTP API that a client such as DS-MCP
 needs to know about. Newest first. Field names are as served (camelCase).
 
+## 2026-11-17: Opaque member ids in group responses
+
+Additive (DS-534 assessment L12); needs ds-core v0.16.0's
+`group_members.public_id` (a migration, applied first). The website must
+move to `memberId` in the same deploy: a client that still sends another
+member's `userId` to the member routes gets `404` (see below).
+
+A group response used to carry every member's account id (`users.id`, the
+login subject) to every co-member. It now carries an opaque id for the
+membership instead: random, stable for that (group, user) membership,
+different in every group, and not an account id.
+
+- `GET /groups/{id}/members`: each member has `memberId` and `isMe`.
+- `GET /groups/{id}`: `ownerMemberId` (the owner's) and `memberId` (the
+  caller's own).
+- `GET /groups/{id}/trains`, `/groups/{id}/journeys`,
+  `/groups/{id}/lines/custom`, `/groups/shared-trains`,
+  `/groups/shared-journeys`, `/groups/shared-custom-lines`: `addedByMemberId` or `grantedByMemberId` (null when
+  the sharer has left the group) and `addedByIsMe` or `grantedByIsMe`.
+- `DELETE /groups/{id}/members/{member}` and `POST
+  /groups/{id}/members/{member}/promote` and `.../demote`: `{member}` is a
+  `memberId`. The caller's own account id is still accepted for their own
+  membership (leaving a group).
+- `POST .../promote` and `.../demote` return `memberId`.
+
+Deprecated, removed in a later release once the frontend has moved:
+`GroupMember.userId`, `GroupDetail.ownerId`, `addedBy`, `grantedBy` and
+`RoleChangeResponse.userId` are now present ONLY when the id is the
+caller's own and are `null` for everybody else. They are typed
+`string | null`. A client that sent another member's `userId` to the member
+routes must send `memberId`: an account id other than the caller's gets
+`404`. The tag (`displayTag`, `addedByTag`) is unchanged.
+
 ## 2026-11-17: Revoke the share and invite links on "log out other sessions"
 
 No migration, grant or response change (DS-534).
