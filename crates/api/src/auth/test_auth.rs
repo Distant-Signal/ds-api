@@ -493,10 +493,29 @@ fn user_digest(sub: &str) -> u64 {
     u64::from_be_bytes(bytes)
 }
 
+/// A failed authentication: charges the listener's failure bucket and
+/// refuses, or, when that bucket is already full, answers `429` without
+/// charging it (the same as the gate's `fail`). A request that authenticates
+/// is never refused for a full bucket.
+fn failed(
+    charge_failure: impl FnOnce() -> Option<std::time::Duration>,
+    reason: Refusal,
+    response: Response,
+) -> Response {
+    match charge_failure() {
+        Some(wait) => refuse(
+            Refusal::RateLimited,
+            None,
+            crate::personal_tokens::gate::rate_limited(wait),
+        ),
+        None => refuse(reason, None, response),
+    }
+}
+
 /// The personal-token gate's test-credentials branch, for a request whose
 /// bearer [`TestAuth::names`] this trust root (see the module doc). Only
 /// `token_gate` calls it. `charge_failure` charges the listener's
-/// failed-authentication bucket.
+/// failed-authentication bucket (or returns the wait when it is full).
 // `allow`, not `expect`: whether this passes the line limit depends on the
 // clippy version.
 #[allow(
@@ -510,11 +529,10 @@ pub(crate) async fn serve(
     next: Next,
     route: &'static TokenRoute,
     matched: &str,
-    charge_failure: impl FnOnce(),
+    charge_failure: impl FnOnce() -> Option<std::time::Duration>,
 ) -> Response {
     if !auth.enabled() {
-        charge_failure();
-        return refuse(Refusal::Disabled, None, invalid_token());
+        return failed(charge_failure, Refusal::Disabled, invalid_token());
     }
     // Never pick one credential of several: a session cookie (removed
     // before the gate, but noted), or more than one `Authorization` header
@@ -527,10 +545,9 @@ pub(crate) async fn serve(
             .count()
             > 1
     {
-        charge_failure();
-        return refuse(
+        return failed(
+            charge_failure,
             Refusal::AmbiguousCredentials,
-            None,
             error_response(
                 StatusCode::BAD_REQUEST,
                 "ambiguous_credentials",
@@ -550,14 +567,12 @@ pub(crate) async fn serve(
         );
     }
     let Some(bearer) = crate::auth::bearer_token(request.headers()) else {
-        charge_failure();
-        return refuse(Refusal::Malformed, None, invalid_token());
+        return failed(charge_failure, Refusal::Malformed, invalid_token());
     };
     let claims = match auth.verify(&bearer).await {
         Ok(claims) => claims,
         Err(reason) => {
-            charge_failure();
-            return refuse(reason, None, invalid_token());
+            return failed(charge_failure, reason, invalid_token());
         }
     };
     drop(bearer);
@@ -912,14 +927,23 @@ mod tests {
         }
 
         fn app_with(test: TestAuthSettings) -> crate::app::App {
+            app_with_tokens(
+                test,
+                PersonalTokenSettings {
+                    enabled: true,
+                    ..PersonalTokenSettings::default()
+                },
+            )
+        }
+
+        fn app_with_tokens(
+            test: TestAuthSettings,
+            tokens: PersonalTokenSettings,
+        ) -> crate::app::App {
             let mut state =
                 Arc::try_unwrap(crate::test_support::inert_app(lazy_pool())).expect("a fresh app");
             state.personal_tokens = Arc::new(
-                PersonalTokens::new(PersonalTokenSettings {
-                    enabled: true,
-                    ..PersonalTokenSettings::default()
-                })
-                .with_test_auth(TestAuth::from_settings(test).unwrap()),
+                PersonalTokens::new(tokens).with_test_auth(TestAuth::from_settings(test).unwrap()),
             );
             Arc::new(state)
         }
@@ -1371,6 +1395,40 @@ mod tests {
                     .is_some(),
                 "the test-credentials global bucket was charged"
             );
+        }
+
+        /// A full failed-authentication bucket (one address, shared by a
+        /// proxy say) answers a bad test token `429` without charging it
+        /// again, and still serves a valid one.
+        #[tokio::test]
+        async fn a_full_failure_bucket_refuses_bad_test_tokens_only() {
+            let (server, _) = mock_authentik().await;
+            let app = app_with_tokens(
+                on(&server.uri()),
+                PersonalTokenSettings {
+                    enabled: true,
+                    trust_cf_connecting_ip: true,
+                    auth_failure_per_minute: 1,
+                    auth_failure_burst: 1,
+                    ..PersonalTokenSettings::default()
+                },
+            );
+            let tokens = token_listener(&app);
+            let good = sign_token(&claims(&server.uri(), |_| {}));
+            let bad = sign_token(&claims(&server.uri(), |c| c["groups"] = json!([])));
+            let uri = "/v1/Line/victoria/Status";
+            let from = ("cf-connecting-ip", "203.0.113.9".to_string());
+            // The first failure is charged and fills the bucket.
+            let (status, _, body) = send(&tokens, "GET", uri, &[bearer(&bad), from.clone()]).await;
+            assert_eq!(status, StatusCode::UNAUTHORIZED, "{body}");
+            // Full: another failure is a 429, with Retry-After.
+            let (status, headers, body) =
+                send(&tokens, "GET", uri, &[bearer(&bad), from.clone()]).await;
+            assert_eq!(status, StatusCode::TOO_MANY_REQUESTS, "{body}");
+            assert!(headers.contains_key(header::RETRY_AFTER));
+            // A valid test token from the same address still works.
+            let (status, _, body) = send(&tokens, "GET", uri, &[bearer(&good), from]).await;
+            assert_eq!(status, StatusCode::OK, "{body}");
         }
 
         /// The extractor of the user-data routes refuses the sandbox
