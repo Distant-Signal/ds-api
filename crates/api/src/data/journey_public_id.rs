@@ -118,14 +118,19 @@ pub async fn public_ids(pool: &PgPool, ids: &[i64]) -> anyhow::Result<HashMap<i6
     Ok(rows.into_iter().collect())
 }
 
-/// The public id of one journey, empty if it does not exist.
+/// The public id of one journey, empty if it does not exist. Takes any
+/// executor, so a handler holding a transaction reads it on that
+/// transaction's connection rather than waiting for a second one.
 ///
 /// # Errors
 /// The query failed.
-pub async fn public_id(pool: &PgPool, id: i64) -> anyhow::Result<String> {
+pub async fn public_id<'e, E: sqlx::PgExecutor<'e>>(
+    executor: E,
+    id: i64,
+) -> anyhow::Result<String> {
     let found: Option<String> = sqlx::query_scalar("SELECT public_id FROM journeys WHERE id = $1")
         .bind(id)
-        .fetch_optional(pool)
+        .fetch_optional(executor)
         .await?;
     Ok(found.unwrap_or_default())
 }

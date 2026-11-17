@@ -885,7 +885,8 @@ async fn save_itinerary(
     };
     let response = ItineraryResponse {
         journey_id,
-        journey_public_id: crate::data::journey_public_id::public_id(&app.database, journey_id)
+        // On the transaction's own connection: a pool of one has no other.
+        journey_public_id: crate::data::journey_public_id::public_id(&mut *tx, journey_id)
             .await
             .map_err(internal("read the journey's public id"))?,
         leg_id: first_leg_id,
