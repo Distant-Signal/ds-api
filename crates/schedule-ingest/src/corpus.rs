@@ -906,9 +906,12 @@ pub(crate) async fn run_corpus_cycle(
     let snapshot = scan_incoming(watch_dir).inspect_err(|_| count_failure("scan"))?;
     let just_stabilized = state.tracker.observe(&snapshot, lane.stability_cycles);
     state.known_stable.extend(just_stabilized);
+    // As in the CIF scan cycle: a file rewritten under the same name is
+    // not stable again until its new `(mtime, len)` has settled.
+    let tracker = &state.tracker;
     state
         .known_stable
-        .retain(|name| snapshot.0.contains_key(name));
+        .retain(|name| tracker.is_stable(name, lane.stability_cycles));
     report_drift(&snapshot, state);
 
     let all = candidates(&snapshot, routing);
