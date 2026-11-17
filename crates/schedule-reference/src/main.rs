@@ -1327,8 +1327,8 @@ async fn poll_once(
 /// the marker (the marker is ahead of the PVC: the newer directory is gone,
 /// and publishing the older delivery would replace newer reference data with
 /// older). Delivery directory names are UTC timestamps, so they order as
-/// strings, as [`discovery::latest_complete_delivery`] already relies on. The one rule
-/// [`poll_once`] and a check run ([`run_check`]) share; it lists
+/// strings, as [`discovery::latest_complete_delivery`] already relies on.
+/// The one rule [`poll_once`] and a check run ([`run_check`]) share; it lists
 /// directories and opens none of the delivery's files.
 fn delivery_to_publish(
     config: &Config,
