@@ -78,6 +78,15 @@ fn cookie_secure(app: &App) -> bool {
 #[derive(Deserialize)]
 struct LoginParams {
     return_to: Option<String>,
+    /// `1` or `true`: make the identity provider authenticate the user
+    /// again (`prompt=login`, `max_age=0`). Used by the account deletion
+    /// screen to satisfy `recent_login_required`.
+    reauth: Option<String>,
+}
+
+/// Whether the login request asks for forced re-authentication.
+fn wants_reauth(raw: Option<&str>) -> bool {
+    matches!(raw, Some("1" | "true"))
 }
 
 /// The `return_to` to persist for this login attempt: the captured value
@@ -128,7 +137,9 @@ async fn login(
         return (StatusCode::FORBIDDEN, "cross-site request rejected").into_response();
     }
 
-    let (url, pkce_verifier, csrf_state, nonce) = match app.oidc.authorize_url().await {
+    let params = params.ok().map(|Query(p)| p);
+    let force_reauth = wants_reauth(params.as_ref().and_then(|p| p.reauth.as_deref()));
+    let (url, pkce_verifier, csrf_state, nonce) = match app.oidc.authorize_url(force_reauth).await {
         Ok(v) => v,
         Err(err) => {
             tracing::error!(error = ?err, "OIDC discovery/authorize_url failed");
@@ -144,7 +155,7 @@ async fn login(
     // failed to deserialize at all -- is discarded at the door and never
     // persisted: insert_login_state receives None for it, exactly as if
     // the parameter had never been sent.
-    let return_to = captured_return_to(params.ok().and_then(|Query(p)| p.return_to).as_deref());
+    let return_to = captured_return_to(params.and_then(|p| p.return_to).as_deref());
 
     let login_state_id = auth::generate_session_token();
     if let Err(err) = users::insert_login_state(
@@ -210,6 +221,27 @@ fn login_failed_redirect(target: &str) -> Response {
         location.push_str(fragment);
     }
     Redirect::to(&location).into_response()
+}
+
+/// [`login_failed_redirect`] for a callback whose login state is already
+/// consumed: it goes to the stored `return_to` (re-validated) or the
+/// operator's fallback, and clears the login-state cookie too.
+#[expect(
+    clippy::expect_used,
+    reason = "cookie header values are built from header-safe ASCII"
+)]
+fn consumed_login_failed(app: &App, stored_return_to: Option<&str>) -> Response {
+    let target = post_login_target(stored_return_to, &app.config.sso_post_login_redirect_url);
+    let mut response = login_failed_redirect(&target);
+    response.headers_mut().append(
+        header::SET_COOKIE,
+        HeaderValue::from_str(&auth::clear_cookie_header(
+            auth::LOGIN_STATE_COOKIE_NAME,
+            cookie_secure(app),
+        ))
+        .expect("cookie header value is always valid ASCII"),
+    );
+    response
 }
 
 /// Deliberately carries NO `Origin`/`Referer` check, unlike `login` and
@@ -332,27 +364,55 @@ async fn callback(
     // `users::insert_session` explains why storing an unused live IdP
     // credential is not worth the blast radius. `exchange_code` still
     // surfaces it so the eventual refresh work has nothing to re-plumb.
-    let (identity, continuity_claims, _refresh_token) = match exchange_result {
+    let exchanged = match exchange_result {
         Ok(result) => result,
         Err(err) => {
             tracing::warn!(error = ?err, "OIDC code exchange failed");
-            let target = post_login_target(
-                stored.return_to.as_deref(),
-                &app.config.sso_post_login_redirect_url,
-            );
-            // The login state is already consumed: clear its cookie too.
-            let mut response = login_failed_redirect(&target);
-            response.headers_mut().append(
-                header::SET_COOKIE,
-                HeaderValue::from_str(&auth::clear_cookie_header(
-                    auth::LOGIN_STATE_COOKIE_NAME,
-                    cookie_secure(&app),
-                ))
-                .expect("cookie header value is always valid ASCII"),
-            );
-            return response;
+            return consumed_login_failed(&app, stored.return_to.as_deref());
         }
     };
+
+    let auth::oidc::ExchangedLogin {
+        identity,
+        continuity: continuity_claims,
+        refresh_token: _refresh_token,
+        auth_time,
+    } = exchanged;
+
+    // A login that forced re-authentication (`?reauth=1`, marked on its
+    // `state`) has to really have been one: refuse when the provider's
+    // `auth_time` says the user last authenticated longer ago than the
+    // recent-login window (a provider that ignored `prompt=login`), and
+    // when it is a different account from the session this browser carried,
+    // so the account deletion screen cannot be pointed at someone else.
+    if stored
+        .csrf_state
+        .starts_with(auth::oidc::REAUTH_STATE_PREFIX)
+    {
+        let window = chrono::Duration::minutes(app.config.session_recent_login_minutes);
+        if !auth::oidc::auth_time_is_fresh(auth_time, chrono::Utc::now(), window) {
+            tracing::warn!("re-authentication refused: the provider's auth_time is stale");
+            return consumed_login_failed(&app, stored.return_to.as_deref());
+        }
+        if let Some(prior) = auth::parse_cookie(&headers, auth::SESSION_COOKIE_NAME) {
+            match users::get_session_with_user(&app.database, &auth::hash_session_token(&prior))
+                .await
+            {
+                Ok(Some(prior_user)) if prior_user.id != identity.sub => {
+                    tracing::warn!("re-authentication refused: a different account");
+                    return consumed_login_failed(&app, stored.return_to.as_deref());
+                }
+                Ok(_) => {}
+                Err(err) => {
+                    if let Some(unavailable) = crate::unavailable::response_for(&err) {
+                        return unavailable.into_response();
+                    }
+                    tracing::error!(error = ?err, "prior session lookup failed");
+                    return (StatusCode::INTERNAL_SERVER_ERROR, "login failed").into_response();
+                }
+            }
+        }
+    }
 
     // LEG-6: store only the groups something reads, not every group the
     // IdP asserts. Rows written before this are trimmed at the next login.
@@ -559,6 +619,19 @@ fn logout_response(deleted: anyhow::Result<()>, secure: bool) -> Response {
     response
 }
 
+/// Optional body of `POST /auth/sessions/revoke-others`. Both flags are
+/// off unless sent: a calendar feed link and a personal API token exist to
+/// keep a calendar app or a device working across the user's own logouts,
+/// so ending other sessions leaves them alone by default.
+#[derive(Debug, Default, Deserialize)]
+#[serde(rename_all = "camelCase", default)]
+struct RevokeOthersRequest {
+    /// Also revoke the calendar feed link.
+    revoke_calendar_feed: bool,
+    /// Also revoke every personal API token.
+    revoke_personal_tokens: bool,
+}
+
 /// "Log out everywhere" (M14/L6, 2026-09-26 Repeater Signal review): ends
 /// every session the caller currently holds -- other devices/browsers
 /// included -- and reissues a fresh one for the request making this call,
@@ -580,6 +653,7 @@ async fn revoke_other_sessions(
     State(app): State<App>,
     user: AuthenticatedUser,
     headers: axum::http::HeaderMap,
+    body: Option<Json<RevokeOthersRequest>>,
 ) -> Response {
     let expected_origin = auth::expected_browser_origin(&app.config.sso_redirect_url);
     if let Some(expected_origin) = expected_origin.as_deref()
@@ -595,10 +669,16 @@ async fn revoke_other_sessions(
         return (StatusCode::FORBIDDEN, "cross-site request rejected").into_response();
     }
 
+    let body = body.map(|Json(body)| body).unwrap_or_default();
     let new_token = match users::invalidate_all_sessions_and_reissue(
         &app.database,
         &user.id,
-        app.config.session_ttl_days,
+        users::SessionLifetime::from_config(&app.config),
+        user.login_at,
+        users::RevokeOthersOptions {
+            calendar_feed: body.revoke_calendar_feed,
+            personal_tokens: body.revoke_personal_tokens,
+        },
     )
     .await
     {
@@ -856,6 +936,25 @@ async fn session(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn only_one_or_true_asks_for_reauthentication() {
+        assert!(wants_reauth(Some("1")));
+        assert!(wants_reauth(Some("true")));
+        assert!(!wants_reauth(Some("0")));
+        assert!(!wants_reauth(Some("")));
+        assert!(!wants_reauth(None));
+    }
+
+    #[test]
+    fn revoke_others_body_defaults_to_revoking_nothing_extra() {
+        let none: RevokeOthersRequest = serde_json::from_str("{}").unwrap();
+        assert!(!none.revoke_calendar_feed && !none.revoke_personal_tokens);
+        let both: RevokeOthersRequest =
+            serde_json::from_str(r#"{"revokeCalendarFeed": true, "revokePersonalTokens": true}"#)
+                .unwrap();
+        assert!(both.revoke_calendar_feed && both.revoke_personal_tokens);
+    }
 
     /// The sign-up and missing-name-claims counters exist at 0 from
     /// startup, under their full names.

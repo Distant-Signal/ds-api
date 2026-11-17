@@ -17,7 +17,7 @@ Code: `crates/api/src/routes/admin.rs`, `crates/api/src/routes/auth.rs`
 
 | Who | How | Effect |
 | --- | --- | --- |
-| The user | Account menu, "log out other sessions" (`POST /api/auth/sessions/revoke-others`) | Ends all of their sessions and reissues one for the current browser |
+| The user | Account menu, "log out other sessions" (`POST /api/auth/sessions/revoke-others`) | Ends all of their sessions and reissues one for the current browser. The optional body `{"revokeCalendarFeed": true, "revokePersonalTokens": true}` (both default false) also revokes the calendar feed link and every personal API token |
 | An admin | `POST /api/admin/users/revoke-sessions` | Ends all of the target user's sessions |
 | Authentik | Back-channel logout to `POST /api/auth/backchannel-logout` | Ends all of that user's sessions |
 
@@ -32,6 +32,22 @@ also revoke every delegated-access grant the user holds (reasons `admin` and
 Connected apps page stops working on its next request and the user must
 connect it again. "Log out other sessions" keeps the grants but refuses
 delegated tokens issued before it. See [connected-apps.md](connected-apps.md).
+
+## Recent login for account deletion
+
+`DELETE /api/account` answers `403 recent_login_required` unless the
+session's login is at most `SESSION_RECENT_LOGIN_MINUTES` old (default 15;
+1 to 1440; the api refuses to start outside that). The login time is
+`sessions.created_at`: a login sets it, "log out other sessions" carries it
+over to the session it reissues, and nothing else moves it, so a stolen
+cookie cannot freshen itself. The site satisfies it by sending the user to
+`/api/auth/login?reauth=1&return_to=...`, which asks the identity provider
+for `prompt=login` and `max_age=0`. Authentik honours both, and does not
+need any setting for it. The callback also refuses (redirecting with `login=failed`, no new session) a re-authentication
+whose ID token's `auth_time` is outside the window (a provider that
+ignored the prompt) or that is for a different account than the browser's
+session. A provider that sends no `auth_time` is accepted on the strength
+of the prompt alone.
 
 ## When a group change takes effect
 

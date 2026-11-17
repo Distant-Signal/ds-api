@@ -2224,6 +2224,7 @@ mod db_tests {
             session_ttl_days: 14,
             session_max_age_days: 90,
             session_extend_throttle_hours: 24,
+            session_recent_login_minutes: 15,
             // 0 = no lower clamp (API-10's `clamp_instant_range`), so the
             // fixed-date fixtures below don't age out of the window.
             history_retention_days: 0,

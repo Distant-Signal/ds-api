@@ -651,6 +651,31 @@ fn session_ttl_days_i32(ttl_days: i64) -> i32 {
 }
 
 #[cfg(test)]
+mod login_is_recent_tests {
+    use super::*;
+    use chrono::{Duration, Utc};
+
+    #[test]
+    fn a_login_inside_the_window_is_recent_and_one_outside_is_not() {
+        let now = Utc::now();
+        assert!(login_is_recent(now, now, 15));
+        assert!(login_is_recent(now - Duration::minutes(15), now, 15));
+        assert!(!login_is_recent(
+            now - Duration::minutes(15) - Duration::seconds(1),
+            now,
+            15
+        ));
+        assert!(!login_is_recent(now - Duration::days(3), now, 15));
+    }
+
+    #[test]
+    fn a_login_in_the_future_counts_as_recent() {
+        let now = Utc::now();
+        assert!(login_is_recent(now + Duration::seconds(5), now, 15));
+    }
+}
+
+#[cfg(test)]
 mod session_ttl_days_i32_tests {
     use super::*;
 
@@ -978,29 +1003,101 @@ mod session_lifetime_tests {
 pub async fn invalidate_all_sessions_and_reissue(
     pool: &PgPool,
     user_id: &str,
-    ttl_days: i64,
+    lifetime: SessionLifetime,
+    login_at: chrono::DateTime<chrono::Utc>,
+    options: RevokeOthersOptions,
 ) -> Result<String> {
     let mut tx = pool.begin().await?;
-    sqlx::query("UPDATE users SET sessions_invalidated_at = NOW() WHERE id = $1")
+    // The marker is the caller's login time, not `NOW()`: the reissued
+    // session carries that time as its `created_at` (below), and
+    // `get_session_with_user` only accepts a session created at or after the
+    // marker. Every other session is deleted in this transaction, so
+    // nothing older than the marker survives.
+    sqlx::query("UPDATE users SET sessions_invalidated_at = LEAST(NOW(), $2) WHERE id = $1")
         .bind(user_id)
+        .bind(login_at)
         .execute(&mut *tx)
         .await?;
     sqlx::query("DELETE FROM sessions WHERE user_id = $1")
         .bind(user_id)
         .execute(&mut *tx)
         .await?;
+    // Delegated tokens are refused when issued before the later of the
+    // grant's `not_before` and `sessions_invalidated_at`
+    // (`auth::delegated`). The marker above is the caller's login time, no
+    // longer NOW(), so it would let a token issued since that login live
+    // on: move each live grant's `not_before` to now to keep "tokens issued
+    // before this are refused".
+    sqlx::query(
+        "UPDATE delegated_grants SET not_before = NOW() \
+         WHERE user_id = $1 AND revoked_at IS NULL",
+    )
+    .bind(user_id)
+    .execute(&mut *tx)
+    .await?;
+    if options.calendar_feed {
+        sqlx::query(
+            "UPDATE unlisted_links SET revoked_at = NOW() \
+             WHERE resource_type = $1 AND resource_id = $2 AND revoked_at IS NULL",
+        )
+        .bind(crate::data::calendar_feed::RESOURCE_TYPE)
+        .bind(user_id)
+        .execute(&mut *tx)
+        .await?;
+    }
+    if options.personal_tokens {
+        crate::data::personal_tokens::revoke_all_for_user(
+            &mut *tx,
+            user_id,
+            crate::data::personal_tokens::RevokeReason::User,
+        )
+        .await?;
+    }
     let token = crate::auth::generate_session_token();
+    // `created_at` is the login the caller made, not now: it is the clock
+    // `DELETE /public/account`'s recent-login check reads, so reissuing must
+    // not make an old session look freshly authenticated. The expiry stays
+    // inside the absolute cap counted from that login.
     sqlx::query(
         "INSERT INTO sessions (id, user_id, refresh_token, created_at, expires_at) \
-         VALUES ($1, $2, NULL, NOW(), NOW() + make_interval(days => $3))",
+         VALUES ($1, $2, NULL, LEAST(NOW(), $3), \
+                 LEAST(NOW() + make_interval(days => $4), \
+                       LEAST(NOW(), $3) + make_interval(days => $5)))",
     )
     .bind(crate::auth::hash_session_token(&token))
     .bind(user_id)
-    .bind(session_ttl_days_i32(ttl_days))
+    .bind(login_at)
+    .bind(lifetime.idle_days)
+    .bind(lifetime.max_age_days)
     .execute(&mut *tx)
     .await?;
     tx.commit().await?;
     Ok(token)
+}
+
+/// What else "log out other sessions" ends besides the sessions. Both are
+/// off by default: a feed link and a personal token exist to keep a
+/// calendar app or a device working across the user's own logouts, so they
+/// are revoked only when the request asks (`revokeCalendarFeed`,
+/// `revokePersonalTokens`).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct RevokeOthersOptions {
+    /// Revoke the calendar feed link (docs/calendar-feed.md).
+    pub calendar_feed: bool,
+    /// Revoke every personal API token (docs/personal-api-tokens.md).
+    pub personal_tokens: bool,
+}
+
+/// Whether a session created at `login_at` counts as a recent login at
+/// `now`, given the window in minutes (`SESSION_RECENT_LOGIN_MINUTES`).
+/// A `login_at` in the future (clock skew) counts as recent.
+#[must_use]
+pub fn login_is_recent(
+    login_at: chrono::DateTime<chrono::Utc>,
+    now: chrono::DateTime<chrono::Utc>,
+    window_minutes: i64,
+) -> bool {
+    now - login_at <= chrono::Duration::minutes(window_minutes)
 }
 
 /// Ends every session `user_id` holds, with no replacement: the server-side
@@ -1999,9 +2096,15 @@ mod db_tests {
             .await
             .expect("insert session two");
 
-        let new_token = invalidate_all_sessions_and_reissue(&pool, &user.id, 14)
-            .await
-            .expect("invalidate and reissue");
+        let new_token = invalidate_all_sessions_and_reissue(
+            &pool,
+            &user.id,
+            SessionLifetime::try_new(14, 24, 90).unwrap(),
+            chrono::Utc::now(),
+            RevokeOthersOptions::default(),
+        )
+        .await
+        .expect("invalidate and reissue");
 
         // Both prior sessions are gone -- not merely marker-rejected, but
         // actually deleted (immediate, not eventually-consistent).
@@ -2035,6 +2138,146 @@ mod db_tests {
 
         // Cleanup -- cascades the reissued session via ON DELETE CASCADE.
         sqlx::query("DELETE FROM users WHERE id = 'TEST-USER-LOGOUT-EVERYWHERE'")
+            .execute(&pool)
+            .await
+            .expect("cleanup test user");
+    }
+
+    /// "Log out other sessions" must not refresh the login time the
+    /// account deletion check reads: the reissued session keeps the
+    /// caller's `created_at`, and the calendar feed link and personal
+    /// tokens are revoked only when asked.
+    #[tokio::test]
+    #[expect(
+        clippy::too_many_lines,
+        reason = "one linear seed, reissue and assert scenario; splitting it would scatter its shared state"
+    )]
+    #[ignore = "requires a live database; run with `cargo test -p api \
+                reissue_keeps_the_login_time -- --ignored --test-threads=1`"]
+    async fn reissue_keeps_the_login_time_and_revokes_credentials_only_when_asked() {
+        use sqlx::postgres::PgPoolOptions;
+
+        let database_url =
+            std::env::var("DATABASE_URL").expect("DATABASE_URL must be set to run this test");
+        let pool = PgPoolOptions::new()
+            .connect(&database_url)
+            .await
+            .expect("connect to postgres");
+        let identity = OidcIdentity {
+            sub: "TEST-USER-REISSUE-KEEPS-LOGIN".to_string(),
+            name: Some("Test Rider".to_string()),
+            preferred_username: Some("test-rider".to_string()),
+            groups: Vec::new(),
+        };
+        let user = upsert_user(&pool, &identity).await.expect("upsert user");
+        let lifetime = SessionLifetime::try_new(14, 24, 90).unwrap();
+        let login_at = chrono::Utc::now() - chrono::Duration::hours(2);
+        sqlx::query(
+            "INSERT INTO unlisted_links (token_hash, resource_type, resource_id, created_by) \
+             VALUES ('reissue-feed', 'calendar_feed', $1, $1)",
+        )
+        .bind(&user.id)
+        .execute(&pool)
+        .await
+        .unwrap();
+        sqlx::query(
+            "INSERT INTO personal_api_tokens (user_id, name, token_hash, hint, scopes, expires_at) \
+             VALUES ($1, 'Display', sha256(convert_to('reissue-ptok', 'UTF8')), 'AbC1', \
+                     '{lines:read}', NOW() + INTERVAL '90 days')",
+        )
+        .bind(&user.id)
+        .execute(&pool)
+        .await
+        .unwrap();
+
+        sqlx::query(
+            "INSERT INTO delegated_grants (user_id, client, client_display_name, scopes) \
+             VALUES ($1, 'ds-mcp', 'Assistant', '{journeys:read}')",
+        )
+        .bind(&user.id)
+        .execute(&pool)
+        .await
+        .unwrap();
+
+        // Default options: the session keeps its login time, and the feed
+        // link and the token are left alone.
+        let token = invalidate_all_sessions_and_reissue(
+            &pool,
+            &user.id,
+            lifetime,
+            login_at,
+            RevokeOthersOptions::default(),
+        )
+        .await
+        .expect("reissue");
+        let session = get_session_with_user(&pool, &crate::auth::hash_session_token(&token))
+            .await
+            .unwrap()
+            .expect("the reissued session resolves");
+        assert!(
+            (session.session_created_at - login_at)
+                .num_milliseconds()
+                .abs()
+                < 5,
+            "the reissued session keeps the caller's login time"
+        );
+        let live_links: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM unlisted_links WHERE token_hash = 'reissue-feed' AND revoked_at IS NULL",
+        )
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        let live_tokens: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM personal_api_tokens WHERE user_id = $1 AND revoked_at IS NULL",
+        )
+        .bind(&user.id)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!((live_links, live_tokens), (1, 1));
+        // The marker is the (older) login time, so the grant's `not_before`
+        // is what refuses a delegated token issued since that login.
+        let refused_since_login: bool = sqlx::query_scalar(
+            "SELECT not_before > NOW() - INTERVAL '1 minute' FROM delegated_grants WHERE user_id = $1",
+        )
+        .bind(&user.id)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert!(
+            refused_since_login,
+            "delegated tokens issued before the reissue are refused"
+        );
+
+        // Asked to: both go.
+        invalidate_all_sessions_and_reissue(
+            &pool,
+            &user.id,
+            lifetime,
+            login_at,
+            RevokeOthersOptions {
+                calendar_feed: true,
+                personal_tokens: true,
+            },
+        )
+        .await
+        .expect("reissue with revocation");
+        let live_links: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM unlisted_links WHERE token_hash = 'reissue-feed' AND revoked_at IS NULL",
+        )
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        let live_tokens: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM personal_api_tokens WHERE user_id = $1 AND revoked_at IS NULL",
+        )
+        .bind(&user.id)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!((live_links, live_tokens), (0, 0));
+
+        sqlx::query("DELETE FROM users WHERE id = 'TEST-USER-REISSUE-KEEPS-LOGIN'")
             .execute(&pool)
             .await
             .expect("cleanup test user");

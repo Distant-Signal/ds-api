@@ -268,6 +268,37 @@ pub struct AccessGroupClaims {
 
 impl AdditionalClaims for AccessGroupClaims {}
 
+/// What [`OidcClient::exchange_code`] returns.
+#[derive(Debug)]
+pub struct ExchangedLogin {
+    pub identity: OidcIdentity,
+    pub continuity: ContinuityClaims,
+    pub refresh_token: Option<String>,
+    /// The ID token's `auth_time`: when the user last authenticated at the
+    /// provider. `None` when the provider did not send it.
+    pub auth_time: Option<chrono::DateTime<chrono::Utc>>,
+}
+
+/// Prefix of the `state` of a login that forced re-authentication
+/// (`OidcClient::authorize_url(true)`). The state is stored server-side
+/// with the login's other state and echoed back unchanged, so the prefix
+/// carries "this login was a re-authentication" to the callback without
+/// a column of its own.
+pub const REAUTH_STATE_PREFIX: &str = "reauth.";
+
+/// Whether a login whose ID token carries `auth_time` was a fresh
+/// authentication: at most `window` before `now`. An absent `auth_time`
+/// counts as fresh (a provider that honoured `prompt=login` but omits the
+/// claim cannot be checked; the prompt is the control then).
+#[must_use]
+pub fn auth_time_is_fresh(
+    auth_time: Option<chrono::DateTime<chrono::Utc>>,
+    now: chrono::DateTime<chrono::Utc>,
+    window: chrono::Duration,
+) -> bool {
+    auth_time.is_none_or(|auth_time| now - auth_time <= window)
+}
+
 /// The ID-token claims that carry a user's identity at a previous
 /// identity provider, for account continuity across the move of public
 /// login to `ds-sso` (docs/connected-apps.md, "Account continuity"). Each
@@ -618,15 +649,37 @@ impl OidcClient {
     /// was added nullable with no backfill possible (see
     /// `migrations/20260915093000_users_username.sql`), so an existing user
     /// has no username stored until their NEXT sign-in.
-    pub async fn authorize_url(&self) -> Result<(Url, PkceCodeVerifier, CsrfToken, Nonce)> {
+    ///
+    /// `force_reauth` asks the provider to authenticate the user again
+    /// even if it holds a live session for them: `prompt=login` and
+    /// `max_age=0` (OIDC Core 3.1.2.1; Authentik honours both), and the
+    /// `state` is marked ([`REAUTH_STATE_PREFIX`]) so the callback knows to
+    /// check the ID token's `auth_time`. It is how an account deletion
+    /// gets the recent login it requires.
+    pub async fn authorize_url(
+        &self,
+        force_reauth: bool,
+    ) -> Result<(Url, PkceCodeVerifier, CsrfToken, Nonce)> {
         let client = self.client().await?;
         let (pkce_challenge, pkce_verifier) = PkceCodeChallenge::new_random_sha256();
-        let (url, csrf_state, nonce) = client
-            .authorize_url(
-                CoreAuthenticationFlow::AuthorizationCode,
-                CsrfToken::new_random,
-                Nonce::new_random,
-            )
+        let mut request = client.authorize_url(
+            CoreAuthenticationFlow::AuthorizationCode,
+            move || {
+                let random = CsrfToken::new_random();
+                if force_reauth {
+                    CsrfToken::new(format!("{REAUTH_STATE_PREFIX}{}", random.secret()))
+                } else {
+                    random
+                }
+            },
+            Nonce::new_random,
+        );
+        if force_reauth {
+            request = request
+                .add_prompt(CoreAuthPrompt::Login)
+                .set_max_age(std::time::Duration::ZERO);
+        }
+        let (url, csrf_state, nonce) = request
             // No `email` scope: nothing in this app reads an email address
             // (see `OidcIdentity`), so it is not asked for.
             .add_scope(Scope::new("profile".to_string()))
@@ -663,7 +716,7 @@ impl OidcClient {
         pkce_verifier: PkceCodeVerifier,
         expected_nonce: &Nonce,
         continuity: &ContinuityClaimNames,
-    ) -> Result<(OidcIdentity, ContinuityClaims, Option<String>)> {
+    ) -> Result<ExchangedLogin> {
         let client = self.client().await?;
 
         let token_response = client
@@ -686,7 +739,12 @@ impl OidcClient {
         let continuity = continuity_claims(&claims.additional_claims().other, continuity);
         let refresh_token = token_response.refresh_token().map(|t| t.secret().clone());
 
-        Ok((identity_from_claims(raw), continuity, refresh_token))
+        Ok(ExchangedLogin {
+            identity: identity_from_claims(raw),
+            continuity,
+            refresh_token,
+            auth_time: claims.auth_time(),
+        })
     }
 }
 
@@ -700,6 +758,24 @@ mod tests {
 
     fn claims() -> RawClaims {
         claims_with_groups(None)
+    }
+
+    #[test]
+    fn auth_time_must_be_inside_the_window_but_an_absent_one_cannot_be_checked() {
+        use chrono::{Duration, Utc};
+        let now = Utc::now();
+        let window = Duration::minutes(15);
+        assert!(auth_time_is_fresh(
+            Some(now - Duration::minutes(1)),
+            now,
+            window
+        ));
+        assert!(!auth_time_is_fresh(
+            Some(now - Duration::hours(3)),
+            now,
+            window
+        ));
+        assert!(auth_time_is_fresh(None, now, window));
     }
 
     fn claims_with_groups(groups: Option<Vec<String>>) -> RawClaims {

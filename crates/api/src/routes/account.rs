@@ -9,6 +9,8 @@
 //!   `{"confirm": "delete my account"}` and a same-origin `Origin`/`Referer`
 //!   (strict, like `logout`: both absent is refused too), on top of the
 //!   router-wide L4 `auth::reject_cross_origin_cookie_mutation` layer.
+//!   The session's login must also be recent (`SESSION_RECENT_LOGIN_MINUTES`,
+//!   default 15): otherwise `403 {"error": "recent_login_required"}`.
 
 use axum::Json;
 use axum::extract::State;
@@ -17,8 +19,15 @@ use axum::response::{IntoResponse, Response};
 use serde::Deserialize;
 
 use crate::app::{App, Router};
+use crate::auth::delegated::error_response;
 use crate::auth::{self, AuthenticatedUser};
-use crate::data::account;
+use crate::data::{account, users};
+
+/// The `error` code of the `403` `DELETE /public/account` answers while
+/// the session's login is older than `SESSION_RECENT_LOGIN_MINUTES`: the
+/// client sends the user through `GET /public/auth/login?reauth=1` and
+/// retries.
+pub const RECENT_LOGIN_REQUIRED: &str = "recent_login_required";
 
 pub fn router() -> Router {
     Router::new()
@@ -70,6 +79,17 @@ async fn delete_account(
             "account deletion rejected: Origin/Referer did not match this app's own origin"
         );
         return (StatusCode::FORBIDDEN, "cross-site request rejected").into_response();
+    }
+    if !users::login_is_recent(
+        user.login_at,
+        chrono::Utc::now(),
+        app.config.session_recent_login_minutes,
+    ) {
+        return error_response(
+            StatusCode::FORBIDDEN,
+            RECENT_LOGIN_REQUIRED,
+            "confirm it's you again to delete your account",
+        );
     }
     if !is_confirmed(&body.confirm) {
         return (
@@ -226,6 +246,7 @@ mod db_tests {
             session_ttl_days: 14,
             session_max_age_days: 90,
             session_extend_throttle_hours: 24,
+            session_recent_login_minutes: 15,
             history_retention_days: 7,
             daily_stats_retention_days: 300,
             half_hourly_stats_retention_hours: 840,
@@ -414,6 +435,62 @@ mod db_tests {
             .await
             .unwrap();
         assert_eq!(res.status(), StatusCode::UNAUTHORIZED);
+    }
+
+    /// A session whose login is older than the window cannot delete the
+    /// account (`403 recent_login_required`, nothing deleted), however
+    /// correct the rest of the request; a fresh login (here, the same
+    /// session moved back inside the window) can.
+    #[tokio::test]
+    #[ignore = "requires a live database; run with `cargo test -p api -- --ignored --test-threads=1`"]
+    async fn delete_account_route_requires_a_recent_login() {
+        let pool = connect().await;
+        let user = "acct-route-recent";
+        sqlx::query("DELETE FROM users WHERE id = $1")
+            .bind(user)
+            .execute(&pool)
+            .await
+            .unwrap();
+        let token = seed_session(&pool, user).await;
+        sqlx::query(
+            "UPDATE sessions SET created_at = NOW() - INTERVAL '1 hour' WHERE user_id = $1",
+        )
+        .bind(user)
+        .execute(&pool)
+        .await
+        .unwrap();
+        let router = test_router(test_app(pool.clone()));
+        let good = r#"{"confirm": "delete my account"}"#;
+
+        let res = router
+            .clone()
+            .oneshot(delete_request(Some(&token), Some(ORIGIN), good))
+            .await
+            .unwrap();
+        assert_eq!(res.status(), StatusCode::FORBIDDEN);
+        let body = axum::body::to_bytes(res.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(json["error"], super::RECENT_LOGIN_REQUIRED);
+        assert!(
+            user_exists(&pool, user).await,
+            "a stale login deletes nothing"
+        );
+
+        sqlx::query(
+            "UPDATE sessions SET created_at = NOW() - INTERVAL '1 minute' WHERE user_id = $1",
+        )
+        .bind(user)
+        .execute(&pool)
+        .await
+        .unwrap();
+        let res = router
+            .oneshot(delete_request(Some(&token), Some(ORIGIN), good))
+            .await
+            .unwrap();
+        assert_eq!(res.status(), StatusCode::NO_CONTENT);
+        assert!(!user_exists(&pool, user).await);
     }
 
     #[tokio::test]

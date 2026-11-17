@@ -7524,12 +7524,12 @@ mod check_mode_tests {
             "a publish run does not republish the older delivery either"
         );
 
-        const NEWEST: &str = "20261102T210000Z";
-        write_fixture_delivery(storage.path(), NEWEST);
+        let newest = "20261102T210000Z";
+        write_fixture_delivery(storage.path(), newest);
         assert_eq!(
             run_check(&sink, &config).await.unwrap(),
             RunOutcome::DeliveryWaiting {
-                delivery: NEWEST.to_owned()
+                delivery: newest.to_owned()
             }
         );
     }

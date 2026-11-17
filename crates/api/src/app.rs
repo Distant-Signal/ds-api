@@ -63,6 +63,18 @@ pub fn with_dead_client_detection(options: PgConnectOptions) -> PgConnectOptions
     options.options(DEAD_CLIENT_DETECTION_SETTINGS)
 }
 
+/// Startup checks on the session settings: the lifetimes
+/// (`SessionLifetime::try_from_config`) and the recent-login window
+/// (`SESSION_RECENT_LOGIN_MINUTES`, 1..=1440).
+fn validate_session_settings(config: &ServiceArguments) -> Result<()> {
+    crate::data::users::SessionLifetime::try_from_config(config)?;
+    ensure!(
+        (1..=1440).contains(&config.session_recent_login_minutes),
+        "session_recent_login_minutes (SESSION_RECENT_LOGIN_MINUTES) must be between 1 and 1440"
+    );
+    Ok(())
+}
+
 /// Startup guard (2026-09-25 Low-severity auth-core review): the
 /// user-facing SSO client and the internal-service `OAuth2` client must
 /// never be configured with the SAME `client_id` -- see the call site in
@@ -205,7 +217,7 @@ impl AppState {
              32-bit day count -- sessions.expires_at is computed via \
              make_interval(days => ...), which requires an i32",
         )?;
-        crate::data::users::SessionLifetime::try_from_config(&config)?;
+        validate_session_settings(&config)?;
 
         // Account continuity (docs/connected-apps.md): off unless a claim
         // name is set; a name the user could edit refuses to start.
