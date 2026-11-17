@@ -3,6 +3,18 @@
 Changes to the Distant Signal (DS) HTTP API that a client such as DS-MCP
 needs to know about. Newest first. Field names are as served (camelCase).
 
+## 2026-11-17: Webhook secrets are sealed for their row (secret box stage 1b)
+
+No change to any request or response (DS-534). The api now creates a
+webhook destination by inserting the row, then sealing its secret for that
+row's id and writing the sealed value in the same transaction, using
+ds-core's context-aware secret box (`seal_in` with `webhook_destinations`
+`secret_ciphertext` and the row id). The stored format is still the legacy
+one (12-byte nonce), so the nonce CHECK holds and every existing row and
+every older reader keeps working. Needs ds-core v0.16.0's library only: no
+migration, no grants. Stage 2 (ds-core's write-format flip and CHECK
+relaxation) is what makes new rows v2; see ds-core's docs/secret-box-aad.md.
+
 ## 2026-11-17: Opaque journey ids (stage 1 of 3)
 
 Additive (DS-534); needs ds-core's `journeys.public_id` migration

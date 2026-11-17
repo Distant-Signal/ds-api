@@ -247,13 +247,12 @@ async fn create_webhook(
     }
     let generated = (valid.kind == Kind::Generic).then(data::generate_secret);
     let plain = generated.as_deref().or(valid.secret.as_deref());
-    // Encrypted before it is stored; never stored or logged as given.
-    let sealed = match plain.map(data::seal) {
-        None => None,
-        Some(Some(sealed)) => Some(sealed),
-        Some(None) => return database_error("encrypt the secret")(anyhow::anyhow!("no key")),
-    };
-    let secret = sealed.as_ref();
+    // Encrypted by `data::create`, bound to the new row's id; never stored
+    // or logged as given.
+    if plain.is_some() && !data::can_seal() {
+        return database_error("encrypt the secret")(anyhow::anyhow!("no key"));
+    }
+    let secret = plain;
     match data::create(
         &app.database,
         &NewWebhook {
