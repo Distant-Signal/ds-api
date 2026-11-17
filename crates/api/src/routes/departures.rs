@@ -275,6 +275,34 @@ async fn get_station_schedule_departures(
 /// `schedule_network_departures` board and a live board have.
 const BOARD_SIZE: i64 = 10;
 
+/// Rows read past [`BOARD_SIZE`] so [`cut_board`] can reorder by the shown
+/// time. The search orders by working time; a public time differs from its
+/// working one by a minute or two, so a train just past the tenth by
+/// working time can be shown before it, and must not lose its place.
+const BOARD_SORT_SLACK: i64 = 10;
+
+/// The board as shown: in order of the time each row displays
+/// (`scheduled`, the public departure else the working one, with its own
+/// day offset; [`crate::render::public_else_working`]), then working time,
+/// cut to [`BOARD_SIZE`]. The search reads in working-time order, so
+/// cutting its rows at ten would keep a train shown later than one it
+/// dropped (review finding, 2026-11).
+fn cut_board(mut rows: Vec<Value>) -> Vec<Value> {
+    // Stable: ties keep the search's working-time, then uid, order.
+    rows.sort_by_cached_key(|row| {
+        let working_day_offset = row.get("day_offset").and_then(Value::as_u64).unwrap_or(0);
+        let (shown, day_offset) = crate::render::public_else_working(
+            row,
+            "public_departure",
+            "scheduled",
+            working_day_offset,
+        );
+        (day_offset, shown)
+    });
+    rows.truncate(usize::try_from(BOARD_SIZE).unwrap_or(10));
+    rows
+}
+
 /// The lower bound of the board's departure window, in train-day minutes of
 /// `service_date` (`queries::train_day_minutes`): the current London time
 /// for today, the same instant a day later on the clock for yesterday (its
@@ -298,7 +326,8 @@ fn board_depart_from(
 ///
 /// The next [`BOARD_SIZE`] departures from `now` by
 /// `queries::search_schedule_calling_point_departures` (boardable calls
-/// only, public time first, train-day order); empty with the station on the
+/// only, public time first), in the order of the time shown ([`cut_board`]);
+/// empty with the station on the
 /// day's timetable is `Some(vec![])`. A station with no timetable rows falls
 /// back to its stored `schedule_network_departures` rows for the date,
 /// unfiltered.
@@ -326,13 +355,13 @@ async fn schedule_board(
             stop_filter: None,
             across_midnight: false,
             after: None,
-            limit: BOARD_SIZE,
+            limit: BOARD_SIZE + BOARD_SORT_SLACK,
         },
     )
     .await?;
     if let Some(page) = page {
         if !page.departures.is_empty() {
-            return Ok(Some(page.departures));
+            return Ok(Some(cut_board(page.departures)));
         }
         if queries::schedule_destination_departures_has_station(pool, &station, service_date)
             .await?
@@ -393,6 +422,63 @@ mod tests {
     use tower::ServiceExt;
 
     use super::*;
+
+    fn board_row(uid: &str, working: &str, public: Option<&str>, day_offset: u64) -> Value {
+        serde_json::json!({
+            "uid": uid,
+            "scheduled": working,
+            "public_departure": public,
+            "day_offset": day_offset,
+        })
+    }
+
+    fn uids(board: &[Value]) -> Vec<&str> {
+        board.iter().map(|r| r["uid"].as_str().unwrap()).collect()
+    }
+
+    #[test]
+    fn the_board_is_ordered_and_cut_by_the_time_it_shows() {
+        // Working-time order, as the search returns it: ten trains each
+        // shown at their working minute from 10:01, then one whose working
+        // time is later (10:10:30) but whose public time (10:00) is the
+        // earliest shown, and one more after it.
+        let mut rows: Vec<Value> = (0..10)
+            .map(|i| board_row(&format!("W{i:02}"), &format!("10:{:02}:00", i + 1), None, 0))
+            .collect();
+        rows.push(board_row("EARLY", "10:10:30", Some("10:00:00"), 0));
+        rows.push(board_row("LATE", "10:30:00", None, 0));
+
+        let board = cut_board(rows);
+        assert_eq!(
+            uids(&board),
+            [
+                "EARLY", "W00", "W01", "W02", "W03", "W04", "W05", "W06", "W07", "W08"
+            ],
+            "shown-time order, cut to ten: the later working row W09 drops, not EARLY"
+        );
+    }
+
+    #[test]
+    fn the_board_sort_keeps_working_order_for_equal_shown_times() {
+        let board = cut_board(vec![
+            board_row("A", "10:00:00", Some("10:00:00"), 0),
+            board_row("B", "10:00:30", Some("10:00:00"), 0),
+            board_row("C", "09:59:30", Some("10:01:00"), 0),
+        ]);
+        assert_eq!(uids(&board), ["A", "B", "C"]);
+    }
+
+    #[test]
+    fn the_board_sort_dates_a_public_time_across_midnight() {
+        // The after-midnight working call (day 1, 00:00:30) is shown at
+        // 23:59 on day 0, so after day 0's 23:58 and before day 1's 00:01.
+        let board = cut_board(vec![
+            board_row("NEXT", "00:01:00", None, 1),
+            board_row("WRAP", "00:00:30", Some("23:59:00"), 1),
+            board_row("BEFORE", "23:58:00", None, 0),
+        ]);
+        assert_eq!(uids(&board), ["BEFORE", "WRAP", "NEXT"]);
+    }
 
     #[tokio::test]
     async fn route_path_parses_and_dispatches() {
