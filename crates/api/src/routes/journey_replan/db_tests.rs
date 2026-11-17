@@ -1559,3 +1559,63 @@ async fn a_dismissed_break_is_not_opened_again_for_the_same_cause() {
     let (_, detail) = call(&router, "GET", &journey, Some(&token), None, None).await;
     assert!(detail["openBreak"].is_null(), "{detail}");
 }
+
+/// A skipped stop is judged alike by a page read and the sweep (review
+/// J2): the break a read opens is confirmed by the sweep, not ended as
+/// recovered and opened again by the next read.
+#[tokio::test]
+#[ignore = "requires a live database: DATABASE_URL"]
+async fn the_sweep_keeps_a_skipped_stop_break_a_page_read_opened() {
+    use chrono::TimeZone;
+    let _now = pin_now();
+    let pool = connect().await;
+    let _cleanup = cleanup(&pool).await;
+    exec(&pool, "DELETE FROM station_samples WHERE crs = 'ZRC'").await;
+    seed_timetable(&pool).await;
+    let token = seed_session(&pool, USER).await;
+    let router = router(pool.clone());
+    let (journey_id, leg_id) = create_journey(&router, &token).await;
+    // RP0001's board at ZRC says it no longer calls at ZRD (the board is
+    // matched by the train's destination).
+    exec(
+        &pool,
+        &format!(
+            "UPDATE train_subscriptions SET pin_destination_crs = 'ZRD' WHERE user_id = '{USER}'"
+        ),
+    )
+    .await;
+    sqlx::query(
+        "INSERT INTO station_samples (crs, polled_at, departures) VALUES ('ZRC', NOW(), $1)",
+    )
+    .bind(serde_json::json!([{
+        "service_id": "replan-skip", "operator": "GR", "destination_crs": "ZRD",
+        "scheduled": "10:00", "estimated": "On time", "is_cancelled": false,
+        "delay_minutes": 0, "skipped_stations": ["ZRD"], "calling_points": []
+    }]))
+    .execute(&pool)
+    .await
+    .expect("seed board");
+
+    let journey = format!("/Journeys/{journey_id}");
+    let (_, detail) = call(&router, "GET", &journey, Some(&token), None, None).await;
+    assert_eq!(detail["openBreak"]["cause"], "skipped_stop", "{detail}");
+    assert_eq!(detail["openBreak"]["triggerLegId"], leg_id, "{detail}");
+    let break_id = detail["openBreak"]["id"].as_i64().expect("break id");
+
+    let app = crate::test_support::inert_app(pool.clone());
+    let now = chrono::Utc.with_ymd_and_hms(2099, 5, 5, 8, 30, 0).unwrap();
+    let swept = crate::journey_break_sweep::run_sweep(&app, now)
+        .await
+        .expect("sweep");
+    assert_eq!((swept.breaks, swept.recovered), (1, 0), "{swept:?}");
+    let row = crate::data::journey_breaks::open_break(&pool, journey_id)
+        .await
+        .expect("read")
+        .expect("still open");
+    assert_eq!(row.id, break_id);
+    assert_eq!(row.cause, "skipped_stop");
+    // The same fingerprint as the read's: confirmed, not reset.
+    assert_eq!(row.confirmations, 2);
+    assert_eq!(break_count(&pool, journey_id).await, 1);
+    exec(&pool, "DELETE FROM station_samples WHERE crs = 'ZRC'").await;
+}

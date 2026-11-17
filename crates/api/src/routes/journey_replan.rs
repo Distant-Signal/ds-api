@@ -232,10 +232,27 @@ pub(crate) async fn analyse(
         .filter_map(|leg| leg.train_subscription_id)
         .collect();
     let by_id = train_tracking::get_by_tracking_ids(&app.database, &ids).await?;
-    let (indexes, states): (Vec<usize>, Vec<train_tracking::TrackedTrainState>) = legs
+    // The departure boards, read as the journey page reads them: the ETA
+    // overlay below and the skipped-stop check (review J2: without it a
+    // page read opened a `skipped_stop` break and the next sweep ended it
+    // as recovered, over and over).
+    let raw_states: Vec<Option<&train_tracking::TrackedTrainState>> = legs
+        .iter()
+        .map(|leg| by_id.get(&leg.train_subscription_id?))
+        .collect();
+    let boards = LegBoards::read(app, journey_id, &legs, &raw_states).await;
+    let (indexes, states): (Vec<usize>, Vec<train_tracking::TrackedTrainState>) = raw_states
         .iter()
         .enumerate()
-        .filter_map(|(index, leg)| Some((index, by_id.get(&leg.train_subscription_id?)?.clone())))
+        .filter_map(|(index, state)| {
+            let state = (*state)?.clone();
+            let origin_board = crate::routes::train::darwin_blend_origin_crs(&state)
+                .and_then(|crs| boards.board(crs));
+            Some((
+                index,
+                crate::routes::train::apply_darwin_eta(state, origin_board),
+            ))
+        })
         .unzip();
     let built = crate::routes::train::attach_journey_stops_batch(app, states).await;
     let mut leg_states: Vec<Option<train_tracking::TrackedTrainState>> =
@@ -266,7 +283,7 @@ pub(crate) async fn analyse(
             whole_cancelled: state
                 .as_ref()
                 .is_some_and(|s| s.status.as_deref() == Some("cancelled")),
-            skipped: false,
+            skipped: boards.skipped(leg, state.as_ref()),
             travelled: travelled.contains(&leg.id),
         })
         .collect();
@@ -277,6 +294,115 @@ pub(crate) async fn analyse(
         facts,
         now,
     })
+}
+
+/// The departure boards [`analyse`] reads, and each leg train's true
+/// origin: the same reads `GET /Journeys/{id}` makes for its ETA overlay
+/// and `legSkip`, so the sweep and a page read judge a journey alike.
+/// Best effort, as on the page: a failed read means no overlay and no
+/// skip.
+struct LegBoards {
+    samples: HashMap<String, common::StationSample>,
+    train_origins: HashMap<i64, String>,
+}
+
+impl LegBoards {
+    async fn read(
+        app: &App,
+        journey_id: i64,
+        legs: &[journeys::JourneyLegWithNamesRow],
+        states: &[Option<&train_tracking::TrackedTrainState>],
+    ) -> Self {
+        let trains_ids: Vec<i64> = states
+            .iter()
+            .filter_map(|state| state.and_then(|s| s.trains_id))
+            .collect();
+        let train_origins: HashMap<i64, String> = if trains_ids.is_empty() {
+            HashMap::new()
+        } else {
+            sqlx::query_as::<_, (i64, String)>(
+                "SELECT id, origin_crs FROM trains WHERE id = ANY($1) AND origin_crs IS NOT NULL",
+            )
+            .bind(&trains_ids)
+            .fetch_all(&app.database)
+            .await
+            .map_or_else(
+                |err| {
+                    tracing::warn!(error = ?err, journey_id, "could not read leg train origins");
+                    HashMap::new()
+                },
+                |rows| rows.into_iter().collect(),
+            )
+        };
+        let mut board_crs: Vec<String> = Vec::new();
+        for (leg, state) in legs.iter().zip(states) {
+            let Some(state) = state else {
+                continue;
+            };
+            board_crs
+                .extend(crate::routes::train::darwin_blend_origin_crs(state).map(str::to_string));
+            if leg.origin_crs.is_some() && leg.destination_crs.is_some() {
+                board_crs.extend(leg.origin_crs.clone());
+                board_crs.extend(
+                    state
+                        .trains_id
+                        .and_then(|id| train_origins.get(&id))
+                        .cloned(),
+                );
+            }
+        }
+        board_crs.sort();
+        board_crs.dedup();
+        let samples = if board_crs.is_empty() {
+            HashMap::new()
+        } else {
+            crate::data::queries::latest_station_samples_for_crs_batch(&app.database, &board_crs)
+                .await
+                .unwrap_or_else(|err| {
+                    tracing::warn!(error = ?err, journey_id, "could not read departure boards for the journey's legs");
+                    HashMap::new()
+                })
+        };
+        Self {
+            samples,
+            train_origins,
+        }
+    }
+
+    fn board(&self, crs: &str) -> Option<&common::StationSample> {
+        self.samples.get(&crate::data::queries::normalize_code(crs))
+    }
+
+    /// Whether `leg`'s train skips its boarding or alighting stop, as the
+    /// page's `legSkip` says.
+    fn skipped(
+        &self,
+        leg: &journeys::JourneyLegWithNamesRow,
+        state: Option<&train_tracking::TrackedTrainState>,
+    ) -> bool {
+        let (Some(origin_crs), Some(destination_crs), Some(state)) = (
+            leg.origin_crs.as_deref(),
+            leg.destination_crs.as_deref(),
+            state,
+        ) else {
+            return false;
+        };
+        let Some(trains_id) = state.trains_id else {
+            return false;
+        };
+        let match_target = state
+            .pin_destination_crs
+            .as_deref()
+            .or(state.next_calling_point.as_deref());
+        let status = crate::data::station_skip::leg_skip_status_from_samples(
+            &self.samples,
+            self.train_origins.get(&trains_id).map(String::as_str),
+            origin_crs,
+            destination_crs,
+            match_target,
+        );
+        status.origin_skipped || status.destination_skipped
+    }
 }
 
 // ---------------------------------------------------------------------------
