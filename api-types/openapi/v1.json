@@ -3250,6 +3250,17 @@
             "format": "date",
             "type": "string"
           },
+          "scheduleSource": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/ScheduleSource"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Where `journeyStops` came from: `cif` (the timetable), `darwin` (the\nDarwin Push Port's schedule, for a train the timetable lacks, such\nas a late-added special or charter) or `trust` (only the stops the\ntrain has reported so far; none ahead are known). `null` when there\nare no stops. `darwin` and `trust` are off unless the api's\n`DARWIN_STOPS_FALLBACK_ENABLED`/`TRUST_STOPS_FALLBACK_ENABLED` are\nset (`data::live_stops`)."
+          },
           "scheduledDeparture": {
             "format": "date-time",
             "type": [
@@ -3447,6 +3458,26 @@
           "unresolved"
         ],
         "type": "string"
+      },
+      "ScheduleSource": {
+        "description": "Where a train's stops came from, served as `scheduleSource`.",
+        "oneOf": [
+          {
+            "const": "cif",
+            "description": "The CIF timetable (`trains.calling_points` or\n`schedule_calling_points_full`): every scheduled train.",
+            "type": "string"
+          },
+          {
+            "const": "darwin",
+            "description": "The Darwin Push Port's schedule for a train the CIF timetable lacks.",
+            "type": "string"
+          },
+          {
+            "const": "trust",
+            "description": "Only the stops TRUST has reported so far: no stops ahead are known.",
+            "type": "string"
+          }
+        ]
       },
       "ServiceMode": {
         "description": "What kind of vehicle a schedule is. The stored spelling is\n[`Self::as_db_str`] (`replacement_bus`), the wire spelling camelCase\n(`replacementBus`).",

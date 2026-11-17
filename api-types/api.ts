@@ -3334,6 +3334,16 @@ export type PreviousWorkingLink = "inferred" | "association";
  */
 export type PublicTrainResponse = { 
 /**
+ * Where `journeyStops` came from: `cif` (the timetable), `darwin` (the
+ * Darwin Push Port's schedule, for a train the timetable lacks, such
+ * as a late-added special or charter) or `trust` (only the stops the
+ * train has reported so far; none ahead are known). `null` when there
+ * are no stops. `darwin` and `trust` are off unless the api's
+ * `DARWIN_STOPS_FALLBACK_ENABLED`/`TRUST_STOPS_FALLBACK_ENABLED` are
+ * set (`data::live_stops`).
+ */
+scheduleSource: ScheduleSource | null, 
+/**
  * The SHARED `trains` row's own surrogate key, serialized as
  * `trainsId`. Deliberately NOT named `id`, which is what this struct
  * used to call it: every `/Train/{trackingId}` route in this app
@@ -4022,6 +4032,11 @@ uid: string,
  * departure row always has: typed as always set.
  */
 scheduled: string, publicDeparture: string | null, workingDeparture: string | null, workingDayOffset: number, dayOffset: number, destinationCrs: string | null, destinationName: string | null, originCrs: string | null, originName: string | null, live: LineTrainSummaryLive | null, serviceMode: ServiceMode, liveTracking: boolean, };
+
+/**
+ * Where a train's stops came from, served as `scheduleSource`.
+ */
+export type ScheduleSource = "cif" | "darwin" | "trust";
 
 /**
  * A time on the plan's clock: `time` (`HH:MM:SS`) and how many days after

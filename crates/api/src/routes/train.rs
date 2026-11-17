@@ -617,7 +617,7 @@ pub(crate) async fn get_by_uid_and_date(
         Some(state) => {
             let state =
                 crate::data::train_operator::attach_to_public_state(&app.database, state).await;
-            let state = attach_journey_stops_public(&app, state).await;
+            let (state, schedule_source) = attach_journey_stops_public(&app, state).await;
             let state =
                 crate::data::train_reasons::attach_to_public_state(&app.database, state).await;
             let mut phase_rows = [PublicPhaseRow {
@@ -633,6 +633,7 @@ pub(crate) async fn get_by_uid_and_date(
                     super::london_today(),
                 ),
                 phase,
+                schedule_source,
             }))
         }
         None => Err((
@@ -658,6 +659,15 @@ pub(crate) struct PublicTrainResponse {
     /// 2026-10-20-untracked-legs-and-tracked-train-states-design.md §4.3).
     #[serde(flatten)]
     phase: PublicPhaseFields,
+    /// Where `journeyStops` came from: `cif` (the timetable), `darwin` (the
+    /// Darwin Push Port's schedule, for a train the timetable lacks, such
+    /// as a late-added special or charter) or `trust` (only the stops the
+    /// train has reported so far; none ahead are known). `null` when there
+    /// are no stops. `darwin` and `trust` are off unless the api's
+    /// `DARWIN_STOPS_FALLBACK_ENABLED`/`TRUST_STOPS_FALLBACK_ENABLED` are
+    /// set (`data::live_stops`).
+    #[serde(rename = "scheduleSource")]
+    schedule_source: Option<crate::data::live_stops::ScheduleSource>,
 }
 
 /// The public train's `trackingPhase` and `firstReportExpectedAt`, the
@@ -1641,46 +1651,102 @@ fn unsuperseded(
 async fn attach_journey_stops_public(
     app: &App,
     mut state: crate::data::trains::PublicTrainState,
-) -> crate::data::trains::PublicTrainState {
+) -> (
+    crate::data::trains::PublicTrainState,
+    Option<crate::data::live_stops::ScheduleSource>,
+) {
+    use crate::data::live_stops::ScheduleSource;
     let key = (state.train_uid.clone(), state.service_date);
     let predictions = predicted_starts(app, std::iter::once(key.clone())).await;
     let prediction = predictions.get(&key);
-    match crate::data::journey::build_journey_stops(
+    let request = crate::data::journey::JourneyStopsRequest {
+        trains_id: state.trains_id,
+        train_uid: &state.train_uid,
+        service_date: state.service_date,
+        calling_points_json: state.calling_points.as_ref(),
+        current_delay_minutes: state.working_delay_minutes,
+        skipped_stations: &state.skipped_stations,
+        platform: state.platform.as_deref(),
+        planned_platform: state.planned_platform.as_deref(),
+        predicted_late_minutes: prediction
+            .and_then(ds_store::trains::predicted_start::PredictedStart::estimate_minutes),
+    };
+    // The live-only fallbacks (Darwin, TRUST) are this route's alone; see
+    // `data::live_stops`'s module doc.
+    let built = crate::data::journey::build_journey_stops_sourced(
         &app.database,
-        state.trains_id,
-        &state.train_uid,
-        state.service_date,
-        state.calling_points.as_ref(),
-        state.working_delay_minutes,
-        &state.skipped_stations,
-        state.platform.as_deref(),
-        state.planned_platform.as_deref(),
-        prediction.and_then(ds_store::trains::predicted_start::PredictedStart::estimate_minutes),
+        &request,
+        crate::data::live_stops::fallbacks(),
     )
-    .await
-    {
-        Ok(stops) => {
-            // See `attach_journey_stops`'s own comment just above -- same
-            // "derive from the freshly-built list before it moves" reasoning.
-            state.may_have_arrived = stops
-                .as_deref()
-                .is_some_and(|stops| crate::data::journey::may_have_arrived(stops, Utc::now()));
-            // Same sequence-anchored confirmed-arrival overlay as
-            // `attach_journey_stops` above -- the public route must not
-            // disagree with the tracked-subscription route about whether a
-            // train has finished.
-            state.status = crate::data::journey::apply_confirmed_arrival(
-                state.status.take(),
-                stops.as_deref(),
-            );
+    .await;
+    match built {
+        Ok(sourced) => {
+            let source = sourced.as_ref().map(|sourced| sourced.source);
+            let stops = sourced.map(|sourced| sourced.stops);
+            // TRUST's stops end at the latest report, not the terminus: an
+            // arrival there is not the train finishing.
+            if source != Some(ScheduleSource::Trust) {
+                // See `attach_journey_stops`'s own comment just above --
+                // same "derive from the freshly-built list before it moves"
+                // reasoning.
+                state.may_have_arrived = stops
+                    .as_deref()
+                    .is_some_and(|stops| crate::data::journey::may_have_arrived(stops, Utc::now()));
+                // Same sequence-anchored confirmed-arrival overlay as
+                // `attach_journey_stops` above -- the public route must not
+                // disagree with the tracked-subscription route about whether
+                // a train has finished.
+                state.status = crate::data::journey::apply_confirmed_arrival(
+                    state.status.take(),
+                    stops.as_deref(),
+                );
+            }
+            if source == Some(ScheduleSource::Darwin)
+                && let Some(stops) = stops.as_deref()
+            {
+                fill_ends_from_stops(&mut state, stops);
+            }
             state.predicted_start = unsuperseded(prediction, stops.as_deref());
             state.journey_stops = stops;
+            (state, source)
         }
         Err(err) => {
             tracing::warn!(error = ?err, trains_id = state.trains_id, "could not build journey stops");
+            (state, None)
         }
     }
-    state
+}
+
+/// A Darwin-sourced train's origin, destination and departure, from its
+/// first and last calls (not passes) with a CRS, where the `trains` row holds none (a
+/// live-only train's row has none), so the page header is not blank.
+fn fill_ends_from_stops(
+    state: &mut crate::data::trains::PublicTrainState,
+    stops: &[crate::data::journey::JourneyStop],
+) {
+    // A station call, not a pass through one (an empty stock or charter
+    // move may start in a yard with no CRS).
+    let is_call = |stop: &&crate::data::journey::JourneyStop| {
+        stop.crs.is_some() && !stop.timetable.passing_point
+    };
+    if state.origin_crs.is_none()
+        && let Some(origin) = stops.iter().find(is_call)
+    {
+        state.origin_crs.clone_from(&origin.crs);
+        state.origin_name.clone_from(&origin.name);
+        if state.scheduled_departure.is_none() {
+            state.scheduled_departure = origin
+                .timetable
+                .public_departure
+                .or(origin.timetable.working_minute_departure);
+        }
+    }
+    if state.destination_crs.is_none()
+        && let Some(destination) = stops.iter().rev().find(is_call)
+    {
+        state.destination_crs.clone_from(&destination.crs);
+        state.destination_name.clone_from(&destination.name);
+    }
 }
 
 /// Shared 500 mapper for every route in this file. Takes the operation that

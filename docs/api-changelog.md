@@ -3,6 +3,43 @@
 Changes to the Distant Signal (DS) HTTP API that a client such as DS-MCP
 needs to know about. Newest first. Field names are as served (camelCase).
 
+## 2026-11-16: Stops for live-only trains
+
+Additive (DS-534), behind two api settings that default off; no migration,
+grant or schema change. A live-only train (a `trains` row with no CIF
+schedule, such as a late-added special or charter) had no stops at all.
+
+- `GET /Train/by-uid/{uid}/{date}` gains `scheduleSource`: where
+  `journeyStops` came from, `cif` (the timetable, every scheduled train),
+  `darwin` (the Darwin Push Port's schedule for a train the timetable
+  lacks) or `trust` (only the stops the train has reported so far; no stops
+  ahead are known), `null` when there are no stops. A CIF schedule always
+  wins.
+- `DARWIN_STOPS_FALLBACK_ENABLED` (default `false`): a live-only train's
+  stops come from Darwin's schedule for its UID and date, else for its
+  TRUST id's headcode on the date when exactly one Darwin-only service
+  with no `trains` row of its own carries it. Cancelled calls are left
+  out, passing points are passes, and displayed times are public times
+  where Darwin has them, working times otherwise (a working stop has no
+  boarding or alighting). Platforms and live times overlay as for any
+  train. A deleted Darwin service, or one with every call cancelled,
+  gives no stops; a part-cancelled one keeps its other calls. With `darwin` stops, an empty `originCrs`,
+  `destinationCrs` (and their names) and `scheduledDeparture` are filled
+  from the first and last stops. Darwin's rows are pruned a few days after
+  the service date, so an older train has no Darwin stops.
+- `TRUST_STOPS_FALLBACK_ENABLED` (default `false`): when Darwin has no row
+  for the train, its stops are the arrivals and departures TRUST has
+  reported, at locations with a CRS. Such a train is never marked finished
+  from its stops, since the last one is only the latest report.
+- Only this route uses the fallbacks; tracked trains, journeys, replans,
+  live trip planning and cancellation inference keep CIF-only stops.
+- Metric: `distant_signal_api_journey_stops_fallback_total{source}`
+  (`darwin`, `trust`), one per train served from a fallback, registered
+  at 0.
+
+For ds-deploy's chart: two api env values, `DARWIN_STOPS_FALLBACK_ENABLED`
+and `TRUST_STOPS_FALLBACK_ENABLED`, both default `false`.
+
 ## 2026-11-16: Headcode for live-only trains
 
 Additive (DS-532); no migration, grant or schema change. A live-only train
