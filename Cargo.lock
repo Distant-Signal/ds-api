@@ -142,6 +142,7 @@ dependencies = [
  "ds-store",
  "flate2",
  "glob",
+ "hmac 0.12.1",
  "hyper",
  "hyper-util",
  "libc",

@@ -2411,7 +2411,13 @@ departureDate: string | null,
  * Whether that departure is on the leg's own date (London); `null`
  * when the pass gives none.
  */
-departureDateMatchesLeg: boolean | null, };
+departureDateMatchesLeg: boolean | null, 
+/**
+ * Send this back with `source: "wallet"` and the `departureDate` above
+ * to save the pass's details as from a pass; good for an hour, for
+ * this leg only.
+ */
+prefillToken: string, };
 
 /**
  * `PUT /Journeys/{id}/legs/{legId}/ticket`'s body.
@@ -2426,14 +2432,20 @@ operatorOnly: boolean,
  */
 name?: string | null, 
 /**
- * `wallet` when the details came from a Wallet pass prefill;
- * `manual` when absent.
+ * `wallet` when the details came from a Wallet pass prefill (with its
+ * `prefillToken`, or when re-saving a ticket already saved from a
+ * pass); `manual` when absent.
  */
 source?: LegTicketSource | null, 
 /**
  * The prefill's departure, kept with a `wallet` source only.
  */
-departureDate?: string | null, };
+departureDate?: string | null, 
+/**
+ * The `prefillToken` the pass upload for this leg answered with; what
+ * a `wallet` source and `departureDate` are checked against.
+ */
+prefillToken?: string | null, };
 
 /**
  * Where a leg's ticket details came from.

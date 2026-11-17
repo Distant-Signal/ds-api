@@ -542,6 +542,16 @@ fn quota_error(operation: &'static str) -> impl Fn(anyhow::Error) -> RouteError 
     }
 }
 
+/// What an itinerary's `Idempotency-Key` is bound to: the route's name and
+/// the body, as the replan routes bind theirs (keys are the user's, across
+/// routes). The same key sent to another route, or with another body, is
+/// a `409 idempotency_conflict`.
+fn itinerary_request_hash(request: &ItineraryRequest) -> Result<String, RouteError> {
+    let canonical = serde_json::to_vec(&("itinerary", request))
+        .map_err(|err| internal("hash request")(err.into()))?;
+    Ok(format!("{:x}", Sha256::digest(&canonical)))
+}
+
 /// The 409 for an `Idempotency-Key` already used with another itinerary.
 fn idempotency_conflict() -> RouteError {
     RouteError::coded(
@@ -670,12 +680,7 @@ async fn save_itinerary(
         validate(body, MAX_ITINERARY_LEGS, crate::routes::london_today())?;
     let operator_filter =
         check_operator_filter(app, request.operator_filter.as_ref(), &legs).await?;
-    let request_hash = {
-        let canonical =
-            serde_json::to_vec(&request).map_err(|err| internal("hash request")(err.into()))?;
-        let digest = Sha256::digest(&canonical);
-        format!("{digest:x}")
-    };
+    let request_hash = itinerary_request_hash(&request)?;
 
     // A key already used is answered before anything else, so a replay
     // always gets its first answer. Read on the pool, not claimed: the
@@ -1038,6 +1043,21 @@ mod tests {
         assert_eq!(
             serde_json::to_string(&request).unwrap(),
             r#"{"customName":"Trip","legs":[{"trainUid":"c12345","serviceDate":"2026-10-20","originCrs":"cre","destinationCrs":null}]}"#
+        );
+    }
+
+    #[test]
+    fn an_itinerary_key_hash_is_bound_to_the_route() {
+        let body = br#"{"legs":[{"trainUid":"c12345","serviceDate":"2026-10-20"}]}"#;
+        let request: ItineraryRequest = serde_json::from_slice(body).unwrap();
+        let bare = format!(
+            "{:x}",
+            Sha256::digest(serde_json::to_vec(&request).unwrap())
+        );
+        assert_ne!(itinerary_request_hash(&request).unwrap(), bare);
+        assert_eq!(
+            itinerary_request_hash(&request).unwrap(),
+            itinerary_request_hash(&request).unwrap()
         );
     }
 

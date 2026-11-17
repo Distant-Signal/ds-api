@@ -1922,6 +1922,70 @@ async fn an_itinerary_saves_on_a_pool_of_one_connection() {
     assert_eq!(status, StatusCode::CONFLICT, "{other}");
 }
 
+/// A browser session's `Idempotency-Key` on `POST /Journeys/itinerary` is
+/// honoured: concurrent duplicates make one journey and answer alike, a
+/// retry replays the first answer, another body is a 409 (the key is bound to the route name too:
+/// `an_itinerary_key_hash_is_bound_to_the_route`),
+/// and no key keeps saving a journey each time.
+#[tokio::test]
+#[ignore = "requires a live database: DATABASE_URL"]
+async fn a_session_itinerary_key_makes_one_journey_per_key() {
+    let _now = pin_now();
+    let pool = connect().await;
+    let _cleanup = cleanup(&pool).await;
+    seed_timetable(&pool).await;
+    let token = seed_session(&pool, USER).await;
+    let router = router(pool.clone());
+    let body = serde_json::json!({
+        "legs": [{
+            "trainUid": "RP0001", "serviceDate": DATE,
+            "originCrs": "ZRC", "destinationCrs": "ZRD"
+        }]
+    });
+    let send = |key: Option<&'static str>, body: Value| {
+        let (router, token) = (router.clone(), token.clone());
+        async move {
+            call(
+                &router,
+                "POST",
+                "/Journeys/itinerary",
+                Some(&token),
+                Some(body),
+                key,
+            )
+            .await
+        }
+    };
+    let ((status_a, first), (status_b, second)) = tokio::join!(
+        send(Some("session-key"), body.clone()),
+        send(Some("session-key"), body.clone())
+    );
+    assert_eq!((status_a, status_b), (StatusCode::OK, StatusCode::OK));
+    assert_eq!(first, second, "concurrent duplicates answer alike");
+    let (status, again) = send(Some("session-key"), body.clone()).await;
+    assert_eq!((status, &again), (StatusCode::OK, &first));
+    let count = || async {
+        sqlx::query_scalar::<_, i64>("SELECT count(*) FROM journeys WHERE user_id = $1")
+            .bind(USER)
+            .fetch_one(&pool)
+            .await
+            .expect("count")
+    };
+    assert_eq!(count().await, 1, "one journey for one key");
+
+    let other_body = serde_json::json!({ "legs": [{ "trainUid": "RP0002", "serviceDate": DATE }] });
+    let (status, conflict) = send(Some("session-key"), other_body).await;
+    assert_eq!(status, StatusCode::CONFLICT, "{conflict}");
+    assert_eq!(count().await, 1);
+
+    // No key: each request saves a journey, as before.
+    for _ in 0..2 {
+        let (status, saved) = send(None, body.clone()).await;
+        assert_eq!(status, StatusCode::OK, "{saved}");
+    }
+    assert_eq!(count().await, 3);
+}
+
 /// Someone else's journey and no journey at all answer an operator filter
 /// alike (review J9): 404, whatever the filter, never the 400 that told
 /// them the journey exists.

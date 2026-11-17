@@ -642,6 +642,101 @@ async fn delay_repay_with_and_without_a_ticket_type() {
     assert!(detail["legs"][0]["ticket"].is_null(), "{detail}");
     assert_eq!(detail["legs"][0]["delayRepay"]["ticketKnown"], false);
 
+    // A Wallet source needs a pass read for this leg: the prefill token, or
+    // a ticket already saved from one.
+    let departure = "2099-05-05T10:00:00Z";
+    let wallet = |token: Option<&str>, departure: &str| {
+        let mut body = serde_json::json!({
+            "ticketType": "return", "source": "wallet", "departureDate": departure
+        });
+        if let Some(token) = token {
+            body["prefillToken"] = token.into();
+        }
+        body
+    };
+    let at: chrono::DateTime<Utc> = departure.parse().expect("departure");
+    let issue = |leg: i64, user: &str, departure| {
+        crate::ticket_prefill::issue("test-secret", user, leg, departure, Utc::now())
+            .expect("token")
+    };
+    for (what, body) in [
+        ("no token", wallet(None, departure)),
+        (
+            "another leg's token",
+            wallet(Some(&issue(leg_id + 1, USER, Some(at))), departure),
+        ),
+        (
+            "another user's token",
+            wallet(Some(&issue(leg_id, OTHER, Some(at))), departure),
+        ),
+        (
+            "another departure",
+            wallet(Some(&issue(leg_id, USER, Some(at))), "2099-05-06T10:00:00Z"),
+        ),
+        (
+            "a made-up token",
+            wallet(Some("9999999999.abcd"), departure),
+        ),
+    ] {
+        let (status, body) = call(&router, "PUT", &uri, Some(&token), Some(body)).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{what}: {body}");
+    }
+    let (_, detail) = call(
+        &router,
+        "GET",
+        &format!("/Journeys/{journey_id}"),
+        Some(&token),
+        None,
+    )
+    .await;
+    assert!(detail["legs"][0]["ticket"].is_null(), "nothing was saved");
+    let proof = issue(leg_id, USER, Some(at));
+    let (status, saved) = call(
+        &router,
+        "PUT",
+        &uri,
+        Some(&token),
+        Some(wallet(Some(&proof), departure)),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{saved}");
+    assert_eq!(saved["source"], "wallet");
+    // Saved from a pass, a re-save with the same departure needs no token;
+    // another departure does.
+    let (status, saved) = call(
+        &router,
+        "PUT",
+        &uri,
+        Some(&token),
+        Some(wallet(None, departure)),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{saved}");
+    assert_eq!(saved["source"], "wallet");
+    let (status, body) = call(
+        &router,
+        "PUT",
+        &uri,
+        Some(&token),
+        Some(wallet(None, "2099-05-06T10:00:00Z")),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+    // Manual is always accepted and drops the departure.
+    let (status, saved) = call(
+        &router,
+        "PUT",
+        &uri,
+        Some(&token),
+        Some(serde_json::json!({ "ticketType": "return", "departureDate": departure })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{saved}");
+    assert_eq!(saved["source"], "manual");
+    assert!(saved["departureDate"].is_null(), "{saved}");
+    let (status, _) = call(&router, "DELETE", &uri, Some(&token), None).await;
+    assert_eq!(status, StatusCode::NO_CONTENT);
+
     // A leg with no train yet has nowhere to keep ticket details.
     let (status, created) = call(
         &router,

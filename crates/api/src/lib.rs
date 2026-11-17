@@ -55,6 +55,7 @@ pub mod shutdown;
 #[cfg(test)]
 pub(crate) mod test_support;
 pub mod text_guard;
+pub mod ticket_prefill;
 pub mod ts_values;
 pub mod unavailable;
 pub mod usage_events;

@@ -72,6 +72,8 @@ schemars = { version = "1.2.3", default-features = false, features = ["derive", 
 # `serde_json::value::RawValue` instead of building a `Value` tree -- see
 # `data::queries::upsert_schedule_line_population`'s doc comment.
 serde_json = { version = "1.0.149", features = ["raw_value"] }
+# The Wallet prefill token (`ticket_prefill`). Already in the tree.
+hmac = "0.12"
 sha2 = "0.10"
 # Constant-time comparison of personal API token hashes
 # (`personal_tokens::token`). Already in the tree through the TLS stack.
