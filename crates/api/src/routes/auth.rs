@@ -194,6 +194,24 @@ fn post_login_target(stored_return_to: Option<&str>, fallback: &str) -> String {
         .unwrap_or_else(|| fallback.to_string())
 }
 
+/// A `303` back to the site with `login=failed` appended, for a callback
+/// that could not complete (the `IdP` reported an error, or the code
+/// exchange failed). Not a `5xx`: both are reachable by an unauthenticated
+/// visitor.
+fn login_failed_redirect(target: &str) -> Response {
+    let (base, fragment) = match target.split_once('#') {
+        Some((base, fragment)) => (base, Some(fragment)),
+        None => (target, None),
+    };
+    let separator = if base.contains('?') { '&' } else { '?' };
+    let mut location = format!("{base}{separator}login=failed");
+    if let Some(fragment) = fragment {
+        location.push('#');
+        location.push_str(fragment);
+    }
+    Redirect::to(&location).into_response()
+}
+
 /// Deliberately carries NO `Origin`/`Referer` check, unlike `login` and
 /// `logout` in this same module (2026-09-25 Low-severity auth-core
 /// review). The whole point of this route is that the browser arrives
@@ -224,7 +242,9 @@ async fn callback(
 ) -> Response {
     if let Some(error) = params.error {
         tracing::warn!(oidc_error = %error, "SSO server returned an error to the callback");
-        return (StatusCode::BAD_GATEWAY, "login was not completed").into_response();
+        // A redirect, not a 5xx: an unauthenticated visitor can supply any
+        // `error` here, and must not be able to mint origin 5xx responses.
+        return login_failed_redirect(&app.config.sso_post_login_redirect_url);
     }
     let (Some(code), Some(state)) = (params.code, params.state) else {
         return (StatusCode::BAD_REQUEST, "missing code or state").into_response();
@@ -316,7 +336,11 @@ async fn callback(
         Ok(result) => result,
         Err(err) => {
             tracing::warn!(error = ?err, "OIDC code exchange failed");
-            return (StatusCode::BAD_GATEWAY, "login failed").into_response();
+            let target = post_login_target(
+                stored.return_to.as_deref(),
+                &app.config.sso_post_login_redirect_url,
+            );
+            return login_failed_redirect(&target);
         }
     };
 
@@ -869,6 +893,21 @@ mod tests {
     #[test]
     fn captured_return_to_treats_no_return_to_the_same_as_an_invalid_one() {
         assert_eq!(captured_return_to(None), None);
+    }
+
+    #[test]
+    fn login_failed_redirect_is_a_303_with_the_marker_appended() {
+        let response = login_failed_redirect("https://rail.example.com/");
+        assert_eq!(response.status(), StatusCode::SEE_OTHER);
+        assert_eq!(
+            response.headers()[header::LOCATION],
+            "https://rail.example.com/?login=failed"
+        );
+        let response = login_failed_redirect("/lines/x?tab=history#top");
+        assert_eq!(
+            response.headers()[header::LOCATION],
+            "/lines/x?tab=history&login=failed#top"
+        );
     }
 
     #[test]
