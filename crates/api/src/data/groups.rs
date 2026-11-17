@@ -348,18 +348,78 @@ pub async fn rename_group(
 /// else needs deleting here -- same "the FK graph does the cleanup" shape
 /// as `train_tracking::delete_tracked_train`.
 ///
-/// Only the group's `owner` (`actor_user_id`, checked in the `DELETE`
-/// itself) may delete it: `false` otherwise.
-pub async fn delete_group(pool: &PgPool, group_id: &str, actor_user_id: &str) -> Result<bool> {
+/// Only the group's `owner` (`actor_user_id`, checked in the same
+/// transaction, and again in the `DELETE` itself) may delete it:
+/// [`DeleteGroupOutcome::NotFound`] otherwise.
+///
+/// `expected_member_count` is what the caller was shown (DS-534). When
+/// given, the group's current member count (the owner included) is read
+/// under the same `groups`-row lock as the delete, and a different number
+/// refuses with [`DeleteGroupOutcome::Changed`], writing nothing: someone
+/// joined or left after the caller opened the page. A join inserts a
+/// `group_members` row, whose foreign key takes a share lock on the group
+/// row, so it cannot slip in between the count and the delete. `None`
+/// deletes unconditionally.
+pub async fn delete_group(
+    pool: &PgPool,
+    group_id: &str,
+    actor_user_id: &str,
+    expected_member_count: Option<i64>,
+) -> Result<DeleteGroupOutcome> {
+    let mut tx = pool.begin().await?;
+    let locked: Option<String> =
+        sqlx::query_scalar("SELECT id FROM groups WHERE id = $1 FOR UPDATE")
+            .bind(group_id)
+            .fetch_optional(&mut *tx)
+            .await?;
+    if locked.is_none() {
+        return Ok(DeleteGroupOutcome::NotFound);
+    }
+    let is_owner: bool = sqlx::query_scalar(&format!("SELECT {}", predicate(OWNER_OF, "$1", "$2")))
+        .bind(group_id)
+        .bind(actor_user_id)
+        .fetch_one(&mut *tx)
+        .await?;
+    if !is_owner {
+        return Ok(DeleteGroupOutcome::NotFound);
+    }
+    if let Some(expected) = expected_member_count {
+        let member_count: i64 =
+            sqlx::query_scalar("SELECT COUNT(*) FROM group_members WHERE group_id = $1")
+                .bind(group_id)
+                .fetch_one(&mut *tx)
+                .await?;
+        if member_count != expected {
+            return Ok(DeleteGroupOutcome::Changed { member_count });
+        }
+    }
     let result = sqlx::query(&format!(
         "DELETE FROM groups WHERE id = $1 AND {}",
         predicate(OWNER_OF, "$1", "$2")
     ))
     .bind(group_id)
     .bind(actor_user_id)
-    .execute(pool)
+    .execute(&mut *tx)
     .await?;
-    Ok(result.rows_affected() > 0)
+    tx.commit().await?;
+    Ok(if result.rows_affected() > 0 {
+        DeleteGroupOutcome::Deleted
+    } else {
+        DeleteGroupOutcome::NotFound
+    })
+}
+
+/// What [`delete_group`] did.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DeleteGroupOutcome {
+    /// The group was deleted.
+    Deleted,
+    /// No such group, or the caller is not its owner. Nothing was written.
+    NotFound,
+    /// The caller said how many members the group had, and it has a
+    /// different number now. Nothing was written; `member_count` is the
+    /// current count.
+    Changed { member_count: i64 },
 }
 
 /// Deliberately no `email` field, and the query below deliberately does
@@ -3628,10 +3688,10 @@ mod db_tests {
         .expect("create group_invite_links");
 
         // Delete the group
-        let deleted = delete_group(&pool, &group_id, "TEST-GROUPS-DELETE-OWNER")
+        let deleted = delete_group(&pool, &group_id, "TEST-GROUPS-DELETE-OWNER", None)
             .await
             .expect("delete group");
-        assert!(deleted);
+        assert_eq!(deleted, DeleteGroupOutcome::Deleted);
 
         // Assert group_members cascaded
         let role = get_member_role(&pool, &group_id, "TEST-GROUPS-DELETE-OWNER")
@@ -6900,10 +6960,11 @@ mod db_tests {
             .await
             .expect("grant");
 
-        assert!(
-            delete_group(&pool, &group_id, "TEST-GRANT-GDEL-OWNER")
+        assert_eq!(
+            delete_group(&pool, &group_id, "TEST-GRANT-GDEL-OWNER", None)
                 .await
-                .expect("delete group")
+                .expect("delete group"),
+            DeleteGroupOutcome::Deleted
         );
         let grants: (i64,) =
             sqlx::query_as("SELECT COUNT(*) FROM custom_line_group_grants WHERE group_id = $1")
@@ -7100,7 +7161,17 @@ mod db_tests {
                 .await
                 .unwrap()
         );
-        assert!(!delete_group(&pool, &group_id, admin).await.unwrap());
+        assert_eq!(
+            delete_group(&pool, &group_id, admin, None).await.unwrap(),
+            DeleteGroupOutcome::NotFound
+        );
+        // A non-owner learns nothing about the member count either.
+        assert_eq!(
+            delete_group(&pool, &group_id, admin, Some(99))
+                .await
+                .unwrap(),
+            DeleteGroupOutcome::NotFound
+        );
         assert!(
             !promote_to_admin(&pool, &group_id, admin, member)
                 .await
@@ -7122,7 +7193,24 @@ mod db_tests {
                 .await
                 .unwrap()
         );
-        assert!(delete_group(&pool, &group_id, owner).await.unwrap());
+        // The owner, an admin and a member: a stale count refuses and
+        // names the current one, the right count deletes.
+        assert_eq!(
+            delete_group(&pool, &group_id, owner, Some(1))
+                .await
+                .unwrap(),
+            DeleteGroupOutcome::Changed { member_count: 3 }
+        );
+        assert_eq!(
+            delete_group(&pool, &group_id, owner, Some(3))
+                .await
+                .unwrap(),
+            DeleteGroupOutcome::Deleted
+        );
+        assert_eq!(
+            delete_group(&pool, &group_id, owner, None).await.unwrap(),
+            DeleteGroupOutcome::NotFound
+        );
 
         cleanup(&pool, &[owner, admin, member]).await;
     }

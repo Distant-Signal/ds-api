@@ -354,20 +354,80 @@ async fn rename_group(
     Ok(Json(GroupIdentityResponse { id: group_id, name }))
 }
 
+/// The optional query of `DELETE /groups/{id}`.
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct DeleteGroupQuery {
+    /// How many members (the owner included) the caller was shown. When
+    /// present and different from the current count, the delete is refused
+    /// with `409` `group_changed` (DS-534). Absent: unconditional.
+    expected_member_count: Option<i64>,
+}
+
+/// The error code of the `409` a delete with a stale `expectedMemberCount`
+/// gets. Stable: clients match on `error`, never on `message`.
+const GROUP_CHANGED: &str = "group_changed";
+
+/// [`delete_group`]'s error: the usual plain-text `(status, message)`, or
+/// the JSON `409` for a group whose membership changed.
+enum DeleteError {
+    Plain(StatusCode, String),
+    GroupChanged { member_count: i64 },
+}
+
+impl From<(StatusCode, String)> for DeleteError {
+    fn from((status, message): (StatusCode, String)) -> Self {
+        DeleteError::Plain(status, message)
+    }
+}
+
+impl IntoResponse for DeleteError {
+    fn into_response(self) -> axum::response::Response {
+        match self {
+            DeleteError::Plain(status, message) => (status, message).into_response(),
+            DeleteError::GroupChanged { member_count } => (
+                StatusCode::CONFLICT,
+                Json(serde_json::json!({
+                    "error": GROUP_CHANGED,
+                    "message": "This group has changed since you opened it. Check who is in it before deleting.",
+                    "memberCount": member_count,
+                })),
+            )
+                .into_response(),
+        }
+    }
+}
+
+/// `DELETE /groups/{id}` -- owner only. `?expectedMemberCount=N` is what the
+/// caller was shown: if the group's member count is no longer `N` (counted
+/// under the same lock as the delete), nothing is deleted and the answer is
+/// `409` `group_changed` with the current `memberCount` (DS-534). Without it
+/// the delete is unconditional, as before. A retried delete is `404`.
 async fn delete_group(
     State(app): State<App>,
     user: AuthenticatedUser,
     Path(group_id): Path<String>,
-) -> Result<StatusCode, (StatusCode, String)> {
+    axum::extract::Query(query): axum::extract::Query<DeleteGroupQuery>,
+) -> Result<StatusCode, DeleteError> {
     require_role(&app, &group_id, &user.id, GroupRole::is_owner).await?;
 
-    let deleted = groups::delete_group(&app.database, &group_id, &user.id)
-        .await
-        .map_err(internal_error("delete group"))?;
-    if !deleted {
-        return Err((StatusCode::NOT_FOUND, "no group with that id".to_string()));
+    let outcome = groups::delete_group(
+        &app.database,
+        &group_id,
+        &user.id,
+        query.expected_member_count,
+    )
+    .await
+    .map_err(internal_error("delete group"))?;
+    match outcome {
+        groups::DeleteGroupOutcome::Deleted => Ok(StatusCode::NO_CONTENT),
+        groups::DeleteGroupOutcome::NotFound => {
+            Err((StatusCode::NOT_FOUND, "no group with that id".to_string()).into())
+        }
+        groups::DeleteGroupOutcome::Changed { member_count } => {
+            Err(DeleteError::GroupChanged { member_count })
+        }
     }
-    Ok(StatusCode::NO_CONTENT)
 }
 
 async fn list_members(
@@ -1771,6 +1831,124 @@ mod db_tests {
         assert_eq!(role, None);
 
         cleanup(&pool, &group_id, &["TEST-ROUTE-GROUPS-LEAVE-SOLE"]).await;
+    }
+
+    #[tokio::test]
+    #[ignore = "requires a live database; see the plan's Global Constraints for the \
+                DATABASE_URL incantation, then run with `cargo test -p api \
+                delete_group_expected_member_count_guards_a_changed_group -- --ignored --test-threads=1`"]
+    async fn delete_group_expected_member_count_guards_a_changed_group() {
+        let pool = connect().await;
+        let owner = "TEST-ROUTE-GROUPS-DELCOUNT-OWNER";
+        let joiner = "TEST-ROUTE-GROUPS-DELCOUNT-JOINER";
+        let owner_token = seed_session(&pool, owner).await;
+        let joiner_token = seed_session(&pool, joiner).await;
+        let group_id = crate::data::groups::create_group(&pool, "Route Test Delete Count", owner)
+            .await
+            .expect("create fixture group");
+
+        // A member who joined after the owner opened the page: the count
+        // the owner saw (1) is stale, the current one (2) includes them.
+        seed_membership(&pool, &group_id, joiner, "member").await;
+        let router = test_router(test_app(pool.clone()));
+        let (status, body) = delete_request(
+            router,
+            format!("/groups/{group_id}?expectedMemberCount=1"),
+            Some(&owner_token),
+        )
+        .await;
+        assert_eq!(status, StatusCode::CONFLICT);
+        assert_eq!(body["error"], "group_changed");
+        assert_eq!(body["memberCount"], 2);
+        assert!(body["message"].as_str().is_some_and(|m| !m.is_empty()));
+        // Nothing was written: the group and both members survive.
+        let role = crate::data::groups::get_member_role(&pool, &group_id, joiner)
+            .await
+            .expect("read member role");
+        assert_eq!(role, Some(crate::data::groups::GroupRole::Member));
+        let role = crate::data::groups::get_member_role(&pool, &group_id, owner)
+            .await
+            .expect("read owner role");
+        assert_eq!(role, Some(crate::data::groups::GroupRole::Owner));
+
+        // A non-owner is refused as before, whatever the count.
+        let router = test_router(test_app(pool.clone()));
+        let (status, _) = delete_request(
+            router,
+            format!("/groups/{group_id}?expectedMemberCount=2"),
+            Some(&joiner_token),
+        )
+        .await;
+        assert_eq!(status, StatusCode::FORBIDDEN);
+
+        // A malformed count is a 400, not a delete.
+        let router = test_router(test_app(pool.clone()));
+        let (status, _) = delete_request(
+            router,
+            format!("/groups/{group_id}?expectedMemberCount=many"),
+            Some(&owner_token),
+        )
+        .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+
+        // The count shown, owner included, deletes.
+        let router = test_router(test_app(pool.clone()));
+        let (status, _) = delete_request(
+            router,
+            format!("/groups/{group_id}?expectedMemberCount=2"),
+            Some(&owner_token),
+        )
+        .await;
+        assert_eq!(status, StatusCode::NO_CONTENT);
+        let role = crate::data::groups::get_member_role(&pool, &group_id, owner)
+            .await
+            .expect("read owner role");
+        assert_eq!(role, None);
+
+        // A retried deletion is a 404, with or without the count.
+        let router = test_router(test_app(pool.clone()));
+        let (status, _) = delete_request(
+            router,
+            format!("/groups/{group_id}?expectedMemberCount=2"),
+            Some(&owner_token),
+        )
+        .await;
+        assert_eq!(status, StatusCode::NOT_FOUND);
+
+        cleanup(&pool, &group_id, &[owner, joiner]).await;
+    }
+
+    #[tokio::test]
+    #[ignore = "requires a live database; see the plan's Global Constraints for the \
+                DATABASE_URL incantation, then run with `cargo test -p api \
+                delete_group_without_an_expected_member_count_deletes_as_before -- --ignored --test-threads=1`"]
+    async fn delete_group_without_an_expected_member_count_deletes_as_before() {
+        let pool = connect().await;
+        let owner = "TEST-ROUTE-GROUPS-DELNOCOUNT-OWNER";
+        let member = "TEST-ROUTE-GROUPS-DELNOCOUNT-MEMBER";
+        let owner_token = seed_session(&pool, owner).await;
+        seed_session(&pool, member).await;
+        let group_id =
+            crate::data::groups::create_group(&pool, "Route Test Delete No Count", owner)
+                .await
+                .expect("create fixture group");
+        seed_membership(&pool, &group_id, member, "member").await;
+
+        let router = test_router(test_app(pool.clone()));
+        let (status, _) =
+            delete_request(router, format!("/groups/{group_id}"), Some(&owner_token)).await;
+        assert_eq!(status, StatusCode::NO_CONTENT);
+        let role = crate::data::groups::get_member_role(&pool, &group_id, member)
+            .await
+            .expect("read member role");
+        assert_eq!(role, None);
+
+        let router = test_router(test_app(pool.clone()));
+        let (status, _) =
+            delete_request(router, format!("/groups/{group_id}"), Some(&owner_token)).await;
+        assert_eq!(status, StatusCode::NOT_FOUND);
+
+        cleanup(&pool, &group_id, &[owner, member]).await;
     }
 
     #[tokio::test]
