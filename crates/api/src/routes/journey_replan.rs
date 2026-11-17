@@ -917,10 +917,10 @@ async fn detail_extras_inner(
                         &timings.timings,
                     ),
                 };
-                let (row, _) =
-                    journey_breaks::upsert_open(pool, journey_id, user_id, &detected, false)
-                        .await?;
-                open = Some(row);
+                // `None`: the traveller dismissed this one; no banner.
+                open = journey_breaks::upsert_open(pool, journey_id, user_id, &detected, false)
+                    .await?
+                    .map(|(row, _)| row);
             }
             None => {
                 if let Some(row) = open.take() {

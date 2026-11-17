@@ -166,13 +166,19 @@ pub enum Upserted {
 /// ever rises; with `confirm` (the sweep, not a page read),
 /// `confirmations` counts consecutive detections with the same fingerprint
 /// (§11: two sweeps before a push, unless cancelled).
+///
+/// `None` when no break is open and the journey's latest break was
+/// dismissed for the same cause on the same leg ([`dismissed_alike`]): the
+/// traveller already said no to it, so it is not opened again (and never
+/// pushed again) while the same thing stays wrong. A different cause or
+/// leg opens a new one.
 pub async fn upsert_open(
     pool: &PgPool,
     journey_id: i64,
     user_id: &str,
     detected: &Detected,
     confirm: bool,
-) -> anyhow::Result<(BreakRow, Upserted)> {
+) -> anyhow::Result<Option<(BreakRow, Upserted)>> {
     let mut tx = pool.begin().await?;
     let existing: Option<BreakRow> = sqlx::query_as(&format!(
         "SELECT {BREAK_COLUMNS} FROM journey_breaks WHERE journey_id = $1 AND status = 'open' \
@@ -181,6 +187,20 @@ pub async fn upsert_open(
     .bind(journey_id)
     .fetch_optional(&mut *tx)
     .await?;
+    if existing.is_none() {
+        let latest: Option<(String, String, Option<i64>)> = sqlx::query_as(
+            "SELECT status, cause, trigger_leg_id FROM journey_breaks WHERE journey_id = $1 \
+             ORDER BY id DESC LIMIT 1",
+        )
+        .bind(journey_id)
+        .fetch_optional(&mut *tx)
+        .await?;
+        if latest.is_some_and(|(status, cause, trigger_leg_id)| {
+            dismissed_alike(&status, &cause, trigger_leg_id, detected)
+        }) {
+            return Ok(None);
+        }
+    }
     let outcome = match &existing {
         None => Upserted::New,
         Some(row) if row.fingerprint == detected.fingerprint => Upserted::Same,
@@ -241,7 +261,22 @@ pub async fn upsert_open(
         )
         .increment(1);
     }
-    Ok((row, outcome))
+    Ok(Some((row, outcome)))
+}
+
+/// Whether a journey's latest break (`status`, `cause`, `trigger_leg_id`)
+/// is one the traveller dismissed for what `detected` found again: the
+/// same cause on the same leg. Its live times may have moved since (the
+/// fingerprint follows them), but it is still what they said no to.
+fn dismissed_alike(
+    status: &str,
+    cause: &str,
+    trigger_leg_id: Option<i64>,
+    detected: &Detected,
+) -> bool {
+    status == "dismissed"
+        && cause == detected.cause.as_str()
+        && trigger_leg_id == detected.trigger_leg_id
 }
 
 /// Stores freshly planned suggestions on an open break, and raises its
@@ -703,6 +738,49 @@ mod tests {
         assert_eq!(fingerprint(Cause::ConnectionMissed, 1, &later_first), base);
         assert_ne!(fingerprint(Cause::ConnectionMissed, 1, &later_second), base);
         assert_ne!(fingerprint(Cause::Cancelled, 1, &before), base);
+    }
+
+    #[test]
+    fn only_a_dismissal_of_the_same_cause_on_the_same_leg_holds_a_break_back() {
+        let detected = Detected {
+            cause: Cause::Cancelled,
+            fault: "operator",
+            severity: 3,
+            trigger_leg_id: Some(7),
+            trigger_trains_id: Some(70),
+            break_position: 1,
+            fingerprint: "f".to_string(),
+        };
+        assert!(dismissed_alike(
+            "dismissed",
+            "cancelled",
+            Some(7),
+            &detected
+        ));
+        assert!(!dismissed_alike(
+            "recovered",
+            "cancelled",
+            Some(7),
+            &detected
+        ));
+        assert!(!dismissed_alike(
+            "accepted",
+            "cancelled",
+            Some(7),
+            &detected
+        ));
+        assert!(!dismissed_alike(
+            "dismissed",
+            "connection_missed",
+            Some(7),
+            &detected
+        ));
+        assert!(!dismissed_alike(
+            "dismissed",
+            "cancelled",
+            Some(8),
+            &detected
+        ));
     }
 
     #[test]

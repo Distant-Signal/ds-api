@@ -38,6 +38,14 @@ last service date).
 
 Either stops the push only; the train's own push then goes out as before.
 
+A dismissed break stays dismissed: while it is the journey's latest
+break, neither a page read nor the sweep opens a new one for the same cause
+on the same leg (so it is never pushed twice), even if that leg recovers in
+between and then goes wrong the same way again. The fingerprint is not
+compared: it follows the live times, which move every few minutes. A
+different cause or a different leg opens a new break, and once that one
+exists the dismissal no longer holds anything back.
+
 ## Metrics
 
 | Metric | Labels |

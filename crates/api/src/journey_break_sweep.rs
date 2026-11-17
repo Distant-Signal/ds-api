@@ -191,7 +191,6 @@ async fn sweep_journey(
         }
         return Ok(());
     };
-    swept.breaks += 1;
     let detected = Detected {
         cause: found.cause,
         fault: "operator",
@@ -201,8 +200,13 @@ async fn sweep_journey(
         break_position: i32::try_from(found.index + 1)?,
         fingerprint: journey_breaks::fingerprint(found.cause, found.index, &timings.timings),
     };
-    let (row, upserted) =
-        journey_breaks::upsert_open(&app.database, journey_id, user_id, &detected, true).await?;
+    let Some((row, upserted)) =
+        journey_breaks::upsert_open(&app.database, journey_id, user_id, &detected, true).await?
+    else {
+        // The traveller dismissed this one: it stays dismissed.
+        return Ok(());
+    };
+    swept.breaks += 1;
     let stale = row
         .suggestions
         .clone()

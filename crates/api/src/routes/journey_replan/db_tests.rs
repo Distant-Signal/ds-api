@@ -1514,3 +1514,48 @@ async fn a_late_train_re_times_a_timetabled_leg_and_judges_the_next_change_from_
     assert_eq!(detail["legs"][2]["connection"]["gapMinutes"], 5, "{detail}");
     transit_cleanup(&pool, NETWORK).await;
 }
+
+/// A dismissed break stays dismissed (review J1): neither the next page
+/// read nor the sweep opens the same cancellation again, so the banner and
+/// the push never come back for it.
+#[tokio::test]
+#[ignore = "requires a live database: DATABASE_URL"]
+async fn a_dismissed_break_is_not_opened_again_for_the_same_cause() {
+    use chrono::TimeZone;
+    let _now = pin_now();
+    let pool = connect().await;
+    let _cleanup = cleanup(&pool).await;
+    seed_timetable(&pool).await;
+    let token = seed_session(&pool, USER).await;
+    let router = router(pool.clone());
+    let (journey_id, _) = create_journey(&router, &token).await;
+    seed_live(&pool, "RP0001", "cancelled", 0, "2099-05-05T07:00:00Z").await;
+    let journey = format!("/Journeys/{journey_id}");
+
+    let (_, detail) = call(&router, "GET", &journey, Some(&token), None, None).await;
+    let break_id = detail["openBreak"]["id"].as_i64().expect("open break");
+    let (status, body) = call(
+        &router,
+        "POST",
+        &format!("/Journeys/{journey_id}/breaks/{break_id}/dismiss"),
+        Some(&token),
+        Some(serde_json::json!({ "reason": "notTravelling" })),
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::NO_CONTENT, "{body}");
+
+    let (_, detail) = call(&router, "GET", &journey, Some(&token), None, None).await;
+    assert!(detail["openBreak"].is_null(), "{detail}");
+    let app = crate::test_support::inert_app(pool.clone());
+    let now = chrono::Utc.with_ymd_and_hms(2099, 5, 5, 8, 30, 0).unwrap();
+    for _ in 0..2 {
+        let swept = crate::journey_break_sweep::run_sweep(&app, now)
+            .await
+            .expect("sweep");
+        assert_eq!(swept.breaks, 0, "{swept:?}");
+    }
+    assert_eq!(break_count(&pool, journey_id).await, 1);
+    let (_, detail) = call(&router, "GET", &journey, Some(&token), None, None).await;
+    assert!(detail["openBreak"].is_null(), "{detail}");
+}
