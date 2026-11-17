@@ -560,10 +560,11 @@ async fn run_scan_cycle(
 
     let just_stabilized = tracker.observe(&snapshot, lane.stability_cycles);
     known_stable.extend(just_stabilized);
-    // Anything that vanished from the directory since the last snapshot is
-    // no longer "known stable" -- mirrors `StabilityTracker::observe`'s own
-    // drop-and-restart-from-zero behavior for the same filenames.
-    known_stable.retain(|name| snapshot.0.contains_key(name));
+    // Anything that vanished from the directory since the last snapshot, or
+    // whose `(mtime, len)` changed (a new upload over the same name: the
+    // zip is overwritten in place), is no longer "known stable" until the
+    // tracker has seen its new state for `stability_cycles` polls again.
+    known_stable.retain(|name| tracker.is_stable(name, lane.stability_cycles));
 
     let mut candidates = delivery::find_zip_candidates(&snapshot, routing);
     if candidates.len() > 1 {
@@ -700,9 +701,33 @@ async fn run_scan_cycle(
 
     let dir_name = delivery::delivery_dir_name(zip_mtime);
 
-    // Provenance: the zip's SHA-256 as read now. A size different from the
-    // stable snapshot's means a new upload has started; wait for it.
-    let delivered = match audit::DeliveredFile::hash_file(&zip_filename, &zip_path) {
+    // Provenance: the zip's SHA-256 as read now, through the one handle it
+    // is extracted from below, so a newer version renamed over the name
+    // meanwhile (the bucket lane's hand-off) is never extracted under this
+    // one's hash and ledger entry. The handle must be the snapshot's
+    // version (same mtime and size); a size different from the stable
+    // snapshot's after hashing means a new upload has started; wait for it.
+    let opened = std::fs::File::open(&zip_path).and_then(|file| {
+        let metadata = file.metadata()?;
+        Ok((file, metadata.modified()?, metadata.len()))
+    });
+    let zip_file = match opened {
+        Ok((file, mtime, len))
+            if mtime == zip_mtime
+                && snapshot.0.get(&zip_filename).map(|&(_, l)| l) == Some(len) =>
+        {
+            file
+        }
+        Ok(_) => {
+            tracing::info!(zip = %zip_filename, "zip delivery changed since the directory was scanned (a new upload?); retrying next cycle");
+            return Ok(());
+        }
+        Err(err) => {
+            tracing::error!(error = %err, zip = %zip_filename, "failed to read the zip delivery to hash it; retrying next cycle");
+            return Ok(());
+        }
+    };
+    let delivered = match audit::DeliveredFile::hash_reader(&zip_filename, &zip_file) {
         Ok(delivered) => delivered,
         Err(err) => {
             tracing::error!(error = %err, zip = %zip_filename, "failed to read the zip delivery to hash it; retrying next cycle");
@@ -780,7 +805,8 @@ async fn run_scan_cycle(
         );
         cif_check::write_stats(extracted, &stats)
     };
-    let extracted = match delivery::ensure_extracted(
+    let extracted = match delivery::ensure_extracted_from(
+        &zip_file,
         &zip_path,
         &config.storage_dir,
         &dir_name,
@@ -1924,6 +1950,68 @@ mod tests {
 
         after.final_check_cycle().await;
         assert_eq!(after.last_ingested_mtime, Some(new_mtime));
+        assert_eq!(ingest_posts(&server), 2);
+    }
+
+    /// B1: the same process sees a second delivery uploaded over the first
+    /// zip's name. While the new upload is still growing it must not be
+    /// hashed or extracted (the name was "known stable" from the first
+    /// delivery); once its `(mtime, len)` has been stable for
+    /// `stability_cycles` polls it is ingested.
+    #[tokio::test]
+    async fn a_zip_rewritten_in_place_waits_to_be_stable_again() {
+        let server = accepting_sink();
+        let watch_dir = tempfile::tempdir().unwrap();
+        let storage_dir = tempfile::tempdir().unwrap();
+        let zip_path = watch_dir.path().join("timetable_full.zip");
+        let set_mtime = |at: SystemTime| {
+            std::fs::File::options()
+                .write(true)
+                .open(&zip_path)
+                .unwrap()
+                .set_modified(at)
+                .unwrap();
+        };
+        let yesterday = SystemTime::now() - Duration::from_secs(86_400);
+        std::fs::write(&zip_path, real_zip()).unwrap();
+        set_mtime(yesterday);
+
+        let mut process = Process::start(watch_dir.path(), storage_dir.path(), &server);
+        for _ in 0..2 {
+            process.final_check_cycle().await;
+        }
+        assert_eq!(process.last_ingested_mtime, Some(yesterday));
+        assert_eq!(ingest_posts(&server), 1);
+
+        // Today's upload starts over the same name: a growing, partial zip.
+        let full = real_zip();
+        let today_at = SystemTime::now() - Duration::from_secs(60);
+        for (step, len) in [full.len() / 3, 2 * full.len() / 3].into_iter().enumerate() {
+            std::fs::write(&zip_path, &full[..len]).unwrap();
+            set_mtime(today_at + Duration::from_secs(step as u64));
+            let lines = process.final_check_cycle().await;
+            let errors = errors(&lines);
+            assert_eq!(errors.len(), 1, "{lines:?}");
+            assert!(
+                errors[0]["message"]
+                    .as_str()
+                    .unwrap()
+                    .contains("still not stable"),
+                "a partial upload must wait, not be read: {errors:?}"
+            );
+            assert_eq!(process.last_ingested_mtime, Some(yesterday));
+            assert_eq!(process.rejected_mtime, None);
+        }
+
+        // The upload finishes; after `stability_cycles` polls it is taken.
+        std::fs::write(&zip_path, &full).unwrap();
+        let finished = today_at + Duration::from_secs(10);
+        set_mtime(finished);
+        process.final_check_cycle().await;
+        assert_eq!(process.last_ingested_mtime, Some(yesterday));
+        assert_eq!(ingest_posts(&server), 1);
+        process.final_check_cycle().await;
+        assert_eq!(process.last_ingested_mtime, Some(finished));
         assert_eq!(ingest_posts(&server), 2);
     }
 

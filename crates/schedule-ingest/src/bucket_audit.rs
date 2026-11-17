@@ -23,12 +23,20 @@
 //! file again; `insert_id` tells the copies apart). A first start ships the
 //! last [`LOOKBACK_DAYS`] days.
 //!
+//! A file that fails (a download error, a CRC32C mismatch) never holds up
+//! the newer ones: the poll carries on with the rest and backs off after.
+//! A failure counts against the file when it is a verification failure,
+//! or when another file of the same poll shipped (so it is that file's
+//! problem, not the bucket's); after [`MAX_FILE_FAILURES`] of them the file
+//! is given up on: recorded as shipped, logged at ERROR and counted as
+//! `schedule_feed_bucket_audit_errors_total{kind="abandoned"}`.
+//!
 //! The same reader credential as the bucket source (`roles/storage.objectViewer`
 //! on the audit-log bucket). Nothing here touches the delivery bucket, its
 //! metrics or the SFTP lane; a refused or failing call is logged once per
 //! state change and backs off up to `BUCKET_MAX_BACKOFF_SECS`.
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeSet, HashMap};
 use std::io::Write as _;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
@@ -50,6 +58,8 @@ pub(crate) const LOOKBACK_DAYS: i64 = 2;
 pub(crate) const MAX_FILE_BYTES: u64 = 64 << 20;
 /// Files shipped per poll; the rest on the next.
 const MAX_FILES_PER_POLL: usize = 200;
+/// Failures counted against one file before it is given up on.
+pub(crate) const MAX_FILE_FAILURES: u32 = 5;
 /// Longest object or resource name shown in a line (the publisher controls
 /// object names).
 const MAX_SHOWN: usize = 1024;
@@ -57,7 +67,8 @@ const MAX_SHOWN: usize = 1024;
 pub(crate) const LINES_METRIC: &str = "schedule_feed_bucket_audit_lines_total";
 pub(crate) const ERRORS_METRIC: &str = "schedule_feed_bucket_audit_errors_total";
 /// `kind` of [`ERRORS_METRIC`].
-pub(crate) const ERROR_KINDS: [&str; 5] = ["auth", "list", "get", "verify", "parse"];
+/// `abandoned`: a file given up on after [`MAX_FILE_FAILURES`] failures.
+pub(crate) const ERROR_KINDS: [&str; 6] = ["auth", "list", "get", "verify", "parse", "abandoned"];
 
 /// The shipper's settings (from `config::BucketArgs`).
 #[derive(Debug, Clone)]
@@ -73,6 +84,9 @@ pub(crate) struct AuditShipper {
     state: PathBuf,
     /// Files shipped within the lookback.
     shipped: BTreeSet<String>,
+    /// Failures counted against each file not yet shipped (in memory: a
+    /// restart gives every file its full count again).
+    file_failures: HashMap<String, u32>,
     failures: u32,
     /// The last poll failed (logged once per change).
     failing: bool,
@@ -237,6 +251,7 @@ impl AuditShipper {
             settings,
             state,
             shipped,
+            file_failures: HashMap::new(),
             failures: 0,
             failing: false,
             clock,
@@ -329,24 +344,61 @@ impl AuditShipper {
         // Oldest first (by the hour in the name, then the shard), whatever
         // the log.
         pending.sort_by(|a, b| (when(&a.1.name), &a.1.name).cmp(&(when(&b.1.name), &b.1.name)));
+        // One bad file must not hold up the newer ones: carry on past a
+        // failure (but not a refusal, which stops the poll), report the
+        // first, and count each against its file.
         let mut result = Ok(());
+        let mut any_shipped = false;
+        let mut failed: Vec<(String, &'static str)> = Vec::new();
         for (log, object) in pending.into_iter().take(MAX_FILES_PER_POLL) {
-            if let Err(err) = self.ship_file(&log, &object).await {
-                result = Err(err);
-                break;
+            match self.ship_file(&log, &object).await {
+                Ok(()) => any_shipped = true,
+                Err(err @ PollError::Revoked(_)) => {
+                    result = Err(err);
+                    break;
+                }
+                Err(PollError::Failed(kind, why)) => {
+                    failed.push((object.name.clone(), kind));
+                    if result.is_ok() {
+                        result = Err(PollError::Failed(kind, why));
+                    }
+                }
+            }
+        }
+        for (name, kind) in failed {
+            if kind == "verify" || any_shipped {
+                self.count_file_failure(&name, kind);
             }
         }
         // Forget names older than every log's lookback.
-        let before = self.shipped.len();
-        self.shipped.retain(|name| {
+        let in_lookback = |name: &String| {
             starts
                 .iter()
                 .any(|(prefix, start)| name.starts_with(prefix.as_str()) && name >= start)
-        });
+        };
+        let before = self.shipped.len();
+        self.shipped.retain(in_lookback);
         if self.shipped.len() != before {
             self.persist();
         }
+        self.file_failures
+            .retain(|name, _| in_lookback(name) && !self.shipped.contains(name));
         result
+    }
+
+    /// Counts a failure against `name`; past [`MAX_FILE_FAILURES`] the
+    /// file is given up on (recorded as shipped, so it is never fetched
+    /// again).
+    fn count_file_failure(&mut self, name: &str, kind: &'static str) {
+        let failures = self.file_failures.entry(name.to_string()).or_insert(0);
+        *failures += 1;
+        if *failures < MAX_FILE_FAILURES {
+            return;
+        }
+        self.file_failures.remove(name);
+        count_error("abandoned");
+        tracing::error!(file = %shown(name), failures = MAX_FILE_FAILURES, last_error = kind, "giving up on an audit-log file that keeps failing; its entries are not shipped");
+        self.mark_shipped(name);
     }
 
     /// Downloads one audit file and ships its entries.
@@ -512,6 +564,8 @@ mod tests {
         refuse: Arc<Mutex<bool>>,
         /// Flip the first byte of this object's downloads (a CRC mismatch).
         corrupt: Arc<Mutex<Option<String>>>,
+        /// Answer every download with 404 (listings still work).
+        fail_gets: Arc<Mutex<bool>>,
     }
 
     impl FakeAuditBucket {
@@ -560,6 +614,9 @@ mod tests {
                 }
                 return ResponseTemplate::new(200)
                     .set_body_json(serde_json::json!({ "items": items, "prefixes": prefixes }));
+            }
+            if *self.fail_gets.lock().unwrap() {
+                return ResponseTemplate::new(404);
             }
             let encoded = path.trim_start_matches(&format!("{list}/"));
             let name = encoded.replace("%2F", "/").replace("%3A", ":");
@@ -805,6 +862,93 @@ mod tests {
         let (delay, lines) = f.poll(&mut shipper).await;
         assert_eq!(delay, Duration::from_secs(600));
         assert_eq!(lines.len(), 1);
+    }
+
+    /// B4: a file that always fails verification holds up none of the newer
+    /// ones, and is given up on (and counted) after `MAX_FILE_FAILURES`.
+    #[tokio::test]
+    async fn a_bad_file_never_blocks_newer_ones_and_is_given_up_on() {
+        let f = Fixture::new().await;
+        let bad = data_access("2026/10/21", "09", 0);
+        f.bucket.put(&bad, &get("2026-10-21T09:10:00Z"));
+        f.bucket.put(
+            &data_access("2026/10/21", "10", 0),
+            &get("2026-10-21T10:10:00Z"),
+        );
+        *f.bucket.corrupt.lock().unwrap() = Some(bad.clone());
+        let mut shipper = f.shipper();
+
+        let (delay, lines) = f.poll(&mut shipper).await;
+        assert_eq!(delay, Duration::from_secs(1200), "still backs off");
+        assert_eq!(lines.len(), 1, "the newer file is shipped: {lines:?}");
+        assert_eq!(lines[0]["time"], "2026-10-21T10:10:00Z");
+
+        f.bucket.put(
+            &data_access("2026/10/21", "11", 0),
+            &get("2026-10-21T11:10:00Z"),
+        );
+        let (_, lines) = f.poll(&mut shipper).await;
+        assert_eq!(lines.len(), 1, "{lines:?}");
+        assert_eq!(lines[0]["time"], "2026-10-21T11:10:00Z");
+
+        // Two failures so far; the last one gives up.
+        for _ in 2..MAX_FILE_FAILURES - 1 {
+            let (_, lines) = f.poll(&mut shipper).await;
+            assert!(lines.is_empty(), "{lines:?}");
+        }
+        assert!(!shipper.shipped.contains(&bad));
+        let (guard, logs) = crate::audit::tests::capture_default();
+        let delay = shipper.poll_once().await;
+        drop(guard);
+        let abandoned: Vec<_> = logs
+            .lines()
+            .into_iter()
+            .filter(|l| l["level"] == "ERROR")
+            .collect();
+        assert_eq!(abandoned.len(), 1, "{abandoned:?}");
+        assert!(
+            abandoned[0]["message"]
+                .as_str()
+                .unwrap()
+                .contains("giving up")
+        );
+        assert!(shipper.shipped.contains(&bad), "recorded as done");
+        assert!(shipper.file_failures.is_empty());
+        assert_eq!(delay, Duration::from_secs(3600), "that poll still failed");
+        // The next poll is clean: nothing left to fetch.
+        let gets = f.media_gets().await;
+        let (delay, lines) = f.poll(&mut shipper).await;
+        assert_eq!(delay, Duration::from_secs(600));
+        assert_eq!(lines, [] as [serde_json::Value; 0]);
+        assert_eq!(f.media_gets().await, gets);
+    }
+
+    /// A download failing for every file (the bucket, not a file) counts
+    /// against none of them.
+    #[tokio::test]
+    async fn failures_of_every_file_are_not_held_against_them() {
+        let f = Fixture::new().await;
+        let name = data_access("2026/10/21", "10", 0);
+        f.bucket.put(&name, &get("2026-10-21T10:10:00Z"));
+        f.bucket.put(
+            &data_access("2026/10/21", "11", 0),
+            &get("2026-10-21T11:10:00Z"),
+        );
+        *f.bucket.fail_gets.lock().unwrap() = true;
+        let mut shipper = f.shipper();
+        for _ in 0..=MAX_FILE_FAILURES {
+            let (_, lines) = f.poll(&mut shipper).await;
+            assert!(lines.is_empty(), "{lines:?}");
+        }
+        assert!(
+            shipper.file_failures.is_empty(),
+            "{:?}",
+            shipper.file_failures
+        );
+        assert!(shipper.shipped.is_empty());
+        *f.bucket.fail_gets.lock().unwrap() = false;
+        let (_, lines) = f.poll(&mut shipper).await;
+        assert_eq!(lines.len(), 2, "both shipped once the bucket recovers");
     }
 
     #[test]

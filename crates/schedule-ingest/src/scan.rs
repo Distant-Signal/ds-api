@@ -102,7 +102,7 @@ impl StabilityTracker {
                 std::collections::hash_map::Entry::Occupied(mut occupied) => {
                     let (seen, count) = occupied.get_mut();
                     if *seen == current {
-                        *count += 1;
+                        *count = count.saturating_add(1);
                     } else {
                         *seen = current;
                         *count = 1;
@@ -122,6 +122,17 @@ impl StabilityTracker {
         }
 
         just_reached
+    }
+
+    /// Whether `name`'s current `(mtime, len)` has now been observed for
+    /// at least `required_cycles` consecutive polls. False for a name not
+    /// in the last snapshot, and again from the moment its `(mtime, len)`
+    /// changes (a new upload over the same name), until the new pair has
+    /// been stable as long.
+    pub(crate) fn is_stable(&self, name: &str, required_cycles: u32) -> bool {
+        self.stable_since
+            .get(name)
+            .is_some_and(|&(_, count)| count >= required_cycles)
     }
 }
 
@@ -200,6 +211,35 @@ mod tests {
             tracker.observe(&present, 3),
             vec!["RJTTF942ZTR.txt".to_string()]
         );
+    }
+
+    /// A file rewritten under the same name (the CIF zip is overwritten in
+    /// place by every delivery) is not stable again until its new
+    /// `(mtime, len)` has been seen for `required_cycles` polls.
+    #[test]
+    fn is_stable_drops_a_rewritten_file_until_it_settles_again() {
+        let mut tracker = StabilityTracker::new();
+        let first = snapshot(&[("timetable_full.zip", 100, 1234)]);
+        let uploading = snapshot(&[("timetable_full.zip", 200, 10)]);
+        let grown = snapshot(&[("timetable_full.zip", 201, 2000)]);
+
+        assert!(!tracker.is_stable("timetable_full.zip", 2));
+        tracker.observe(&first, 2);
+        assert!(!tracker.is_stable("timetable_full.zip", 2));
+        tracker.observe(&first, 2);
+        assert!(tracker.is_stable("timetable_full.zip", 2));
+        tracker.observe(&first, 2);
+        assert!(tracker.is_stable("timetable_full.zip", 2));
+
+        tracker.observe(&uploading, 2);
+        assert!(!tracker.is_stable("timetable_full.zip", 2));
+        tracker.observe(&grown, 2);
+        assert!(!tracker.is_stable("timetable_full.zip", 2));
+        tracker.observe(&grown, 2);
+        assert!(tracker.is_stable("timetable_full.zip", 2));
+
+        tracker.observe(&snapshot(&[]), 2);
+        assert!(!tracker.is_stable("timetable_full.zip", 2));
     }
 
     #[test]

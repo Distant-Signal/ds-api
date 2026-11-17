@@ -12,7 +12,7 @@
 //!    ingested, or a new one" by comparing the candidate's own mtime against
 //!    the last one this process successfully ingested, since there is no
 //!    sequence number to compare instead.
-//! 3. [`ensure_extracted`] -- unzipping a stable candidate's contents into
+//! 3. [`ensure_extracted_from`] -- unzipping a stable candidate's contents into
 //!    a timestamp-named storage directory (see [`delivery_dir_name`]), so
 //!    `schedule-reference` keeps reading real flat `RJTTFnnn*.txt` files off
 //!    disk. Since PL-6 this is atomic: the zip is extracted into
@@ -217,7 +217,9 @@ pub(crate) fn is_rejected(err: &anyhow::Error) -> bool {
     err.downcast_ref::<RejectedZip>().is_some() || err.downcast_ref::<RejectedForNow>().is_some()
 }
 
-/// Extracts every regular-file entry of the zip at `zip_path` directly into
+/// Extracts every regular-file entry of the zip open as `file` (`zip_path`
+/// only names it in errors, so every read is of the version that handle
+/// opened) directly into
 /// `dest_dir` (created if needed), streaming each entry straight to disk
 /// (the real `RJTTFnnnMCA.txt` entry is ~700MB uncompressed -- this must
 /// never hold a whole entry in memory). Returns each extracted file's name,
@@ -230,8 +232,9 @@ pub(crate) fn is_rejected(err: &anyhow::Error) -> bool {
 ///
 /// Every file is fsynced, and its extracted size checked against the size
 /// the zip's own central directory records for it, so a short write can
-/// never pass for a complete file. Callers outside tests go through
-/// [`ensure_extracted`], never this directly: `dest_dir` is written in place.
+/// never pass for a complete file. Callers go through
+/// [`ensure_extracted_from`], never this directly: `dest_dir` is written in
+/// place.
 ///
 /// PL-5: before anything is written, the entry count and the sum of the
 /// declared sizes are checked against `limits`; and each entry is read
@@ -242,14 +245,14 @@ pub(crate) fn is_rejected(err: &anyhow::Error) -> bool {
     clippy::unnecessary_debug_formatting,
     reason = "Debug quotes the path in the error text, which is wanted"
 )]
-pub(crate) fn extract_zip(
+fn extract_zip_from(
+    file: &std::fs::File,
     zip_path: &Path,
     dest_dir: &Path,
     limits: ExtractLimits,
 ) -> anyhow::Result<Vec<ExtractedFile>> {
     use std::io::Read;
 
-    let file = std::fs::File::open(zip_path)?;
     let mut archive = zip::ZipArchive::new(file)
         .map_err(|err| anyhow::anyhow!("failed to open {zip_path:?} as a zip archive: {err}"))?;
 
@@ -337,7 +340,7 @@ pub(crate) fn extract_zip(
     Ok(extracted)
 }
 
-/// How [`ensure_extracted`] arrived at a complete delivery directory.
+/// How [`ensure_extracted_from`] arrived at a complete delivery directory.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum Extraction {
     /// The directory already carried the completion marker: nothing was
@@ -351,8 +354,11 @@ pub(crate) enum Extraction {
     Extracted,
 }
 
-/// Makes `storage_dir/<dir_name>` a complete, marked extraction of
-/// `zip_path`, doing as little as possible:
+/// Makes `storage_dir/<dir_name>` a complete, marked extraction of the zip
+/// open as `zip` (`zip_path` only names it in errors), doing as little as
+/// possible. The caller hashes the zip through the same handle, so a newer
+/// version renamed over `zip_path` meanwhile (the bucket lane's hand-off)
+/// is never extracted under the older one's hash:
 ///
 /// 1. Already marked complete: returns the file list recorded in the
 ///    marker. No extraction, no IO beyond reading the marker.
@@ -370,7 +376,8 @@ pub(crate) enum Extraction {
 ///    unmarked (so incomplete) final directory is first renamed aside and
 ///    removed after the swap. `storage_dir` is on one volume, so each rename
 ///    is atomic: a reader sees either no directory or a complete one.
-pub(crate) fn ensure_extracted(
+pub(crate) fn ensure_extracted_from(
+    zip: &std::fs::File,
     zip_path: &Path,
     storage_dir: &Path,
     dir_name: &str,
@@ -382,7 +389,7 @@ pub(crate) fn ensure_extracted(
         return Ok((files, Extraction::AlreadyComplete));
     }
     if final_dir.is_dir()
-        && let Some(files) = files_matching_zip(zip_path, &final_dir)?
+        && let Some(files) = files_matching_zip(zip, zip_path, &final_dir)?
     {
         write_marker(&final_dir, &files)?;
         return Ok((files, Extraction::Adopted));
@@ -410,7 +417,7 @@ pub(crate) fn ensure_extracted(
     // The content checks (`cif_check.rs`) run on the extracted files before
     // the marker exists, so a delivery that fails them is never visible to
     // `schedule-reference`.
-    let files = match extract_zip(zip_path, &temp_dir, limits)
+    let files = match extract_zip_from(zip, zip_path, &temp_dir, limits)
         .and_then(|files| check(&temp_dir).map(|()| files))
     {
         Ok(files) => files,
@@ -454,7 +461,7 @@ pub(crate) fn ensure_extracted(
     Ok((files, Extraction::Extracted))
 }
 
-/// Where [`ensure_extracted`] moves an incomplete final directory it is
+/// Where [`ensure_extracted_from`] moves an incomplete final directory it is
 /// about to replace. Hidden, so neither discovery nor pruning ever sees it.
 const STALE_DIR_PREFIX: &str = ".stale-";
 
@@ -654,8 +661,11 @@ fn fsync_dir(dir: &Path) -> std::io::Result<()> {
     clippy::unnecessary_debug_formatting,
     reason = "Debug quotes the path in the error text, which is wanted"
 )]
-fn files_matching_zip(zip_path: &Path, dir: &Path) -> anyhow::Result<Option<Vec<ExtractedFile>>> {
-    let file = std::fs::File::open(zip_path)?;
+fn files_matching_zip(
+    file: &std::fs::File,
+    zip_path: &Path,
+    dir: &Path,
+) -> anyhow::Result<Option<Vec<ExtractedFile>>> {
     let mut archive = zip::ZipArchive::new(file)
         .map_err(|err| anyhow::anyhow!("failed to open {zip_path:?} as a zip archive: {err}"))?;
     let mut files = Vec::new();
@@ -742,7 +752,7 @@ pub(crate) fn adopt_legacy_deliveries(
             continue;
         }
         let files = match current_zips.get(&name) {
-            Some(zip_path) => files_matching_zip(zip_path, &path)?,
+            Some(zip_path) => files_matching_zip(&std::fs::File::open(zip_path)?, zip_path, &path)?,
             None => legacy_files_if_complete(&path)?,
         };
         match files {
@@ -954,6 +964,35 @@ pub(crate) fn recognise_completed(
     listed.sort();
     recorded.sort();
     Ok((!listed.is_empty() && listed == recorded).then_some(Recognised::Extracted))
+}
+
+/// [`extract_zip_from`] the zip at `zip_path` (tests).
+#[cfg(test)]
+pub(crate) fn extract_zip(
+    zip_path: &Path,
+    dest_dir: &Path,
+    limits: ExtractLimits,
+) -> anyhow::Result<Vec<ExtractedFile>> {
+    extract_zip_from(&std::fs::File::open(zip_path)?, zip_path, dest_dir, limits)
+}
+
+/// [`ensure_extracted_from`] the zip at `zip_path` (tests).
+#[cfg(test)]
+pub(crate) fn ensure_extracted(
+    zip_path: &Path,
+    storage_dir: &Path,
+    dir_name: &str,
+    limits: ExtractLimits,
+    check: impl FnOnce(&Path) -> anyhow::Result<()>,
+) -> anyhow::Result<(Vec<ExtractedFile>, Extraction)> {
+    ensure_extracted_from(
+        &std::fs::File::open(zip_path)?,
+        zip_path,
+        storage_dir,
+        dir_name,
+        limits,
+        check,
+    )
 }
 
 /// A minimal in-memory `.zip` writer, used only by this module's own tests
@@ -1646,6 +1685,51 @@ mod tests {
         assert_eq!(how, Extraction::Adopted);
         assert_eq!(files.len(), 2);
         assert!(final_dir.join(COMPLETE_MARKER).is_file());
+    }
+
+    /// B5: the zip is hashed and extracted through one handle, so a newer
+    /// version renamed over its name in between (the bucket lane's
+    /// hand-off) is never extracted under the older one's hash.
+    #[test]
+    fn hashing_and_extraction_read_the_version_the_handle_opened() {
+        let watch = tempfile::tempdir().unwrap();
+        let storage = tempfile::tempdir().unwrap();
+        let zip_path = fixture_zip(watch.path());
+        let older = std::fs::read(&zip_path).unwrap();
+        let handle = std::fs::File::open(&zip_path).unwrap();
+        let hashed =
+            crate::audit::DeliveredFile::hash_reader("timetable_full.zip", &handle).unwrap();
+        assert_eq!(
+            hashed,
+            crate::audit::DeliveredFile::from_bytes("timetable_full.zip", &older)
+        );
+
+        // A newer version lands over the name, as `bucket::land` does it.
+        let newer = watch.path().join(".landing-timetable_full.zip");
+        std::fs::write(
+            &newer,
+            build_test_zip(&[("RJTTF943MCA.txt", b"newer delivery")]),
+        )
+        .unwrap();
+        std::fs::rename(&newer, &zip_path).unwrap();
+
+        let (mut files, how) = ensure_extracted_from(
+            &handle,
+            &zip_path,
+            storage.path(),
+            "20260903T172830Z",
+            ExtractLimits::default(),
+            |_| Ok(()),
+        )
+        .unwrap();
+        files.sort();
+        assert_eq!(how, Extraction::Extracted);
+        let names: Vec<_> = files.iter().map(|f| f.name.as_str()).collect();
+        assert_eq!(names, ["RJTTF942MCA.txt", "RJTTF942MSN.txt"]);
+        assert_eq!(
+            std::fs::read(storage.path().join("20260903T172830Z/RJTTF942MCA.txt")).unwrap(),
+            b"mca content"
+        );
     }
 
     /// A scratch directory from a crashed extraction is discarded, not
