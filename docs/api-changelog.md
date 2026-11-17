@@ -77,6 +77,10 @@ response-shape change.
   is the same `400`, "That push address can't be used. It must be a public
   https address.". The distinct reasons were an internal-DNS probe; they
   stay in the server log, without the URL.
+- `POST /public/lines` and `PUT /public/lines/{id}` (custom lines): at
+  most 100 stations per line (was 200; the longest catalogue line has 61).
+  Repeated station codes (ignoring case and spaces) are folded into one,
+  as before, before the "at least 2 stations" and the cap are checked.
 
 ## 2026-11-17: Journey break and replan fixes
 

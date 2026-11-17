@@ -910,8 +910,9 @@ fn reject_unknown_stations(
 
 /// Most stations one custom line may list. The longest catalogue line
 /// (thameslink-southern) has 61; every station is polled by `poller-ldbws`,
-/// so this bounds recurring work as well as storage (API-7).
-const MAX_CUSTOM_LINE_STATIONS: usize = 200;
+/// so this bounds recurring work as well as storage (API-7). 100 leaves
+/// room above it (it was 200 before the DS-534 assessment).
+const MAX_CUSTOM_LINE_STATIONS: usize = 100;
 /// Most entries in each of `operators`, `headcode_prefixes` and
 /// `destination_crs_filter` (API-7).
 const MAX_CUSTOM_LINE_LIST_ITEMS: usize = 32;
@@ -1451,6 +1452,48 @@ mod tests {
                 err.1.len()
             );
         }
+    }
+
+    /// `n` distinct well-formed codes (`AAA`, `AAB`, ...).
+    fn distinct_codes(n: u8) -> Vec<String> {
+        (0..n)
+            .map(|i| {
+                format!(
+                    "A{}{}",
+                    char::from(b'A' + i / 26),
+                    char::from(b'A' + i % 26)
+                )
+            })
+            .collect()
+    }
+
+    #[test]
+    fn a_line_may_list_up_to_the_station_cap_and_no_more() {
+        let mut req = line_request();
+        req.stations = distinct_codes(100);
+        assert!(validate_line_request(&req).is_ok());
+        req.stations = distinct_codes(101);
+        let err = validate_line_request(&req).expect_err("101 stations");
+        assert_eq!(err.0, StatusCode::BAD_REQUEST);
+    }
+
+    /// Repeated codes are folded into one before the count, so a body of
+    /// repeats can neither pass the minimum nor swell the stored line.
+    #[test]
+    fn repeated_station_codes_collapse_before_validation() {
+        let mut req = line_request();
+        req.stations = ["WOK", "wok", " WOK ", "WOK"].map(String::from).to_vec();
+        normalize_line_request(&mut req);
+        assert_eq!(req.stations, ["WOK"]);
+        assert!(
+            validate_line_request(&req).is_err(),
+            "one station is too few"
+        );
+
+        req.stations = [distinct_codes(100), distinct_codes(100)].concat();
+        normalize_line_request(&mut req);
+        assert_eq!(req.stations.len(), 100);
+        assert!(validate_line_request(&req).is_ok());
     }
 
     #[test]
