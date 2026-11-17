@@ -263,11 +263,15 @@ impl LegRun {
 fn leg_run(row: &LegRow, live: Option<StopDelay>) -> Option<LegRun> {
     if row.recorded {
         let cancelled = row.final_cancelled.unwrap_or(false);
-        if row.final_delay.is_none() && !cancelled {
+        // A leg with no destination was recorded, before 2026-11-17, with
+        // the delay wherever its train last reported: not an arrival there,
+        // so not read as one (a cancelled train would read as arrived).
+        let final_delay = row.final_delay.filter(|_| row.destination_crs.is_some());
+        if final_delay.is_none() && !cancelled {
             return None;
         }
         return Some(LegRun {
-            delay: row.final_delay.map(|minutes| StopDelay {
+            delay: final_delay.map(|minutes| StopDelay {
                 minutes,
                 basis: DelayBasis::Public,
                 provisional: false,
@@ -785,5 +789,18 @@ mod tests {
             response.trains[0].cancelled,
             "the train itself was cancelled"
         );
+    }
+
+    /// An older row for a leg with no destination holds the delay wherever
+    /// the train last reported: a cancelled one is still not reached.
+    #[test]
+    fn a_recorded_delay_without_a_destination_is_not_an_arrival() {
+        let mut nowhere = recorded(leg(1, 11, 1), Some(20), true);
+        nowhere.destination_crs = None;
+        let run = leg_run(&nowhere, None).expect("a cancellation is known");
+        assert!(run.not_reached());
+        assert_eq!(run.delay, None);
+        nowhere.final_cancelled = Some(false);
+        assert_eq!(leg_run(&nowhere, None), None);
     }
 }

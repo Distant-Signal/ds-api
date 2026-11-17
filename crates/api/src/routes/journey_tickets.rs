@@ -611,7 +611,13 @@ pub(crate) async fn leg_delay_repays(
             } else {
                 (None, None)
             };
-            let (delay, outcome) = with_recorded(live_delay, live_outcome, input.recorded);
+            // A leg with no destination was recorded, before 2026-11-17,
+            // with the delay wherever its train last reported: not an
+            // arrival there, so only its cancellation is read.
+            let recorded = input
+                .recorded
+                .map(|(minutes, cancelled)| (minutes.filter(|_| destination.is_some()), cancelled));
+            let (delay, outcome) = with_recorded(live_delay, live_outcome, recorded);
             let (measured_at_crs, measured_at_name) = destination.unzip();
             Some(build_leg_delay_repay(
                 input.ticket,

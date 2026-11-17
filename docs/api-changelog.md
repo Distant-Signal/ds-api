@@ -23,6 +23,8 @@ Behaviour fixes (DS-534); no field, migration or grant change.
   terminated without reporting at the leg's destination, or a leg with no
   destination, records no delay (it used to record the forecast, or the
   delay wherever the train last reported, which read back as measured).
+  Rows already recorded for a leg with no destination are read without
+  their delay: only their cancellation counts.
 - `POST /public/lines` (custom lines): a new line's `id` is the slug of
   its name plus a random suffix (`custom-my-commute-k3x9q2ab`) instead of
   the bare slug with `-2`, `-3` on a clash, which showed that another user
