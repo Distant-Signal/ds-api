@@ -11,6 +11,10 @@ fn parse_toml_path<T: DeserializeOwned>(path: &'_ str) -> Result<T> {
 }
 
 #[derive(Debug, clap::Parser)]
+#[expect(
+    clippy::struct_excessive_bools,
+    reason = "each bool is an independent on/off env switch"
+)]
 pub struct ServiceArguments {
     #[arg(short, long, env, default_value = "0.0.0.0:8080")]
     pub bind_url: String,
@@ -163,6 +167,25 @@ pub struct ServiceArguments {
     /// DEFAULT: off.
     #[arg(long, env, default_value = "")]
     pub sso_primary_sub_claim: String,
+
+    /// Account continuity, stricter match (docs/connected-apps.md,
+    /// "Account continuity"): when true, a login re-keys on the primary
+    /// sub only if the matched account's stored Discord id equals the
+    /// token's Discord id claim. A primary-sub match with no Discord id on
+    /// one or both sides is refused (the login creates a new account, and
+    /// `distant_signal_api_account_rekey_refused_total` counts it). FALSE
+    /// BY DEFAULT: the documented staff migration matches by primary sub
+    /// alone, and staff accounts carry no Discord id.
+    #[arg(long, env, default_value_t = false)]
+    pub account_continuity_require_strong_match: bool,
+
+    /// Account continuity, strict revocation: when true, a re-key also
+    /// revokes the account's personal API tokens and delegated grants
+    /// (connected apps), not only its other sessions. FALSE BY DEFAULT: the
+    /// tokens and grants belong to the person, who keeps them across a
+    /// change of identity provider.
+    #[arg(long, env, default_value_t = false)]
+    pub account_continuity_revoke_tokens_on_rekey: bool,
 
     /// Session idle timeout in days: a SLIDING expiry. Sign-in stamps
     /// `sessions.expires_at = NOW() + this`, and

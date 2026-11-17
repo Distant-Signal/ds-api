@@ -20,6 +20,14 @@
 //!
 //! The Discord id claim is stored on every login. A match that would be
 //! ambiguous refuses the re-key: see [`Conflict`].
+//!
+//! A re-key also ends every session the account had: they authenticated
+//! under the previous subject, and the login that caused the re-key gets
+//! its own session after [`login`] returns. Personal API tokens and
+//! delegated grants are the person's and follow the account, unless
+//! [`Options::revoke_tokens_on_rekey`] is set. With
+//! [`Options::require_strong_match`] a primary-sub match must be backed by
+//! the Discord id (see [`Refusal`]).
 
 use anyhow::Result;
 use sqlx::PgPool;
@@ -34,9 +42,23 @@ pub const REKEYS_METRIC: &str = "api_account_rekeys_total";
 /// one per refused re-key or refused Discord id (see [`Conflict`]).
 pub const CONFLICTS_METRIC: &str = "api_account_continuity_conflicts_total";
 
-/// Registers both counters at 0 for each label, so an alert's
+/// Suffix of `distant_signal_api_account_rekey_refused_total{reason}`: one
+/// per re-key the strong-match rule declined (see [`Refusal`]).
+pub const REFUSED_METRIC: &str = "api_account_rekey_refused_total";
+
+/// Registers the counters at 0 for each label, so an alert's
 /// `increase()` sees the first one after a restart.
 pub fn register_metrics() {
+    for refusal in [
+        Refusal::PrimarySubNoDiscordId,
+        Refusal::PrimarySubDiscordIdUnverified,
+    ] {
+        metrics::counter!(
+            ds_runtime::metrics::metric_name(REFUSED_METRIC),
+            "reason" => refusal.label()
+        )
+        .increment(0);
+    }
     for matched_by in [MatchedBy::DiscordId, MatchedBy::PrimarySub] {
         metrics::counter!(
             ds_runtime::metrics::metric_name(REKEYS_METRIC),
@@ -71,6 +93,49 @@ impl MatchedBy {
             Self::PrimarySub => "primary_sub",
         }
     }
+}
+
+/// A re-key declined by `ACCOUNT_CONTINUITY_REQUIRE_STRONG_MATCH`: the
+/// login goes ahead as a new account (the same as when nothing matches), so
+/// someone who can only set the primary-sub claim cannot take an account
+/// over.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Refusal {
+    /// The primary sub matched an account, but neither it nor the token
+    /// carries a Discord id to back the match.
+    PrimarySubNoDiscordId,
+    /// The primary sub matched an account, but only one side has a Discord
+    /// id, so the match is not corroborated.
+    PrimarySubDiscordIdUnverified,
+}
+
+impl Refusal {
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::PrimarySubNoDiscordId => "primary_sub_no_discord_id",
+            Self::PrimarySubDiscordIdUnverified => "primary_sub_discord_id_unverified",
+        }
+    }
+}
+
+/// The settings of a continuity login (`Config`'s
+/// `account_continuity_*` fields). Both default to off.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct Options {
+    /// A primary-sub match needs a corroborating Discord id: see
+    /// [`Refusal`].
+    pub require_strong_match: bool,
+    /// A re-key also revokes the account's personal API tokens and
+    /// delegated grants (they are kept by default).
+    pub revoke_tokens_on_rekey: bool,
+}
+
+/// What a re-key revoked.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct Revoked {
+    pub sessions: u64,
+    pub tokens: u64,
+    pub grants: u64,
 }
 
 /// A login whose continuity claims point at more than one account, or at
@@ -122,38 +187,55 @@ pub enum Outcome {
 }
 
 /// The result of [`login`]: the user (absent when a conflict refused the
-/// login), what happened, and any conflict.
+/// login), what happened, any conflict, any declined re-key and what a
+/// re-key revoked.
 #[derive(Debug)]
 pub struct Login {
     pub user: Option<User>,
     pub outcome: Outcome,
     pub conflict: Option<Conflict>,
+    pub refused: Option<Refusal>,
+    pub revoked: Revoked,
+}
+
+/// [`choose`]'s answer.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum Chosen {
+    NoMatch,
+    Rekey(String, MatchedBy),
+    Refused(Refusal),
 }
 
 /// Which account a login with no account of its own takes over: the
 /// Discord id's match, else the primary sub's, unless they disagree.
 /// `by_primary` is the primary sub's account and its stored Discord id.
+/// With `require_strong` a primary-sub match needs the stored and claimed
+/// Discord ids to be present and equal.
 fn choose(
     by_discord: Option<&str>,
     by_primary: Option<(&str, Option<&str>)>,
     discord_claim: Option<&str>,
-) -> Result<Option<(String, MatchedBy)>, Conflict> {
+    require_strong: bool,
+) -> Result<Chosen, Conflict> {
     match (by_discord, by_primary) {
         (Some(discord), Some((primary, _))) if discord != primary => Err(Conflict::AmbiguousMatch),
-        (Some(discord), _) => Ok(Some((discord.to_string(), MatchedBy::DiscordId))),
+        (Some(discord), _) => Ok(Chosen::Rekey(discord.to_string(), MatchedBy::DiscordId)),
         (None, Some((primary, stored))) => match (stored, discord_claim) {
             (Some(stored), Some(claim)) if stored != claim => {
                 Err(Conflict::PrimarySubAccountHasAnotherDiscordId)
             }
-            _ => Ok(Some((primary.to_string(), MatchedBy::PrimarySub))),
+            (Some(_), Some(_)) => Ok(Chosen::Rekey(primary.to_string(), MatchedBy::PrimarySub)),
+            _ if !require_strong => Ok(Chosen::Rekey(primary.to_string(), MatchedBy::PrimarySub)),
+            (None, None) => Ok(Chosen::Refused(Refusal::PrimarySubNoDiscordId)),
+            _ => Ok(Chosen::Refused(Refusal::PrimarySubDiscordIdUnverified)),
         },
-        (None, None) => Ok(None),
+        (None, None) => Ok(Chosen::NoMatch),
     }
 }
 
 /// The login callback's upsert with account continuity on, in one
 /// transaction (module docs). `claims` are this login's continuity claims
-/// (`auth::oidc::continuity_claims`).
+/// (`auth::oidc::continuity_claims`); `options` are the settings.
 ///
 /// Locks each candidate row (`FOR UPDATE`), so two concurrent first logins
 /// of one user serialise: the second finds the row already re-keyed to its
@@ -162,6 +244,7 @@ pub async fn login(
     pool: &PgPool,
     identity: &OidcIdentity,
     claims: &ContinuityClaims,
+    options: &Options,
 ) -> Result<Login> {
     let new_sub = identity.sub.as_str();
     let discord_claim = claims.discord_id.as_deref();
@@ -173,6 +256,8 @@ pub async fn login(
         .await?;
 
     let mut outcome = Outcome::Upserted;
+    let mut refused = None;
+    let mut revoked = Revoked::default();
     if own.is_none() {
         let by_discord: Option<String> = match discord_claim {
             Some(discord) => {
@@ -198,6 +283,7 @@ pub async fn login(
                 .as_ref()
                 .map(|(id, stored)| (id.as_str(), stored.as_deref())),
             discord_claim,
+            options.require_strong_match,
         );
         match chosen {
             Err(conflict) => {
@@ -206,13 +292,17 @@ pub async fn login(
                     user: None,
                     outcome,
                     conflict: Some(conflict),
+                    refused: None,
+                    revoked,
                 });
             }
-            Ok(Some((from, matched_by))) => {
+            Ok(Chosen::Rekey(from, matched_by)) => {
                 rekey(&mut tx, &from, new_sub).await?;
+                revoked = revoke_old_access(&mut tx, new_sub, options).await?;
                 outcome = Outcome::Rekeyed { from, matched_by };
             }
-            Ok(None) => {}
+            Ok(Chosen::Refused(refusal)) => refused = Some(refusal),
+            Ok(Chosen::NoMatch) => {}
         }
     }
 
@@ -239,7 +329,47 @@ pub async fn login(
         user: Some(user),
         outcome,
         conflict,
+        refused,
+        revoked,
     })
+}
+
+/// Ends what the re-keyed account's previous holder could still use: every
+/// session (the callback creates the new login's session after this, so it
+/// is not among them) and, with `revoke_tokens_on_rekey`, the personal API
+/// tokens and delegated grants. Tokens and grants are marked revoked with
+/// the `admin` reason, the one the `revoked_reason` check allows for an
+/// operator-side revocation.
+async fn revoke_old_access(
+    conn: &mut sqlx::PgConnection,
+    account: &str,
+    options: &Options,
+) -> Result<Revoked> {
+    let sessions = sqlx::query("DELETE FROM sessions WHERE user_id = $1")
+        .bind(account)
+        .execute(&mut *conn)
+        .await?
+        .rows_affected();
+    let mut revoked = Revoked {
+        sessions,
+        ..Revoked::default()
+    };
+    if options.revoke_tokens_on_rekey {
+        revoked.tokens = crate::data::personal_tokens::revoke_all_for_user(
+            &mut *conn,
+            account,
+            crate::data::personal_tokens::RevokeReason::Admin,
+        )
+        .await?;
+        revoked.grants = crate::data::delegated::revoke_grants_for_user(
+            &mut *conn,
+            account,
+            None,
+            crate::data::delegated::RevokeReason::Admin,
+        )
+        .await?;
+    }
+    Ok(revoked)
 }
 
 /// Moves the account `from` to `to`: the `users` row (cascading to every
@@ -274,44 +404,79 @@ async fn rekey(conn: &mut sqlx::PgConnection, from: &str, to: &str) -> Result<()
 mod tests {
     use super::*;
 
+    fn rekey(from: &str, matched_by: MatchedBy) -> Chosen {
+        Chosen::Rekey(from.to_string(), matched_by)
+    }
+
     #[test]
     fn no_match_creates() {
-        assert_eq!(choose(None, None, Some("1")), Ok(None));
-        assert_eq!(choose(None, None, None), Ok(None));
+        assert_eq!(choose(None, None, Some("1"), false), Ok(Chosen::NoMatch));
+        assert_eq!(choose(None, None, None, false), Ok(Chosen::NoMatch));
+        assert_eq!(choose(None, None, None, true), Ok(Chosen::NoMatch));
     }
 
     #[test]
     fn the_discord_match_wins_when_alone_or_the_same_account() {
-        assert_eq!(
-            choose(Some("old"), None, Some("1")),
-            Ok(Some(("old".to_string(), MatchedBy::DiscordId)))
-        );
-        assert_eq!(
-            choose(Some("old"), Some(("old", Some("1"))), Some("1")),
-            Ok(Some(("old".to_string(), MatchedBy::DiscordId)))
-        );
+        for strong in [false, true] {
+            assert_eq!(
+                choose(Some("old"), None, Some("1"), strong),
+                Ok(rekey("old", MatchedBy::DiscordId))
+            );
+            assert_eq!(
+                choose(Some("old"), Some(("old", Some("1"))), Some("1"), strong),
+                Ok(rekey("old", MatchedBy::DiscordId))
+            );
+        }
     }
 
     #[test]
     fn the_primary_sub_matches_staff() {
         assert_eq!(
-            choose(None, Some(("staff", None)), None),
-            Ok(Some(("staff".to_string(), MatchedBy::PrimarySub)))
+            choose(None, Some(("staff", None)), None, false),
+            Ok(rekey("staff", MatchedBy::PrimarySub))
         );
         // A stored Discord id with no Discord claim, or the same one, is
         // no conflict.
         assert_eq!(
-            choose(None, Some(("staff", Some("1"))), None),
-            Ok(Some(("staff".to_string(), MatchedBy::PrimarySub)))
+            choose(None, Some(("staff", Some("1"))), None, false),
+            Ok(rekey("staff", MatchedBy::PrimarySub))
+        );
+        assert_eq!(
+            choose(None, Some(("staff", None)), Some("1"), false),
+            Ok(rekey("staff", MatchedBy::PrimarySub))
+        );
+    }
+
+    #[test]
+    fn a_strong_match_refuses_a_primary_sub_nothing_backs() {
+        assert_eq!(
+            choose(None, Some(("staff", None)), None, true),
+            Ok(Chosen::Refused(Refusal::PrimarySubNoDiscordId))
+        );
+        assert_eq!(
+            choose(None, Some(("staff", Some("1"))), None, true),
+            Ok(Chosen::Refused(Refusal::PrimarySubDiscordIdUnverified))
+        );
+        assert_eq!(
+            choose(None, Some(("staff", None)), Some("1"), true),
+            Ok(Chosen::Refused(Refusal::PrimarySubDiscordIdUnverified))
+        );
+        // Equal ids on both sides back it (the Discord lookup finds this
+        // account first, so it is only reachable through `choose` alone).
+        assert_eq!(
+            choose(None, Some(("staff", Some("1"))), Some("1"), true),
+            Ok(rekey("staff", MatchedBy::PrimarySub))
         );
     }
 
     #[test]
     fn disagreeing_matches_are_conflicts_that_refuse_the_login() {
-        let ambiguous = choose(Some("a"), Some(("b", None)), Some("1"));
-        assert_eq!(ambiguous, Err(Conflict::AmbiguousMatch));
-        let other = choose(None, Some(("staff", Some("2"))), Some("1"));
-        assert_eq!(other, Err(Conflict::PrimarySubAccountHasAnotherDiscordId));
+        for strong in [false, true] {
+            let ambiguous = choose(Some("a"), Some(("b", None)), Some("1"), strong);
+            assert_eq!(ambiguous, Err(Conflict::AmbiguousMatch));
+            let other = choose(None, Some(("staff", Some("2"))), Some("1"), strong);
+            assert_eq!(other, Err(Conflict::PrimarySubAccountHasAnotherDiscordId));
+        }
         assert!(Conflict::AmbiguousMatch.refuses_login());
         assert!(Conflict::PrimarySubAccountHasAnotherDiscordId.refuses_login());
         assert!(!Conflict::DiscordIdHeldByAnotherAccount.refuses_login());
@@ -382,7 +547,8 @@ mod db_tests {
     const DISCORD: &str = "900000000000000001";
 
     /// A public user's first `ds-sso` login takes over their account, with
-    /// their session, personal API token, delegated grant and pin, and the
+    /// their personal API token, delegated grant and pin (not their
+    /// session: see `a_rekey_ends_old_sessions_and_keeps_the_new_logins`), and the
     /// copied `group_train_share_moves.added_by` and calendar feed link.
     #[tokio::test]
     #[ignore = "requires a live database; run with `cargo test -p api account_continuity -- \
@@ -421,9 +587,14 @@ mod db_tests {
         let share_move = seed_share_move(&pool, OLD).await;
         let feed_token = seed_feed_link(&pool, OLD).await;
 
-        let result = login(&pool, &identity(NEW), &discord(DISCORD))
-            .await
-            .expect("login");
+        let result = login(
+            &pool,
+            &identity(NEW),
+            &discord(DISCORD),
+            &Options::default(),
+        )
+        .await
+        .expect("login");
         let user = result.user.expect("a user");
         assert_eq!(user.id, NEW);
         assert!(!user.created, "a re-key is not a new user");
@@ -441,11 +612,21 @@ mod db_tests {
             Some(Some(DISCORD.to_string()))
         );
 
-        let session = users::get_session_with_user(&pool, "TEST-CONTINUITY-SESSION")
-            .await
-            .expect("session lookup")
-            .expect("the session survives the re-key");
-        assert_eq!(session.id, NEW);
+        assert_eq!(
+            result.revoked,
+            Revoked {
+                sessions: 1,
+                tokens: 0,
+                grants: 0
+            }
+        );
+        assert!(
+            users::get_session_with_user(&pool, "TEST-CONTINUITY-SESSION")
+                .await
+                .expect("session lookup")
+                .is_none(),
+            "the previous holder's session ends with the re-key"
+        );
         let token = crate::data::personal_tokens::find_active_by_hash(&pool, &token_hash)
             .await
             .expect("token lookup")
@@ -510,9 +691,14 @@ mod db_tests {
     }
 
     async fn login_again(pool: &PgPool, sub: &str, discord_id: &str) -> Login {
-        login(pool, &identity(sub), &discord(discord_id))
-            .await
-            .expect("login")
+        login(
+            pool,
+            &identity(sub),
+            &discord(discord_id),
+            &Options::default(),
+        )
+        .await
+        .expect("login")
     }
 
     /// 2026-11-06: a first `ds-sso` login without name claims re-keys the
@@ -543,7 +729,7 @@ mod db_tests {
             groups: Vec::new(),
         };
 
-        let result = login(&pool, &claimless, &discord(SNOWFLAKE))
+        let result = login(&pool, &claimless, &discord(SNOWFLAKE), &Options::default())
             .await
             .expect("re-keying login");
         assert_eq!(
@@ -559,9 +745,14 @@ mod db_tests {
         assert_eq!(user.name.as_deref(), Some("Named Rider"));
         assert_eq!(user.username.as_deref(), Some("named-rider"));
 
-        let result = login(&pool, &claimless, &ContinuityClaims::default())
-            .await
-            .expect("claimless login");
+        let result = login(
+            &pool,
+            &claimless,
+            &ContinuityClaims::default(),
+            &Options::default(),
+        )
+        .await
+        .expect("claimless login");
         assert_eq!(result.outcome, Outcome::Upserted);
         let user = result.user.expect("a user");
         assert_eq!(user.name.as_deref(), Some("Named Rider"));
@@ -599,9 +790,14 @@ mod db_tests {
         );
 
         // A later login without the claim keeps the stored id.
-        login(&pool, &identity(NEW), &ContinuityClaims::default())
-            .await
-            .expect("login");
+        login(
+            &pool,
+            &identity(NEW),
+            &ContinuityClaims::default(),
+            &Options::default(),
+        )
+        .await
+        .expect("login");
         assert_eq!(
             discord_of(&pool, NEW).await,
             Some(Some(DISCORD.to_string()))
@@ -652,7 +848,9 @@ mod db_tests {
             discord_id: None,
             primary_sub: Some(OLD.to_string()),
         };
-        let result = login(&pool, &identity(NEW), &claims).await.expect("login");
+        let result = login(&pool, &identity(NEW), &claims, &Options::default())
+            .await
+            .expect("login");
         assert_eq!(result.user.expect("a user").id, NEW);
         assert_eq!(
             result.outcome,
@@ -661,11 +859,13 @@ mod db_tests {
                 matched_by: MatchedBy::PrimarySub
             }
         );
-        let session = users::get_session_with_user(&pool, "TEST-CONTINUITY-STAFF-SESSION")
-            .await
-            .expect("session lookup")
-            .expect("the session survives the re-key");
-        assert_eq!(session.id, NEW);
+        assert!(
+            users::get_session_with_user(&pool, "TEST-CONTINUITY-STAFF-SESSION")
+                .await
+                .expect("session lookup")
+                .is_none(),
+            "the previous holder's session ends with the re-key"
+        );
         clear(&pool, &[OLD, NEW]).await;
     }
 
@@ -684,7 +884,9 @@ mod db_tests {
             discord_id: Some(DISCORD.to_string()),
             primary_sub: Some(OTHER.to_string()),
         };
-        let result = login(&pool, &identity(NEW), &claims).await.expect("login");
+        let result = login(&pool, &identity(NEW), &claims, &Options::default())
+            .await
+            .expect("login");
         assert!(result.user.is_none());
         assert_eq!(result.conflict, Some(Conflict::AmbiguousMatch));
         assert_eq!(discord_of(&pool, NEW).await, None, "no account was created");
@@ -694,6 +896,195 @@ mod db_tests {
         );
         assert_eq!(discord_of(&pool, OTHER).await, Some(None));
         clear(&pool, &[OLD, OTHER, NEW]).await;
+    }
+
+    const SESSION_OLD: &str = "TEST-CONTINUITY-REVOKE-SESSION-OLD";
+    const SESSION_NEW: &str = "TEST-CONTINUITY-REVOKE-SESSION-NEW";
+    const REVOKE_TOKEN_HASH: [u8; 32] = [9u8; 32];
+
+    /// A session, a personal token and a delegated grant for `user`.
+    async fn seed_access(pool: &PgPool, user: &str) {
+        users::insert_session(pool, SESSION_OLD, user, 14)
+            .await
+            .expect("insert session");
+        sqlx::query(
+            "INSERT INTO personal_api_tokens (user_id, name, token_hash, hint, scopes, expires_at) \
+             VALUES ($1, 'continuity', $2, 'abcd', ARRAY['journeys:read'], now() + interval '1 day')",
+        )
+        .bind(user)
+        .bind(REVOKE_TOKEN_HASH.as_slice())
+        .execute(pool)
+        .await
+        .expect("insert personal token");
+        sqlx::query(
+            "INSERT INTO delegated_grants (user_id, client, client_display_name, scopes) \
+             VALUES ($1, 'continuity-test', 'Continuity', ARRAY['journeys:read'])",
+        )
+        .bind(user)
+        .execute(pool)
+        .await
+        .expect("insert delegated grant");
+    }
+
+    async fn token_alive(pool: &PgPool) -> bool {
+        crate::data::personal_tokens::find_active_by_hash(pool, &REVOKE_TOKEN_HASH)
+            .await
+            .expect("token lookup")
+            .is_some()
+    }
+
+    async fn grant_alive(pool: &PgPool, user: &str) -> bool {
+        crate::data::delegated::active_grant(pool, user, "continuity-test")
+            .await
+            .expect("grant lookup")
+            .is_some()
+    }
+
+    async fn session_alive(pool: &PgPool, token: &str) -> bool {
+        users::get_session_with_user(pool, token)
+            .await
+            .expect("session lookup")
+            .is_some()
+    }
+
+    /// The previous holder's sessions end with a re-key; the session the
+    /// callback creates for the new login (after `login` returns) works.
+    /// The personal token and delegated grant survive by default.
+    #[tokio::test]
+    #[ignore = "requires a live database; run with `cargo test -p api account_continuity -- \
+                --ignored --test-threads=1`"]
+    async fn a_rekey_ends_old_sessions_and_keeps_the_new_logins() {
+        let pool = connect().await;
+        clear(&pool, &[OLD, NEW]).await;
+        seed_user(&pool, OLD, Some(DISCORD)).await;
+        seed_access(&pool, OLD).await;
+
+        let result = login_again(&pool, NEW, DISCORD).await;
+        assert!(matches!(result.outcome, Outcome::Rekeyed { .. }));
+        assert_eq!(
+            result.revoked,
+            Revoked {
+                sessions: 1,
+                tokens: 0,
+                grants: 0
+            }
+        );
+        assert!(!session_alive(&pool, SESSION_OLD).await);
+
+        // What the callback does next.
+        users::insert_session(&pool, SESSION_NEW, NEW, 14)
+            .await
+            .expect("insert the new login's session");
+        assert!(session_alive(&pool, SESSION_NEW).await);
+        assert!(token_alive(&pool).await, "tokens survive by default");
+        assert!(grant_alive(&pool, NEW).await, "grants survive by default");
+
+        // An ordinary later login revokes nothing.
+        let again = login_again(&pool, NEW, DISCORD).await;
+        assert_eq!(again.revoked, Revoked::default());
+        assert!(session_alive(&pool, SESSION_NEW).await);
+        clear(&pool, &[OLD, NEW]).await;
+    }
+
+    /// With `revoke_tokens_on_rekey` the token and grant die too.
+    #[tokio::test]
+    #[ignore = "requires a live database; run with `cargo test -p api account_continuity -- \
+                --ignored --test-threads=1`"]
+    async fn the_strict_setting_also_revokes_tokens_and_grants() {
+        let pool = connect().await;
+        clear(&pool, &[OLD, NEW]).await;
+        seed_user(&pool, OLD, Some(DISCORD)).await;
+        seed_access(&pool, OLD).await;
+
+        let options = Options {
+            revoke_tokens_on_rekey: true,
+            ..Options::default()
+        };
+        let result = login(&pool, &identity(NEW), &discord(DISCORD), &options)
+            .await
+            .expect("login");
+        assert!(matches!(result.outcome, Outcome::Rekeyed { .. }));
+        assert_eq!(
+            result.revoked,
+            Revoked {
+                sessions: 1,
+                tokens: 1,
+                grants: 1
+            }
+        );
+        assert!(!session_alive(&pool, SESSION_OLD).await);
+        assert!(!token_alive(&pool).await);
+        assert!(!grant_alive(&pool, NEW).await);
+        clear(&pool, &[OLD, NEW]).await;
+    }
+
+    /// A primary sub with no Discord id on either side re-keys by default
+    /// (the documented staff migration) and is refused with
+    /// `require_strong_match`: the login becomes a new account and the old
+    /// one, with its sessions, stays as it was.
+    #[tokio::test]
+    #[ignore = "requires a live database; run with `cargo test -p api account_continuity -- \
+                --ignored --test-threads=1`"]
+    async fn a_weak_primary_sub_match_is_refused_only_with_the_strong_setting() {
+        let pool = connect().await;
+        clear(&pool, &[OLD, NEW]).await;
+        seed_user(&pool, OLD, None).await;
+        seed_access(&pool, OLD).await;
+        let claims = ContinuityClaims {
+            discord_id: None,
+            primary_sub: Some(OLD.to_string()),
+        };
+
+        let strong = Options {
+            require_strong_match: true,
+            ..Options::default()
+        };
+        let result = login(&pool, &identity(NEW), &claims, &strong)
+            .await
+            .expect("login");
+        assert_eq!(result.refused, Some(Refusal::PrimarySubNoDiscordId));
+        assert_eq!(result.outcome, Outcome::Upserted);
+        assert_eq!(result.revoked, Revoked::default());
+        let user = result.user.expect("a user");
+        assert_eq!(user.id, NEW);
+        assert!(user.created, "the refused re-key creates a new account");
+        assert_eq!(discord_of(&pool, OLD).await, Some(None), "OLD is untouched");
+        assert!(session_alive(&pool, SESSION_OLD).await);
+        clear(&pool, &[NEW]).await;
+
+        let result = login(&pool, &identity(NEW), &claims, &Options::default())
+            .await
+            .expect("login");
+        assert_eq!(result.refused, None);
+        assert_eq!(
+            result.outcome,
+            Outcome::Rekeyed {
+                from: OLD.to_string(),
+                matched_by: MatchedBy::PrimarySub
+            }
+        );
+        assert!(!result.user.expect("a user").created);
+        clear(&pool, &[OLD, NEW]).await;
+    }
+
+    /// A Discord id match is strong: `require_strong_match` still re-keys.
+    #[tokio::test]
+    #[ignore = "requires a live database; run with `cargo test -p api account_continuity -- \
+                --ignored --test-threads=1`"]
+    async fn a_discord_match_rekeys_with_the_strong_setting() {
+        let pool = connect().await;
+        clear(&pool, &[OLD, NEW]).await;
+        seed_user(&pool, OLD, Some(DISCORD)).await;
+        let strong = Options {
+            require_strong_match: true,
+            ..Options::default()
+        };
+        let result = login(&pool, &identity(NEW), &discord(DISCORD), &strong)
+            .await
+            .expect("login");
+        assert_eq!(result.refused, None);
+        assert!(matches!(result.outcome, Outcome::Rekeyed { .. }));
+        clear(&pool, &[OLD, NEW]).await;
     }
 
     /// With the feature off the callback calls the plain `upsert_user`:
