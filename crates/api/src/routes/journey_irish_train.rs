@@ -195,6 +195,9 @@ async fn track(app: &App, user_id: &str, body: &[u8]) -> Result<Response, RouteE
 }
 
 fn internal(err: &anyhow::Error) -> RouteError {
+    if let Some((status, message)) = crate::data::quota::response_for(err) {
+        return RouteError::Legacy(status, message);
+    }
     tracing::error!(error = ?err, "track an Iarnród Éireann train");
     RouteError::Legacy(
         StatusCode::INTERNAL_SERVER_ERROR,

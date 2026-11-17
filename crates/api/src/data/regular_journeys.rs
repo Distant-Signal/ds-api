@@ -467,8 +467,9 @@ pub enum CreatePlanOutcome {
 
 /// Creates a regular journey from a plan, and with `return_journey` its
 /// return, linked as a pair, in one transaction. The cap counts both. The
-/// user row is locked first, so two concurrent creates can't both pass
-/// the cap.
+/// user's template quota lock (the one `journey_templates::create_template`
+/// takes) is held first, so two concurrent creates can't both pass the
+/// cap.
 pub async fn create_plan_templates(
     pool: &PgPool,
     user_id: &str,
@@ -477,10 +478,7 @@ pub async fn create_plan_templates(
     return_journey: Option<&PlanTemplateInput>,
 ) -> anyhow::Result<CreatePlanOutcome> {
     let mut tx = pool.begin().await?;
-    sqlx::query("SELECT 1 FROM users WHERE id = $1 FOR UPDATE")
-        .bind(user_id)
-        .execute(&mut *tx)
-        .await?;
+    crate::data::quota::lock(&mut tx, crate::data::quota::Kind::Templates, user_id).await?;
     let owned: i64 =
         sqlx::query_scalar("SELECT COUNT(*) FROM journey_templates WHERE user_id = $1")
             .bind(user_id)

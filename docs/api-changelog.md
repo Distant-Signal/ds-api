@@ -29,6 +29,21 @@ route, migration or grant change in the API.
   on this route.` there. Line-status history already stored keeps the old
   wording.
 
+## 2026-11-17: Quotas hold under concurrent requests; shares per group are capped
+
+No migration, grant or schema change (DS-534, review L10).
+
+- The per-user caps (journeys, tracked trains, custom lines, journey
+  templates, groups) are now counted inside the write's transaction under a
+  per-user lock, so a burst of concurrent requests can no longer pass them
+  together. The caps, statuses and messages are unchanged.
+- New cap: a group holds at most 200 shared journeys and trains together.
+  `POST /groups/{id}/trains` and `POST /groups/{id}/journeys` answer `400`
+  "This group already has 200 shared journeys and trains, which is the
+  maximum. Remove some to make room." for a share that would pass it;
+  sharing something already shared still answers `204`. No group is near it
+  today (the largest has a dozen).
+
 ## 2026-11-17: Calendar feed, Delay Repay, custom line and token fixes
 
 Behaviour fixes (DS-534); no field, migration or grant change.

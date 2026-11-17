@@ -502,6 +502,13 @@ async fn post_restore(
         }
     }
 
+    // The trains to count again on the transaction below, owned so `planned`
+    // can be consumed.
+    let new_train_pairs: Vec<(String, NaiveDate)> = new_trains
+        .iter()
+        .map(|&(train_uid, service_date)| (train_uid.to_string(), service_date))
+        .collect();
+
     // Each kept leg ready to save, and what the response says of each.
     let mut legs = Vec::with_capacity(planned.len());
     let mut report = Vec::with_capacity(planned.len());
@@ -572,6 +579,60 @@ async fn post_restore(
         Ok(true) => {}
         Ok(false) => return not_found(),
         Err(err) => return internal("take a recently deleted journey")(err),
+    }
+    // The caps again, counted on this transaction under the user's quota
+    // locks, so concurrent saves cannot all pass the reads on the pool
+    // above (review L10). Same answers as those.
+    let has_new_trains = !new_train_pairs.is_empty();
+    if let Err(err) = crate::data::quota::lock_user(&mut tx, &user.id, true, has_new_trains).await {
+        return internal("take the quota locks")(err);
+    }
+    match crate::data::quota::ensure_journey_room(&mut tx, &user.id).await {
+        Ok(()) => {}
+        Err(err) if err.is::<crate::data::quota::Exceeded>() => {
+            return refused(
+                StatusCode::CONFLICT,
+                "journey_limit",
+                format!(
+                    "You already have {} journeys, which is the maximum. Delete some old ones to \
+                     make room for this one.",
+                    journeys::MAX_JOURNEYS_PER_USER
+                ),
+            );
+        }
+        Err(err) => return internal("count journeys")(err),
+    }
+    if has_new_trains {
+        let mut new_now = 0_i64;
+        for (train_uid, service_date) in &new_train_pairs {
+            match train_tracking::user_tracks_train_uid(
+                &mut *tx,
+                &user.id,
+                train_uid,
+                *service_date,
+            )
+            .await
+            {
+                Ok(true) => {}
+                Ok(false) => new_now += 1,
+                Err(err) => return internal("check existing subscription")(err),
+            }
+        }
+        if new_now > 0 {
+            let upcoming =
+                match train_tracking::count_future_subscriptions_for_user(&mut *tx, &user.id).await
+                {
+                    Ok(upcoming) => upcoming,
+                    Err(err) => return internal("count tracked trains")(err),
+                };
+            if upcoming.saturating_add(new_now) > train_tracking::MAX_FUTURE_PINS_PER_USER {
+                return refused(
+                    StatusCode::CONFLICT,
+                    "pin_limit",
+                    train_tracking::pin_cap_message(),
+                );
+            }
+        }
     }
     let (journey_id, created) = match journeys::create_journey_from_itinerary(
         &mut tx,

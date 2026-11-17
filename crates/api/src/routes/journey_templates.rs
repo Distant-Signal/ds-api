@@ -453,6 +453,9 @@ fn internal_error(operation: &'static str) -> impl Fn(anyhow::Error) -> (StatusC
         if let Some(unavailable) = crate::unavailable::response_for(&err) {
             return unavailable;
         }
+        if let Some(exceeded) = crate::data::quota::response_for(&err) {
+            return exceeded;
+        }
         tracing::error!(error = ?err, operation, "journey template request failed");
         (
             StatusCode::INTERNAL_SERVER_ERROR,
@@ -533,19 +536,16 @@ async fn post_journey_template(
     Json(body): Json<CreateJourneyTemplateRequest>,
 ) -> Result<Json<CreateJourneyTemplateResponse>, (StatusCode, String)> {
     // Per-user cap (2026-09-26 review, L10) -- both arms below create a new
-    // template. Same route-level count-then-insert shape as
-    // `routes::lines`'s custom-line cap (and the same accepted race).
+    // template. This count is the early refusal; `create_template` and
+    // `create_plan_templates` count again under the user's template quota
+    // lock, which is the check that holds under concurrent requests.
     let owned = journey_templates::count_templates_for_user(&app.database, &user.id)
         .await
         .map_err(internal_error("count journey templates"))?;
     if owned >= journey_templates::MAX_JOURNEY_TEMPLATES_PER_USER {
         return Err((
             StatusCode::BAD_REQUEST,
-            format!(
-                "You already have {} journey templates, which is the maximum. Delete one to \
-                 make room for a new one.",
-                journey_templates::MAX_JOURNEY_TEMPLATES_PER_USER
-            ),
+            crate::data::quota::Exceeded::Templates.message(),
         ));
     }
     match body {

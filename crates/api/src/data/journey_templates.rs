@@ -489,7 +489,11 @@ pub(crate) async fn insert_template_leg(
 }
 
 /// Creates a new template with `legs.len()` legs (`leg_order` 1-based,
-/// assignment order), in one transaction -- all legs land or none do. The
+/// assignment order), in one transaction -- all legs land or none do. It
+/// refuses with [`crate::data::quota::Exceeded::Templates`] (as the error's
+/// source) when the user already owns [`MAX_JOURNEY_TEMPLATES_PER_USER`],
+/// counting under their template quota lock so concurrent creates cannot
+/// all pass it. The
 /// ROUTE layer is responsible for having already validated every leg
 /// (`validate_template_leg` for a `manual`-mode request; the
 /// promote-from-journey path validates nothing here, since a source
@@ -510,6 +514,15 @@ pub async fn create_template(
     legs: &[TemplateLegInput],
 ) -> anyhow::Result<i64> {
     let mut tx = pool.begin().await?;
+    crate::data::quota::lock(&mut tx, crate::data::quota::Kind::Templates, user_id).await?;
+    let owned: i64 =
+        sqlx::query_scalar("SELECT COUNT(*) FROM journey_templates WHERE user_id = $1")
+            .bind(user_id)
+            .fetch_one(&mut *tx)
+            .await?;
+    if owned >= MAX_JOURNEY_TEMPLATES_PER_USER {
+        return Err(crate::data::quota::Exceeded::Templates.into());
+    }
     let (template_id,): (i64,) = sqlx::query_as(
         "INSERT INTO journey_templates (user_id, custom_name) VALUES ($1, $2) RETURNING id",
     )
