@@ -89,6 +89,18 @@ plan, where the whole replace used to be refused.
 Where the browser sees the message only, a delegated client sees the code
 as well.
 
+The window is judged before anything else about the request: a closed
+window is a `409` whatever `from` says (a code that is not a station
+included), and a break still open on the leg turns even a free choice
+(`cause=choice`, or none) into a window judgement, so it answers
+`miss_window_closed`, not `leg_travelled`. The window closes at 04:00
+London exactly (03:59 is open).
+
+A replace sent with an `Idempotency-Key` keeps the opaque ids of the legs it
+replaced (they are deleted with it) in the stored response, so a retry that
+names them by `l_` id, by number or by one then the other is the same
+request and replays the first answer. They are never served.
+
 **Where it searches from.** By default the leg's own boarding station,
 at the later of "now" and when the traveller could board (the previous
 leg's live arrival plus the change time): right for someone who arrived late

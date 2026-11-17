@@ -132,6 +132,13 @@ pub struct RevisionParam {
     pub revision_no: i32,
 }
 
+/// `{leg_id}` as the caller wrote it, for a route that needs the opaque id
+/// itself as well as what [`LegId`] resolves it to.
+#[derive(Debug, Deserialize)]
+pub struct LegParam {
+    pub leg_id: String,
+}
+
 /// `{id}`, a group's, next to a `{journey_id}`.
 #[derive(Debug, Deserialize)]
 pub struct GroupParam {

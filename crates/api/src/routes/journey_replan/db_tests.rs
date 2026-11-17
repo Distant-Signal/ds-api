@@ -2718,3 +2718,391 @@ async fn a_missed_train_can_be_undone_until_the_replacement_leaves() {
     assert_eq!(status, StatusCode::OK, "{undone}");
     assert_eq!(undone["revisionNo"], 3, "{undone}");
 }
+
+async fn leg_public_id_of(pool: &PgPool, leg_id: i64) -> String {
+    sqlx::query_scalar("SELECT public_id FROM journey_legs WHERE id = $1")
+        .bind(leg_id)
+        .fetch_one(pool)
+        .await
+        .expect("leg public id")
+}
+
+async fn leg_ids_of(pool: &PgPool, journey_id: i64) -> Vec<i64> {
+    sqlx::query_scalar("SELECT id FROM journey_legs WHERE journey_id = $1 ORDER BY leg_order")
+        .bind(journey_id)
+        .fetch_all(pool)
+        .await
+        .expect("leg ids")
+}
+
+async fn revision_count_of(pool: &PgPool, journey_id: i64) -> i64 {
+    sqlx::query_scalar("SELECT count(*) FROM journey_revisions WHERE journey_id = $1")
+        .bind(journey_id)
+        .fetch_one(pool)
+        .await
+        .expect("count revisions")
+}
+
+/// A replace over both legs of a two-leg journey under one
+/// `Idempotency-Key`, named by `first`'s ids (the path leg and
+/// `throughLegId`) and then retried by the other form's. The replace
+/// deletes both legs, so a retry by opaque ids has nothing to look up:
+/// it must still be the same request (DS-534).
+async fn replace_retried_in_the_other_id_form(public_first: bool) {
+    let _now = pin_now();
+    let pool = connect().await;
+    let _cleanup = cleanup(&pool).await;
+    seed_timetable(&pool).await;
+    seed_onward(&pool).await;
+    let token = seed_session(&pool, USER).await;
+    let router = router(pool.clone());
+    let (journey_id, legs) = create_started_two_leg_journey(&pool, &router, &token).await;
+    let numeric = (legs[0].to_string(), serde_json::json!(legs[1]));
+    let opaque = (
+        leg_public_id_of(&pool, legs[0]).await,
+        serde_json::json!(leg_public_id_of(&pool, legs[1]).await),
+    );
+    let (first, other) = if public_first {
+        (opaque, numeric)
+    } else {
+        (numeric, opaque)
+    };
+    let send = |form: &(String, Value), uid: &str| {
+        let router = router.clone();
+        let token = token.clone();
+        let uri = format!("/Journeys/{journey_id}/legs/{}/replace", form.0);
+        let mut body = replace_body("choice", uid);
+        body["throughLegId"] = form.1.clone();
+        async move {
+            call(
+                &router,
+                "POST",
+                &uri,
+                Some(&token),
+                Some(body),
+                Some("replace-either-form"),
+            )
+            .await
+        }
+    };
+
+    let (status, answer) = send(&first, "RP0002").await;
+    assert_eq!(status, StatusCode::OK, "{answer}");
+    assert!(
+        answer.get("replacedLegs").is_none(),
+        "the stored legs are never served: {answer}"
+    );
+    let legs_after = leg_ids_of(&pool, journey_id).await;
+    assert_eq!(legs_after.len(), 1, "both legs were replaced by one");
+    let revisions_after = revision_count_of(&pool, journey_id).await;
+
+    // The retry in the other form, and in the first form again, replay.
+    for (label, form) in [("other form", &other), ("same form", &first)] {
+        let (status, again) = send(form, "RP0002").await;
+        assert_eq!(
+            (status, &again),
+            (StatusCode::OK, &answer),
+            "{label}: the first response, replayed"
+        );
+        assert_eq!(leg_ids_of(&pool, journey_id).await, legs_after, "{label}");
+        assert_eq!(
+            revision_count_of(&pool, journey_id).await,
+            revisions_after,
+            "{label}"
+        );
+    }
+
+    // A different request under the key is still a conflict, in either
+    // form, and so is a leg id the key never replaced.
+    for (label, form) in [("other form", &other), ("first form", &first)] {
+        let (status, body) = send(form, "RP0003").await;
+        assert_eq!(status, StatusCode::CONFLICT, "{label}: {body}");
+        assert_eq!(
+            body, "This Idempotency-Key was already used for a different request.",
+            "{label}"
+        );
+    }
+    let stranger = (
+        "l_00000000000000000000000000000000".to_string(),
+        other.1.clone(),
+    );
+    let (status, body) = send(&stranger, "RP0002").await;
+    assert_eq!(status, StatusCode::CONFLICT, "{body}");
+    assert_eq!(leg_ids_of(&pool, journey_id).await, legs_after);
+    assert_eq!(revision_count_of(&pool, journey_id).await, revisions_after);
+}
+
+#[tokio::test]
+#[ignore = "requires a live database: DATABASE_URL"]
+async fn an_idempotent_replace_by_number_is_replayed_for_the_opaque_ids() {
+    replace_retried_in_the_other_id_form(false).await;
+}
+
+#[tokio::test]
+#[ignore = "requires a live database: DATABASE_URL"]
+async fn an_idempotent_replace_by_opaque_ids_is_replayed_for_the_numbers() {
+    replace_retried_in_the_other_id_form(true).await;
+}
+
+/// Whether `GET /Journeys/mine` lists journey `journey_id` as over.
+async fn listed_as_travelled(router: &axum::Router, token: &str, journey_id: i64) -> bool {
+    let (_, mine) = call(router, "GET", "/Journeys/mine", Some(token), None, None).await;
+    mine.as_array()
+        .and_then(|rows| rows.iter().find(|row| row["id"] == journey_id))
+        .and_then(|row| row["travelled"].as_bool())
+        .unwrap_or_else(|| panic!("the journey is listed with `travelled`: {mine}"))
+}
+
+/// Nothing is stored about a miss, so a journey is over or still to come
+/// from its current legs (DS-534): one whose only train has run is over,
+/// and goes back to still-to-come once that leg is replaced by a train
+/// that has not left, and over again when the replacement has run.
+#[tokio::test]
+#[ignore = "requires a live database: DATABASE_URL"]
+async fn a_past_journey_is_upcoming_again_after_a_replacement_for_a_train_still_to_come() {
+    let _now = pin_now();
+    let pool = connect().await;
+    let _cleanup = cleanup(&pool).await;
+    seed_timetable(&pool).await;
+    seed_late_train(&pool, "RP0006", "12:45", "13:45").await;
+    let token = seed_session(&pool, USER).await;
+    let router = router(pool.clone());
+    let (journey_id, leg_id) = create_journey(&router, &token).await;
+    assert!(!listed_as_travelled(&router, &token, journey_id).await);
+
+    // The list judges "over" in SQL against the database's own clock, not
+    // the pinned one, so the trains' finish is stated by their state: the
+    // booked train has completed.
+    let _later = crate::routes::pin_london_now_for_tests(london_at(0, 12, 30));
+    seed_live(&pool, "RP0001", "completed", 0, "2099-05-05T10:00:00Z").await;
+    assert!(listed_as_travelled(&router, &token, journey_id).await);
+
+    let (status, replaced) = call(
+        &router,
+        "POST",
+        &format!("/Journeys/{journey_id}/legs/{leg_id}/replace"),
+        Some(&token),
+        Some(replace_body("missed", "RP0006")),
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{replaced}");
+    assert!(
+        !listed_as_travelled(&router, &token, journey_id).await,
+        "the 12:45 is still to come"
+    );
+
+    // The replacement has completed too.
+    seed_live(&pool, "RP0006", "completed", 0, "2099-05-05T13:00:00Z").await;
+    assert!(listed_as_travelled(&router, &token, journey_id).await);
+}
+
+/// What the miss window refuses beyond the plain cases (DS-534): a free
+/// choice on a leg with a break open is judged by the window, not the
+/// train; `from` does not get past a closed window (the window is judged
+/// before the station is); and the window closes at 04:00 exactly.
+#[tokio::test]
+#[ignore = "requires a live database: DATABASE_URL"]
+async fn a_closed_window_refuses_a_break_leg_and_a_from_station_and_closes_at_four() {
+    let _now = pin_now();
+    let pool = connect().await;
+    let _cleanup = cleanup(&pool).await;
+    seed_timetable(&pool).await;
+    let token = seed_session(&pool, USER).await;
+    let router = router(pool.clone());
+    let (journey_id, leg_id) = create_journey(&router, &token).await;
+    exec(
+        &pool,
+        &format!(
+            "INSERT INTO train_current_state (trains_id, status) \
+             SELECT id, 'cancelled' FROM trains WHERE service_date = '{DATE}' AND train_uid = 'RP0001'"
+        ),
+    )
+    .await;
+    // A page read opens the break; it stays open in the table until
+    // another read (this test makes none) ends it.
+    let (_, detail) = call(
+        &router,
+        "GET",
+        &format!("/Journeys/{journey_id}"),
+        Some(&token),
+        None,
+        None,
+    )
+    .await;
+    assert_eq!(detail["openBreak"]["cause"], "cancelled", "{detail}");
+
+    let alternatives = format!("/Journeys/{journey_id}/legs/{leg_id}/alternatives");
+    let replace = format!("/Journeys/{journey_id}/legs/{leg_id}/replace");
+    let too_late = "It's too late to change this journey.";
+
+    // 04:30 the morning after.
+    let _closed = crate::routes::pin_london_now_for_tests(london_at(1, 4, 30));
+    // No cause is a free choice, which a break open on the leg turns into
+    // a window judgement: miss_window_closed, not leg_travelled.
+    for uri in [alternatives.clone(), format!("{alternatives}?cause=choice")] {
+        let (status, body) = call(&router, "GET", &uri, Some(&token), None, None).await;
+        assert_eq!(status, StatusCode::CONFLICT, "{uri}: {body}");
+        assert_eq!(body, too_late, "{uri}");
+    }
+    let (status, body) = call(
+        &router,
+        "POST",
+        &replace,
+        Some(&token),
+        Some(replace_body("choice", "RP0002")),
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::CONFLICT, "{body}");
+    assert_eq!(body, too_late);
+    // A station that exists, one that does not and one that is not a code:
+    // all the window's answer.
+    for from in ["ZRC", "QQQ", "ZR"] {
+        let (status, body) = call(
+            &router,
+            "GET",
+            &format!("{alternatives}?cause=missed&from={from}"),
+            Some(&token),
+            None,
+            None,
+        )
+        .await;
+        assert_eq!(status, StatusCode::CONFLICT, "from {from}: {body}");
+        assert_eq!(body, too_late, "from {from}");
+    }
+
+    // 04:00 sharp is closed, a minute before it is open.
+    let _four = crate::routes::pin_london_now_for_tests(london_at(1, 4, 0));
+    let (status, body) = call(
+        &router,
+        "POST",
+        &replace,
+        Some(&token),
+        Some(replace_body("missed", "RP0002")),
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::CONFLICT, "{body}");
+    assert_eq!(revision_count_of(&pool, journey_id).await, 1);
+    let _before_four = crate::routes::pin_london_now_for_tests(london_at(1, 3, 59));
+    let (status, body) = call(
+        &router,
+        "POST",
+        &replace,
+        Some(&token),
+        Some(replace_body("missed", "RP0002")),
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+}
+
+/// A break's stored suggestions carry no opaque leg ids (older sets never
+/// did), so they are filled when the break is served, in one lookup, and a
+/// leg that no longer exists leaves its id empty without failing the read.
+#[tokio::test]
+#[ignore = "requires a live database: DATABASE_URL"]
+async fn a_stored_set_is_served_with_the_legs_opaque_ids_and_empty_ones_for_gone_legs() {
+    let _now = pin_now();
+    let pool = connect().await;
+    let _cleanup = cleanup(&pool).await;
+    seed_timetable(&pool).await;
+    let token = seed_session(&pool, USER).await;
+    let router = router(pool.clone());
+    let (journey_id, leg_id) = create_journey(&router, &token).await;
+    let leg_public_id = leg_public_id_of(&pool, leg_id).await;
+    exec(
+        &pool,
+        &format!(
+            "INSERT INTO train_current_state (trains_id, status) \
+             SELECT id, 'cancelled' FROM trains WHERE service_date = '{DATE}' AND train_uid = 'RP0001'"
+        ),
+    )
+    .await;
+    let (_, detail) = call(
+        &router,
+        "GET",
+        &format!("/Journeys/{journey_id}"),
+        Some(&token),
+        None,
+        None,
+    )
+    .await;
+    let break_id = detail["openBreak"]["id"].as_i64().expect("break id");
+    let (status, preview) = call(
+        &router,
+        "POST",
+        &format!("/Journeys/{journey_id}/replan/preview"),
+        Some(&token),
+        Some(serde_json::json!({ "breakId": break_id })),
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{preview}");
+
+    // As stored an old set was: no opaque ids, and a leg that has since
+    // gone (999999999) as one suggestion's through leg.
+    let stored: Value = sqlx::query_scalar("SELECT suggestions FROM journey_breaks WHERE id = $1")
+        .bind(break_id)
+        .fetch_one(&pool)
+        .await
+        .expect("the stored set");
+    let mut old = stored.clone();
+    old["fromLegPublicId"] = serde_json::json!("");
+    if old["trigger"].is_object() {
+        old["trigger"]["legPublicId"] = serde_json::json!("");
+    }
+    let suggestions = old["suggestions"].as_array_mut().expect("suggestions");
+    assert!(!suggestions.is_empty(), "{stored}");
+    suggestions[0]["throughLegId"] = serde_json::json!(999_999_999);
+    suggestions[0]["throughLegPublicId"] = serde_json::json!("");
+    suggestions[0]["rejoinsLegId"] = serde_json::json!(leg_id);
+    suggestions[0]["rejoinsLegPublicId"] = Value::Null;
+    for later in suggestions.iter_mut().skip(1) {
+        let object = later.as_object_mut().expect("a suggestion");
+        object.remove("throughLegPublicId");
+        object.remove("rejoinsLegPublicId");
+    }
+    sqlx::query("UPDATE journey_breaks SET suggestions = $2 WHERE id = $1")
+        .bind(break_id)
+        .bind(&old)
+        .execute(&pool)
+        .await
+        .expect("store the old set");
+
+    let (status, current) = call(
+        &router,
+        "GET",
+        &format!("/Journeys/{journey_id}/breaks/current"),
+        Some(&token),
+        None,
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{current}");
+    let set = &current["suggestions"];
+    assert_eq!(set["fromLegPublicId"], leg_public_id.as_str(), "{current}");
+    if set["trigger"].is_object() {
+        assert_eq!(set["trigger"]["legPublicId"], leg_public_id.as_str());
+    }
+    assert_eq!(set["suggestions"][0]["throughLegPublicId"], "", "{current}");
+    assert_eq!(
+        set["suggestions"][0]["rejoinsLegPublicId"],
+        leg_public_id.as_str(),
+        "{current}"
+    );
+    for later in set["suggestions"]
+        .as_array()
+        .expect("suggestions")
+        .iter()
+        .skip(1)
+    {
+        assert_eq!(
+            later["throughLegPublicId"],
+            leg_public_id.as_str(),
+            "{current}"
+        );
+        assert!(later["rejoinsLegPublicId"].is_null(), "{current}");
+    }
+}
