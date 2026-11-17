@@ -471,8 +471,9 @@ pub(crate) fn validate_leg(
 /// Untracked legs have no timetable and are skipped. The code is
 /// [`leg_validation::LegCallError::code`]; with more than one leg the
 /// message starts "Leg N: ", N counting every leg of the itinerary
-/// (1-based). Runs after the idempotency claim, like the caps, so a replay
-/// still gets its first answer.
+/// (1-based). Runs after the `Idempotency-Key` is checked, like the caps,
+/// so a replay still gets its first answer, and before the save's
+/// transaction starts (it reads through the pool).
 pub(crate) async fn check_legs_call(app: &App, legs: &[ValidLeg]) -> Result<(), RouteError> {
     for (index, leg) in legs.iter().enumerate() {
         let ValidLeg::Train {
@@ -530,6 +531,49 @@ fn idempotency_key(headers: &HeaderMap) -> Result<Option<String>, RouteError> {
         ));
     }
     Ok(Some(key.to_string()))
+}
+
+/// The 409 for an `Idempotency-Key` already used with another itinerary.
+fn idempotency_conflict() -> RouteError {
+    RouteError::coded(
+        StatusCode::CONFLICT,
+        "idempotency_conflict",
+        "This Idempotency-Key was already used for a different itinerary.",
+    )
+}
+
+/// What an earlier request with `key` left, read without claiming it:
+/// `Replay` with its answer for the same request, `Conflict` for another,
+/// `None` when the key is unused (or past its 24 hours, when the claim
+/// will take it over). `claim_idempotency_key` still decides, in the
+/// write's transaction.
+async fn peek_idempotency_key(
+    pool: &sqlx::PgPool,
+    user_id: &str,
+    key: &str,
+    request_hash: &str,
+) -> anyhow::Result<Option<IdempotencyClaim>> {
+    let existing: Option<(String, Option<serde_json::Value>)> = sqlx::query_as(
+        "SELECT request_hash, response FROM journey_idempotency_keys \
+         WHERE user_id = $1 AND idempotency_key = $2 \
+           AND created_at >= now() - make_interval(hours => $3)",
+    )
+    .bind(user_id)
+    .bind(key)
+    .bind(i32::try_from(
+        crate::data::delegated::IDEMPOTENCY_RETENTION_HOURS,
+    )?)
+    .fetch_optional(pool)
+    .await?;
+    Ok(match existing {
+        Some((hash, Some(response))) if hash == request_hash => {
+            Some(IdempotencyClaim::Replay(response))
+        }
+        Some((hash, _)) if hash != request_hash => Some(IdempotencyClaim::Conflict),
+        // Unused, or the same request with no answer yet (the claim waits
+        // for it).
+        _ => None,
+    })
 }
 
 /// Each validated leg ready to save: a train leg's shared `trains` row
@@ -624,36 +668,27 @@ async fn save_itinerary(
         format!("{digest:x}")
     };
 
-    let mut tx = app
-        .database
-        .begin()
-        .await
-        .map_err(|err| internal("start transaction")(err.into()))?;
+    // A key already used is answered before anything else, so a replay
+    // always gets its first answer. Read on the pool, not claimed: the
+    // caps and the leg checks below read through the pool too, and must
+    // not run while this request holds a transaction's connection (review
+    // J8: under load every save held one and waited for another). The
+    // claim in the transaction below settles a race with a concurrent
+    // request using the same key.
     if let Some(key) = &key {
-        match crate::data::delegated::claim_idempotency_key(
-            &mut tx,
-            &user.user_id,
-            key,
-            &request_hash,
-        )
-        .await
-        .map_err(internal("claim idempotency key"))?
+        match peek_idempotency_key(&app.database, &user.user_id, key, &request_hash)
+            .await
+            .map_err(internal("read idempotency key"))?
         {
-            IdempotencyClaim::Fresh => {}
-            IdempotencyClaim::Replay(response) => {
+            Some(IdempotencyClaim::Replay(response)) => {
                 return Ok(axum::Json(response).into_response());
             }
-            IdempotencyClaim::Conflict => {
-                return Err(RouteError::coded(
-                    StatusCode::CONFLICT,
-                    "idempotency_conflict",
-                    "This Idempotency-Key was already used for a different itinerary.",
-                ));
-            }
+            Some(IdempotencyClaim::Conflict) => return Err(idempotency_conflict()),
+            Some(IdempotencyClaim::Fresh) | None => {}
         }
     }
 
-    // The caps, after the key, so a replay always gets its first answer.
+    // The caps.
     let owned = journeys::count_manual_journeys_for_user(&app.database, &user.user_id)
         .await
         .map_err(internal("count journeys"))?;
@@ -726,6 +761,30 @@ async fn save_itinerary(
 
     check_legs_call(app, &legs).await?;
     let resolved = resolve_legs(app, &legs).await?;
+
+    // From here on, only the transaction's own connection.
+    let mut tx = app
+        .database
+        .begin()
+        .await
+        .map_err(|err| internal("start transaction")(err.into()))?;
+    if let Some(key) = &key {
+        match crate::data::delegated::claim_idempotency_key(
+            &mut tx,
+            &user.user_id,
+            key,
+            &request_hash,
+        )
+        .await
+        .map_err(internal("claim idempotency key"))?
+        {
+            IdempotencyClaim::Fresh => {}
+            IdempotencyClaim::Replay(response) => {
+                return Ok(axum::Json(response).into_response());
+            }
+            IdempotencyClaim::Conflict => return Err(idempotency_conflict()),
+        }
+    }
     let created_via = client
         .as_ref()
         .map_or_else(|| "web".to_string(), |client| client.name.clone());

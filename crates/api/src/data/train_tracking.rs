@@ -197,7 +197,11 @@ const PIN_MAX_SKIPPED_STATIONS: usize = 64;
 /// checked; a user already over the cap keeps every existing row.
 pub const MAX_FUTURE_PINS_PER_USER: i64 = 100;
 
-/// The count [`MAX_FUTURE_PINS_PER_USER`] is checked against.
+/// The count [`MAX_FUTURE_PINS_PER_USER`] is checked against: dated
+/// London's today or later. Not the database's `CURRENT_DATE` (review J7:
+/// UTC on a pool with no time zone set, so after midnight in summer
+/// yesterday's trains still counted, and overlapped the London-dated
+/// recent-past count).
 pub async fn count_future_subscriptions_for_user<'c, E>(
     executor: E,
     user_id: &str,
@@ -207,9 +211,10 @@ where
 {
     let count: i64 = sqlx::query_scalar(
         "SELECT COUNT(*) FROM train_subscriptions \
-         WHERE user_id = $1 AND service_date >= CURRENT_DATE",
+         WHERE user_id = $1 AND service_date >= $2",
     )
     .bind(user_id)
+    .bind(crate::routes::london_today())
     .fetch_one(executor)
     .await?;
     Ok(count)
@@ -4028,5 +4033,40 @@ mod journey_leg_list_tests {
 
         cleanup(&pool, user_id).await;
         cleanup(&pool, other_user).await;
+    }
+
+    /// Review J7: the pin cap counts from London's today, so at 00:30 BST
+    /// (23:30 UTC the day before) yesterday's trains no longer count.
+    #[tokio::test]
+    #[ignore = "requires a live database; run with `DATABASE_URL=... cargo test -p api \
+                the_pin_cap_counts_from_london_s_today -- --ignored`"]
+    async fn the_pin_cap_counts_from_london_s_today() {
+        use chrono::TimeZone;
+        const USER: &str = "TEST-PIN-CAP-LONDON-TODAY";
+        let _now = crate::routes::pin_london_now_for_tests(
+            Utc.with_ymd_and_hms(2099, 5, 4, 23, 30, 0).unwrap(),
+        );
+        let pool = connect().await;
+        ds_store::test_support::cleanup_user(&pool, USER).await;
+        seed_user(&pool, USER).await;
+        for date in ["2099-05-04", "2099-05-05"] {
+            let date: NaiveDate = date.parse().unwrap();
+            crate::test_support::assert_synthetic_date(date);
+            ds_store::test_support::seed_backlog_candidate_pin(
+                &pool,
+                USER,
+                date,
+                Some("KGX"),
+                None,
+                "pending",
+                None,
+            )
+            .await;
+        }
+        let count = count_future_subscriptions_for_user(&pool, USER)
+            .await
+            .expect("count");
+        assert_eq!(count, 1, "only London's today on");
+        ds_store::test_support::cleanup_user(&pool, USER).await;
     }
 }

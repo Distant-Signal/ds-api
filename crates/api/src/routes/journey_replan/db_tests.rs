@@ -1514,3 +1514,451 @@ async fn a_late_train_re_times_a_timetabled_leg_and_judges_the_next_change_from_
     assert_eq!(detail["legs"][2]["connection"]["gapMinutes"], 5, "{detail}");
     transit_cleanup(&pool, NETWORK).await;
 }
+
+/// A dismissed break stays dismissed (review J1): neither the next page
+/// read nor the sweep opens the same cancellation again, so the banner and
+/// the push never come back for it.
+#[tokio::test]
+#[ignore = "requires a live database: DATABASE_URL"]
+async fn a_dismissed_break_is_not_opened_again_for_the_same_cause() {
+    use chrono::TimeZone;
+    let _now = pin_now();
+    let pool = connect().await;
+    let _cleanup = cleanup(&pool).await;
+    seed_timetable(&pool).await;
+    let token = seed_session(&pool, USER).await;
+    let router = router(pool.clone());
+    let (journey_id, _) = create_journey(&router, &token).await;
+    seed_live(&pool, "RP0001", "cancelled", 0, "2099-05-05T07:00:00Z").await;
+    let journey = format!("/Journeys/{journey_id}");
+
+    let (_, detail) = call(&router, "GET", &journey, Some(&token), None, None).await;
+    let break_id = detail["openBreak"]["id"].as_i64().expect("open break");
+    let (status, body) = call(
+        &router,
+        "POST",
+        &format!("/Journeys/{journey_id}/breaks/{break_id}/dismiss"),
+        Some(&token),
+        Some(serde_json::json!({ "reason": "notTravelling" })),
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::NO_CONTENT, "{body}");
+
+    let (_, detail) = call(&router, "GET", &journey, Some(&token), None, None).await;
+    assert!(detail["openBreak"].is_null(), "{detail}");
+    let app = crate::test_support::inert_app(pool.clone());
+    let now = chrono::Utc.with_ymd_and_hms(2099, 5, 5, 8, 30, 0).unwrap();
+    for _ in 0..2 {
+        let swept = crate::journey_break_sweep::run_sweep(&app, now)
+            .await
+            .expect("sweep");
+        assert_eq!(swept.breaks, 0, "{swept:?}");
+    }
+    assert_eq!(break_count(&pool, journey_id).await, 1);
+    let (_, detail) = call(&router, "GET", &journey, Some(&token), None, None).await;
+    assert!(detail["openBreak"].is_null(), "{detail}");
+}
+
+/// A skipped stop is judged alike by a page read and the sweep (review
+/// J2): the break a read opens is confirmed by the sweep, not ended as
+/// recovered and opened again by the next read.
+#[tokio::test]
+#[ignore = "requires a live database: DATABASE_URL"]
+async fn the_sweep_keeps_a_skipped_stop_break_a_page_read_opened() {
+    use chrono::TimeZone;
+    let _now = pin_now();
+    let pool = connect().await;
+    let _cleanup = cleanup(&pool).await;
+    exec(&pool, "DELETE FROM station_samples WHERE crs = 'ZRC'").await;
+    seed_timetable(&pool).await;
+    let token = seed_session(&pool, USER).await;
+    let router = router(pool.clone());
+    let (journey_id, leg_id) = create_journey(&router, &token).await;
+    // RP0001's board at ZRC says it no longer calls at ZRD (the board is
+    // matched by the train's destination).
+    exec(
+        &pool,
+        &format!(
+            "UPDATE train_subscriptions SET pin_destination_crs = 'ZRD' WHERE user_id = '{USER}'"
+        ),
+    )
+    .await;
+    sqlx::query(
+        "INSERT INTO station_samples (crs, polled_at, departures) VALUES ('ZRC', NOW(), $1)",
+    )
+    .bind(serde_json::json!([{
+        "service_id": "replan-skip", "operator": "GR", "destination_crs": "ZRD",
+        "scheduled": "10:00", "estimated": "On time", "is_cancelled": false,
+        "delay_minutes": 0, "skipped_stations": ["ZRD"], "calling_points": []
+    }]))
+    .execute(&pool)
+    .await
+    .expect("seed board");
+
+    let journey = format!("/Journeys/{journey_id}");
+    let (_, detail) = call(&router, "GET", &journey, Some(&token), None, None).await;
+    assert_eq!(detail["openBreak"]["cause"], "skipped_stop", "{detail}");
+    assert_eq!(detail["openBreak"]["triggerLegId"], leg_id, "{detail}");
+    let break_id = detail["openBreak"]["id"].as_i64().expect("break id");
+
+    let app = crate::test_support::inert_app(pool.clone());
+    let now = chrono::Utc.with_ymd_and_hms(2099, 5, 5, 8, 30, 0).unwrap();
+    let swept = crate::journey_break_sweep::run_sweep(&app, now)
+        .await
+        .expect("sweep");
+    assert_eq!((swept.breaks, swept.recovered), (1, 0), "{swept:?}");
+    let row = crate::data::journey_breaks::open_break(&pool, journey_id)
+        .await
+        .expect("read")
+        .expect("still open");
+    assert_eq!(row.id, break_id);
+    assert_eq!(row.cause, "skipped_stop");
+    // The same fingerprint as the read's: confirmed, not reset.
+    assert_eq!(row.confirmations, 2);
+    assert_eq!(break_count(&pool, journey_id).await, 1);
+    exec(&pool, "DELETE FROM station_samples WHERE crs = 'ZRC'").await;
+}
+
+/// A two-leg journey RP0001 then RP0004 that is no longer being planned
+/// (a dismissed break on it); returns its id and leg ids.
+async fn create_started_two_leg_journey(
+    pool: &PgPool,
+    router: &axum::Router,
+    token: &str,
+) -> (i64, Vec<i64>) {
+    let (status, body) = call(
+        router,
+        "POST",
+        "/Journeys/itinerary",
+        Some(token),
+        Some(serde_json::json!({
+            "legs": [
+                { "trainUid": "RP0001", "serviceDate": DATE, "originCrs": "ZRC", "destinationCrs": "ZRD" },
+                { "trainUid": "RP0004", "serviceDate": DATE, "originCrs": "ZRD", "destinationCrs": "ZRE" }
+            ]
+        })),
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let journey_id = body["journeyId"].as_i64().expect("journeyId");
+    let legs: Vec<i64> = body["legs"]
+        .as_array()
+        .expect("legs")
+        .iter()
+        .map(|leg| leg["legId"].as_i64().expect("legId"))
+        .collect();
+    sqlx::query(
+        "INSERT INTO journey_breaks (journey_id, user_id, cause, fault, severity, \
+             trigger_leg_id, break_position, fingerprint, status, resolved_at) \
+         VALUES ($1, $2, 'connection_missed', 'operator', 1, $3, 2, '', 'dismissed', now())",
+    )
+    .bind(journey_id)
+    .bind(USER)
+    .bind(legs[1])
+    .execute(pool)
+    .await
+    .expect("seed a dismissed break");
+    (journey_id, legs)
+}
+
+/// Going back to a plan that had more legs after the current ones (review
+/// J4): the missing legs come back, where this was a 409.
+#[tokio::test]
+#[ignore = "requires a live database: DATABASE_URL"]
+async fn reverting_to_a_longer_plan_brings_its_later_legs_back() {
+    let _now = pin_now();
+    let pool = connect().await;
+    let _cleanup = cleanup(&pool).await;
+    seed_timetable(&pool).await;
+    seed_onward(&pool).await;
+    let token = seed_session(&pool, USER).await;
+    let router = router(pool.clone());
+    let (journey_id, legs) = create_started_two_leg_journey(&pool, &router, &token).await;
+
+    // Deleting the second leg, once started, is a plan of its own.
+    let (status, body) = call(
+        &router,
+        "DELETE",
+        &format!("/Journeys/{journey_id}/legs/{}", legs[1]),
+        Some(&token),
+        None,
+        None,
+    )
+    .await;
+    assert!(status.is_success(), "{status} {body}");
+    let (_, revisions) = call(
+        &router,
+        "GET",
+        &format!("/Journeys/{journey_id}/revisions"),
+        Some(&token),
+        None,
+        None,
+    )
+    .await;
+    assert_eq!(revisions["revisions"][0]["revisionNo"], 2, "{revisions}");
+    assert_eq!(revisions["revisions"][1]["canRevert"], true, "{revisions}");
+
+    let (status, body) = call(
+        &router,
+        "POST",
+        &format!("/Journeys/{journey_id}/revisions/1/revert"),
+        Some(&token),
+        None,
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let (_, detail) = call(
+        &router,
+        "GET",
+        &format!("/Journeys/{journey_id}"),
+        Some(&token),
+        None,
+        None,
+    )
+    .await;
+    let uids: Vec<&str> = detail["legs"]
+        .as_array()
+        .expect("legs")
+        .iter()
+        .filter_map(|leg| leg["trackedTrainState"]["trainUid"].as_str())
+        .collect();
+    assert_eq!(uids, ["RP0001", "RP0004"], "{detail}");
+}
+
+/// An `Idempotency-Key` names one request to one journey and leg (review
+/// J5): the same key on another journey's revert is a conflict, never the
+/// first journey's answer replayed with nothing done.
+#[tokio::test]
+#[ignore = "requires a live database: DATABASE_URL"]
+async fn an_idempotency_key_is_scoped_to_its_journey() {
+    let _now = pin_now();
+    let pool = connect().await;
+    let _cleanup = cleanup(&pool).await;
+    seed_timetable(&pool).await;
+    seed_onward(&pool).await;
+    let token = seed_session(&pool, USER).await;
+    let router = router(pool.clone());
+    let mut journeys = Vec::new();
+    for _ in 0..2 {
+        let (journey_id, legs) = create_started_two_leg_journey(&pool, &router, &token).await;
+        let (status, body) = call(
+            &router,
+            "DELETE",
+            &format!("/Journeys/{journey_id}/legs/{}", legs[1]),
+            Some(&token),
+            None,
+            None,
+        )
+        .await;
+        assert!(status.is_success(), "{status} {body}");
+        journeys.push(journey_id);
+    }
+    let revert = |journey_id: i64| format!("/Journeys/{journey_id}/revisions/1/revert");
+    let (status, first) = call(
+        &router,
+        "POST",
+        &revert(journeys[0]),
+        Some(&token),
+        None,
+        Some("revert-key"),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{first}");
+    // A retry of the same request replays it.
+    let (status, again) = call(
+        &router,
+        "POST",
+        &revert(journeys[0]),
+        Some(&token),
+        None,
+        Some("revert-key"),
+    )
+    .await;
+    assert_eq!((status, &again), (StatusCode::OK, &first));
+    let (status, body) = call(
+        &router,
+        "POST",
+        &revert(journeys[1]),
+        Some(&token),
+        None,
+        Some("revert-key"),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CONFLICT, "{body}");
+    assert_ne!(body, first);
+}
+
+/// Accepting from stale suggestions re-plans them, and the replacement
+/// starts from the leg the fresh set starts from (review J6), not the one
+/// the stored set named.
+#[tokio::test]
+#[ignore = "requires a live database: DATABASE_URL"]
+async fn an_accept_after_a_re_plan_starts_from_the_fresh_sets_leg() {
+    let _now = pin_now();
+    let pool = connect().await;
+    let _cleanup = cleanup(&pool).await;
+    seed_timetable(&pool).await;
+    seed_onward(&pool).await;
+    let token = seed_session(&pool, USER).await;
+    let router = router(pool.clone());
+    let (journey_id, legs) = create_started_two_leg_journey(&pool, &router, &token).await;
+    seed_live(&pool, "RP0004", "cancelled", 0, "2099-05-05T07:00:00Z").await;
+    let journey = format!("/Journeys/{journey_id}");
+
+    let (_, detail) = call(&router, "GET", &journey, Some(&token), None, None).await;
+    assert_eq!(detail["openBreak"]["cause"], "cancelled", "{detail}");
+    assert_eq!(detail["openBreak"]["triggerLegId"], legs[1], "{detail}");
+    let break_id = detail["openBreak"]["id"].as_i64().expect("break id");
+    let (status, preview) = call(
+        &router,
+        "POST",
+        &format!("/Journeys/{journey_id}/replan/preview"),
+        Some(&token),
+        Some(serde_json::json!({ "breakId": break_id })),
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{preview}");
+    let pick = preview["suggestions"]["suggestions"]
+        .as_array()
+        .expect("suggestions")
+        .iter()
+        .find(|s| s["legs"][0]["trainUid"] == "RP0005")
+        .expect("RP0005 offered")
+        .clone();
+    // The stored set goes stale and names the first leg, as a set planned
+    // before the break's trigger moved would.
+    sqlx::query(
+        "UPDATE journey_breaks SET suggestions = jsonb_set(jsonb_set(suggestions, \
+             '{fromLegId}', to_jsonb($2::bigint)), '{fingerprint}', '\"moved\"') \
+         WHERE id = $1",
+    )
+    .bind(break_id)
+    .bind(legs[0])
+    .execute(&pool)
+    .await
+    .expect("age the stored set");
+
+    let (status, body) = call(
+        &router,
+        "POST",
+        &format!("/Journeys/{journey_id}/replan/accept"),
+        Some(&token),
+        Some(serde_json::json!({ "breakId": break_id, "suggestionId": pick["id"] })),
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let (_, detail) = call(&router, "GET", &journey, Some(&token), None, None).await;
+    let uids: Vec<&str> = detail["legs"]
+        .as_array()
+        .expect("legs")
+        .iter()
+        .filter_map(|leg| leg["trackedTrainState"]["trainUid"].as_str())
+        .collect();
+    assert_eq!(uids, ["RP0001", "RP0005"], "{detail}");
+    assert_eq!(detail["legs"][0]["id"], legs[0], "{detail}");
+}
+
+/// Saving an itinerary never holds its transaction's connection while it
+/// waits for another (review J8): with a pool of one connection the save,
+/// and its replay, still go through.
+#[tokio::test]
+#[ignore = "requires a live database: DATABASE_URL"]
+async fn an_itinerary_saves_on_a_pool_of_one_connection() {
+    let _now = pin_now();
+    let pool = connect().await;
+    let _cleanup = cleanup(&pool).await;
+    seed_timetable(&pool).await;
+    let token = seed_session(&pool, USER).await;
+    let database_url = std::env::var("DATABASE_URL").expect("DATABASE_URL");
+    let one = sqlx::postgres::PgPoolOptions::new()
+        .max_connections(1)
+        .acquire_timeout(std::time::Duration::from_secs(5))
+        .connect(&database_url)
+        .await
+        .expect("connect");
+    let router = router(one);
+    let body = serde_json::json!({
+        "legs": [{
+            "trainUid": "RP0001", "serviceDate": DATE,
+            "originCrs": "ZRC", "destinationCrs": "ZRD"
+        }]
+    });
+    let (status, first) = call(
+        &router,
+        "POST",
+        "/Journeys/itinerary",
+        Some(&token),
+        Some(body.clone()),
+        Some("one-connection"),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{first}");
+    let (status, again) = call(
+        &router,
+        "POST",
+        "/Journeys/itinerary",
+        Some(&token),
+        Some(body),
+        Some("one-connection"),
+    )
+    .await;
+    assert_eq!((status, &again), (StatusCode::OK, &first));
+    let (status, other) = call(
+        &router,
+        "POST",
+        "/Journeys/itinerary",
+        Some(&token),
+        Some(serde_json::json!({
+            "legs": [{ "trainUid": "RP0002", "serviceDate": DATE }]
+        })),
+        Some("one-connection"),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CONFLICT, "{other}");
+}
+
+/// Someone else's journey and no journey at all answer an operator filter
+/// alike (review J9): 404, whatever the filter, never the 400 that told
+/// them the journey exists.
+#[tokio::test]
+#[ignore = "requires a live database: DATABASE_URL"]
+async fn an_operator_filter_on_someone_elses_journey_is_a_404_whatever_its_codes() {
+    let _now = pin_now();
+    let pool = connect().await;
+    let _cleanup = cleanup(&pool).await;
+    seed_timetable(&pool).await;
+    let token = seed_session(&pool, USER).await;
+    let other = seed_session(&pool, OTHER).await;
+    let router = router(pool.clone());
+    let (journey_id, _) = create_journey(&router, &token).await;
+    let filter = serde_json::json!({
+        "operatorFilter": { "mode": "only", "entries": ["Q9"] }
+    });
+    let (status, body) = call(
+        &router,
+        "PUT",
+        &format!("/Journeys/{journey_id}/operator-filter"),
+        Some(&token),
+        Some(filter.clone()),
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "the owner's: {body}");
+    for id in [journey_id, i64::MAX] {
+        let (status, body) = call(
+            &router,
+            "PUT",
+            &format!("/Journeys/{id}/operator-filter"),
+            Some(&other),
+            Some(filter.clone()),
+            None,
+        )
+        .await;
+        assert_eq!(status, StatusCode::NOT_FOUND, "{id}: {body}");
+    }
+}

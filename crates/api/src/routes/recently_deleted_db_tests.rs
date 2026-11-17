@@ -368,6 +368,53 @@ async fn untracking_a_train_records_its_journey() {
     assert_eq!(recorded[0].1["legs"][0]["trainUid"], UIDS[2]);
 }
 
+/// Deleting a journey's last leg deletes the journey: recorded as
+/// `DELETE /Journeys/{id}` records one (review J3). Deleting a leg that
+/// leaves others is not a journey delete and records nothing.
+#[tokio::test]
+#[ignore = "requires a live database; run with `cargo test -p api recently_deleted_db_tests -- --ignored --test-threads=1`"]
+async fn deleting_the_last_leg_records_its_journey() {
+    const USER: &str = "TEST-RECENTLY-DELETED-LEG";
+    recently_deleted::set_for_tests(true, 7);
+    let _pin = pin_today();
+    let pool = connect().await;
+    let _cleanup = cleanup(&pool, &[USER]).await;
+    let token = seed_user(&pool, USER).await;
+    let router = router(pool.clone());
+
+    let saved = save_journey(&router, &token).await;
+    let journey = saved["journeyId"].as_i64().unwrap();
+    let legs: Vec<i64> = saved["legs"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|leg| leg["legId"].as_i64().unwrap())
+        .collect();
+    assert_eq!(legs.len(), 3, "{saved}");
+    for (index, leg) in legs.iter().enumerate() {
+        let (status, body) = call(
+            &router,
+            "DELETE",
+            &format!("/Journeys/{journey}/legs/{leg}"),
+            &token,
+            None,
+        )
+        .await;
+        assert!(status.is_success(), "{status} {body}");
+        let recorded = rows(&pool, USER).await;
+        if index + 1 < legs.len() {
+            assert_eq!(recorded, Vec::new(), "leg {index}");
+        } else {
+            assert_eq!(recorded.len(), 1);
+            assert_eq!(recorded[0].0, "web");
+            assert_eq!(recorded[0].1["legs"][0]["trainUid"], UIDS[1]);
+        }
+    }
+    let (status, list) = call(&router, "GET", "/Journeys/recently-deleted", &token, None).await;
+    assert_eq!(status, StatusCode::OK, "{list}");
+    assert!(list.to_string().contains(UIDS[1]), "{list}");
+}
+
 /// Another user can neither see, save again nor delete someone's row.
 #[tokio::test]
 #[ignore = "requires a live database; run with `cargo test -p api recently_deleted_db_tests -- --ignored --test-threads=1`"]

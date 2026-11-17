@@ -232,10 +232,27 @@ pub(crate) async fn analyse(
         .filter_map(|leg| leg.train_subscription_id)
         .collect();
     let by_id = train_tracking::get_by_tracking_ids(&app.database, &ids).await?;
-    let (indexes, states): (Vec<usize>, Vec<train_tracking::TrackedTrainState>) = legs
+    // The departure boards, read as the journey page reads them: the ETA
+    // overlay below and the skipped-stop check (review J2: without it a
+    // page read opened a `skipped_stop` break and the next sweep ended it
+    // as recovered, over and over).
+    let raw_states: Vec<Option<&train_tracking::TrackedTrainState>> = legs
+        .iter()
+        .map(|leg| by_id.get(&leg.train_subscription_id?))
+        .collect();
+    let boards = LegBoards::read(app, journey_id, &legs, &raw_states).await;
+    let (indexes, states): (Vec<usize>, Vec<train_tracking::TrackedTrainState>) = raw_states
         .iter()
         .enumerate()
-        .filter_map(|(index, leg)| Some((index, by_id.get(&leg.train_subscription_id?)?.clone())))
+        .filter_map(|(index, state)| {
+            let state = (*state)?.clone();
+            let origin_board = crate::routes::train::darwin_blend_origin_crs(&state)
+                .and_then(|crs| boards.board(crs));
+            Some((
+                index,
+                crate::routes::train::apply_darwin_eta(state, origin_board),
+            ))
+        })
         .unzip();
     let built = crate::routes::train::attach_journey_stops_batch(app, states).await;
     let mut leg_states: Vec<Option<train_tracking::TrackedTrainState>> =
@@ -266,7 +283,7 @@ pub(crate) async fn analyse(
             whole_cancelled: state
                 .as_ref()
                 .is_some_and(|s| s.status.as_deref() == Some("cancelled")),
-            skipped: false,
+            skipped: boards.skipped(leg, state.as_ref()),
             travelled: travelled.contains(&leg.id),
         })
         .collect();
@@ -277,6 +294,115 @@ pub(crate) async fn analyse(
         facts,
         now,
     })
+}
+
+/// The departure boards [`analyse`] reads, and each leg train's true
+/// origin: the same reads `GET /Journeys/{id}` makes for its ETA overlay
+/// and `legSkip`, so the sweep and a page read judge a journey alike.
+/// Best effort, as on the page: a failed read means no overlay and no
+/// skip.
+struct LegBoards {
+    samples: HashMap<String, common::StationSample>,
+    train_origins: HashMap<i64, String>,
+}
+
+impl LegBoards {
+    async fn read(
+        app: &App,
+        journey_id: i64,
+        legs: &[journeys::JourneyLegWithNamesRow],
+        states: &[Option<&train_tracking::TrackedTrainState>],
+    ) -> Self {
+        let trains_ids: Vec<i64> = states
+            .iter()
+            .filter_map(|state| state.and_then(|s| s.trains_id))
+            .collect();
+        let train_origins: HashMap<i64, String> = if trains_ids.is_empty() {
+            HashMap::new()
+        } else {
+            sqlx::query_as::<_, (i64, String)>(
+                "SELECT id, origin_crs FROM trains WHERE id = ANY($1) AND origin_crs IS NOT NULL",
+            )
+            .bind(&trains_ids)
+            .fetch_all(&app.database)
+            .await
+            .map_or_else(
+                |err| {
+                    tracing::warn!(error = ?err, journey_id, "could not read leg train origins");
+                    HashMap::new()
+                },
+                |rows| rows.into_iter().collect(),
+            )
+        };
+        let mut board_crs: Vec<String> = Vec::new();
+        for (leg, state) in legs.iter().zip(states) {
+            let Some(state) = state else {
+                continue;
+            };
+            board_crs
+                .extend(crate::routes::train::darwin_blend_origin_crs(state).map(str::to_string));
+            if leg.origin_crs.is_some() && leg.destination_crs.is_some() {
+                board_crs.extend(leg.origin_crs.clone());
+                board_crs.extend(
+                    state
+                        .trains_id
+                        .and_then(|id| train_origins.get(&id))
+                        .cloned(),
+                );
+            }
+        }
+        board_crs.sort();
+        board_crs.dedup();
+        let samples = if board_crs.is_empty() {
+            HashMap::new()
+        } else {
+            crate::data::queries::latest_station_samples_for_crs_batch(&app.database, &board_crs)
+                .await
+                .unwrap_or_else(|err| {
+                    tracing::warn!(error = ?err, journey_id, "could not read departure boards for the journey's legs");
+                    HashMap::new()
+                })
+        };
+        Self {
+            samples,
+            train_origins,
+        }
+    }
+
+    fn board(&self, crs: &str) -> Option<&common::StationSample> {
+        self.samples.get(&crate::data::queries::normalize_code(crs))
+    }
+
+    /// Whether `leg`'s train skips its boarding or alighting stop, as the
+    /// page's `legSkip` says.
+    fn skipped(
+        &self,
+        leg: &journeys::JourneyLegWithNamesRow,
+        state: Option<&train_tracking::TrackedTrainState>,
+    ) -> bool {
+        let (Some(origin_crs), Some(destination_crs), Some(state)) = (
+            leg.origin_crs.as_deref(),
+            leg.destination_crs.as_deref(),
+            state,
+        ) else {
+            return false;
+        };
+        let Some(trains_id) = state.trains_id else {
+            return false;
+        };
+        let match_target = state
+            .pin_destination_crs
+            .as_deref()
+            .or(state.next_calling_point.as_deref());
+        let status = crate::data::station_skip::leg_skip_status_from_samples(
+            &self.samples,
+            self.train_origins.get(&trains_id).map(String::as_str),
+            origin_crs,
+            destination_crs,
+            match_target,
+        );
+        status.origin_skipped || status.destination_skipped
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -917,10 +1043,10 @@ async fn detail_extras_inner(
                         &timings.timings,
                     ),
                 };
-                let (row, _) =
-                    journey_breaks::upsert_open(pool, journey_id, user_id, &detected, false)
-                        .await?;
-                open = Some(row);
+                // `None`: the traveller dismissed this one; no banner.
+                open = journey_breaks::upsert_open(pool, journey_id, user_id, &detected, false)
+                    .await?
+                    .map(|(row, _)| row);
             }
             None => {
                 if let Some(row) = open.take() {
@@ -1329,10 +1455,13 @@ pub(crate) struct AcceptBody {
     fingerprint: Option<String>,
 }
 
-/// The `Idempotency-Key` header and the request's hash.
+/// The `Idempotency-Key` header and the request's hash. Keys are the
+/// user's, across routes and journeys, so `request` names the route and its
+/// path ids as well as the body (review J5: the same key sent to another
+/// journey replayed the first journey's answer and changed nothing).
 fn idempotency(
     headers: &HeaderMap,
-    body: &impl Serialize,
+    request: &impl Serialize,
 ) -> Result<Option<(String, String)>, RouteError> {
     let Some(value) = headers.get("idempotency-key") else {
         return Ok(None);
@@ -1348,7 +1477,8 @@ fn idempotency(
             "Idempotency-Key must be 1 to 200 visible ASCII characters.",
         ));
     }
-    let canonical = serde_json::to_vec(body).map_err(|err| internal("hash request")(err.into()))?;
+    let canonical =
+        serde_json::to_vec(request).map_err(|err| internal("hash request")(err.into()))?;
     Ok(Some((
         key.to_string(),
         format!("{:x}", Sha256::digest(&canonical)),
@@ -1457,7 +1587,7 @@ async fn post_accept(
 ) -> Response {
     render(
         async {
-            let idempotency = idempotency(&headers, &body)?;
+            let idempotency = idempotency(&headers, &("accept", journey_id, &body))?;
             require_owner(&app, journey_id, &user.id).await?;
             let now = now_utc();
             let row = journey_breaks::get_break(&app.database, journey_id, body.break_id)
@@ -1503,12 +1633,21 @@ async fn post_accept(
             }) && chosen
                 .first_train_departure()
                 .is_none_or(|departure| departure >= now - Duration::minutes(1));
-            let (row, chosen, rank) = if fresh_enough {
+            // The leg the replacement starts from comes with the set the
+            // chosen suggestion came from: a re-plan follows the break's
+            // trigger as it is now (review J6: the stored set's could be
+            // an earlier leg's).
+            let (row, chosen, rank, from_leg_id) = if fresh_enough {
                 let rank = stored
                     .as_ref()
                     .and_then(|set| set.suggestions.iter().position(|s| s.id == chosen.id))
                     .unwrap_or(0);
-                (row, chosen, rank)
+                let from_leg_id = stored
+                    .as_ref()
+                    .map_or(row.trigger_leg_id.unwrap_or_default(), |set| {
+                        set.from_leg_id
+                    });
+                (row, chosen, rank, from_leg_id)
             } else {
                 let analysis = analyse(&app, journey_id, now)
                     .await
@@ -1523,10 +1662,10 @@ async fn post_accept(
                     set.suggestions
                         .iter()
                         .position(|s| s.train_key() == key)
-                        .map(|rank| (set.suggestions[rank].clone(), rank))
+                        .map(|rank| (set.suggestions[rank].clone(), rank, set.from_leg_id))
                 });
                 match found {
-                    Some((suggestion, rank)) => (row, suggestion, rank),
+                    Some((suggestion, rank, from_leg_id)) => (row, suggestion, rank, from_leg_id),
                     None => return Ok(stale_response(row, now)),
                 }
             };
@@ -1536,11 +1675,6 @@ async fn post_accept(
                     "a suggestion train was not resolved"
                 )));
             };
-            let from_leg_id = stored
-                .as_ref()
-                .map_or(row.trigger_leg_id.unwrap_or_default(), |set| {
-                    set.from_leg_id
-                });
             let cause = Cause::parse(&row.cause).unwrap_or(Cause::ConnectionMissed);
             let outcome = journey_replace::replace(
                 &app.database,
@@ -1623,7 +1757,7 @@ async fn post_replace(
 ) -> Response {
     render(
         async {
-            let idempotency = idempotency(&headers, &body)?;
+            let idempotency = idempotency(&headers, &("replace", journey_id, leg_id, &body))?;
             if body.legs.is_empty()
                 || i64::try_from(body.legs.len()).unwrap_or(i64::MAX)
                     > journeys::MAX_LEGS_PER_JOURNEY
@@ -1810,7 +1944,7 @@ async fn post_revert(
 ) -> Response {
     render(
         async {
-            let idempotency = idempotency(&headers, &revision_no)?;
+            let idempotency = idempotency(&headers, &("revert", journey_id, revision_no))?;
             require_owner(&app, journey_id, &user.id).await?;
             let now = now_utc();
             let revisions = journey_revisions::list_revisions(&app.database, journey_id)
@@ -1842,6 +1976,15 @@ async fn post_revert(
                 .zip(&target.legs)
                 .position(|(leg, old)| old.source_leg_id != Some(leg.id))
                 .unwrap_or(current.len().min(target.legs.len()));
+            // That plan is this one with more legs after it (one deleted
+            // since, say): a replacement needs a leg to replace, so the
+            // last leg is rebuilt as that plan had it, followed by the rest
+            // (review J4: this was a 409).
+            let first_diff = if first_diff == current.len() && target.legs.len() > current.len() {
+                first_diff.saturating_sub(1)
+            } else {
+                first_diff
+            };
             let (Some(from), Some(through)) = (current.get(first_diff), current.last()) else {
                 return Err(RouteError::coded(
                     StatusCode::CONFLICT,
@@ -1878,7 +2021,13 @@ async fn post_revert(
                         old.planned_arrival,
                         &old.transit_mode,
                     ) else {
-                        continue;
+                        // Refused, never left out: the plan gone back to
+                        // would silently lose a leg (review J4).
+                        return Err(RouteError::coded(
+                            StatusCode::CONFLICT,
+                            "revision_gone",
+                            "That plan has a leg with no times.",
+                        ));
                     };
                     // Its stops and network ride as that plan had them
                     // (DS-237; a revision from before keeps none). The
@@ -2007,6 +2156,10 @@ async fn put_operator_filter(
 ) -> Response {
     render(
         async {
+            // Ownership first: the filter's codes are checked against the
+            // journey's dates, so a 400 before the 404 told anyone whether
+            // a journey id exists (review J9).
+            require_owner(&app, journey_id, &user.id).await?;
             let filter = match &body.operator_filter {
                 None => None,
                 Some(request) => {
