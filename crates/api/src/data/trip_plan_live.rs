@@ -166,7 +166,7 @@ pub(crate) fn env_num<T: std::str::FromStr + std::fmt::Display + Copy>(
 /// Minutes from London-local midnight of `date` to `at` (may exceed 1440,
 /// like `schedule_query::Connection::departure_min`). `None` before it.
 pub fn service_minute(date: NaiveDate, at: DateTime<Utc>) -> Option<u32> {
-    let local = at.with_timezone(&chrono_tz::Europe::London).naive_local();
+    let local = common::zone::london_naive(at);
     let minutes = (local - date.and_time(NaiveTime::MIN)).num_minutes();
     u32::try_from(minutes).ok()
 }

@@ -220,7 +220,7 @@ pub fn verdict_of(row: &FullCoverageWindowStatsRow, thresholds: &Defaults) -> Wi
 
 /// London hour of an instant (07-19 is "daytime").
 fn london_hour(at: DateTime<Utc>) -> u32 {
-    at.with_timezone(&chrono_tz::Europe::London).hour()
+    common::zone::london_time(at).hour()
 }
 
 fn is_daytime(at: DateTime<Utc>) -> bool {

@@ -36,7 +36,7 @@ pub async fn increment(
 
 /// The first London day still kept as of `now`: days before it go.
 pub fn retention_cutoff(now: DateTime<Utc>) -> NaiveDate {
-    let today = now.with_timezone(&chrono_tz::Europe::London).date_naive();
+    let today = common::zone::london_date(now);
     today
         .checked_sub_months(Months::new(RETENTION_MONTHS))
         .unwrap_or(NaiveDate::MIN)

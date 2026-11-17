@@ -107,11 +107,10 @@ async fn main() -> anyhow::Result<()> {
     let date = if args.no_calling_points {
         None
     } else {
-        Some(args.calling_points_date.unwrap_or_else(|| {
-            chrono::Utc::now()
-                .with_timezone(&chrono_tz::Europe::London)
-                .date_naive()
-        }))
+        Some(
+            args.calling_points_date
+                .unwrap_or_else(|| common::zone::london_date(chrono::Utc::now())),
+        )
     };
     let timetable = corpus_comparison::load_timetable(&pool, date).await?;
     let comparison = corpus_comparison::compare_layers(&layers, &timetable);

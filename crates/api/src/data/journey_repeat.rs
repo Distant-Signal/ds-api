@@ -26,7 +26,7 @@
 //! trains (a waypoint visit, which a plan from A to B would leave out), or
 //! a train leg with no train or no stations is [`Unsupported`].
 
-use chrono::{DateTime, Duration, NaiveDate, NaiveTime, TimeZone, Timelike, Utc};
+use chrono::{DateTime, Duration, NaiveDate, NaiveTime, Timelike, Utc};
 use serde::Serialize;
 use sqlx::PgPool;
 
@@ -135,7 +135,7 @@ fn crs(code: Option<&String>) -> Option<String> {
 
 /// The London date and clock time of `at`.
 pub fn london_clock(at: DateTime<Utc>) -> (NaiveDate, NaiveTime) {
-    let local = at.with_timezone(&chrono_tz::Europe::London);
+    let local = common::zone::london_local(at);
     (
         local.date_naive(),
         NaiveTime::from_hms_opt(local.hour(), local.minute(), 0).unwrap_or_default(),
@@ -146,15 +146,7 @@ pub fn london_clock(at: DateTime<Utc>) -> (NaiveDate, NaiveTime) {
 /// repeated autumn hour, the hour after in the missing spring one).
 pub fn london_instant(date: NaiveDate, time: NaiveTime) -> DateTime<Utc> {
     let local = date.and_time(time);
-    chrono_tz::Europe::London
-        .from_local_datetime(&local)
-        .earliest()
-        .or_else(|| {
-            chrono_tz::Europe::London
-                .from_local_datetime(&(local + Duration::hours(1)))
-                .earliest()
-        })
-        .map_or_else(|| local.and_utc(), |at| at.with_timezone(&Utc))
+    common::zone::london_to_utc_gap_shifted(local).unwrap_or_else(|| local.and_utc())
 }
 
 /// The train legs (with their stations, `ends`) as the plan sweep's usual
@@ -503,7 +495,7 @@ mod tests {
     ) -> PlanLeg {
         PlanLeg::Train {
             train_uid: uid.to_string(),
-            service_date: dep.with_timezone(&chrono_tz::Europe::London).date_naive(),
+            service_date: common::zone::london_date(dep),
             origin_crs: Some(from.to_string()),
             origin_name: None,
             destination_crs: Some(to.to_string()),

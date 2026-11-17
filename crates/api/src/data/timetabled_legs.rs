@@ -28,7 +28,7 @@
 use std::collections::HashMap;
 
 use anyhow::{Context, Result};
-use chrono::{DateTime, Duration, NaiveDate, TimeZone, Utc};
+use chrono::{DateTime, Duration, NaiveDate, Utc};
 use serde::{Deserialize, Serialize};
 use sqlx::PgPool;
 
@@ -312,26 +312,17 @@ async fn line_destinations(
 pub fn london_instant(date: NaiveDate, seconds: i64) -> Option<DateTime<Utc>> {
     let minutes = transit_planning::round_to_minute(seconds);
     let local = date.and_hms_opt(0, 0, 0)? + Duration::minutes(i64::from(minutes));
-    let tz = chrono_tz::Europe::London;
-    tz.from_local_datetime(&local)
-        .earliest()
-        .or_else(|| {
-            tz.from_local_datetime(&(local + Duration::hours(1)))
-                .earliest()
-        })
-        .map(|at| at.with_timezone(&Utc))
+    common::zone::london_to_utc_gap_shifted(local)
 }
 
 fn london_date(at: DateTime<Utc>) -> NaiveDate {
-    at.with_timezone(&chrono_tz::Europe::London).date_naive()
+    common::zone::london_date(at)
 }
 
 /// Seconds from `date`'s London midnight to `at`.
 fn seconds_since(date: NaiveDate, at: DateTime<Utc>) -> Option<i64> {
-    let midnight = chrono_tz::Europe::London
-        .from_local_datetime(&date.and_hms_opt(0, 0, 0)?)
-        .earliest()?;
-    Some((at - midnight.with_timezone(&Utc)).num_seconds())
+    let midnight = common::zone::london_to_utc_earliest(date.and_hms_opt(0, 0, 0)?)?;
+    Some((at - midnight).num_seconds())
 }
 
 /// The network's spelling of a station node.

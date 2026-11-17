@@ -28,7 +28,6 @@
 //! - A location Darwin cancelled serves its platform as `cancelled`.
 
 use chrono::{DateTime, NaiveTime, Timelike, Utc};
-use chrono_tz::Europe::London;
 use ds_store::darwin::DarwinCall;
 
 use crate::data::journey::{JourneyStop, platforms_differ};
@@ -36,7 +35,7 @@ use ds_store::trains::types::{PlatformEvidence, PlatformEvidenceSource, Platform
 
 /// `at` as Europe/London `HH:MM`.
 fn local_minute(at: DateTime<Utc>) -> NaiveTime {
-    let local = at.with_timezone(&London).time();
+    let local = common::zone::london_time(at);
     NaiveTime::from_hms_opt(local.hour(), local.minute(), 0).unwrap_or(local)
 }
 

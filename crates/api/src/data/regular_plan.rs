@@ -354,7 +354,7 @@ fn leg_arrival(leg: &PlanLeg) -> DateTime<Utc> {
 /// Minutes from `date`'s midnight on the London clock (past 1440 for the
 /// next day).
 fn london_minutes(at: DateTime<Utc>, date: NaiveDate) -> i64 {
-    let local = at.with_timezone(&chrono_tz::Europe::London);
+    let local = common::zone::london_local(at);
     (local.date_naive() - date).num_days() * 1440
         + i64::from(local.hour()) * 60
         + i64::from(local.minute())
@@ -584,7 +584,7 @@ pub async fn committed_trains(
 
 #[cfg(test)]
 mod tests {
-    use chrono::{NaiveTime, TimeZone};
+    use chrono::NaiveTime;
 
     use super::*;
     use crate::data::regular_journeys::UsualItineraryLeg;
@@ -597,10 +597,7 @@ mod tests {
 
     /// 2099-06-17 is in BST: London is UTC+1.
     fn at(h: u32, m: u32) -> DateTime<Utc> {
-        chrono_tz::Europe::London
-            .from_local_datetime(&date().and_hms_opt(h, m, 0).unwrap())
-            .unwrap()
-            .with_timezone(&Utc)
+        common::zone::london_to_utc_earliest(date().and_hms_opt(h, m, 0).unwrap()).unwrap()
     }
 
     fn option(uid: &str, operator: &str, dep: (u32, u32), arr: (u32, u32)) -> PlanOption {
@@ -730,10 +727,10 @@ mod tests {
     #[test]
     fn london_minutes_count_past_midnight() {
         assert_eq!(london_minutes(at(8, 12), date()), 8 * 60 + 12);
-        let next = chrono_tz::Europe::London
-            .from_local_datetime(&date().succ_opt().unwrap().and_hms_opt(0, 30, 0).unwrap())
-            .unwrap()
-            .with_timezone(&Utc);
+        let next = common::zone::london_to_utc_earliest(
+            date().succ_opt().unwrap().and_hms_opt(0, 30, 0).unwrap(),
+        )
+        .unwrap();
         assert_eq!(london_minutes(next, date()), 1440 + 30);
     }
 }

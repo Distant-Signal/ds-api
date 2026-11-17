@@ -574,7 +574,7 @@ async fn trust_events_for(
 
 /// A London-local time and its day offset from `service_date`.
 fn london_time(at: DateTime<Utc>, service_date: NaiveDate) -> (NaiveTime, u8) {
-    let local = at.with_timezone(&chrono_tz::Europe::London);
+    let local = common::zone::london_local(at);
     let days = (local.date_naive() - service_date).num_days();
     (local.time(), u8::try_from(days.clamp(0, 2)).unwrap_or(0))
 }

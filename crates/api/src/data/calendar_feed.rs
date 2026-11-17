@@ -413,7 +413,6 @@ pub fn events_for(
     now: DateTime<Utc>,
     since: DateTime<Utc>,
 ) -> Vec<Event> {
-    let today = now.with_timezone(&chrono_tz::Europe::London).date_naive();
     let facts: Vec<JourneyFacts> = rows
         .iter()
         .map(|row| JourneyFacts {
@@ -421,6 +420,18 @@ pub fn events_for(
             ..JourneyFacts::from(row)
         })
         .collect();
+    events_from_facts(&facts, site, now, since)
+}
+
+/// [`events_for`] from the facts: a journey's event, and the Delay Repay
+/// reminder while its claim window is open on London's date at `now`.
+fn events_from_facts(
+    facts: &[JourneyFacts],
+    site: &Site,
+    now: DateTime<Utc>,
+    since: DateTime<Utc>,
+) -> Vec<Event> {
+    let today = common::zone::london_date(now);
     let mut events: Vec<Event> = facts
         .iter()
         .filter_map(|f| journey_event(f, site, since))
@@ -558,6 +569,46 @@ mod tests {
         f.travelled = true;
         f.final_delay_minutes = Some(22);
         f
+    }
+
+    /// The claim window is judged on London's calendar date at `now`, not
+    /// UTC's: the last hour of a summer UTC day is already London's next
+    /// day. Expectations are from the IANA rules (python zoneinfo). The
+    /// default claim window is 28 days from the service date.
+    #[test]
+    fn the_reminder_is_judged_on_londons_date_at_now() {
+        // (service date, now, reminder shown)
+        let cases = [
+            // BST: the last claim day, 2026-08-07, ends at 23:00Z.
+            ("2026-07-10", "2026-08-07T22:59:00Z", true),
+            ("2026-07-10", "2026-08-07T23:00:00Z", false),
+            ("2026-07-10", "2026-08-08T22:59:00Z", false),
+            // GMT: the calendars agree.
+            ("2026-12-01", "2026-12-29T23:59:00Z", true),
+            ("2026-12-01", "2026-12-30T00:00:00Z", false),
+            // The clocks go back on 2026-10-25 (the last claim day).
+            ("2026-09-27", "2026-10-24T23:00:00Z", true),
+            ("2026-09-27", "2026-10-25T22:59:00Z", true),
+            ("2026-09-27", "2026-10-25T23:59:00Z", true),
+            ("2026-09-27", "2026-10-26T00:00:00Z", false),
+            // The clocks go forward on 2026-03-29 (the last claim day).
+            ("2026-03-01", "2026-03-28T23:59:00Z", true),
+            ("2026-03-01", "2026-03-29T22:59:00Z", true),
+            ("2026-03-01", "2026-03-29T23:00:00Z", false),
+        ];
+        for (service_date, now, shown) in cases {
+            let mut f = late();
+            let service_date: NaiveDate = service_date.parse().unwrap();
+            f.service_date = service_date;
+            let now: DateTime<Utc> = now.parse().unwrap();
+            let events = events_from_facts(&[f], &site(), now, now - Duration::days(PAST_DAYS));
+            let deadline = When::Day(service_date + Duration::days(28));
+            assert_eq!(
+                events.iter().any(|event| event.start == deadline),
+                shown,
+                "service date {service_date}, now {now}"
+            );
+        }
     }
 
     #[test]

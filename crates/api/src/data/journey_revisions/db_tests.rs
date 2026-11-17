@@ -99,12 +99,11 @@ async fn create(pool: &PgPool, trains_id: i64) -> (i64, i64) {
 }
 
 fn london(hour: u32, minute: u32) -> DateTime<Utc> {
-    use chrono::TimeZone;
-    chrono_tz::Europe::London
-        .from_local_datetime(&date().and_hms_opt(hour, minute, 0).expect("time"))
-        .single()
-        .expect("unambiguous")
-        .with_timezone(&Utc)
+    let local = date().and_hms_opt(hour, minute, 0).expect("time");
+    match common::zone::london_resolve(local) {
+        common::zone::LocalTime::Single(at) => at,
+        other => panic!("{local} is not a single London time: {other:?}"),
+    }
 }
 
 #[tokio::test]

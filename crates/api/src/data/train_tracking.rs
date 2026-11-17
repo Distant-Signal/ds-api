@@ -117,7 +117,7 @@ pub fn validate_pin(pin: &TrackPinRequest, now: DateTime<Utc>) -> Result<(), Str
     // API-6: a pin beyond the published timetable can never match, and
     // used to sit in both 300 s sweeps until its date came round (a pin
     // dated 2090 was swept for ever).
-    let london_today = now.with_timezone(&chrono_tz::Europe::London).date_naive();
+    let london_today = common::zone::london_date(now);
     if beyond_tracking_horizon(pin.service_date, london_today)
         || pin.scheduled_departure - now > chrono::Duration::days(PIN_MAX_DAYS_AHEAD + 1)
     {
