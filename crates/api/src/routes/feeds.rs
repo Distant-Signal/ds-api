@@ -364,7 +364,7 @@ pub fn status_entry(site: &Site, line: &FeedLine, change: &StatusChange<'_>) -> 
 
 /// "3 Nov 2026 14:05", London time.
 fn london_time(at: DateTime<Utc>) -> String {
-    at.with_timezone(&chrono_tz::Europe::London)
+    common::zone::london_local(at)
         .format("%-d %b %Y %H:%M")
         .to_string()
 }

@@ -5,7 +5,7 @@
 
 use axum::body::Body;
 use axum::http::{Request, StatusCode, header};
-use chrono::{NaiveDate, TimeZone, Utc};
+use chrono::{NaiveDate, Utc};
 use serde_json::Value;
 use sqlx::PgPool;
 use tower::ServiceExt;
@@ -42,10 +42,7 @@ async fn connect() -> PgPool {
 
 /// `h:m` London on `date` (BST in August).
 fn london(date: NaiveDate, h: u32, m: u32) -> chrono::DateTime<Utc> {
-    chrono_tz::Europe::London
-        .from_local_datetime(&date.and_hms_opt(h, m, 0).expect("time"))
-        .unwrap()
-        .with_timezone(&Utc)
+    common::zone::london_to_utc_earliest(date.and_hms_opt(h, m, 0).expect("time")).unwrap()
 }
 
 fn pin_at(h: u32, m: u32) -> crate::routes::PinnedLondonNow {

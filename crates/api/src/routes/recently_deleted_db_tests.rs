@@ -119,12 +119,8 @@ async fn call(
 /// A walk, then two trains, on [`DAY`], named "Work"; returns the
 /// itinerary response.
 async fn save_journey(router: &axum::Router, token: &str) -> Value {
-    let at = |h, m| {
-        chrono_tz::Europe::London
-            .from_local_datetime(&day().and_hms_opt(h, m, 0).unwrap())
-            .unwrap()
-            .with_timezone(&Utc)
-    };
+    let at =
+        |h, m| common::zone::london_to_utc_earliest(day().and_hms_opt(h, m, 0).unwrap()).unwrap();
     let (status, body) = call(
         router,
         "POST",

@@ -6288,10 +6288,7 @@ mod db_tests {
         let pool = connect().await;
         let _pin = crate::routes::pin_london_now_for_tests(now);
         let date = crate::routes::london_today();
-        let depart = now
-            .with_timezone(&chrono_tz::Europe::London)
-            .format("%H:%M")
-            .to_string();
+        let depart = common::zone::london_local(now).format("%H:%M").to_string();
         let router = test_router(test_app(pool.clone()));
         let warm = std::time::Instant::now();
         let (status, _) = get(
