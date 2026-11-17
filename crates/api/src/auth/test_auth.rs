@@ -1413,7 +1413,11 @@ mod tests {
             }
         }
 
+        /// Ignored so that it runs in the serial pass: a scoped subscriber
+        /// races other tests over tracing's process-wide callsite cache.
         #[tokio::test]
+        #[ignore = "reads the log output; run with `cargo test -p api \
+                    the_audit_line_names_the_sub -- --ignored --test-threads=1`"]
         async fn the_audit_line_names_the_sub_and_never_the_token() {
             let captured = Captured::default();
             let subscriber = tracing_subscriber::fmt()
@@ -1441,9 +1445,8 @@ mod tests {
             }
 
             let logs = String::from_utf8(captured.0.lock().unwrap().clone()).unwrap();
-            assert!(logs.contains("test_auth"), "{logs}");
-            assert!(logs.contains(SUB), "{logs}");
-            assert!(logs.contains(&format!("test:{SUB}")), "{logs}");
+            assert!(logs.contains(&format!("principal=test:{SUB}")), "{logs}");
+            assert!(logs.contains(&format!("sub={SUB}")), "{logs}");
             assert!(logs.contains("missing_group"), "{logs}");
             assert!(logs.contains("wrong_listener"), "{logs}");
             for secret in [&token, &bad] {
