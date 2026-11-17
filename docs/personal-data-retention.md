@@ -39,7 +39,7 @@ Neither route touches the user's account on the login service (the Authentik tha
 Every foreign key to `users(id)` has an explicit `ON DELETE` action (migrations `20260927060000` and `20260927060100`). `data::account::delete_account` then does four things:
 
 1. Locks the user row.
-2. Leaves every group the user belongs to. This uses the same code path as "Leave group" (`groups::remove_member_in_tx`):
+2. Leaves every group the user belongs to. This uses the code path of "Leave group" (`groups::remove_member_in_tx`), except that "Leave group" refuses a sole owner (`409` `owner_must_delete`: they delete the group instead) while account deletion deletes the group:
    - For an owned group with other members, ownership passes to the longest-standing admin, or if there is none, the longest-standing member.
    - An owned group with no other members is deleted.
    - The user's shared trains and journeys in that group are removed.
