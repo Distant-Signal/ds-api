@@ -14,6 +14,17 @@
 //! `RUN_ONCE=true`, one run of a Kubernetes `CronJob` ([`run_once`]). Either
 //! way a cycle publishes only while it holds the run lock
 //! (`ds_store::schedule::reference_signals::RunLock`).
+//!
+//! A once-mode run has two kinds, picked by `RUN_ONCE_MODE`
+//! ([`OnceMode`]): `publish` (the default, [`run_once`]) and `check`
+//! ([`run_check`]), a cheap pre-check that only says, by its exit status,
+//! whether a delivery is waiting to be published (0: nothing new; 10,
+//! [`DELIVERY_WAITING_EXIT`]: a delivery is waiting). It lists the
+//! delivery directories and reads the marker and the `settled` signal; it
+//! never opens a CIF file or builds the schedule index, so it runs in tens
+//! of MiB, where a publish needs about 1.4 GiB. The chart can then request
+//! the heavy run's memory only when there is something to publish
+//! (ds-deploy's docs/scheduled-jobs.md, "schedule-reference", Capacity).
 
 mod alf;
 mod config;
@@ -111,10 +122,97 @@ fn config_defaults() -> ds_runtime::service_args::ConfigDefaults {
 #[tokio::main]
 async fn main() -> std::process::ExitCode {
     ds_runtime::service_args::exit_if_print_config_defaults(config_defaults);
-    ds_runtime::logging::exit_code(run().await)
+    match run().await {
+        // Not an error: a check run's answer (`run_check`), so it is not
+        // logged as a fatal error.
+        Ok(RunOutcome::DeliveryWaiting { delivery }) => {
+            tracing::info!(
+                delivery,
+                exit_status = DELIVERY_WAITING_EXIT,
+                "a delivery is waiting to be published; a publish run is needed"
+            );
+            std::process::ExitCode::from(DELIVERY_WAITING_EXIT)
+        }
+        result => ds_runtime::logging::exit_code(result.map(drop)),
+    }
 }
 
-async fn run() -> anyhow::Result<()> {
+/// `RUN_ONCE_MODE`: which kind of once-mode run this is ([`OnceMode`]).
+const RUN_ONCE_MODE_ENV: &str = "RUN_ONCE_MODE";
+
+/// The exit status of a check run ([`run_check`]) that found a delivery
+/// waiting to be published.
+///
+/// Chosen not to collide with any status the scheduled Jobs' pod failure
+/// policy or the runtime gives a meaning to (ds-deploy's
+/// docs/scheduled-jobs.md, "How a run behaves"): 1 (a transient failure,
+/// retried), 2 (clap's usage error), 3 (`ExitStatus::REJECTED`, fails the
+/// Job at once), 137 (OOM-killed) and 143 (SIGTERM, retried); nor with the
+/// shell's 126/127 or the 128+signal range. It is still a non-zero exit,
+/// so a pod whose main container exits 10 counts as failed: the check
+/// `CronJob` must read the status itself (an init container that records it)
+/// rather than let the Job's failure policy see it.
+const DELIVERY_WAITING_EXIT: u8 = 10;
+
+/// What a once-mode run does (`RUN_ONCE_MODE`, read only with
+/// `RUN_ONCE=true`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum OnceMode {
+    /// `publish`, or unset: publish the newest delivery if it is new
+    /// ([`run_once`]).
+    Publish,
+    /// `check`: only say whether a delivery is waiting ([`run_check`]).
+    Check,
+}
+
+impl OnceMode {
+    /// `None` for the Deployment's loop (`once` false and no mode), else
+    /// the mode. An unknown value, or a mode without `RUN_ONCE=true` (a
+    /// loop that would ignore it), is a startup error.
+    fn from_lookup(once: bool, value: Option<&str>) -> anyhow::Result<Option<Self>> {
+        let mode = match value.map(str::trim) {
+            None | Some("") => None,
+            Some("publish") => Some(Self::Publish),
+            Some("check") => Some(Self::Check),
+            Some(other) => {
+                anyhow::bail!("{RUN_ONCE_MODE_ENV} must be publish or check, not {other:?}")
+            }
+        };
+        match (once, mode) {
+            (false, None) => Ok(None),
+            (false, Some(_)) => anyhow::bail!(
+                "{RUN_ONCE_MODE_ENV} is only read in once mode; set RUN_ONCE=true or unset it"
+            ),
+            (true, mode) => Ok(Some(mode.unwrap_or(Self::Publish))),
+        }
+    }
+
+    fn from_env(once: bool) -> anyhow::Result<Option<Self>> {
+        let value = match std::env::var(RUN_ONCE_MODE_ENV) {
+            Ok(value) => Some(value),
+            Err(std::env::VarError::NotPresent) => None,
+            Err(err @ std::env::VarError::NotUnicode(_)) => {
+                anyhow::bail!("{RUN_ONCE_MODE_ENV}: {err}")
+            }
+        };
+        Self::from_lookup(once, value.as_deref())
+    }
+}
+
+/// What [`run`] ended with, when it ended without an error: always
+/// [`RunOutcome::Done`] except for a check run that found a delivery
+/// waiting.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum RunOutcome {
+    /// The loop stopped, a publish run finished, or a check run found
+    /// nothing to publish: exit 0.
+    Done,
+    /// A check run found `delivery` waiting to be published: exit
+    /// [`DELIVERY_WAITING_EXIT`].
+    DeliveryWaiting { delivery: String },
+}
+
+async fn run() -> anyhow::Result<RunOutcome> {
     dotenvy::dotenv().ok();
     ds_runtime::logging::init("schedule-reference");
     // Before the first publish: each publish's freed peak goes back to the
@@ -124,6 +222,7 @@ async fn run() -> anyhow::Result<()> {
     let config = Config::parse();
     config.validate()?;
     let once = common::poller_loop::RunOnce::from_env()?;
+    let mode = OnceMode::from_env(once.is_some())?;
     if config.metrics.metrics_enabled {
         ds_runtime::metrics::install(config.metrics_port)?;
     }
@@ -132,10 +231,13 @@ async fn run() -> anyhow::Result<()> {
     let pool = connect_db(&config, &progress).await?;
     sink::db::register_metrics();
     let sink = DbSink::new(pool, &config.lines);
-    if once.is_some() {
-        return run_once(&sink, &config).await;
+    match mode {
+        Some(OnceMode::Check) => run_check(&sink, &config).await,
+        Some(OnceMode::Publish) => run_once(&sink, &config).await.map(|()| RunOutcome::Done),
+        None => run_with(&sink, &config, &progress)
+            .await
+            .map(|()| RunOutcome::Done),
     }
-    run_with(&sink, &config, &progress).await
 }
 
 /// `pg_stat_activity.application_name` of the sink's pool.
@@ -250,7 +352,8 @@ async fn run_with(
 /// instead ([`seed_last_processed_delivery`]).
 const ONCE_SEED_ATTEMPTS: u32 = 7;
 
-/// One run of the `CronJob` (`RUN_ONCE=true`; docs/scheduled-jobs.md,
+/// One publish run of the `CronJob` (`RUN_ONCE=true`, `RUN_ONCE_MODE` unset
+/// or `publish`; ds-deploy's docs/scheduled-jobs.md,
 /// "schedule-reference"). Exits:
 ///
 /// - 0: another run holds the run lock; no complete delivery, or the newest
@@ -279,20 +382,7 @@ async fn run_once(sink: &impl PublishSink, config: &Config) -> anyhow::Result<()
 
 /// [`run_once`]'s work, under the run lock.
 async fn run_once_locked(sink: &impl PublishSink, config: &Config) -> anyhow::Result<()> {
-    let last_processed_delivery = seed_once(sink, config).await?;
-    record_signal(
-        sink,
-        sink::Signal::Seeded,
-        "",
-        last_processed_delivery.as_deref(),
-    )
-    .await;
-    let settled = sink.settled_delivery().await?;
-    let mut state = PublishState {
-        last_processed_delivery,
-        settled,
-        partial: None,
-    };
+    let mut state = once_state(sink, config).await?;
     let report = match poll_once(sink, config, &mut state).await {
         Ok(report) => report,
         Err(err) => {
@@ -328,6 +418,79 @@ async fn run_once_locked(sink: &impl PublishSink, config: &Config) -> anyhow::Re
             .context(ds_runtime::logging::ExitStatus::REJECTED))
         }
     }
+}
+
+/// What a once-mode run starts from, under the run lock, the same for a
+/// publish and a check run: the completion marker ([`seed_once`]), the
+/// `seeded` signal recorded (`DistantSignalScheduleReferenceNotSeeded`
+/// expects one an hour, so a check run must record it as a publish run
+/// does), and the settled delivery.
+async fn once_state(sink: &impl PublishSink, config: &Config) -> anyhow::Result<PublishState> {
+    let last_processed_delivery = seed_once(sink, config).await?;
+    record_signal(
+        sink,
+        sink::Signal::Seeded,
+        "",
+        last_processed_delivery.as_deref(),
+    )
+    .await;
+    let settled = sink.settled_delivery().await?;
+    Ok(PublishState {
+        last_processed_delivery,
+        settled,
+        partial: None,
+    })
+}
+
+/// A check run (`RUN_ONCE=true`, `RUN_ONCE_MODE=check`): would a publish
+/// run started now publish anything? It makes the same decision
+/// [`run_once`] does, through the same code ([`once_state`] and
+/// [`delivery_to_publish`], which [`poll_once`] uses), so the two can't
+/// disagree, and stops there: it lists `storage_dir`'s delivery
+/// directories but never opens a CIF file, builds nothing and publishes
+/// nothing. Its only writes are the `seeded` signal (as every run records
+/// it) and the run lock's session.
+///
+/// Exits (the status is the answer, see [`DELIVERY_WAITING_EXIT`]):
+///
+/// - 0: nothing to publish: no complete delivery (none yet, or the newest
+///   is still being extracted), or the newest is the one the marker names,
+///   or the one an earlier run settled; or another run holds the run lock.
+///   A held lock is a publish under way (it writes the marker when it
+///   finishes, and a second publish would only find the lock held too) or
+///   another check (which answers for itself), so there is nothing to start;
+/// - 10 ([`DELIVERY_WAITING_EXIT`]): a delivery is waiting, so a publish
+///   run should be started;
+/// - 1: the marker or the settled delivery could not be read, or the
+///   storage directory could not be listed (as for [`run_once`]).
+///
+/// The lock is released before the process exits, so a publish run the
+/// result starts never finds it held by this check.
+async fn run_check(sink: &impl PublishSink, config: &Config) -> anyhow::Result<RunOutcome> {
+    if !sink.try_lock_run().await? {
+        tracing::info!(
+            "another schedule-reference run holds the run lock; no publish run is needed"
+        );
+        return Ok(RunOutcome::Done);
+    }
+    let result = run_check_locked(sink, config).await;
+    sink.unlock_run().await;
+    result
+}
+
+/// [`run_check`]'s work, under the run lock.
+async fn run_check_locked(sink: &impl PublishSink, config: &Config) -> anyhow::Result<RunOutcome> {
+    let state = once_state(sink, config).await?;
+    Ok(match delivery_to_publish(config, &state)? {
+        None => {
+            tracing::info!("no new delivery to publish");
+            RunOutcome::Done
+        }
+        // Logged by `main`, which exits with it.
+        Some(delivery) => RunOutcome::DeliveryWaiting {
+            delivery: delivery.dir_name,
+        },
+    })
 }
 
 /// The completion marker, read up to [`ONCE_SEED_ATTEMPTS`] times.
@@ -895,25 +1058,9 @@ async fn poll_once(
     config: &Config,
     state: &mut PublishState,
 ) -> anyhow::Result<CycleReport> {
-    let Some(delivery) = discovery::latest_complete_delivery(&config.storage_dir)? else {
-        tracing::debug!("no complete MCA+MSN delivery directory found yet");
+    let Some(delivery) = delivery_to_publish(config, state)? else {
         return Ok(CycleReport::NothingNew);
     };
-    if Some(&delivery.dir_name) == state.last_processed_delivery.as_ref() {
-        tracing::debug!(
-            delivery = %delivery.dir_name,
-            "no new delivery since last successful parse; nothing to do"
-        );
-        return Ok(CycleReport::NothingNew);
-    }
-    if Some(&delivery.dir_name) == state.settled.as_ref() {
-        tracing::info!(
-            delivery = %delivery.dir_name,
-            "this delivery was settled by an earlier run (a failure it can't fix); waiting for \
-             a newer one"
-        );
-        return Ok(CycleReport::NothingNew);
-    }
 
     // Declared before everything the cycle builds, so it drops after all of
     // it, on every return path.
@@ -1114,6 +1261,37 @@ async fn poll_once(
         delivery: delivery.dir_name,
         failed: outcome.permanent_failures,
     })
+}
+
+/// The delivery a cycle would publish now, if any: the newest complete one
+/// on the PVC ([`discovery::latest_complete_delivery`]), unless it is the
+/// one `state` says is processed (the marker) or settled. The one rule
+/// [`poll_once`] and a check run ([`run_check`]) share; it lists
+/// directories and opens none of the delivery's files.
+fn delivery_to_publish(
+    config: &Config,
+    state: &PublishState,
+) -> anyhow::Result<Option<discovery::CompleteDelivery>> {
+    let Some(delivery) = discovery::latest_complete_delivery(&config.storage_dir)? else {
+        tracing::debug!("no complete MCA+MSN delivery directory found yet");
+        return Ok(None);
+    };
+    if Some(&delivery.dir_name) == state.last_processed_delivery.as_ref() {
+        tracing::debug!(
+            delivery = %delivery.dir_name,
+            "no new delivery since last successful parse; nothing to do"
+        );
+        return Ok(None);
+    }
+    if Some(&delivery.dir_name) == state.settled.as_ref() {
+        tracing::info!(
+            delivery = %delivery.dir_name,
+            "this delivery was settled by an earlier run (a failure it can't fix); waiting for \
+             a newer one"
+        );
+        return Ok(None);
+    }
+    Ok(Some(delivery))
 }
 
 /// Records a run signal, best effort: a failure is logged, never fails the
@@ -6868,5 +7046,278 @@ mod once_mode_tests {
                 delivery: DELIVERY.to_owned()
             }
         );
+    }
+}
+
+/// The check run (`RUN_ONCE_MODE=check`): the same decision as a publish
+/// run, reported by exit status, with nothing read but directory listings,
+/// the marker and the `settled` signal, and nothing written but `seeded`.
+#[cfg(test)]
+mod check_mode_tests {
+    use super::poll_once_retry_tests::write_fixture_delivery;
+    use super::sink::fake::{self, Fail, FakePublishSink};
+    use super::*;
+
+    const DELIVERY: &str = "20261031T210342Z";
+    const NEWER: &str = "20261101T210000Z";
+
+    fn config(root: &std::path::Path) -> Config {
+        let mut config = poll_once_tests::test_config();
+        config.storage_dir = root.to_path_buf();
+        config
+    }
+
+    /// The process's exit status for a check run's result, as `main`
+    /// gives it.
+    fn status(result: &anyhow::Result<RunOutcome>) -> u8 {
+        match result {
+            Ok(RunOutcome::Done) => 0,
+            Ok(RunOutcome::DeliveryWaiting { .. }) => DELIVERY_WAITING_EXIT,
+            Err(err) => ds_runtime::logging::exit_status_of(err),
+        }
+    }
+
+    /// The endpoints called, in order.
+    fn endpoints(sink: &FakePublishSink) -> Vec<&'static str> {
+        sink.calls().iter().map(|call| call.endpoint).collect()
+    }
+
+    /// Everything a check run may call: the lock, the marker, the `seeded`
+    /// signal and the settled read. No product, no completion marker.
+    const CHECK_CALLS: [&str; 4] = [
+        fake::RUN_LOCK,
+        fake::LAST_PUBLISH,
+        fake::SIGNALS,
+        fake::SETTLED,
+    ];
+
+    #[test]
+    fn the_mode_is_publish_by_default_and_unknown_values_are_refused() {
+        assert_eq!(OnceMode::from_lookup(false, None).unwrap(), None);
+        assert_eq!(OnceMode::from_lookup(false, Some("")).unwrap(), None);
+        assert_eq!(
+            OnceMode::from_lookup(true, None).unwrap(),
+            Some(OnceMode::Publish)
+        );
+        assert_eq!(
+            OnceMode::from_lookup(true, Some("publish")).unwrap(),
+            Some(OnceMode::Publish)
+        );
+        assert_eq!(
+            OnceMode::from_lookup(true, Some(" check ")).unwrap(),
+            Some(OnceMode::Check)
+        );
+        for unknown in ["Check", "dry-run", "true"] {
+            let err = OnceMode::from_lookup(true, Some(unknown)).unwrap_err();
+            assert!(err.to_string().contains(RUN_ONCE_MODE_ENV), "{err}");
+        }
+        assert!(
+            OnceMode::from_lookup(false, Some("check")).is_err(),
+            "a mode the loop would ignore is refused"
+        );
+    }
+
+    #[test]
+    fn the_waiting_status_is_none_the_failure_policy_reads() {
+        assert_eq!(DELIVERY_WAITING_EXIT, 10);
+        assert_ne!(
+            DELIVERY_WAITING_EXIT,
+            ds_runtime::logging::ExitStatus::REJECTED.0
+        );
+        for reserved in [0, 1, 2, 3, 126, 127, 137, 143] {
+            assert_ne!(DELIVERY_WAITING_EXIT, reserved);
+        }
+    }
+
+    #[tokio::test]
+    async fn nothing_on_the_pvc_exits_0_and_records_seeded() {
+        let sink = FakePublishSink::new();
+        let storage = tempfile::tempdir().unwrap();
+        let result = run_check(&sink, &config(storage.path())).await;
+        assert_eq!(status(&result), 0, "{result:?}");
+        assert_eq!(endpoints(&sink), CHECK_CALLS);
+        assert_eq!(
+            sink.signals(),
+            [("seeded".to_owned(), String::new())],
+            "seeded, as a publish run records it"
+        );
+        assert!(!sink.holds_run_lock(), "released on the way out");
+    }
+
+    /// A new delivery: exit 10 having published nothing; the publish run it
+    /// starts publishes that delivery, and the next check exits 0.
+    #[tokio::test]
+    async fn a_waiting_delivery_exits_10_and_agrees_with_the_publish_run() {
+        let sink = FakePublishSink::new();
+        let storage = tempfile::tempdir().unwrap();
+        write_fixture_delivery(storage.path(), DELIVERY);
+        let config = config(storage.path());
+
+        let result = run_check(&sink, &config).await;
+        assert_eq!(status(&result), DELIVERY_WAITING_EXIT, "{result:?}");
+        assert_eq!(
+            result.unwrap(),
+            RunOutcome::DeliveryWaiting {
+                delivery: DELIVERY.to_owned()
+            }
+        );
+        assert_eq!(endpoints(&sink), CHECK_CALLS, "nothing published");
+        assert!(!sink.holds_run_lock(), "free for the publish run");
+
+        sink.reset();
+        run_once(&sink, &config).await.unwrap();
+        assert_eq!(
+            sink.count(fake::PUBLISHES),
+            1,
+            "the publish run publishes it"
+        );
+
+        sink.reset();
+        let result = run_check(&sink, &config).await;
+        assert_eq!(status(&result), 0, "{result:?}");
+        assert_eq!(endpoints(&sink), CHECK_CALLS);
+    }
+
+    /// A delivery schedule-ingest has not finished extracting (no completion
+    /// marker yet) is not waiting; the older complete one the marker names
+    /// is still the newest.
+    #[tokio::test]
+    async fn a_delivery_still_being_extracted_is_not_waiting() {
+        let storage = tempfile::tempdir().unwrap();
+        write_fixture_delivery(storage.path(), DELIVERY);
+        write_fixture_delivery(storage.path(), NEWER);
+        std::fs::remove_file(
+            storage
+                .path()
+                .join(NEWER)
+                .join(common::schedule_delivery::COMPLETE_MARKER),
+        )
+        .unwrap();
+        let sink = FakePublishSink::new().with_last_completed(Some(DELIVERY));
+        let result = run_check(&sink, &config(storage.path())).await;
+        assert_eq!(status(&result), 0, "{result:?}");
+        assert_eq!(endpoints(&sink), CHECK_CALLS);
+    }
+
+    /// A delivery an earlier run settled is skipped until a newer one lands.
+    #[tokio::test]
+    async fn a_settled_delivery_is_not_waiting() {
+        let sink = FakePublishSink::new();
+        sink.record_signal(sink::Signal::Settled, "", Some(DELIVERY))
+            .await
+            .unwrap();
+        sink.reset();
+        let storage = tempfile::tempdir().unwrap();
+        write_fixture_delivery(storage.path(), DELIVERY);
+        let config = config(storage.path());
+
+        let result = run_check(&sink, &config).await;
+        assert_eq!(status(&result), 0, "{result:?}");
+        assert_eq!(endpoints(&sink), CHECK_CALLS);
+
+        write_fixture_delivery(storage.path(), NEWER);
+        let result = run_check(&sink, &config).await;
+        assert_eq!(
+            result.unwrap(),
+            RunOutcome::DeliveryWaiting {
+                delivery: NEWER.to_owned()
+            }
+        );
+    }
+
+    /// The marker names a delivery newer than any on the PVC (the newer
+    /// directory was removed). The rule is the publish run's own (a
+    /// delivery other than the marker's is new), so the check reports the
+    /// one on the PVC as waiting, exactly when a publish run would publish
+    /// it: the two never disagree.
+    #[tokio::test]
+    async fn a_marker_ahead_of_the_pvc_gives_the_publish_runs_answer() {
+        let sink = FakePublishSink::new().with_last_completed(Some(NEWER));
+        let storage = tempfile::tempdir().unwrap();
+        write_fixture_delivery(storage.path(), DELIVERY);
+        let config = config(storage.path());
+
+        let result = run_check(&sink, &config).await;
+        assert_eq!(
+            result.unwrap(),
+            RunOutcome::DeliveryWaiting {
+                delivery: DELIVERY.to_owned()
+            }
+        );
+        assert_eq!(endpoints(&sink), CHECK_CALLS);
+
+        sink.reset();
+        let mut state = once_state(&sink, &config).await.unwrap();
+        assert_eq!(
+            poll_once(&sink, &config, &mut state).await.unwrap(),
+            CycleReport::Published {
+                delivery: DELIVERY.to_owned()
+            },
+            "a publish run publishes the delivery the check reported"
+        );
+    }
+
+    /// Another run holds the lock: exit 0 without reading anything else (a
+    /// publish under way finishes the job; another check answers itself).
+    #[tokio::test]
+    async fn a_held_run_lock_exits_0_without_reading_anything() {
+        let sink = FakePublishSink::new();
+        sink.hold_run_lock_elsewhere(true);
+        let storage = tempfile::tempdir().unwrap();
+        write_fixture_delivery(storage.path(), DELIVERY);
+        let result = run_check(&sink, &config(storage.path())).await;
+        assert_eq!(status(&result), 0, "{result:?}");
+        assert_eq!(endpoints(&sink), [fake::RUN_LOCK], "only the lock attempt");
+        assert!(!sink.holds_run_lock());
+    }
+
+    /// The check never opens the delivery's files: an MCA a publish would
+    /// fail to read (not UTF-8) is still reported as waiting.
+    #[tokio::test]
+    async fn the_check_never_reads_the_cif() {
+        let storage = tempfile::tempdir().unwrap();
+        write_fixture_delivery(storage.path(), DELIVERY);
+        std::fs::write(
+            storage.path().join(DELIVERY).join("RJTTF942MCA.txt"),
+            [0xff, 0xfe, b'\n'],
+        )
+        .unwrap();
+        let config = config(storage.path());
+
+        let sink = FakePublishSink::new();
+        let result = run_check(&sink, &config).await;
+        assert_eq!(status(&result), DELIVERY_WAITING_EXIT, "{result:?}");
+        assert_eq!(endpoints(&sink), CHECK_CALLS);
+
+        let mut state = PublishState::default();
+        assert!(
+            poll_once(&sink, &config, &mut state).await.is_err(),
+            "a publish does read it"
+        );
+    }
+
+    /// An unreadable marker fails the check (exit 1, the Job retries), as
+    /// it fails a publish run, rather than guess.
+    #[tokio::test]
+    async fn an_unreadable_marker_exits_1() {
+        let sink = FakePublishSink::new();
+        sink.fail(fake::LAST_PUBLISH, u64::MAX, Fail::Transient);
+        let storage = tempfile::tempdir().unwrap();
+        write_fixture_delivery(storage.path(), DELIVERY);
+        let result = run_check(&sink, &config(storage.path())).await;
+        assert_eq!(status(&result), 1, "{result:?}");
+        assert!(!sink.holds_run_lock(), "released on failure too");
+    }
+
+    /// An unreadable settled signal fails the check too: without it the
+    /// check could report a settled delivery as waiting.
+    #[tokio::test]
+    async fn an_unreadable_settled_signal_exits_1() {
+        let sink = FakePublishSink::new();
+        sink.fail(fake::SETTLED, u64::MAX, Fail::Transient);
+        let storage = tempfile::tempdir().unwrap();
+        write_fixture_delivery(storage.path(), DELIVERY);
+        let result = run_check(&sink, &config(storage.path())).await;
+        assert_eq!(status(&result), 1, "{result:?}");
     }
 }
