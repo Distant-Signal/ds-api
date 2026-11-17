@@ -20,6 +20,11 @@ use subtle::ConstantTimeEq;
 /// How long a pass's prefill may be saved after it was read.
 pub const TOKEN_TTL_SECS: i64 = 3600;
 
+/// How far ahead of this replica's clock another replica's `issue` may be
+/// and still have its token accepted (the expiry is checked against a
+/// ceiling of now plus the lifetime).
+const CLOCK_SKEW_SECS: i64 = 60;
+
 fn mac_hex(
     secret: &str,
     user_id: &str,
@@ -27,6 +32,11 @@ fn mac_hex(
     departure: Option<DateTime<Utc>>,
     expires_at: i64,
 ) -> Option<String> {
+    // Never sign or check with a key made from nothing (`AppState::init`
+    // already refuses an empty secret; this keeps the module safe alone).
+    if secret.is_empty() {
+        return None;
+    }
     let mut key = Sha256::new();
     key.update(b"distant-signal ticket prefill v1\0");
     key.update(secret.as_bytes());
@@ -78,7 +88,7 @@ pub fn verify(
         return false;
     };
     let now = now.timestamp();
-    if expires_at < now || expires_at > now.saturating_add(TOKEN_TTL_SECS) {
+    if expires_at < now || expires_at > now.saturating_add(TOKEN_TTL_SECS + CLOCK_SKEW_SECS) {
         return false;
     }
     let Some(expected) = mac_hex(secret, user_id, leg_id, departure, expires_at) else {
@@ -113,6 +123,25 @@ mod tests {
         ));
         assert!(!verify("secret", "user-1", 7, None, &token, now));
         assert!(!verify("other", "user-1", 7, departure, &token, now));
+    }
+
+    #[test]
+    fn an_empty_secret_neither_signs_nor_verifies() {
+        let now = at("2026-11-17T12:00:00Z");
+        assert!(issue("", "user-1", 7, None, now).is_none());
+        let token = issue("secret", "user-1", 7, None, now).unwrap();
+        assert!(!verify("", "user-1", 7, None, &token, now));
+    }
+
+    #[test]
+    fn a_token_from_a_replica_a_little_ahead_is_accepted() {
+        let now = at("2026-11-17T12:00:00Z");
+        let ahead = now + chrono::Duration::seconds(CLOCK_SKEW_SECS);
+        let token = issue("secret", "user-1", 7, None, ahead).unwrap();
+        assert!(verify("secret", "user-1", 7, None, &token, now));
+        let too_far = now + chrono::Duration::seconds(CLOCK_SKEW_SECS + 1);
+        let token = issue("secret", "user-1", 7, None, too_far).unwrap();
+        assert!(!verify("secret", "user-1", 7, None, &token, now));
     }
 
     #[test]
