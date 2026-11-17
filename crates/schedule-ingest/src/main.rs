@@ -72,7 +72,6 @@ use std::path::PathBuf;
 use std::time::{Duration, Instant, SystemTime};
 
 use chrono::{DateTime, NaiveTime, Utc};
-use chrono_tz::Europe::London;
 use clap::Parser;
 use config::Config;
 use delivery::DeliveryRelation;
@@ -245,9 +244,11 @@ async fn run() -> anyhow::Result<()> {
         // rather than derived from "did the scheduler just wake for that
         // exact slot", since scanning is no longer tied to waking at
         // specific slots.
-        let now_london = Utc::now().with_timezone(&London);
-        let is_final_check_of_day =
-            is_final_check_of_day(now_london.time(), final_check_time, window_start_time);
+        let is_final_check_of_day = is_final_check_of_day(
+            london_time_of_day(Utc::now()),
+            final_check_time,
+            window_start_time,
+        );
         let cycle_start = Instant::now();
 
         run_lanes_once(
@@ -1053,6 +1054,11 @@ fn parse_check_times(raw: &str) -> anyhow::Result<Vec<NaiveTime>> {
     Ok(times)
 }
 
+/// The Europe/London wall-clock time of day at `at`.
+fn london_time_of_day(at: DateTime<Utc>) -> NaiveTime {
+    common::zone::london_time(at)
+}
+
 /// Whether `now` (a Europe/London wall-clock time-of-day) falls in the gap
 /// between today's final configured `check_times` fallback
 /// (`final_check_time`, `16:00` by default) and the next overnight
@@ -1158,6 +1164,39 @@ mod tests {
 
     use super::*;
     use crate::sink::tests::{Answer, FakeSink};
+
+    /// The final-check gate reads London's clock, not UTC's, across both
+    /// clock changes of 2025 and 2026. Expectations are from the IANA rules
+    /// (python zoneinfo).
+    #[test]
+    fn the_final_check_reads_the_london_time_of_day() {
+        #[rustfmt::skip]
+        let cases = [
+            ("2025-03-29T22:59:59Z", "22:59:59"),
+            ("2025-03-30T00:59:59Z", "00:59:59"),
+            ("2025-03-30T01:00:00Z", "02:00:00"),
+            ("2025-03-30T12:00:00Z", "13:00:00"),
+            ("2025-06-30T22:59:59Z", "23:59:59"),
+            ("2025-06-30T23:00:00Z", "00:00:00"),
+            ("2025-10-25T23:30:00Z", "00:30:00"),
+            ("2025-10-26T00:59:59Z", "01:59:59"),
+            ("2025-10-26T01:00:00Z", "01:00:00"),
+            ("2025-10-26T01:30:00Z", "01:30:00"),
+            ("2026-01-15T00:00:00Z", "00:00:00"),
+            ("2026-03-29T00:59:59Z", "00:59:59"),
+            ("2026-03-29T01:00:00Z", "02:00:00"),
+            ("2026-10-25T00:30:00Z", "01:30:00"),
+            ("2026-10-25T01:00:00Z", "01:00:00"),
+        ];
+        for (instant, london) in cases {
+            let at: DateTime<Utc> = instant.parse().unwrap();
+            assert_eq!(
+                london_time_of_day(at),
+                london.parse::<NaiveTime>().unwrap(),
+                "London time at {instant}"
+            );
+        }
+    }
 
     /// Regression for the "L1 -- `MissedTickBehavior::Burst` still default"
     /// finding: this scan loop's own interval must opt into `Delay`, not

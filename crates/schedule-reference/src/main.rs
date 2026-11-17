@@ -2867,7 +2867,7 @@ async fn publish_schedule_associations(
 /// Europe/London clock time via `DateTime::with_timezone`, which is always
 /// exactly one unambiguous answer.
 fn london_local_time_at(instant: chrono::DateTime<chrono::Utc>) -> chrono::NaiveTime {
-    instant.with_timezone(&chrono_tz::Europe::London).time()
+    common::zone::london_time(instant)
 }
 
 fn london_local_time_now() -> chrono::NaiveTime {
@@ -2921,13 +2921,11 @@ mod test_clock {
     /// still resolves while times of day stop depending on when the test
     /// runs. `time` must not fall in a DST-transition hour (01:00-02:00).
     pub(super) fn pin_london_today_at(time: chrono::NaiveTime) -> Pin {
-        use chrono::TimeZone as _;
         let today = super::london_local_date_at(chrono::Utc::now());
-        let at = chrono_tz::Europe::London
-            .from_local_datetime(&today.and_time(time))
-            .single()
-            .expect("an unambiguous London-local time")
-            .with_timezone(&chrono::Utc);
+        let local = today.and_time(time);
+        let common::zone::LocalTime::Single(at) = common::zone::london_resolve(local) else {
+            panic!("{local} is not a single London-local time");
+        };
         pin(at)
     }
 }
@@ -2953,9 +2951,7 @@ mod test_clock {
 /// the same "always exactly one unambiguous answer" reasoning applies -- no
 /// `LocalResult` handling is needed here either.
 fn london_local_date_at(instant: chrono::DateTime<chrono::Utc>) -> chrono::NaiveDate {
-    instant
-        .with_timezone(&chrono_tz::Europe::London)
-        .date_naive()
+    common::zone::london_date(instant)
 }
 
 fn london_local_date_now() -> chrono::NaiveDate {

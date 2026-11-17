@@ -12,7 +12,6 @@ axum = { version = "0.8.9", features = ["http2", "tracing", "multipart"] }
 axum-prometheus = "0.10"
 base64 = "0.22"
 chrono = { version = "0.4.44", features = ["serde"] }
-chrono-tz = "0.10"
 clap = { version = "4.6.1", features = ["derive", "env"] }
 # The checksum on a personal API token (`personal_tokens::token`), so secret
 # scanners and the api can recognise a real one without a lookup.
