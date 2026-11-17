@@ -304,7 +304,7 @@ async fn the_consent_flow_needs_a_fresh_single_use_confirmation_token() {
     let body = consent.json();
     assert_eq!(body["client"]["displayName"], "Distant Signal assistant");
     assert_eq!(body["username"], user.as_str());
-    assert_eq!(consent.headers[header::CACHE_CONTROL], "no-store");
+    assert_eq!(consent.headers[header::CACHE_CONTROL], "private, no-store");
     let confirmation = body["confirmationToken"].as_str().unwrap().to_string();
 
     // Bound to the session that rendered the page.
@@ -421,6 +421,7 @@ async fn the_consent_flow_needs_a_fresh_single_use_confirmation_token() {
     )
     .await;
     assert_eq!(list.status, StatusCode::OK);
+    assert_eq!(list.headers[header::CACHE_CONTROL], "private, no-store");
     assert_eq!(list.json()["grants"].as_array().unwrap().len(), 1);
     assert_eq!(list.json()["grants"][0]["clientEnabled"], true);
     assert_eq!(list.json()["available"][0]["name"], "ds-mcp");

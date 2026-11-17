@@ -164,7 +164,7 @@ async fn the_feed_link_is_made_shown_once_used_replaced_and_turned_off() {
     )
     .await;
     assert_eq!(status, StatusCode::OK, "{body}");
-    assert_eq!(headers[header::CACHE_CONTROL], "no-store");
+    assert_eq!(headers[header::CACHE_CONTROL], "private, no-store");
     let token = serde_json::from_str::<Value>(&body).unwrap()["token"]
         .as_str()
         .unwrap()

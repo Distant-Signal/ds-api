@@ -25,6 +25,10 @@ needs to know about. Newest first. Field names are as served (camelCase).
   ("That push address can't be used. It must be a public https
   address.") as every other bad endpoint. It was accepted with `204`.
 
+## 2026-11-17: Personal account responses are `private, no-store`
+
+Behaviour fix (DS-534, round-2 security assessment); no field, migration or grant change. Not part of the 2026-11-17 deploy 2. The personal-token, webhook, connected-app and calendar-feed account routes (`/public/account/personal-tokens`, `/public/account/webhooks`, `/public/account/connected-apps` and its consent step, `/public/account/calendar-feed`) and the account data export sent `Cache-Control: no-store`; they now send `private, no-store`, as every other personal response does. The frontend proxy relays the value. `/v1` responses are unchanged.
+
 ## 2026-11-17: Webhook secrets are sealed for their row (secret box stage 1b)
 
 No change to any request or response (DS-534). The api now creates a

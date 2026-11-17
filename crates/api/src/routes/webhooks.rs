@@ -214,9 +214,10 @@ async fn list_webhooks(State(app): State<App>, user: AuthenticatedUser) -> Respo
         destinations,
     })
     .into_response();
-    response
-        .headers_mut()
-        .insert(header::CACHE_CONTROL, HeaderValue::from_static("no-store"));
+    response.headers_mut().insert(
+        header::CACHE_CONTROL,
+        HeaderValue::from_static("private, no-store"),
+    );
     response
 }
 
@@ -282,9 +283,10 @@ async fn create_webhook(
                 }),
             )
                 .into_response();
-            response
-                .headers_mut()
-                .insert(header::CACHE_CONTROL, HeaderValue::from_static("no-store"));
+            response.headers_mut().insert(
+                header::CACHE_CONTROL,
+                HeaderValue::from_static("private, no-store"),
+            );
             response
         }
         Ok(CreateOutcome::TooMany) => error_response(

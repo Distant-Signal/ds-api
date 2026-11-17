@@ -223,7 +223,7 @@ async fn list_connected_apps(State(app): State<App>, user: AuthenticatedUser) ->
     .into_response();
     response.headers_mut().insert(
         header::CACHE_CONTROL,
-        header::HeaderValue::from_static("no-store"),
+        header::HeaderValue::from_static("private, no-store"),
     );
     response
 }
@@ -283,7 +283,7 @@ async fn consent(
     .into_response();
     response.headers_mut().insert(
         header::CACHE_CONTROL,
-        header::HeaderValue::from_static("no-store"),
+        header::HeaderValue::from_static("private, no-store"),
     );
     response
 }
