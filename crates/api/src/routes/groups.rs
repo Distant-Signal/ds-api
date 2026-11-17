@@ -24,6 +24,7 @@ use serde::{Deserialize, Serialize};
 use crate::app::{App, Router};
 use crate::auth::AuthenticatedUser;
 use crate::data::groups::{self, GroupRole};
+use crate::routes::journey_ref::{GroupParam, JourneyId};
 use crate::usage_events::FeatureEvent;
 
 pub fn router() -> Router {
@@ -879,7 +880,8 @@ async fn list_shared_journeys_route(
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct AddGroupJourneyRequest {
-    journey_id: i64,
+    /// The journey's `publicId`, or its deprecated numeric `id` (DS-534).
+    journey_id: crate::data::journey_public_id::JourneyRef,
 }
 
 /// Any current member may add one of their OWN journeys (spec §6);
@@ -894,7 +896,12 @@ async fn add_group_journey(
 ) -> Result<StatusCode, (StatusCode, String)> {
     require_member(&app, &group_id, &user.id).await?;
 
-    let added = groups::add_journey_to_group(&app.database, &group_id, req.journey_id, &user.id)
+    let journey_id = req
+        .journey_id
+        .resolve(&app.database)
+        .await
+        .map_err(|err| internal_error("resolve the journey id")(err.into()))?;
+    let added = groups::add_journey_to_group(&app.database, &group_id, journey_id, &user.id)
         .await
         .map_err(internal_error("add journey to group"))?;
     if !added {
@@ -909,7 +916,8 @@ async fn add_group_journey(
 async fn remove_group_journey(
     State(app): State<App>,
     user: AuthenticatedUser,
-    Path((group_id, journey_id)): Path<(String, i64)>,
+    Path(GroupParam { id: group_id }): Path<GroupParam>,
+    JourneyId(journey_id): JourneyId,
 ) -> Result<StatusCode, (StatusCode, String)> {
     let role = require_member(&app, &group_id, &user.id).await?;
 

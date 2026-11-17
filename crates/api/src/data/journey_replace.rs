@@ -78,7 +78,12 @@ pub struct RegularWrite<'a> {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, ts_rs::TS)]
 #[serde(rename_all = "camelCase")]
 pub struct ReplaceResponse {
+    // Deprecated (DS-534): use `journey_public_id`.
     pub journey_id: i64,
+    // The journey's opaque id. Absent from a response stored before
+    // DS-534, which an `Idempotency-Key` replay still reads.
+    #[serde(default)]
+    pub journey_public_id: String,
     /// The revision now current (1 when revision 1 was refreshed).
     pub revision_no: i32,
     pub new_leg_ids: Vec<i64>,
@@ -346,8 +351,14 @@ pub async fn replace(pool: &PgPool, replacement: &Replacement<'_>) -> anyhow::Re
         .bind(journey_id)
         .execute(&mut *tx)
         .await?;
+    let journey_public_id: String =
+        sqlx::query_scalar("SELECT public_id FROM journeys WHERE id = $1")
+            .bind(journey_id)
+            .fetch_one(&mut *tx)
+            .await?;
     let response = ReplaceResponse {
         journey_id,
+        journey_public_id,
         revision_no,
         new_leg_ids,
         undo_revision_no: revision_id.and(previous_no),

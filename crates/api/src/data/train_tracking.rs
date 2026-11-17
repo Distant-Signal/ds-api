@@ -785,11 +785,22 @@ pub struct TrackedTrainState {
     #[serde(skip_serializing_if = "Option::is_none")]
     #[ts(optional)]
     pub journey_ids: Option<Vec<i64>>,
+    // `journey_ids`' opaque ids, in the same order (DS-534). `journey_ids`
+    // is deprecated.
+    #[sqlx(skip)]
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub journey_public_ids: Option<Vec<String>>,
     /// See `journey_ids`.
     #[sqlx(skip)]
     #[serde(skip_serializing_if = "Option::is_none")]
     #[ts(optional)]
     pub single_leg_journey_ids: Option<Vec<i64>>,
+    // `single_leg_journey_ids`' opaque ids, in the same order (DS-534).
+    #[sqlx(skip)]
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub single_leg_journey_public_ids: Option<Vec<String>>,
     /// Whether this subscription's delay, cancellation and skipped-stop
     /// pushes are on (`train_subscriptions.notifications_enabled`, set by
     /// `PATCH /Train/{trackingId}`). Owner's view only, like `journey_ids`;
@@ -1106,12 +1117,20 @@ pub struct TrackedTrainListItem {
     /// folds these rows into their journey instead of listing them as
     /// standalone tracked trains. Additive (2026-10-20).
     pub journey_ids: Vec<i64>,
+    // `journey_ids`' opaque ids, in the same order (DS-534). `journey_ids`
+    // is deprecated. Filled after the list query.
+    #[sqlx(skip)]
+    pub journey_public_ids: Vec<String>,
     /// Of `journey_ids`, the train's own journeys: the caller's one-leg
     /// journeys whose leg is bound to this subscription itself. "Stop
     /// tracking" (`DELETE /Train/{trackingId}`) deletes these; a train in
     /// any other of `journey_ids` stays tracked there (DS-124). Additive
     /// (2026-10-22).
     pub single_leg_journey_ids: Vec<i64>,
+    // `single_leg_journey_ids`' opaque ids, in the same order (DS-534).
+    // Filled after the list query.
+    #[sqlx(skip)]
+    pub single_leg_journey_public_ids: Vec<String>,
     /// Whether the train is over, by the rule that splits this list's
     /// travel order (`travel_order`): `completed`, or it has actually
     /// reached its destination. Rows come still-to-come first, so the first
@@ -1351,6 +1370,16 @@ pub async fn list_tracked_trains_for_user(
         .fetch_all(pool)
         .await?;
     let mut rows = rows;
+    let wanted: Vec<i64> = rows
+        .iter()
+        .flat_map(|row| row.journey_ids.iter().chain(&row.single_leg_journey_ids))
+        .copied()
+        .collect();
+    let public_ids = crate::data::journey_public_id::public_ids(pool, &wanted).await?;
+    for row in &mut rows {
+        row.journey_public_ids = public_ids_of(&public_ids, &row.journey_ids);
+        row.single_leg_journey_public_ids = public_ids_of(&public_ids, &row.single_leg_journey_ids);
+    }
     crate::data::stop_delay::apply_public_delays(pool, &mut rows).await?;
     crate::data::irish_trains::attach(pool, &mut rows, Utc::now()).await;
     crate::data::schedule_services::attach(pool, &mut rows).await;
@@ -1363,6 +1392,14 @@ pub async fn list_tracked_trains_for_user(
     )
     .await;
     Ok(rows)
+}
+
+/// `ids` as their opaque ids, in order; a journey that is gone is dropped
+/// from neither list's length (an empty string keeps the lists parallel).
+fn public_ids_of(public_ids: &std::collections::HashMap<i64, String>, ids: &[i64]) -> Vec<String> {
+    ids.iter()
+        .map(|id| public_ids.get(id).cloned().unwrap_or_default())
+        .collect()
 }
 
 pub async fn get_by_tracking_id(
@@ -1482,6 +1519,14 @@ pub async fn attach_journey_ids(
         Some((journeys, single_leg, enabled)) => (journeys, single_leg, Some(enabled)),
         None => (Vec::new(), Vec::new(), None),
     };
+    let wanted: Vec<i64> = journey_ids
+        .iter()
+        .chain(&single_leg_journey_ids)
+        .copied()
+        .collect();
+    let public_ids = crate::data::journey_public_id::public_ids(pool, &wanted).await?;
+    state.journey_public_ids = Some(public_ids_of(&public_ids, &journey_ids));
+    state.single_leg_journey_public_ids = Some(public_ids_of(&public_ids, &single_leg_journey_ids));
     state.journey_ids = Some(journey_ids);
     state.single_leg_journey_ids = Some(single_leg_journey_ids);
     state.notifications_enabled = notifications_enabled;

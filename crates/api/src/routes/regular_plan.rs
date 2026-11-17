@@ -17,7 +17,7 @@
 use std::collections::HashMap;
 
 use axum::Json;
-use axum::extract::{Path, State};
+use axum::extract::State;
 use axum::http::StatusCode;
 use axum::response::Response;
 use chrono::{DateTime, Duration, Utc};
@@ -31,6 +31,7 @@ use crate::data::journey_revisions::RevisionMeta;
 use crate::data::regular_plan::{self, PlanOption, StoredPlan};
 use crate::data::trip_planning_itinerary::{PlannedItinerary, PlannedLeg};
 use crate::routes::journey_itinerary::RouteError;
+use crate::routes::journey_ref::JourneyId;
 use crate::routes::journey_replan::{internal, now_utc, render, replaced_response, require_owner};
 use crate::routes::trips::{ReplanQuery, ReplanSlot};
 
@@ -67,7 +68,7 @@ fn conflict(code: &'static str, message: &'static str) -> RouteError {
 async fn post_accept(
     State(app): State<App>,
     user: AuthenticatedUser,
-    Path(journey_id): Path<i64>,
+    JourneyId(journey_id): JourneyId,
     Json(body): Json<AcceptBody>,
 ) -> Response {
     render(

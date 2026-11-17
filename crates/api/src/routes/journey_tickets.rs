@@ -38,6 +38,7 @@ use crate::data::leg_tickets::{
 use crate::data::schedule_services::{ServiceMode, ServiceModeFields};
 use crate::data::ticket_subprocess::{ParseFailure, TicketKind, TicketParser};
 use crate::data::{delay_repay_rules, ticket_extraction, ticket_precheck, ticket_subprocess};
+use crate::routes::journey_ref::{JourneyId, LegParam};
 
 pub fn router() -> Router {
     Router::new()
@@ -135,7 +136,8 @@ async fn wallet_proven(
 async fn put_leg_ticket(
     State(app): State<App>,
     user: AuthenticatedUser,
-    Path((journey_id, leg_id)): Path<(i64, i64)>,
+    JourneyId(journey_id): JourneyId,
+    Path(LegParam { leg_id }): Path<LegParam>,
     Json(body): Json<LegTicketBody>,
 ) -> Result<Json<LegTicket>, (StatusCode, String)> {
     let name = crate::data::train_tracking::validate_custom_name(body.name.as_deref())
@@ -203,7 +205,8 @@ async fn put_leg_ticket(
 async fn delete_leg_ticket(
     State(app): State<App>,
     user: AuthenticatedUser,
-    Path((journey_id, leg_id)): Path<(i64, i64)>,
+    JourneyId(journey_id): JourneyId,
+    Path(LegParam { leg_id }): Path<LegParam>,
 ) -> Result<StatusCode, (StatusCode, String)> {
     match leg_tickets::lookup_leg(&app.database, &user.id, journey_id, leg_id)
         .await
@@ -276,7 +279,8 @@ fn prefill(
 async fn post_leg_ticket_pkpass(
     State(app): State<App>,
     user: AuthenticatedUser,
-    Path((journey_id, leg_id)): Path<(i64, i64)>,
+    JourneyId(journey_id): JourneyId,
+    Path(LegParam { leg_id }): Path<LegParam>,
     multipart: Multipart,
 ) -> Result<Json<LegTicketPrefill>, (StatusCode, String)> {
     let leg_date = match leg_tickets::lookup_leg(&app.database, &user.id, journey_id, leg_id)
@@ -781,7 +785,9 @@ mod tests {
             custom_name: None,
             shared_group_count: 0,
             journey_ids: None,
+            journey_public_ids: None,
             single_leg_journey_ids: None,
+            single_leg_journey_public_ids: None,
             notifications_enabled: None,
             trains_id: Some(1),
             journey_stops: None,

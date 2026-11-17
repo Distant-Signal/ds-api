@@ -157,7 +157,10 @@ fn train_kind() -> String {
 #[derive(Debug, Serialize, Deserialize, ts_rs::TS)]
 #[serde(rename_all = "camelCase")]
 pub(crate) struct ItineraryResponse {
+    // Deprecated (DS-534): use `journey_public_id`.
     journey_id: i64,
+    // The new journey's opaque id.
+    journey_public_id: String,
     leg_id: i64,
     tracking_id: i64,
     #[ts(as = "Option<crate::ts_values::ResolutionStatus>")]
@@ -882,6 +885,9 @@ async fn save_itinerary(
     };
     let response = ItineraryResponse {
         journey_id,
+        journey_public_id: crate::data::journey_public_id::public_id(&app.database, journey_id)
+            .await
+            .map_err(internal("read the journey's public id"))?,
         leg_id: first_leg_id,
         tracking_id: first_tracking_id,
         resolution_status: None,

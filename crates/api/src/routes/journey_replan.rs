@@ -46,6 +46,7 @@ use crate::data::journey_replace::{self, Replaced, Replacement};
 use crate::data::journey_revisions::{self, Reason, RevisionMeta};
 use crate::data::{journeys, train_tracking};
 use crate::routes::journey_itinerary::RouteError;
+use crate::routes::journey_ref::{BreakParam, JourneyId, LegParam, RevisionParam};
 use crate::routes::trips::{ReplanQuery, ReplanSlot};
 
 pub fn router() -> Router {
@@ -1126,7 +1127,8 @@ fn missed_fault(analysis: &Analysis, index: usize) -> &'static str {
 async fn get_alternatives(
     State(app): State<App>,
     user: AuthenticatedUser,
-    Path((journey_id, leg_id)): Path<(i64, i64)>,
+    JourneyId(journey_id): JourneyId,
+    Path(LegParam { leg_id }): Path<LegParam>,
     Query(params): Query<AlternativesParams>,
 ) -> Response {
     render(
@@ -1190,7 +1192,10 @@ fn leg_travelled() -> RouteError {
 #[serde(rename_all = "camelCase")]
 pub(crate) struct BreakResponse {
     id: i64,
+    // Deprecated (DS-534): use `journey_public_id`.
     journey_id: i64,
+    // The journey's opaque id.
+    journey_public_id: String,
     #[ts(as = "crate::ts_values::BreakCause")]
     cause: String,
     #[ts(as = "crate::ts_values::BreakFault")]
@@ -1228,6 +1233,7 @@ impl BreakResponse {
                 .then_some("Your earlier train was late, so this counts as a missed connection."),
             id: row.id,
             journey_id: row.journey_id,
+            journey_public_id: row.journey_public_id,
             cause: row.cause,
             fault: row.fault,
             severity: row.severity,
@@ -1296,7 +1302,7 @@ struct CurrentBreakParams {
 async fn get_current_break(
     State(app): State<App>,
     user: AuthenticatedUser,
-    Path(journey_id): Path<i64>,
+    JourneyId(journey_id): JourneyId,
     Query(params): Query<CurrentBreakParams>,
 ) -> Response {
     render(
@@ -1341,7 +1347,8 @@ struct DismissBody {
 async fn post_dismiss(
     State(app): State<App>,
     user: AuthenticatedUser,
-    Path((journey_id, break_id)): Path<(i64, i64)>,
+    JourneyId(journey_id): JourneyId,
+    Path(BreakParam { break_id }): Path<BreakParam>,
     Json(body): Json<DismissBody>,
 ) -> Response {
     render(
@@ -1393,7 +1400,7 @@ struct PreviewBody {
 async fn post_preview(
     State(app): State<App>,
     user: AuthenticatedUser,
-    Path(journey_id): Path<i64>,
+    JourneyId(journey_id): JourneyId,
     Json(body): Json<PreviewBody>,
 ) -> Response {
     render(
@@ -1588,7 +1595,7 @@ impl SuggestionStaleResponse {
 async fn post_accept(
     State(app): State<App>,
     user: AuthenticatedUser,
-    Path(journey_id): Path<i64>,
+    JourneyId(journey_id): JourneyId,
     headers: HeaderMap,
     Json(body): Json<AcceptBody>,
 ) -> Response {
@@ -1758,7 +1765,8 @@ pub(crate) struct ReplaceBody {
 async fn post_replace(
     State(app): State<App>,
     user: AuthenticatedUser,
-    Path((journey_id, leg_id)): Path<(i64, i64)>,
+    JourneyId(journey_id): JourneyId,
+    Path(LegParam { leg_id }): Path<LegParam>,
     headers: HeaderMap,
     Json(body): Json<ReplaceBody>,
 ) -> Response {
@@ -1890,7 +1898,7 @@ pub(crate) struct RevisionResponse {
 async fn get_revisions(
     State(app): State<App>,
     user: AuthenticatedUser,
-    Path(journey_id): Path<i64>,
+    JourneyId(journey_id): JourneyId,
 ) -> Response {
     render(
         async {
@@ -1946,7 +1954,8 @@ fn revert_allowed(
 async fn post_revert(
     State(app): State<App>,
     user: AuthenticatedUser,
-    Path((journey_id, revision_no)): Path<(i64, i32)>,
+    JourneyId(journey_id): JourneyId,
+    Path(RevisionParam { revision_no }): Path<RevisionParam>,
     headers: HeaderMap,
 ) -> Response {
     render(
@@ -2121,7 +2130,7 @@ struct MutedBody {
 async fn put_suggestions_muted(
     State(app): State<App>,
     user: AuthenticatedUser,
-    Path(journey_id): Path<i64>,
+    JourneyId(journey_id): JourneyId,
     Json(body): Json<MutedBody>,
 ) -> Response {
     render(
@@ -2158,7 +2167,7 @@ struct OperatorFilterBody {
 async fn put_operator_filter(
     State(app): State<App>,
     user: AuthenticatedUser,
-    Path(journey_id): Path<i64>,
+    JourneyId(journey_id): JourneyId,
     Json(body): Json<OperatorFilterBody>,
 ) -> Response {
     render(
@@ -2235,6 +2244,7 @@ mod wire_tests {
     fn a_replace_answer_names_the_undo_revision() {
         let value = serde_json::to_value(journey_replace::ReplaceResponse {
             journey_id: 4,
+            journey_public_id: "j_00000000000000000000000000000004".to_string(),
             revision_no: 3,
             new_leg_ids: vec![9],
             undo_revision_no: Some(2),
@@ -2243,7 +2253,8 @@ mod wire_tests {
         assert_eq!(
             value,
             serde_json::json!({
-                "journeyId": 4, "revisionNo": 3, "newLegIds": [9], "undoRevisionNo": 2
+                "journeyId": 4, "journeyPublicId": "j_00000000000000000000000000000004",
+                "revisionNo": 3, "newLegIds": [9], "undoRevisionNo": 2
             })
         );
     }
@@ -2323,6 +2334,7 @@ mod wire_tests {
         let row = BreakRow {
             id: 5,
             journey_id: 4,
+            journey_public_id: "j_00000000000000000000000000000004".to_string(),
             user_id: "user-1".to_string(),
             detected_at: at("2026-09-17T08:55:00Z"),
             cause: "user_missed".to_string(),

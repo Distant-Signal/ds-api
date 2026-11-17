@@ -59,7 +59,10 @@ pub const OPERATOR_FAULT_CAUSES: &[&str] = &[
 #[serde(rename_all = "camelCase")]
 #[ts(rename = "ReliabilityTrain")]
 pub struct ReliabilityTrain {
+    // Deprecated (DS-534): use `journey_public_id`.
     pub journey_id: i64,
+    // The journey's opaque id. Filled by [`for_user`] after [`assemble`].
+    pub journey_public_id: String,
     /// The current plan's leg; `null` for a replaced booked train.
     pub leg_id: Option<i64>,
     pub train_uid: Option<String>,
@@ -86,7 +89,10 @@ pub struct ReliabilityTrain {
 #[serde(rename_all = "camelCase")]
 #[ts(rename = "ReliabilityJourney")]
 pub struct ReliabilityJourney {
+    // Deprecated (DS-534): use `journey_public_id`.
     pub journey_id: i64,
+    // The journey's opaque id. Filled by [`for_user`] after [`assemble`].
+    pub journey_public_id: String,
     pub custom_name: Option<String>,
     /// The last train leg's date.
     pub service_date: NaiveDate,
@@ -363,13 +369,27 @@ pub async fn for_user(
     let subscription_ids: Vec<i64> = legs.iter().filter_map(|leg| leg.subscription_id).collect();
     let tickets =
         crate::data::leg_tickets::for_subscriptions(pool, user_id, &subscription_ids).await?;
-    Ok(assemble(&Readings {
+    let mut response = assemble(&Readings {
         legs,
         live,
         replaced,
         baselines,
         tickets,
-    }))
+    });
+    let public_ids = crate::data::journey_public_id::public_ids(pool, &journey_ids).await?;
+    for train in &mut response.trains {
+        train.journey_public_id = public_ids
+            .get(&train.journey_id)
+            .cloned()
+            .unwrap_or_default();
+    }
+    for journey in &mut response.journeys {
+        journey.journey_public_id = public_ids
+            .get(&journey.journey_id)
+            .cloned()
+            .unwrap_or_default();
+    }
+    Ok(response)
 }
 
 fn is_irish(uid: Option<&str>) -> bool {
@@ -448,6 +468,7 @@ fn trains(readings: &Readings, runs: &HashMap<i64, LegRun>) -> Vec<ReliabilityTr
         };
         trains.push(ReliabilityTrain {
             journey_id: leg.journey_id,
+            journey_public_id: String::new(),
             leg_id: Some(leg.leg_id),
             train_uid: leg.train_uid.clone(),
             service_date: leg.service_date,
@@ -475,6 +496,7 @@ fn trains(readings: &Readings, runs: &HashMap<i64, LegRun>) -> Vec<ReliabilityTr
         }
         trains.push(ReliabilityTrain {
             journey_id: row.journey_id,
+            journey_public_id: String::new(),
             leg_id: None,
             train_uid: row.train_uid.clone(),
             service_date: row.service_date,
@@ -558,6 +580,7 @@ fn journey_delay_repay(
     let ticket_type = ticket.map(LegTicket::kind_text);
     Some(ReliabilityJourney {
         journey_id: last.journey_id,
+        journey_public_id: String::new(),
         custom_name: last.custom_name.clone(),
         service_date: last.service_date,
         destination_crs: destination_crs.clone(),

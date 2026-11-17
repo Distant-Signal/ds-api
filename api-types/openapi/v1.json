@@ -780,6 +780,9 @@
             ],
             "description": "The `/plan` operator filter the journey keeps (owner only; additive,\n2026-10-31). Absent when it has none."
           },
+          "publicId": {
+            "type": "string"
+          },
           "regularPlan": {
             "anyOf": [
               {
@@ -835,6 +838,7 @@
         },
         "required": [
           "id",
+          "publicId",
           "createdAt",
           "legs",
           "isOwner",
@@ -1363,6 +1367,9 @@
               "null"
             ]
           },
+          "publicId": {
+            "type": "string"
+          },
           "resolutionStatus": {
             "anyOf": [
               {
@@ -1502,6 +1509,7 @@
         },
         "required": [
           "id",
+          "publicId",
           "createdAt",
           "createdVia",
           "legId",

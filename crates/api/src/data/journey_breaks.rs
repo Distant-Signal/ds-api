@@ -86,6 +86,9 @@ pub fn severity(cause: Cause, best_delay_minutes: Option<Option<i64>>) -> i16 {
 pub struct BreakRow {
     pub id: i64,
     pub journey_id: i64,
+    /// `journeys.public_id` of `journey_id` (DS-534), read in the same
+    /// statement (see `BREAK_COLUMNS`).
+    pub journey_public_id: String,
     pub user_id: String,
     pub detected_at: DateTime<Utc>,
     pub cause: String,
@@ -110,7 +113,8 @@ pub struct BreakRow {
 const BREAK_COLUMNS: &str = "id, journey_id, user_id, detected_at, cause, fault, severity, \
      trigger_leg_id, trigger_trains_id, break_position, fingerprint, status, suggestions, \
      suggestions_at, confirmations, notified_at, notified_severity, opened_at, opened_via, \
-     resolved_at, accepted_revision_id";
+     resolved_at, accepted_revision_id, \
+     (SELECT j.public_id FROM journeys j WHERE j.id = journey_id) AS journey_public_id";
 
 /// A detected break, before it is stored.
 #[derive(Debug, Clone, PartialEq, Eq)]
