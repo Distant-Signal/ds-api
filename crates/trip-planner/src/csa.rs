@@ -1315,4 +1315,59 @@ mod tests {
             JourneyLeg::Train(_) => panic!("expected the walk"),
         }
     }
+
+    /// A walk from the stop a post-midnight train reaches, whose day mask
+    /// allows only `days` (Monday first): the search starts on `date` (a
+    /// Saturday) and the train arrives at 00:20, minute 1460, which is
+    /// Sunday. ds-core's `LinkWindow` reads the day mask for that day
+    /// (v0.15.0, W5); before it, the walk was judged on the service date.
+    fn after_midnight_walk(days: &str) -> Option<Journey> {
+        let connections = vec![conn("N1", "O", "A", 23 * 60 + 30, 1440 + 20)];
+        let mut interchange = empty_interchange();
+        for (tiploc, crs) in [("A", "AAA"), ("Z", "ZZZ")] {
+            interchange
+                .tiploc_to_crs
+                .insert(tiploc.to_string(), crs.to_string());
+            interchange
+                .crs_to_tiplocs
+                .insert(crs.to_string(), vec![tiploc.to_string()]);
+        }
+        interchange.fixed_links_from_crs.insert(
+            "AAA".to_string(),
+            vec![schedule_query::FixedLink {
+                only_without: schedule_query::OperatorId::UNKNOWN,
+                operator: schedule_query::OperatorId::UNKNOWN,
+                mode: "WALK".to_string(),
+                to_crs: "ZZZ".to_string(),
+                minutes: 10,
+                valid_from: "0000".to_string(),
+                valid_to: "2359".to_string(),
+                days_mask: days.to_string(),
+            }],
+        );
+        scan_connections(ScanOptions {
+            connections: &connections,
+            interchange: &interchange,
+            from_tiplocs: &["O".to_string()],
+            to_tiplocs: &["Z".to_string()],
+            departure_min: 23 * 60,
+            // Saturday.
+            date: NaiveDate::from_ymd_opt(2026, 11, 14).unwrap(),
+        })
+    }
+
+    #[test]
+    fn a_sunday_only_walk_is_usable_after_midnight_on_a_saturday_service() {
+        let journey = after_midnight_walk("0000001").expect("the Sunday walk applies at 00:20");
+        assert_eq!(journey.arrival_min, 1440 + 20 + 10);
+        match &journey.legs[1] {
+            JourneyLeg::Transfer(leg) => assert_eq!(leg.mode, "WALK"),
+            JourneyLeg::Train(_) => panic!("expected the walk"),
+        }
+    }
+
+    #[test]
+    fn a_saturday_only_walk_is_not_usable_after_midnight_on_a_saturday_service() {
+        assert!(after_midnight_walk("0000010").is_none());
+    }
 }
