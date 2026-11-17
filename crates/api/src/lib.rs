@@ -38,6 +38,7 @@ pub mod app;
 pub mod atom;
 pub mod auth;
 pub mod bank_holidays_sync;
+pub mod cache_control;
 pub mod data;
 pub mod edge;
 pub mod ics;

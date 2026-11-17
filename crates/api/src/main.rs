@@ -554,6 +554,11 @@ async fn server_main() -> anyhow::Result<()> {
         .layer(axum::middleware::from_fn(
             api::personal_tokens::refuse_on_main_listener,
         ))
+        // `private, no-store` on personal responses that set no
+        // Cache-Control of their own. See `api::cache_control`.
+        .layer(axum::middleware::from_fn(
+            api::cache_control::default_private,
+        ))
         .layer(TraceLayer::new_for_http().make_span_with(request_span))
         .with_state(app.clone());
     // The token listener's router: its own allowlisted `/v1` routes, not a
@@ -562,6 +567,9 @@ async fn server_main() -> anyhow::Result<()> {
         (
             addr.to_string(),
             api::personal_tokens::router(&app, &edge_settings)
+                .layer(axum::middleware::from_fn(
+                    api::cache_control::default_private,
+                ))
                 .layer(TraceLayer::new_for_http().make_span_with(request_span))
                 .with_state(app.clone()),
         )
