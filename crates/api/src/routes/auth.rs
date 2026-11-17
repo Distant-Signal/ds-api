@@ -42,7 +42,9 @@ pub fn router() -> Router {
         )
         .route(
             "/auth/backchannel-logout",
-            axum::routing::post(backchannel_logout),
+            axum::routing::post(backchannel_logout).layer(axum::extract::DefaultBodyLimit::max(
+                BACKCHANNEL_MAX_BODY_BYTES,
+            )),
         )
 }
 
@@ -595,6 +597,14 @@ async fn revoke_other_sessions(
     response
 }
 
+/// The unauthenticated back-channel logout endpoint's body cap. A real
+/// logout JWT is a few KiB; the form wrapper adds almost nothing.
+const BACKCHANNEL_MAX_BODY_BYTES: usize = 32 * 1024;
+
+/// Longest `logout_token` verified; longer values are refused with 400
+/// before any parsing or key lookup.
+const BACKCHANNEL_MAX_TOKEN_BYTES: usize = 16 * 1024;
+
 #[derive(Deserialize)]
 struct BackchannelLogoutForm {
     logout_token: String,
@@ -651,6 +661,10 @@ async fn backchannel_logout(
         tracing::warn!("back-channel logout rejected: no logout_token form field");
         return backchannel_response(StatusCode::BAD_REQUEST, Some("invalid_request"));
     };
+    if form.logout_token.len() > BACKCHANNEL_MAX_TOKEN_BYTES {
+        tracing::warn!("back-channel logout rejected: logout_token too long");
+        return backchannel_response(StatusCode::BAD_REQUEST, Some("invalid_request"));
+    }
     let subject = match app.oidc.verify_logout_token(&form.logout_token).await {
         Ok(subject) => subject,
         Err(reason) => {
