@@ -81,6 +81,12 @@ response-shape change.
   most 100 stations per line (was 200; the longest catalogue line has 61).
   Repeated station codes (ignoring case and spaces) are folded into one,
   as before, before the "at least 2 stations" and the cap are checked.
+- Session-cookie mutations (POST, PUT, PATCH, DELETE) with no `Origin`
+  header are refused with `403` when `Sec-Fetch-Site` is `cross-site`
+  (defence in depth; the frontend proxy checks too). A request with
+  neither header (a non-browser client), or with `same-origin`,
+  `same-site` or `none`, is judged as before; a present `Origin` still
+  decides on its own. `same-site` stays allowed.
 
 ## 2026-11-17: Journey break and replan fixes
 

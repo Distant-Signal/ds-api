@@ -198,6 +198,20 @@ pub fn is_cross_origin_cookie_mutation(
     let referer = headers
         .get(axum::http::header::REFERER)
         .and_then(|v| v.to_str().ok());
+    // No `Origin`: a browser that omits it (some same-origin and old-browser
+    // shapes) still says where the request came from in `Sec-Fetch-Site`,
+    // which a page cannot forge. `cross-site` is refused; `same-site` stays
+    // allowed (a sibling subdomain is not this app, but nothing here shows
+    // no first-party flow uses it, and `Origin` covers the real cases);
+    // neither header (a non-browser client) stays allowed.
+    if origin.is_none()
+        && headers
+            .get("sec-fetch-site")
+            .and_then(|v| v.to_str().ok())
+            .is_some_and(|v| v.trim().eq_ignore_ascii_case("cross-site"))
+    {
+        return true;
+    }
     if origin.is_none() && referer.is_none() {
         return false;
     }
@@ -890,6 +904,63 @@ mod cross_origin_mutation_tests {
         assert_eq!(got, StatusCode::FORBIDDEN);
         let got = status(Some(SITE), Method::POST, true, Some("null"), None).await;
         assert_eq!(got, StatusCode::FORBIDDEN);
+    }
+
+    async fn status_with_fetch_site(
+        origin: Option<&str>,
+        referer: Option<&str>,
+        fetch_site: &str,
+    ) -> StatusCode {
+        let mut builder = Request::builder()
+            .method(Method::POST)
+            .uri("/groups/join/tok")
+            .header(header::COOKIE, format!("{SESSION_COOKIE_NAME}=abc"))
+            .header("sec-fetch-site", fetch_site);
+        if let Some(origin) = origin {
+            builder = builder.header(header::ORIGIN, origin);
+        }
+        if let Some(referer) = referer {
+            builder = builder.header(header::REFERER, referer);
+        }
+        router(Some(SITE))
+            .oneshot(builder.body(Body::empty()).unwrap())
+            .await
+            .unwrap()
+            .status()
+    }
+
+    /// With no `Origin`, `Sec-Fetch-Site: cross-site` is refused; the
+    /// other values, and a real `Origin`, are judged as before.
+    #[tokio::test]
+    async fn a_missing_origin_is_refused_when_fetch_metadata_says_cross_site() {
+        assert_eq!(
+            status_with_fetch_site(None, None, "cross-site").await,
+            StatusCode::FORBIDDEN
+        );
+        assert_eq!(
+            status_with_fetch_site(None, None, "Cross-Site").await,
+            StatusCode::FORBIDDEN
+        );
+        assert_eq!(
+            status_with_fetch_site(None, Some("https://ds.example.test/x"), "cross-site").await,
+            StatusCode::FORBIDDEN
+        );
+        for site in ["same-origin", "same-site", "none"] {
+            assert_eq!(
+                status_with_fetch_site(None, None, site).await,
+                StatusCode::NO_CONTENT,
+                "{site}"
+            );
+        }
+        // A matching Origin decides on its own.
+        assert_eq!(
+            status_with_fetch_site(Some(SITE), None, "cross-site").await,
+            StatusCode::NO_CONTENT
+        );
+        assert_eq!(
+            status_with_fetch_site(Some("https://evil.example.test"), None, "same-origin").await,
+            StatusCode::FORBIDDEN
+        );
     }
 
     #[tokio::test]
