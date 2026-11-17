@@ -46,8 +46,12 @@ struct Harness {
 }
 
 fn harness(pool: PgPool, settings: PersonalTokenSettings) -> Harness {
+    harness_with(pool, PersonalTokens::new(settings))
+}
+
+fn harness_with(pool: PgPool, tokens: PersonalTokens) -> Harness {
     let mut state = Arc::try_unwrap(crate::test_support::inert_app(pool)).expect("a fresh app");
-    state.personal_tokens = Arc::new(PersonalTokens::new(settings));
+    state.personal_tokens = Arc::new(tokens);
     let app: App = Arc::new(state);
     let main = crate::app::Router::new()
         .merge(super::journeys::router())
@@ -55,6 +59,10 @@ fn harness(pool: PgPool, settings: PersonalTokenSettings) -> Harness {
         .with_state(app.clone())
         .layer(axum::middleware::from_fn(
             crate::personal_tokens::refuse_on_main_listener,
+        ))
+        .layer(axum::middleware::from_fn_with_state(
+            app.personal_tokens.test_auth.clone(),
+            crate::auth::test_auth::refuse_off_token_listener,
         ));
     let tokens = crate::personal_tokens::router(&app, &crate::edge::EdgeSettings::default())
         .with_state(app.clone());
@@ -842,4 +850,120 @@ async fn the_openapi_document_is_served_unwrapped() {
     assert!(body.get("data").is_none());
     assert_eq!(headers[header::CACHE_CONTROL], "public, max-age=3600");
     assert_eq!(&body, crate::personal_tokens::openapi::document());
+}
+
+/// Test credentials (`crate::auth::test_auth`) on the real token router and
+/// handlers: the sandbox principal `test:<sub>` reads reference data, is
+/// refused everything that needs a user, and never becomes a `users` row
+/// (or a session, a token, a journey or a preference).
+#[tokio::test]
+#[ignore = "requires a live database; run with `DATABASE_URL=... cargo test -p api \
+            personal_tokens_db_tests -- --ignored --test-threads=1`"]
+async fn test_credentials_never_touch_users() {
+    use crate::auth::internal_oauth::test_support::{mock_authentik, sign_token};
+    use crate::auth::test_auth::{TestAuth, TestAuthSettings};
+
+    const SUB: &str = "TEST-TAUTH-sandbox";
+    let pool = connect().await;
+    let (server, _) = mock_authentik().await;
+    let test_auth = TestAuth::from_settings(TestAuthSettings {
+        enabled: true,
+        issuer: server.uri(),
+        ..TestAuthSettings::default()
+    })
+    .unwrap();
+    let h = harness_with(
+        pool.clone(),
+        PersonalTokens::new(settings()).with_test_auth(test_auth),
+    );
+    let now = chrono::Utc::now().timestamp();
+    let token = sign_token(&json!({
+        "sub": SUB,
+        "iss": server.uri(),
+        "aud": crate::auth::test_auth::DEFAULT_AUDIENCE,
+        "iat": now,
+        "exp": now + 3600,
+        "groups": [crate::auth::test_auth::DEFAULT_REQUIRED_GROUP],
+    }));
+    let auth = bearer(&token);
+    let count = |sql: &'static str| {
+        let pool = pool.clone();
+        async move {
+            sqlx::query_scalar::<_, i64>(sql)
+                .bind(SUB)
+                .bind(format!("test:{SUB}"))
+                .fetch_one(&pool)
+                .await
+                .unwrap()
+        }
+    };
+    let users_before: i64 = sqlx::query_scalar("SELECT count(*) FROM users")
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+
+    // Reference data: reached the real handler, wrapped like any token
+    // response.
+    let (status, _, body) = send(
+        &h.tokens,
+        "GET",
+        "/v1/Line/Mode/national-rail/Status",
+        &[("authorization", &auth)],
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert!(body["data"].is_array(), "{body}");
+    assert!(body["attribution"]["statement"].is_string(), "{body}");
+
+    // Anything that needs a user: 403, before any handler.
+    for uri in [
+        "/v1/me",
+        "/v1/Journeys/mine",
+        "/v1/Journeys/1",
+        "/v1/preferences",
+        "/v1/preferences/notifications",
+    ] {
+        let (status, _, body) =
+            send(&h.tokens, "GET", uri, &[("authorization", &auth)], None).await;
+        assert_eq!(status, StatusCode::FORBIDDEN, "{uri}: {body}");
+        assert_eq!(body["error"], "insufficient_scope", "{uri}");
+    }
+    // No write: a POST is refused.
+    let (status, _, _) = send(
+        &h.tokens,
+        "POST",
+        "/v1/Journeys/mine",
+        &[("authorization", &auth)],
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::METHOD_NOT_ALLOWED);
+    // And the website's listener refuses it outright.
+    for uri in ["/Journeys/mine", "/public/account/personal-tokens"] {
+        let (status, _, body) = send(&h.main, "GET", uri, &[("authorization", &auth)], None).await;
+        assert_eq!(status, StatusCode::UNAUTHORIZED, "{uri}: {body}");
+    }
+
+    let users_after: i64 = sqlx::query_scalar("SELECT count(*) FROM users")
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    assert_eq!(users_after, users_before, "a users row was created");
+    assert_eq!(
+        count("SELECT count(*) FROM users WHERE id IN ($1, $2) OR id LIKE 'test:%'").await,
+        0
+    );
+    assert_eq!(
+        count("SELECT count(*) FROM sessions WHERE user_id IN ($1, $2)").await,
+        0
+    );
+    assert_eq!(
+        count("SELECT count(*) FROM personal_api_tokens WHERE user_id IN ($1, $2)").await,
+        0
+    );
+    assert_eq!(
+        count("SELECT count(*) FROM journeys WHERE user_id IN ($1, $2)").await,
+        0
+    );
 }
