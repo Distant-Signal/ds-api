@@ -33,7 +33,16 @@ use sqlx::PgPool;
 /// -- see that function's own doc comment for the full scheme/DNS-rebinding
 /// rationale, shared verbatim with `crates/notifier`'s own send-time
 /// re-check (this module's doc comment above).
+///
+/// An endpoint with userinfo (`https://user:pw@host/...`) is refused first:
+/// a real push service never issues one, and the notifier would send the
+/// credentials on every push.
 pub async fn validate_push_endpoint(endpoint: &str) -> Result<(), String> {
+    if let Ok(parsed) = openidconnect::url::Url::parse(endpoint)
+        && (!parsed.username().is_empty() || parsed.password().is_some())
+    {
+        return Err("push endpoint must not contain a username or password".to_string());
+    }
     ds_runtime::outbound_endpoint_guard::validate_outbound_url(endpoint).await
 }
 
@@ -532,6 +541,18 @@ mod validate_push_endpoint_tests {
             .await
             .unwrap_err();
         assert!(err.contains("https"), "unexpected message: {err}");
+    }
+
+    #[tokio::test]
+    async fn rejects_an_endpoint_with_userinfo() {
+        for endpoint in [
+            "https://user:pw@93.184.216.34/push",
+            "https://user@93.184.216.34/push",
+            "https://:pw@93.184.216.34/push",
+        ] {
+            let err = validate_push_endpoint(endpoint).await.unwrap_err();
+            assert!(err.contains("username"), "unexpected message: {err}");
+        }
     }
 
     #[tokio::test]
