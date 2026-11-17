@@ -89,6 +89,28 @@ pub fn slugify(name: &str) -> String {
     format!("custom-{slug}")
 }
 
+/// Length of the random part of a new custom line's id ([`line_id`]).
+const ID_SUFFIX_LEN: usize = 8;
+
+/// A new custom line's id: the name's [`slugify`] plus a random suffix of
+/// lowercase letters and digits, `custom-my-commute-k3x9q2ab`. Ids are
+/// global, so a readable id alone (with `-2`, `-3`, ... on a collision)
+/// told a user that someone else already had a line of that name (review
+/// 2026-11, C6); a random suffix makes a collision vanishingly rare and,
+/// when one happens, a fresh draw says nothing about anyone's names.
+/// Lines made before this keep their ids.
+pub fn line_id(name: &str) -> String {
+    use rand::Rng as _;
+    const ALPHABET: &[u8] = b"abcdefghijklmnopqrstuvwxyz0123456789";
+    let mut rng = rand::thread_rng();
+    let suffix: String = (0..ID_SUFFIX_LEN)
+        .map(|_| char::from(ALPHABET[rng.gen_range(0..ALPHABET.len())]))
+        .collect();
+    // A name with no ASCII letters or digits slugs to a bare `custom-`.
+    let slug = slugify(name);
+    format!("{}-{suffix}", slug.trim_end_matches('-'))
+}
+
 /// Fetches one custom line by id, or `None` if no custom line has that id
 /// (including catalogue-line ids, which are never rows in this table). The
 /// second element of the tuple is the row's `user_id`. It's still typed
@@ -155,10 +177,9 @@ pub async fn count_custom_lines_for_user(pool: &PgPool, user_id: &str) -> Result
     Ok(count)
 }
 
-/// Inserts a new custom line, deriving its id from `new.name` via
-/// [`slugify`]. On a slug collision (another custom line already has that
-/// id — e.g. two lines both named "My Commute"), retries with `-2`, `-3`,
-/// ... appended until an unused id is found. The existence check is atomic
+/// Inserts a new custom line, its id from `new.name` via [`line_id`]
+/// (the slug plus a random suffix). On the rare collision with an existing
+/// id it draws again until an unused id is found. The existence check is atomic
 /// with the insert (`ON CONFLICT ... DO NOTHING RETURNING id`) so two
 /// concurrent requests racing on the same id can't both pass a check and
 /// then have one fail on the `PRIMARY KEY` constraint.
@@ -184,9 +205,7 @@ pub async fn insert_custom_line(
     user_id: &str,
 ) -> Result<CustomLine> {
     let new = new.normalized();
-    let base_id = slugify(&new.name);
-    let mut id = base_id.clone();
-    let mut suffix = 2;
+    let mut id = line_id(&new.name);
     loop {
         let mut tx = pool.begin().await?;
         let inserted: Option<String> = sqlx::query_scalar(
@@ -219,8 +238,7 @@ pub async fn insert_custom_line(
             tx.commit().await?;
             break;
         }
-        id = format!("{base_id}-{suffix}");
-        suffix += 1;
+        id = line_id(&new.name);
     }
 
     Ok(CustomLine {
@@ -519,6 +537,25 @@ mod tests {
     #[test]
     fn slugify_trims_trailing_punctuation() {
         assert_eq!(slugify("Trailing---"), "custom-trailing");
+    }
+
+    /// Review 2026-11 (C6): an id is the slug plus a random suffix, so two
+    /// users' lines of one name get unrelated ids and neither learns of the
+    /// other's.
+    #[test]
+    fn a_line_id_is_the_slug_and_a_random_suffix() {
+        let id = line_id("My Commute");
+        let suffix = id.strip_prefix("custom-my-commute-").expect("the slug");
+        assert_eq!(suffix.len(), ID_SUFFIX_LEN);
+        assert!(
+            suffix
+                .chars()
+                .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit())
+        );
+        assert_ne!(line_id("My Commute"), line_id("My Commute"));
+        let bare = line_id("!!!");
+        assert!(bare.starts_with("custom-") && !bare.starts_with("custom--"));
+        assert_eq!(bare.len(), "custom-".len() + ID_SUFFIX_LEN);
     }
 
     #[test]
