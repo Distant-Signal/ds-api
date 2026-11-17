@@ -742,12 +742,17 @@ mod session_revocation_db_tests {
                 ),
             ),
             ("not a jwt", "garbage".to_string()),
+            ("oversized token", "a".repeat(20 * 1024)),
         ];
         for (name, token) in cases {
             let (status, body) = send(router.clone(), backchannel_request(&token)).await;
             assert_eq!(status, StatusCode::BAD_REQUEST, "{name}: {body}");
             assert_eq!(body["error"], "invalid_request", "{name}");
         }
+
+        // A body past the route's size cap is refused before it is parsed.
+        let (status, _) = send(router.clone(), backchannel_request(&"a".repeat(64 * 1024))).await;
+        assert_eq!(status, StatusCode::PAYLOAD_TOO_LARGE);
 
         // No form field at all.
         let (status, _) = send(

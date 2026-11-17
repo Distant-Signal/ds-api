@@ -1894,10 +1894,10 @@ async fn extend_journey_share_link(
 ) -> Result<Json<ShareLinkResponse>, (StatusCode, String)> {
     require_journey_ownership(&app, journey_id, &user.id).await?;
 
-    let expires_at = unlisted_links::extend_link(
+    let expires_at = unlisted_links::extend_journey_link(
         &app.database,
-        JOURNEY_RESOURCE_TYPE,
-        &journey_id.to_string(),
+        journey_id,
+        &user.id,
         JOURNEY_SHARE_LINK_TTL,
     )
     .await
@@ -1925,13 +1925,9 @@ async fn revoke_journey_share_link(
 ) -> Result<StatusCode, (StatusCode, String)> {
     require_journey_ownership(&app, journey_id, &user.id).await?;
 
-    unlisted_links::revoke_link(
-        &app.database,
-        JOURNEY_RESOURCE_TYPE,
-        &journey_id.to_string(),
-    )
-    .await
-    .map_err(internal_error("revoke journey share link"))?;
+    unlisted_links::revoke_journey_link(&app.database, journey_id, &user.id)
+        .await
+        .map_err(internal_error("revoke journey share link"))?;
     // The follows through the revoked link end with it (DS-146).
     journey_follows::drop_dead_link_follows(&app.database, journey_id)
         .await

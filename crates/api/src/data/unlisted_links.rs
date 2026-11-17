@@ -134,6 +134,54 @@ pub async fn revoke_link(
     Ok(result.rows_affected() > 0)
 }
 
+/// SQL fragment: journey `$1` is owned by user `$2` (the journey share
+/// link's ownership rule, `journeys.user_id`). Compares `journeys.id` as a
+/// number so the primary key is used, not a cast of every journey id.
+const JOURNEY_OWNED_BY: &str =
+    "EXISTS (SELECT 1 FROM journeys j WHERE j.id = $1::bigint AND j.user_id = $2)";
+
+/// [`revoke_link`] for a journey share link, with the owner check in the
+/// `UPDATE` itself: `owner_user_id` must own journey `journey_id`.
+pub async fn revoke_journey_link(
+    pool: &PgPool,
+    journey_id: i64,
+    owner_user_id: &str,
+) -> anyhow::Result<bool> {
+    let result = sqlx::query(&format!(
+        "UPDATE unlisted_links SET revoked_at = NOW() \
+         WHERE resource_type = 'journey' AND resource_id = $1::bigint::text AND revoked_at IS NULL \
+           AND {JOURNEY_OWNED_BY}"
+    ))
+    .bind(journey_id)
+    .bind(owner_user_id)
+    .execute(pool)
+    .await?;
+    Ok(result.rows_affected() > 0)
+}
+
+/// [`extend_link`] for a journey share link, with the owner check in the
+/// `UPDATE` itself: `owner_user_id` must own journey `journey_id`.
+pub async fn extend_journey_link(
+    pool: &PgPool,
+    journey_id: i64,
+    owner_user_id: &str,
+    ttl: Duration,
+) -> anyhow::Result<Option<DateTime<Utc>>> {
+    let expires_at = Utc::now() + ttl;
+    let result = sqlx::query(&format!(
+        "UPDATE unlisted_links SET expires_at = $3 \
+         WHERE resource_type = 'journey' AND resource_id = $1::bigint::text AND revoked_at IS NULL \
+           AND (expires_at IS NULL OR expires_at > NOW()) \
+           AND {JOURNEY_OWNED_BY}"
+    ))
+    .bind(journey_id)
+    .bind(owner_user_id)
+    .bind(expires_at)
+    .execute(pool)
+    .await?;
+    Ok((result.rows_affected() > 0).then_some(expires_at))
+}
+
 /// The active link for `(resource_type, resource_id)`, if any -- `None`
 /// once revoked or past `expires_at` (when set). Same validity predicate
 /// as `get_active_invite_link`: `revoked_at IS NULL AND (expires_at IS
@@ -463,6 +511,48 @@ mod db_tests {
         );
 
         cleanup(&pool, "widget", &["TEST-UNLISTED-LINKS-OWNER-2"]).await;
+    }
+
+    #[tokio::test]
+    #[ignore = "requires a live database; run with `cargo test -p api \
+                journey_link_changes_require_the_journey_owner -- --ignored --test-threads=1`"]
+    async fn journey_link_changes_require_the_journey_owner() {
+        let (owner, other) = ("TEST-UNLISTED-LINKS-JOWNER", "TEST-UNLISTED-LINKS-JOTHER");
+        let pool = connect().await;
+        seed_user(&pool, owner).await;
+        seed_user(&pool, other).await;
+        let journey: i64 =
+            sqlx::query_scalar("INSERT INTO journeys (user_id) VALUES ($1) RETURNING id")
+                .bind(owner)
+                .fetch_one(&pool)
+                .await
+                .expect("seed journey");
+        rotate_link(&pool, "journey", &journey.to_string(), owner, None)
+            .await
+            .expect("rotate");
+
+        let ttl = Duration::days(7);
+        assert!(
+            extend_journey_link(&pool, journey, other, ttl)
+                .await
+                .unwrap()
+                .is_none()
+        );
+        assert!(!revoke_journey_link(&pool, journey, other).await.unwrap());
+        assert!(
+            extend_journey_link(&pool, journey, owner, ttl)
+                .await
+                .unwrap()
+                .is_some()
+        );
+        assert!(revoke_journey_link(&pool, journey, owner).await.unwrap());
+
+        sqlx::query("DELETE FROM journeys WHERE id = $1")
+            .bind(journey)
+            .execute(&pool)
+            .await
+            .ok();
+        cleanup(&pool, "journey", &[owner, other]).await;
     }
 
     #[tokio::test]

@@ -135,6 +135,42 @@ impl EdgeSettings {
     }
 }
 
+/// Keys the handler-panic counter at 0 so the first panic after a restart is
+/// visible to `increase()`/`rate()`.
+pub fn register_panic_metric() {
+    metrics::counter!(ds_runtime::metrics::metric_name("api_handler_panics_total")).increment(0);
+}
+
+/// A handler that panics answers a plain `500` instead of dropping the
+/// connection. The body names nothing: the panic message goes to the log
+/// only. Add as a `.layer(edge::catch_panic_layer())`, inside the trace
+/// layer so the `500` is traced.
+pub fn catch_panic_layer() -> tower_http::catch_panic::CatchPanicLayer<
+    fn(Box<dyn std::any::Any + Send + 'static>) -> axum::response::Response,
+> {
+    tower_http::catch_panic::CatchPanicLayer::custom(
+        panic_response as fn(Box<dyn std::any::Any + Send + 'static>) -> axum::response::Response,
+    )
+}
+
+#[expect(
+    clippy::needless_pass_by_value,
+    reason = "the signature CatchPanicLayer::custom calls"
+)]
+fn panic_response(panic: Box<dyn std::any::Any + Send + 'static>) -> axum::response::Response {
+    use axum::response::IntoResponse;
+    let message = panic
+        .downcast_ref::<&str>()
+        .map(|message| (*message).to_string())
+        .or_else(|| panic.downcast_ref::<String>().cloned())
+        .unwrap_or_else(|| "non-string panic payload".to_string());
+    tracing::error!(%message, "a request handler panicked");
+    // Counted, so an alert on `increase(...[5m]) > 0` sees panics that the
+    // `500` would otherwise hide among ordinary server errors.
+    metrics::counter!(ds_runtime::metrics::metric_name("api_handler_panics_total")).increment(1);
+    (StatusCode::INTERNAL_SERVER_ERROR, "internal server error").into_response()
+}
+
 /// Interval between HTTP/2 keep-alive pings, and how long to wait for the
 /// answer before closing the connection.
 const HTTP2_KEEP_ALIVE_INTERVAL: Duration = Duration::from_secs(30);
@@ -275,6 +311,44 @@ mod tests {
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
     use super::*;
+
+    #[tokio::test]
+    async fn a_panicking_handler_answers_500_without_leaking_the_message() {
+        use tower::ServiceExt;
+        #[expect(clippy::panic, reason = "the test needs a handler that panics")]
+        async fn boom() -> &'static str {
+            panic!("secret detail 12345");
+        }
+        let router = axum::Router::new()
+            .route("/boom", get(boom))
+            .route("/ok", get(|| async { "fine" }))
+            .layer(catch_panic_layer());
+        let response = router
+            .clone()
+            .oneshot(
+                axum::http::Request::builder()
+                    .uri("/boom")
+                    .body(axum::body::Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::INTERNAL_SERVER_ERROR);
+        let body = axum::body::to_bytes(response.into_body(), 1024)
+            .await
+            .unwrap();
+        assert_eq!(&body[..], b"internal server error");
+        let response = router
+            .oneshot(
+                axum::http::Request::builder()
+                    .uri("/ok")
+                    .body(axum::body::Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+    }
 
     #[test]
     fn defaults_match_the_documented_values() {

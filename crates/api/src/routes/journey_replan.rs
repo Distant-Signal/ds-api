@@ -1363,9 +1363,15 @@ async fn post_dismiss(
                 .acquire()
                 .await
                 .map_err(|err| internal("dismiss break")(err.into()))?;
-            journey_breaks::resolve(&mut conn, break_id, "dismissed", None, Some(&body.reason))
-                .await
-                .map_err(internal("dismiss break"))?;
+            journey_breaks::resolve_for_owner(
+                &mut conn,
+                break_id,
+                &user.id,
+                "dismissed",
+                Some(&body.reason),
+            )
+            .await
+            .map_err(internal("dismiss break"))?;
             Ok(StatusCode::NO_CONTENT.into_response())
         }
         .await,

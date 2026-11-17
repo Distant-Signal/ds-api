@@ -12,6 +12,10 @@
 //!   set it);
 //! - otherwise the socket peer address.
 //!
+//! `API_RATE_LIMIT_TRUSTED_PROXIES` (CIDRs, default empty = any peer, the
+//! behaviour above) narrows whose `X-Real-IP` is believed: from any other
+//! peer the header is ignored and the key is the socket peer.
+//!
 //! `X-Forwarded-For` is never read: a client can put anything in it. A
 //! request with no usable `X-Real-IP` falls back to the peer, which is
 //! usually the frontend pod, so all such requests share one bucket; that is
@@ -275,6 +279,12 @@ pub struct RateLimitSettings {
     /// Service is ClusterIP-only.
     #[arg(long, env = "API_RATE_LIMIT_TRUST_X_REAL_IP", default_value_t = true, action = clap::ArgAction::Set)]
     pub trust_x_real_ip: bool,
+    /// Comma-separated CIDR ranges (`10.0.0.0/8,fd00::/8`) of the peers whose
+    /// `X-Real-IP` is believed. Empty (the default) believes any direct
+    /// caller, as before; set it to the frontend pods' range to ignore the
+    /// header from every other peer (the key is then the socket peer).
+    #[arg(long, env = "API_RATE_LIMIT_TRUSTED_PROXIES", default_value = "")]
+    pub trusted_proxies: String,
 
     #[arg(long, env = "API_RATE_LIMIT_LOGIN_PER_MINUTE", default_value_t = 10)]
     pub login_per_minute: u32,
@@ -403,6 +413,7 @@ impl Default for RateLimitSettings {
         Self {
             enabled: true,
             trust_x_real_ip: true,
+            trusted_proxies: String::new(),
             login_per_minute: 10,
             login_burst: 20,
             trip_plan_per_minute: 20,
@@ -440,6 +451,7 @@ impl RateLimitSettings {
     }
 
     fn validate(&self) -> Result<()> {
+        parse_cidrs(&self.trusted_proxies).context("invalid API_RATE_LIMIT_TRUSTED_PROXIES")?;
         for (class, (per_minute, burst)) in [
             (LimitClass::Login, (self.login_per_minute, self.login_burst)),
             (
@@ -595,6 +607,42 @@ impl Quota {
 /// isn't enough, the table is cleared (fail open) rather than grow without
 /// bound under a spoofed-address flood.
 const MAX_TRACKED_KEYS: usize = 100_000;
+/// Once still over [`MAX_TRACKED_KEYS`] after dropping recovered keys, the
+/// `1/EVICT_DENOMINATOR` of the table whose buckets recover soonest (the
+/// least recently charged) is evicted: a spoofed-address flood costs those
+/// keys their (nearly spent) history, not every client's budget.
+const EVICT_DENOMINATOR: usize = 10;
+
+/// Brings an over-full table back under [`MAX_TRACKED_KEYS`] by evicting the
+/// entries with the earliest theoretical arrival time, instead of wiping it.
+fn evict_oldest<K: Eq + std::hash::Hash>(tat: &mut HashMap<K, Instant>, what: &str) {
+    if tat.len() < MAX_TRACKED_KEYS {
+        return;
+    }
+    let evict = (tat.len() / EVICT_DENOMINATOR).max(tat.len() + 1 - MAX_TRACKED_KEYS);
+    tracing::warn!(
+        keys = tat.len(),
+        evict,
+        "{what} table full; evicting the oldest keys"
+    );
+    metrics::counter!(ds_runtime::metrics::metric_name(
+        "api_rate_limit_table_resets_total"
+    ))
+    .increment(1);
+    let mut times: Vec<Instant> = tat.values().copied().collect();
+    let (_, cutoff, _) = times.select_nth_unstable(evict - 1);
+    let cutoff = *cutoff;
+    let mut removed = 0;
+    tat.retain(|_, at| {
+        if removed < evict && *at <= cutoff {
+            removed += 1;
+            false
+        } else {
+            true
+        }
+    });
+}
+
 /// Prune fully recovered keys every this many checks.
 const PRUNE_EVERY: u64 = 4096;
 
@@ -669,9 +717,73 @@ pub fn bearer_decision(
     }
 }
 
+/// An IP range, as `addr/prefix`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct Cidr {
+    addr: IpAddr,
+    prefix: u8,
+}
+
+impl Cidr {
+    fn contains(&self, ip: IpAddr) -> bool {
+        let (net, ip) = (self.addr.to_canonical(), ip.to_canonical());
+        let prefix = u32::from(self.prefix);
+        match (net, ip) {
+            (IpAddr::V4(net), IpAddr::V4(ip)) => {
+                let mask = u32::MAX.checked_shl(32 - prefix).unwrap_or(0);
+                u32::from(net) & mask == u32::from(ip) & mask
+            }
+            (IpAddr::V6(net), IpAddr::V6(ip)) => {
+                let mask = u128::MAX.checked_shl(128 - prefix).unwrap_or(0);
+                u128::from(net) & mask == u128::from(ip) & mask
+            }
+            _ => false,
+        }
+    }
+}
+
+/// Parses a comma-separated CIDR list; a bare address is a single-host range.
+fn parse_cidrs(list: &str) -> Result<Vec<Cidr>> {
+    let mut out = Vec::new();
+    for entry in list.split(',').map(str::trim).filter(|e| !e.is_empty()) {
+        let (addr, prefix) = match entry.split_once('/') {
+            Some((addr, prefix)) => (addr, Some(prefix)),
+            None => (entry, None),
+        };
+        let addr: IpAddr = addr
+            .parse()
+            .with_context(|| format!("`{entry}` is not an IP range"))?;
+        let max = if addr.is_ipv4() { 32 } else { 128 };
+        let prefix = match prefix {
+            Some(prefix) => prefix
+                .parse::<u8>()
+                .ok()
+                .filter(|prefix| *prefix <= max)
+                .with_context(|| format!("`{entry}` has an invalid prefix length"))?,
+            None => max,
+        };
+        // An IPv4-mapped IPv6 range is matched as IPv4 (peers are canonical),
+        // so it is stored as IPv4 with the `::ffff:0:0/96` part of the prefix
+        // removed; a shorter prefix cannot be expressed and is refused.
+        let (addr, prefix) = match addr.to_canonical() {
+            IpAddr::V4(v4) if addr.is_ipv6() => {
+                let v4_prefix = prefix.checked_sub(96).with_context(|| {
+                    format!("`{entry}` is an IPv4-mapped range shorter than /96")
+                })?;
+                (IpAddr::V4(v4), v4_prefix)
+            }
+            _ => (addr, prefix),
+        };
+        out.push(Cidr { addr, prefix });
+    }
+    Ok(out)
+}
+
 /// The limiter: one GCRA timestamp per (class, client key).
 pub struct RateLimiter {
     settings: RateLimitSettings,
+    /// `settings.trusted_proxies`, parsed; empty trusts every peer.
+    trusted_proxies: Vec<Cidr>,
     service_callers: Option<ServiceCallerAuth>,
     state: Mutex<LimiterState>,
     warned_about_peer_fallback: std::sync::atomic::AtomicBool,
@@ -703,8 +815,19 @@ impl RateLimiter {
         settings: RateLimitSettings,
         service_callers: Option<ServiceCallerAuth>,
     ) -> Arc<Self> {
+        let trusted_proxies = parse_cidrs(&settings.trusted_proxies).unwrap_or_else(|err| {
+            // Checked by `validate` at startup; an unparsable list here
+            // trusts nobody (a range matching only 0.0.0.0, never a peer)
+            // rather than everybody.
+            tracing::error!(error = ?err, "invalid trusted proxy list; trusting no peer's X-Real-IP");
+            vec![Cidr {
+                addr: IpAddr::from([0, 0, 0, 0]),
+                prefix: 32,
+            }]
+        });
         Arc::new(Self {
             settings,
+            trusted_proxies,
             service_callers,
             state: Mutex::new(LimiterState::default()),
             warned_about_peer_fallback: std::sync::atomic::AtomicBool::new(false),
@@ -739,17 +862,7 @@ impl RateLimiter {
         state.checks += 1;
         if state.checks.is_multiple_of(PRUNE_EVERY) || state.tat.len() >= MAX_TRACKED_KEYS {
             state.tat.retain(|_, tat| *tat > now);
-            if state.tat.len() >= MAX_TRACKED_KEYS {
-                tracing::warn!(
-                    keys = state.tat.len(),
-                    "rate limiter key table full; clearing it"
-                );
-                metrics::counter!(ds_runtime::metrics::metric_name(
-                    "api_rate_limit_table_resets_total"
-                ))
-                .increment(1);
-                state.tat.clear();
-            }
+            evict_oldest(&mut state.tat, "rate limiter");
         }
         let mut updates = Vec::with_capacity(clients.len());
         let mut refused: Option<(ClientKey, Duration)> = None;
@@ -839,6 +952,7 @@ impl RateLimiter {
         peer: Option<SocketAddr>,
     ) -> Option<(IpAddr, KeySource)> {
         if self.settings.trust_x_real_ip
+            && self.peer_is_trusted_proxy(peer)
             && let Some(ip) = headers
                 .get(REAL_IP_HEADER)
                 .and_then(|value| value.to_str().ok())
@@ -847,6 +961,13 @@ impl RateLimiter {
             return Some((normalise(ip), KeySource::RealIpHeader));
         }
         peer.map(|peer| (normalise(peer.ip()), KeySource::Peer))
+    }
+
+    /// Whether `peer`'s `X-Real-IP` is believed: always when no trusted
+    /// range is configured, else only from a peer inside one.
+    fn peer_is_trusted_proxy(&self, peer: Option<SocketAddr>) -> bool {
+        self.trusted_proxies.is_empty()
+            || peer.is_some_and(|peer| self.trusted_proxies.iter().any(|c| c.contains(peer.ip())))
     }
 
     fn note_peer_fallback(&self, class: LimitClass) {
@@ -905,17 +1026,7 @@ impl<K: Copy + Eq + std::hash::Hash> KeyedLimiter<K> {
         state.checks += 1;
         if state.checks.is_multiple_of(PRUNE_EVERY) || state.tat.len() >= MAX_TRACKED_KEYS {
             state.tat.retain(|_, tat| *tat > now);
-            if state.tat.len() >= MAX_TRACKED_KEYS {
-                tracing::warn!(
-                    keys = state.tat.len(),
-                    "keyed rate limiter table full; clearing it"
-                );
-                metrics::counter!(ds_runtime::metrics::metric_name(
-                    "api_rate_limit_table_resets_total"
-                ))
-                .increment(1);
-                state.tat.clear();
-            }
+            evict_oldest(&mut state.tat, "keyed rate limiter");
         }
         let mut updates = Vec::with_capacity(buckets.len());
         let mut wait = Duration::ZERO;
@@ -1924,5 +2035,74 @@ mod tests {
         let parsed =
             RateLimitSettings::try_parse_from(std::iter::empty::<String>()).expect("parse");
         assert_eq!(parsed, RateLimitSettings::default());
+    }
+
+    #[test]
+    fn a_full_table_evicts_the_oldest_keys_and_keeps_the_rest() {
+        let now = Instant::now();
+        let mut tat: HashMap<usize, Instant> = (0..MAX_TRACKED_KEYS)
+            .map(|i| {
+                (
+                    i,
+                    now + Duration::from_millis(u64::try_from(i).unwrap() + 1),
+                )
+            })
+            .collect();
+        evict_oldest(&mut tat, "test");
+        assert!(tat.len() < MAX_TRACKED_KEYS);
+        assert!(tat.len() >= MAX_TRACKED_KEYS - MAX_TRACKED_KEYS / EVICT_DENOMINATOR);
+        assert!(!tat.contains_key(&0), "the oldest key is gone");
+        assert!(
+            tat.contains_key(&(MAX_TRACKED_KEYS - 1)),
+            "the newest stays"
+        );
+        // Below the cap nothing is touched.
+        let before = tat.len();
+        evict_oldest(&mut tat, "test");
+        assert_eq!(tat.len(), before);
+    }
+
+    #[test]
+    fn cidr_lists_parse_and_match() {
+        let cidrs = parse_cidrs("10.0.0.0/8, fd00::/8,192.0.2.7").unwrap();
+        let limiter = |list: &str| {
+            RateLimiter::new(RateLimitSettings {
+                trusted_proxies: list.to_string(),
+                ..RateLimitSettings::default()
+            })
+        };
+        assert!(cidrs[0].contains("10.1.2.3".parse().unwrap()));
+        assert!(!cidrs[0].contains("11.0.0.1".parse().unwrap()));
+        assert!(cidrs[1].contains("fd12::1".parse().unwrap()));
+        assert!(cidrs[2].contains("192.0.2.7".parse().unwrap()));
+        assert!(!cidrs[2].contains("192.0.2.8".parse().unwrap()));
+        assert!(parse_cidrs("10.0.0.0/33").is_err());
+        assert!(parse_cidrs("nope").is_err());
+        // A mapped range matches as IPv4; one shorter than /96 is refused
+        // (it would otherwise wrap into a match-everything mask).
+        let mapped = parse_cidrs("::ffff:10.0.0.0/104").unwrap();
+        assert!(mapped[0].contains("10.9.9.9".parse().unwrap()));
+        assert!(mapped[0].contains("::ffff:10.9.9.9".parse().unwrap()));
+        assert!(!mapped[0].contains("11.0.0.1".parse().unwrap()));
+        assert!(parse_cidrs("::ffff:10.0.0.0/64").is_err());
+
+        let mut headers = HeaderMap::new();
+        headers.insert(REAL_IP_HEADER, HeaderValue::from_static("203.0.113.9"));
+        let inside: SocketAddr = "10.1.2.3:4000".parse().unwrap();
+        let outside: SocketAddr = "198.51.100.1:4000".parse().unwrap();
+        // Unset: any peer is believed (the default, unchanged).
+        let open = limiter("");
+        assert_eq!(
+            open.client_key(&headers, Some(outside)).unwrap().1,
+            KeySource::RealIpHeader
+        );
+        let scoped = limiter("10.0.0.0/8");
+        assert_eq!(
+            scoped.client_key(&headers, Some(inside)).unwrap().1,
+            KeySource::RealIpHeader
+        );
+        let (ip, source) = scoped.client_key(&headers, Some(outside)).unwrap();
+        assert_eq!(source, KeySource::Peer);
+        assert_eq!(ip, "198.51.100.1".parse::<IpAddr>().unwrap());
     }
 }

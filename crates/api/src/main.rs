@@ -506,6 +506,7 @@ async fn server_main() -> anyhow::Result<()> {
         // a rare route's first request after a restart is visible to
         // increase()/rate(). See `api::route_metrics`.
         api::route_metrics::register();
+        api::edge::register_panic_metric();
         // The trip-plan graph builds' counter and timing (DS-225).
         routes::trips::register_graph_metrics();
         // Usage analytics' feature and event counters at 0 (DS-190).
@@ -554,6 +555,14 @@ async fn server_main() -> anyhow::Result<()> {
         .layer(axum::middleware::from_fn(
             api::personal_tokens::refuse_on_main_listener,
         ))
+        // A panicking handler answers 500 (no detail) rather than dropping
+        // the connection. See `api::edge::catch_panic_layer`.
+        .layer(api::edge::catch_panic_layer())
+        // `private, no-store` on personal responses that set no
+        // Cache-Control of their own. See `api::cache_control`.
+        .layer(axum::middleware::from_fn(
+            api::cache_control::default_private,
+        ))
         .layer(TraceLayer::new_for_http().make_span_with(request_span))
         .with_state(app.clone());
     // The token listener's router: its own allowlisted `/v1` routes, not a
@@ -562,6 +571,10 @@ async fn server_main() -> anyhow::Result<()> {
         (
             addr.to_string(),
             api::personal_tokens::router(&app, &edge_settings)
+                .layer(api::edge::catch_panic_layer())
+                .layer(axum::middleware::from_fn(
+                    api::cache_control::default_private,
+                ))
                 .layer(TraceLayer::new_for_http().make_span_with(request_span))
                 .with_state(app.clone()),
         )
@@ -573,6 +586,15 @@ async fn server_main() -> anyhow::Result<()> {
             trust_cf_connecting_ip = app.personal_tokens.settings.trust_cf_connecting_ip,
             "personal API tokens enabled: accepted only on this listener"
         );
+        if !app.personal_tokens.settings.trust_cf_connecting_ip {
+            // Not a startup error: a dev stack legitimately runs without a
+            // trusted proxy. Behind a shared proxy every client then shares
+            // one failed-authentication bucket (keyed on the socket peer).
+            tracing::warn!(
+                "PERSONAL_TOKENS_TRUST_CF_CONNECTING_IP is false: the failed-authentication \
+                 bucket is keyed on the socket peer, which behind a proxy is one shared address"
+            );
+        }
     } else {
         tracing::info!("PERSONAL_TOKENS_ENABLED is false: personal API tokens are off");
     }

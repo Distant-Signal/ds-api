@@ -492,7 +492,7 @@ async fn the_rate_buckets_and_the_failure_bucket_hold() {
         ]
     );
 
-    // Failures from one address: after the burst, 429 before any lookup.
+    // Failures from one address: after the burst, 429.
     let peer: SocketAddr = "198.51.100.9:5000".parse().unwrap();
     let mut statuses = Vec::new();
     for _ in 0..3 {
@@ -511,6 +511,20 @@ async fn the_rate_buckets_and_the_failure_bucket_hold() {
             StatusCode::UNAUTHORIZED,
             StatusCode::TOO_MANY_REQUESTS
         ]
+    );
+
+    // A full failure bucket does not refuse a request that authenticates.
+    let (_, body) = create(&h, &raw, &["lines:read"]).await;
+    let valid = bearer(body["token"].as_str().unwrap());
+    let request = Request::builder()
+        .uri("/v1/me")
+        .header("authorization", &valid)
+        .extension(ConnectInfo(peer))
+        .body(Body::empty())
+        .unwrap();
+    assert_eq!(
+        h.tokens.clone().oneshot(request).await.unwrap().status(),
+        StatusCode::OK
     );
 
     cleanup(&pool, "TEST-PTOK-C").await;

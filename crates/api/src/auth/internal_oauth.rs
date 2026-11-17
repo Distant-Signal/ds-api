@@ -169,6 +169,16 @@ const UNKNOWN_KID_NEGATIVE_CACHE_TTL: Duration = Duration::from_secs(30);
 /// unbounded-growth side of the same attack.
 const UNKNOWN_KID_CACHE_SWEEP_THRESHOLD: usize = 1024;
 
+/// Hard cap on the unknown-`kid` negative cache. Past the sweep threshold
+/// expired entries are dropped; if every entry is still live (a flood inside
+/// one TTL) the oldest entry is evicted so the map never grows beyond this.
+const UNKNOWN_KID_CACHE_HARD_CAP: usize = 4096;
+
+/// Longest `kid` accepted from a JWT header. Real key ids are short hashes or
+/// UUIDs; anything longer is refused as malformed before it can be cached or
+/// trigger a JWKS refetch.
+const MAX_KID_BYTES: usize = 128;
+
 /// Global cooldown between actual outbound JWKS refetches, independent of
 /// which `kid` triggered the attempt -- closes the gap left by
 /// `UNKNOWN_KID_NEGATIVE_CACHE_TTL` above (2026-09-26 Repeater Signal
@@ -365,6 +375,16 @@ impl ServiceTokenVerifier {
         if cache.len() >= UNKNOWN_KID_CACHE_SWEEP_THRESHOLD {
             cache.retain(|_, checked_at| checked_at.elapsed() < UNKNOWN_KID_NEGATIVE_CACHE_TTL);
         }
+        while cache.len() >= UNKNOWN_KID_CACHE_HARD_CAP {
+            let Some(oldest) = cache
+                .iter()
+                .min_by_key(|(_, checked_at)| **checked_at)
+                .map(|(kid, _)| kid.clone())
+            else {
+                break;
+            };
+            cache.remove(&oldest);
+        }
         cache.insert(kid.to_string(), Instant::now());
     }
 
@@ -389,6 +409,9 @@ impl ServiceTokenVerifier {
         let header: JwtHeader =
             serde_json::from_slice(&header_bytes).map_err(|_| VerifyError::Malformed)?;
         let kid = header.kid.ok_or(VerifyError::Malformed)?;
+        if kid.len() > MAX_KID_BYTES {
+            return Err(VerifyError::Malformed);
+        }
         let signature = URL_SAFE_NO_PAD
             .decode(sig_b64)
             .map_err(|_| VerifyError::Malformed)?;
@@ -609,6 +632,30 @@ mod tests {
 
     use super::test_support::{AUDIENCE, mock_authentik, sign_token, valid_claims};
     use super::*;
+
+    #[tokio::test]
+    async fn an_oversized_kid_is_malformed_and_never_cached() {
+        let (_server, verifier) = mock_authentik().await;
+        let kid = "k".repeat(MAX_KID_BYTES + 1);
+        let header = URL_SAFE_NO_PAD
+            .encode(serde_json::to_vec(&json!({"alg": "RS256", "kid": kid})).unwrap());
+        let token = format!("{header}.e30.c2ln");
+
+        assert_eq!(verifier.verify(&token).await, Err(VerifyError::Malformed));
+        assert!(verifier.unknown_kid_cache.read().await.is_empty());
+    }
+
+    #[tokio::test]
+    async fn the_unknown_kid_cache_is_bounded_and_evicts_the_oldest() {
+        let (_server, verifier) = mock_authentik().await;
+        for i in 0..UNKNOWN_KID_CACHE_HARD_CAP + 10 {
+            verifier.record_unknown_kid(&format!("kid-{i}")).await;
+        }
+        let cache = verifier.unknown_kid_cache.read().await;
+        assert!(cache.len() <= UNKNOWN_KID_CACHE_HARD_CAP);
+        assert!(cache.contains_key(&format!("kid-{}", UNKNOWN_KID_CACHE_HARD_CAP + 9)));
+        assert!(!cache.contains_key("kid-0"));
+    }
 
     #[tokio::test]
     async fn a_valid_token_with_expected_claims_verifies() {
