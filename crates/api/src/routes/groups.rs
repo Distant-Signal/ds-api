@@ -210,6 +210,9 @@ fn validate_group_name(name: &str) -> Result<String, String> {
         return Err("Enter a name for this group.".to_string());
     }
     crate::text_guard::reject_nul(trimmed)?;
+    if trimmed.chars().any(char::is_control) {
+        return Err("A group name can't contain line breaks or control characters.".to_string());
+    }
     if trimmed.chars().count() > MAX_GROUP_NAME_LENGTH {
         return Err(format!(
             "That name is too long. Group names can be at most {MAX_GROUP_NAME_LENGTH} \
@@ -1082,6 +1085,23 @@ mod tests {
     #[test]
     fn router_builds_without_panicking() {
         let _ = router();
+    }
+
+    /// Group names (create and rename share the validator) refuse line
+    /// breaks and other control characters, as place and leg names do.
+    #[test]
+    fn group_names_refuse_control_characters() {
+        for bad in ["a\nb", "a\tb", "a\rb", "a\u{7f}b", "a\u{85}b"] {
+            assert_eq!(
+                validate_group_name(bad).unwrap_err(),
+                "A group name can't contain line breaks or control characters.",
+                "{bad:?}"
+            );
+        }
+        assert_eq!(
+            validate_group_name("  Work friends ").unwrap(),
+            "Work friends"
+        );
     }
 
     /// `demote_member`'s target-role decision, exercised without a

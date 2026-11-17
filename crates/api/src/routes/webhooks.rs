@@ -128,6 +128,22 @@ fn invalid(message: &str) -> Response {
     error_response(StatusCode::BAD_REQUEST, "invalid_request", message)
 }
 
+/// The one answer for every refused address: not a URL, not https, a
+/// username or password, a private or loopback address, a name that does not
+/// resolve. Telling them apart would let a caller probe the cluster's
+/// internal DNS (as for `POST /notifications/subscribe`).
+const ADDRESS_REFUSED: &str = "That address can't be used. It must be a public https address.";
+
+/// The DNS half of the address check; the reason stays in the log.
+async fn check_address(url: &str) -> Result<(), &'static str> {
+    ds_runtime::outbound_endpoint_guard::validate_outbound_url(url)
+        .await
+        .map_err(|reason| {
+            tracing::info!(reason, "refused a webhook address");
+            ADDRESS_REFUSED
+        })
+}
+
 /// A checked create request.
 #[derive(Debug, PartialEq, Eq)]
 struct Valid {
@@ -151,20 +167,20 @@ fn validate(request: &CreateWebhookRequest) -> Result<Valid, &'static str> {
     }
     let url = request.url.trim().to_string();
     if url.is_empty() || url.len() > MAX_URL_CHARS {
-        return Err("address must be 1 to 2048 characters");
+        return Err(ADDRESS_REFUSED);
     }
-    let parsed = openidconnect::url::Url::parse(&url).map_err(|_| "address must be a valid URL")?;
+    let parsed = openidconnect::url::Url::parse(&url).map_err(|_| ADDRESS_REFUSED)?;
     if parsed.scheme() != "https" {
-        return Err("address must start with https://");
+        return Err(ADDRESS_REFUSED);
     }
     if parsed.host().is_none() {
-        return Err("address must have a host");
+        return Err(ADDRESS_REFUSED);
     }
     if !parsed.username().is_empty() || parsed.password().is_some() {
-        return Err("address must not contain a username or password");
+        return Err(ADDRESS_REFUSED);
     }
     if parsed.fragment().is_some() {
-        return Err("address must not contain a #fragment");
+        return Err(ADDRESS_REFUSED);
     }
     let secret = request
         .secret
@@ -240,11 +256,8 @@ async fn create_webhook(
         Ok(valid) => valid,
         Err(message) => return invalid(message),
     };
-    if ds_runtime::outbound_endpoint_guard::validate_outbound_url(&valid.url)
-        .await
-        .is_err()
-    {
-        return invalid("address must be a public https address that resolves");
+    if let Err(message) = check_address(&valid.url).await {
+        return invalid(message);
     }
     let generated = (valid.kind == Kind::Generic).then(data::generate_secret);
     let plain = generated.as_deref().or(valid.secret.as_deref());
@@ -428,6 +441,38 @@ mod tests {
         ] {
             assert!(validate(&bad).is_err(), "{bad:?}");
         }
+    }
+
+    /// Every refused address, whatever the reason, gets the same message.
+    #[tokio::test]
+    async fn every_refused_address_gets_the_same_message() {
+        for url in [
+            "http://h.example",
+            "ftp://h.example/x",
+            "not a url",
+            "https://user:pw@h.example",
+            "https://h.example/#frag",
+            "",
+        ] {
+            assert_eq!(
+                validate(&request("generic", "n", url, None)).unwrap_err(),
+                ADDRESS_REFUSED,
+                "{url}"
+            );
+        }
+        for url in [
+            "https://10.0.0.7/x",
+            "https://127.0.0.1/x",
+            "https://[::1]/x",
+            "https://no-such-host.invalid/x",
+        ] {
+            assert_eq!(
+                check_address(url).await.unwrap_err(),
+                ADDRESS_REFUSED,
+                "{url}"
+            );
+        }
+        assert!(!ADDRESS_REFUSED.contains("resolve"));
     }
 
     #[test]
