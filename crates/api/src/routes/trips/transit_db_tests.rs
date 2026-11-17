@@ -746,13 +746,14 @@ async fn a_graph_from_the_snapshot_is_the_graph_from_postgres() {
     let _switch = set_switch_for_tests(&[NETWORK]);
     let networks = vec![NETWORK.to_string()];
     let marker = super::read_graph_marker(&pool, &networks).await.unwrap();
+    let hour = std::time::Duration::from_secs(3600);
     let dates: Vec<NaiveDate> = (-1..=2)
         .map(|offset| today() + chrono::Duration::days(offset))
         .collect();
     let mut from_postgres = Vec::new();
     for &date in &dates {
         from_postgres.push(
-            super::build_planning_graph(&pool, date, &networks, &marker)
+            super::build_planning_graph(&pool, date, &networks, &marker, hour)
                 .await
                 .unwrap(),
         );
@@ -782,16 +783,15 @@ async fn a_graph_from_the_snapshot_is_the_graph_from_postgres() {
     assert_eq!(planner_snapshot::decode(&stored.bytes).unwrap(), snapshot);
 
     // Installed from the stored row, then every date's graph built from it.
-    let hour = std::time::Duration::from_secs(3600);
     assert_eq!(
         planner_snapshot::ensure(&pool, &marker, &networks, hour)
             .await
             .unwrap(),
         planner_snapshot::Outcome::Loaded
     );
-    assert!(planner_snapshot::current(&marker, &networks).is_some());
+    assert!(planner_snapshot::current(&marker, &networks, hour).is_some());
     for (date, expected) in dates.iter().zip(&from_postgres) {
-        let actual = super::build_planning_graph(&pool, *date, &networks, &marker)
+        let actual = super::build_planning_graph(&pool, *date, &networks, &marker, hour)
             .await
             .unwrap();
         assert_same_graph(*date, expected.as_ref(), actual.as_ref());
@@ -840,11 +840,11 @@ async fn the_snapshot_is_rebuilt_on_a_new_publish_and_loaded_elsewhere() {
     .unwrap();
     let published = super::read_graph_marker(&pool, &networks).await.unwrap();
     assert_ne!(published, marker);
-    assert!(planner_snapshot::current(&published, &networks).is_none());
+    assert!(planner_snapshot::current(&published, &networks, hour).is_none());
     assert_eq!(ensure(published.clone(), hour).await, Outcome::Built);
-    assert!(planner_snapshot::current(&published, &networks).is_some());
+    assert!(planner_snapshot::current(&published, &networks, hour).is_some());
     assert!(
-        planner_snapshot::current(&marker, &networks).is_none(),
+        planner_snapshot::current(&marker, &networks, hour).is_none(),
         "graphs for the old publish no longer use it"
     );
 
@@ -856,6 +856,8 @@ async fn the_snapshot_is_rebuilt_on_a_new_publish_and_loaded_elsewhere() {
         ensure(published.clone(), std::time::Duration::ZERO).await,
         Outcome::Built
     );
+    // A graph built later than the max age does not use it either.
+    assert!(planner_snapshot::current(&published, &networks, std::time::Duration::ZERO).is_none());
 
     cleanup_snapshots(&pool).await;
     cleanup_rail(&pool).await;

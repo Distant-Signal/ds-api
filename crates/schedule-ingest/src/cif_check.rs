@@ -7,9 +7,12 @@
 //! complete (and so before `schedule-reference` can publish from it), the
 //! extracted files must look like the real full CIF extract and must not be
 //! a step backwards from the last accepted one. A failure is a
-//! [`RejectedZip`]: the delivery is quarantined with the reason, counted in
-//! `schedule_feed_zip_rejected_total` (the `DistantSignalScheduleFeedZipRejected`
-//! alert), and the previous timetable stays in service.
+//! [`RejectedZip`] (not CIF-shaped: remembered across restarts, see
+//! `delivery::ensure_extracted`) or a [`RejectedForNow`] (a threshold or
+//! comparison: checked again after a restart): the delivery is quarantined
+//! with the reason, counted in `schedule_feed_zip_rejected_total` (the
+//! `DistantSignalScheduleFeedZipRejected` alert), and the previous
+//! timetable stays in service.
 //!
 //! What a real delivery looks like (2026-09-28 to 09-30, read-only from the
 //! PVC): `RJTTF<seq>MCA.txt` is ~724 MB of fixed 80-column CRLF records,
@@ -28,7 +31,7 @@ use std::path::Path;
 use chrono::{DateTime, NaiveDate, Utc};
 use serde::{Deserialize, Serialize};
 
-use crate::delivery::RejectedZip;
+use crate::delivery::{RejectedForNow, RejectedZip};
 
 /// Written into each accepted delivery directory (hidden, so neither
 /// discovery nor pruning treats it as a delivery file) so the next
@@ -73,8 +76,47 @@ const RECORD_TYPES: [&[u8; 2]; 14] = [
 /// update); column 47 of the CIF spec.
 const HD_UPDATE_INDICATOR: usize = 46;
 
+/// The longest line, terminator included, read from a delivery file. A CIF
+/// record is 80 columns plus CRLF (as is every MSN banner line); this
+/// leaves generous room for padding. A longer line is not CIF,
+/// and reading it whole could take gigabytes of memory: the extraction cap
+/// allows an MCA of several GB with no newline at all.
+const MAX_LINE_BYTES: u64 = 256;
+
+/// Reads the next line of `reader` (up to and including its `\n`) into
+/// `line`, which is cleared first, reading at most [`MAX_LINE_BYTES`].
+/// `Ok(false)` at the end of the file; a [`RejectedZip`] naming `what`
+/// (e.g. "MCA record 12") when the line is longer than that.
+fn read_line(
+    reader: &mut impl BufRead,
+    line: &mut Vec<u8>,
+    what: impl FnOnce() -> String,
+) -> anyhow::Result<bool> {
+    line.clear();
+    let read = std::io::Read::take(&mut *reader, MAX_LINE_BYTES).read_until(b'\n', line)?;
+    if read == 0 {
+        return Ok(false);
+    }
+    if u64::try_from(read).is_ok_and(|read| read >= MAX_LINE_BYTES) && line.last() != Some(&b'\n') {
+        return Err(reject(format!(
+            "{} is longer than {MAX_LINE_BYTES} bytes",
+            what()
+        )));
+    }
+    Ok(true)
+}
+
+/// A delivery not shaped like CIF ([`inspect`]): that never changes for
+/// these bytes, so `delivery::ensure_extracted` remembers it.
 fn reject(reason: impl Into<String>) -> anyhow::Error {
     RejectedZip(reason.into()).into()
+}
+
+/// A delivery refused by a threshold or a comparison ([`check`]): the
+/// settings, or the delivery compared with, can change, so a restart
+/// checks it again.
+fn reject_for_now(reason: impl Into<String>) -> anyhow::Error {
+    RejectedForNow(reason.into()).into()
 }
 
 /// The one file in `dir` named `RJTTF*<suffix>`.
@@ -104,11 +146,9 @@ pub(crate) fn inspect(dir: &Path) -> anyhow::Result<CifStats> {
     let mut line = Vec::with_capacity(128);
     let (mut records, mut schedules, mut tiplocs, mut headers, mut trailers) = (0u64, 0, 0, 0, 0);
     let mut last_type = [0u8; 2];
-    loop {
-        line.clear();
-        if reader.read_until(b'\n', &mut line)? == 0 {
-            break;
-        }
+    while read_line(&mut reader, &mut line, || {
+        format!("MCA record {}", records + 1)
+    })? {
         while matches!(line.last(), Some(b'\n' | b'\r')) {
             line.pop();
         }
@@ -172,11 +212,14 @@ pub(crate) fn inspect(dir: &Path) -> anyhow::Result<CifStats> {
 /// The `/!! Generated:` date and `/!! Sequence:` number from the first
 /// lines of an RJTTF banner file.
 fn read_banner(path: &Path) -> anyhow::Result<(NaiveDate, Option<u32>)> {
-    let reader = std::io::BufReader::new(std::fs::File::open(path)?);
+    let mut reader = std::io::BufReader::new(std::fs::File::open(path)?);
     let (mut generated, mut sequence) = (None, None);
-    for line in reader.split(b'\n').take(10) {
-        let line = line?;
-        let line = String::from_utf8_lossy(&line);
+    let mut line = Vec::with_capacity(128);
+    for number in 1..=10 {
+        if !read_line(&mut reader, &mut line, || format!("MSN line {number}"))? {
+            break;
+        }
+        let line = String::from_utf8_lossy(line.strip_suffix(b"\n").unwrap_or(&line));
         if let Some(value) = line.strip_prefix("/!! Generated:") {
             generated = NaiveDate::parse_from_str(value.trim(), "%d/%m/%Y").ok();
             if generated.is_none() {
@@ -204,7 +247,7 @@ pub(crate) fn check(
     let delivered = delivered_at.date_naive();
     // A London export date can be a day ahead of the UTC delivery time.
     if stats.generated > delivered + chrono::Days::new(1) {
-        return Err(reject(format!(
+        return Err(reject_for_now(format!(
             "generated {} is after the delivery date {delivered}",
             stats.generated
         )));
@@ -212,13 +255,13 @@ pub(crate) fn check(
     if checks.max_generated_age_days > 0
         && stats.generated + chrono::Days::new(u64::from(checks.max_generated_age_days)) < delivered
     {
-        return Err(reject(format!(
+        return Err(reject_for_now(format!(
             "generated {} is more than {} days before the delivery date {delivered} (a replayed old extract?)",
             stats.generated, checks.max_generated_age_days
         )));
     }
     if checks.min_schedules > 0 && stats.schedules < checks.min_schedules {
-        return Err(reject(format!(
+        return Err(reject_for_now(format!(
             "MCA has {} schedules (BS), fewer than CIF_MIN_SCHEDULES ({})",
             stats.schedules, checks.min_schedules
         )));
@@ -227,7 +270,7 @@ pub(crate) fn check(
         return Ok(());
     };
     if stats.generated < previous.generated {
-        return Err(reject(format!(
+        return Err(reject_for_now(format!(
             "generated {} is older than the last accepted delivery's {}",
             stats.generated, previous.generated
         )));
@@ -240,7 +283,7 @@ pub(crate) fn check(
             // now < before * (100 - max) / 100, without overflow or floats.
             let floor = u128::from(before) * u128::from(100 - checks.max_drop_percent.min(100));
             if u128::from(now) * 100 < floor {
-                return Err(reject(format!(
+                return Err(reject_for_now(format!(
                     "{what} fell from {before} to {now}, more than CIF_MAX_RECORD_DROP_PERCENT ({}%) since the last accepted delivery",
                     checks.max_drop_percent
                 )));
@@ -438,6 +481,59 @@ pub(crate) mod tests {
         let headerless: String = MCA.lines().skip(1).map(|l| format!("{l}\n")).collect();
         assert!(rejected_reason(with_mca(headerless)).contains("HD"));
         assert!(rejected_reason(with_mca(String::new())).contains("empty"));
+    }
+
+    /// A record longer than any CIF line is rejected after reading at most
+    /// [`MAX_LINE_BYTES`] of it, not read whole into memory.
+    #[test]
+    fn an_overlong_line_is_rejected_without_reading_it_whole() {
+        let line_cap = usize::try_from(MAX_LINE_BYTES).unwrap();
+        // 1 MiB with no newline at all, after a valid HD record.
+        let header = MCA.lines().next().unwrap();
+        let endless = format!("{header}\r\nBS{}", "N".repeat(1 << 20));
+        let reason = rejected_reason(with_mca(endless));
+        assert!(
+            reason.contains("MCA record 2 is longer than 256 bytes"),
+            "{reason}"
+        );
+        // Just over the cap, then a newline.
+        let long = MCA.replacen("TIABER ", &format!("TIABER {}", " ".repeat(line_cap)), 1);
+        assert!(rejected_reason(with_mca(long)).contains("is longer than"));
+        // A long but bounded line (trailing spaces) still passes.
+        let padded = MCA.replacen("\r\n", &format!("{}\r\n", " ".repeat(100)), 1);
+        let dir = tempfile::tempdir().unwrap();
+        write(dir.path(), &with_mca(padded));
+        inspect(dir.path()).unwrap();
+        // The MSN banner is bounded the same way.
+        let mut files = delivery_files(None);
+        files[1].1 = "/".repeat(1 << 20);
+        let reason = rejected_reason(files);
+        assert!(reason.contains("MSN line 1 is longer than"), "{reason}");
+    }
+
+    #[test]
+    fn read_line_reads_up_to_the_cap() {
+        let cap = usize::try_from(MAX_LINE_BYTES).unwrap();
+        let mut line = Vec::new();
+        // Exactly the cap, newline included: fine.
+        let exact = format!("{}\n", "x".repeat(cap - 1));
+        let mut reader = std::io::Cursor::new(exact.as_bytes());
+        assert!(read_line(&mut reader, &mut line, String::new).unwrap());
+        assert_eq!(line.len(), cap);
+        assert!(!read_line(&mut reader, &mut line, String::new).unwrap());
+        // One more byte without a newline: rejected.
+        let over = "x".repeat(cap + 1);
+        let err = read_line(
+            &mut std::io::Cursor::new(over.as_bytes()),
+            &mut line,
+            || "it".to_string(),
+        )
+        .unwrap_err();
+        assert!(crate::delivery::is_rejected(&err), "{err:?}");
+        // A short last line without a newline: fine.
+        let mut reader = std::io::Cursor::new(&b"ZZ"[..]);
+        assert!(read_line(&mut reader, &mut line, String::new).unwrap());
+        assert_eq!(line, b"ZZ");
     }
 
     #[test]

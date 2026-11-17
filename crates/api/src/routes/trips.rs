@@ -1610,9 +1610,10 @@ async fn load_graph_in(
     // Read here, not in the build: the build may run on another task.
     let transit_networks = transit_planning::enabled_networks();
     let build_marker = marker.clone();
+    let max_age = cache.max_age();
     let cached = cache
         .get_or_build(date, marker, move || async move {
-            build_planning_graph(&pool, date, &transit_networks, &build_marker).await
+            build_planning_graph(&pool, date, &transit_networks, &build_marker, max_age).await
         })
         .await?;
     let Some((graph, outcome)) = cached else {
@@ -1639,17 +1640,19 @@ async fn load_graph_in(
 
 /// Reads and builds `date`'s [`trip_planning::PlanningGraph`]; `None` when
 /// nothing is published for `date`. Times its read and CPU phases
-/// ([`GRAPH_BUILD_SECONDS_METRIC`]).
+/// ([`GRAPH_BUILD_SECONDS_METRIC`]). `max_age` is the graph cache's.
 async fn build_planning_graph(
     pool: &sqlx::PgPool,
     date: NaiveDate,
     transit_networks: &[String],
     marker: &trip_planning::GraphMarker,
+    max_age: std::time::Duration,
 ) -> anyhow::Result<Option<trip_planning::PlanningGraph>> {
     let started = std::time::Instant::now();
     // The date's own inputs: from the timetable snapshot when one is
-    // installed for this marker and spans the date (DS-235), else read.
-    let snapshot = planner_snapshot::current(marker, transit_networks);
+    // installed for this marker, younger than the cache's max age and
+    // spanning the date (DS-235), else read.
+    let snapshot = planner_snapshot::current(marker, transit_networks, max_age);
     let source = if snapshot.is_some() {
         "snapshot"
     } else {
