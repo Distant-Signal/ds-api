@@ -38,7 +38,7 @@ use crate::app::{App, Router};
 use crate::auth::AuthenticatedUser;
 use crate::data::alternative_ranking::{self, Context, TicketInfo, Weights};
 use crate::data::journey_alternatives::{
-    self, Planned, SetInputs, Suggestion, SuggestionSet, TriggerTrain,
+    self, AlternativesLegFacts, Planned, SetInputs, Suggestion, SuggestionSet, TriggerTrain,
 };
 use crate::data::journey_breaks::{self, BreakRow, Cause, Detected, LegFacts};
 use crate::data::journey_feasibility::{self, JourneyTimings, LegTiming, TrainLegTiming};
@@ -167,6 +167,18 @@ impl Analysis {
 
     fn is_train(&self, index: usize) -> bool {
         self.legs[index].kind == journeys::LEG_KIND_TRAIN
+    }
+
+    /// What leg `index`'s train had done at `self.now`: the facts a "did you
+    /// really miss it?" check shows. A leg with no live timing has not left
+    /// as far as DS knows.
+    fn leg_facts(&self, index: usize) -> AlternativesLegFacts {
+        AlternativesLegFacts {
+            departed: self
+                .timing(index)
+                .is_some_and(|timing| timing.live_dep <= self.now),
+            arrived: self.facts[index].arrived,
+        }
     }
 
     fn board_crs(&self, index: usize) -> Option<String> {
@@ -492,6 +504,7 @@ pub(crate) async fn plan_suggestions(
     fault: &str,
     fingerprint: &str,
     slot: ReplanSlot,
+    origin_override: Option<String>,
 ) -> Result<SuggestionSet, RouteError> {
     let started = std::time::Instant::now();
     let trigger_label = match slot {
@@ -515,9 +528,12 @@ pub(crate) async fn plan_suggestions(
             "Other trains can be found for a train leg only.",
         ));
     }
-    let (Some(origin), Some(destination)) =
-        (analysis.board_crs(index), analysis.alight_crs(last_train))
-    else {
+    // The traveller's own starting point, when they are not at the leg's
+    // boarding station (DS-534); it only moves where the searches start.
+    let (Some(origin), Some(destination)) = (
+        origin_override.or_else(|| analysis.board_crs(index)),
+        analysis.alight_crs(last_train),
+    ) else {
         return Err(RouteError::coded(
             StatusCode::UNPROCESSABLE_ENTITY,
             "no_stations",
@@ -819,7 +835,9 @@ pub(crate) async fn plan_suggestions(
     .flatten();
     let booked_departure = timing.map(|t| t.sched_dep);
 
+    let board = analysis.board_crs(index);
     let mut codes: Vec<String> = vec![origin.clone(), destination.clone()];
+    codes.extend(board.clone());
     for planned in &plans {
         for leg in &planned.itinerary.legs {
             if let crate::data::trip_planning_itinerary::PlannedLeg::Train {
@@ -856,7 +874,7 @@ pub(crate) async fn plan_suggestions(
     let trigger = Some(TriggerTrain {
         leg_id: legs[index].id,
         departure: booked_departure,
-        origin_name: names.get(&origin).cloned(),
+        origin_name: board.as_ref().and_then(|crs| names.get(crs).cloned()),
         destination_name: name_of(analysis.alight_crs(index)),
         train_destination_name: name_of(state.and_then(|s| s.schedule_destination_crs.clone())),
     });
@@ -1100,6 +1118,9 @@ async fn detail_extras_inner(
 #[serde(deny_unknown_fields)]
 struct AlternativesParams {
     cause: Option<AskCause>,
+    /// Where to search from instead of the leg's boarding station: a
+    /// station CRS (additive, DS-534).
+    from: Option<String>,
 }
 
 /// The cause and fault a request plans with: an open break's when it is on
@@ -1139,12 +1160,10 @@ pub fn register_metrics() {
 /// [`MISSED_STATES`] label. A leg with no live timing (a pinned leg with
 /// no train yet) has not left as far as DS knows.
 fn missed_state_of(analysis: &Analysis, index: usize) -> &'static str {
-    if analysis.facts[index].arrived {
+    let facts = analysis.leg_facts(index);
+    if facts.arrived {
         "arrived"
-    } else if analysis
-        .timing(index)
-        .is_some_and(|timing| timing.live_dep <= analysis.now)
-    {
+    } else if facts.departed {
         "departed"
     } else {
         "before_departure"
@@ -1163,12 +1182,14 @@ fn missed_fault(analysis: &Analysis, index: usize) -> &'static str {
     journey_breaks::user_missed_fault(connection_onto.as_ref())
 }
 
-/// `GET /Journeys/{id}/legs/{legId}/alternatives?cause=missed|cancelled|connection|choice`:
+/// `GET /Journeys/{id}/legs/{legId}/alternatives?cause=missed|cancelled|connection|choice&from=CRS`:
 /// ranked alternatives from one train leg, live, whatever the leg's
 /// `windowSearched` (§7). Not stored, and never opens a break: "I missed
 /// this train" shows these, and only taking one (`.../replace` with
 /// `cause: missed`) records the leg as missed. Opening the sheet to look is
-/// not saying the train was missed.
+/// not saying the train was missed. `from` searches from that station
+/// instead of the leg's boarding station (400 for a code that is not a
+/// station); the set's `leg` says what the train had done.
 async fn get_alternatives(
     State(app): State<App>,
     user: AuthenticatedUser,
@@ -1203,6 +1224,10 @@ async fn get_alternatives(
             if let Some(refusal) = leg_refusal(&analysis, index, ask, on_leg) {
                 return Err(refusal);
             }
+            let from = match params.from.as_deref() {
+                None => None,
+                Some(text) => Some(validate_from(&app, text).await?),
+            };
             let (cause, mut fault) = plan_cause(ask, open.as_ref(), leg_id);
             if !on_leg && ask == AskCause::Missed {
                 fault = missed_fault(&analysis, index).to_string();
@@ -1212,7 +1237,7 @@ async fn get_alternatives(
                 .filter(|b| b.trigger_leg_id == Some(leg_id))
                 .map(|b| b.fingerprint.clone())
                 .unwrap_or_default();
-            let set = plan_suggestions(
+            let mut set = plan_suggestions(
                 &app,
                 journey_id,
                 &analysis,
@@ -1221,12 +1246,44 @@ async fn get_alternatives(
                 &fault,
                 &fingerprint,
                 ReplanSlot::Request,
+                from,
             )
             .await?;
+            set.leg = Some(analysis.leg_facts(index));
             Ok(Json(set).into_response())
         }
         .await,
     )
+}
+
+/// `?from=` as a station CRS: three letters (400 with the usual copy
+/// otherwise) and a station DS knows (400 otherwise).
+async fn validate_from(app: &App, text: &str) -> Result<String, RouteError> {
+    let crs = text.trim().to_ascii_uppercase();
+    if crs.len() != 3 || !crs.bytes().all(|b| b.is_ascii_uppercase()) {
+        return Err(RouteError::coded(
+            StatusCode::BAD_REQUEST,
+            "invalid_station",
+            "Enter a valid station. Station codes are three letters, like WOK or EUS.",
+        ));
+    }
+    let known: bool = sqlx::query_scalar(
+        "SELECT EXISTS (SELECT 1 FROM stations WHERE TRIM(crs) = $1) \
+             OR EXISTS (SELECT 1 FROM tiploc_crs WHERE TRIM(crs) = $1)",
+    )
+    .bind(&crs)
+    .fetch_one(&app.database)
+    .await
+    .map_err(|err| internal("check the station")(err.into()))?;
+    if known {
+        Ok(crs)
+    } else {
+        Err(RouteError::coded(
+            StatusCode::BAD_REQUEST,
+            "invalid_station",
+            "We don't recognise that station.",
+        ))
+    }
 }
 
 /// Why leg `index` cannot be replanned for `ask`, if it cannot: `409
@@ -1350,6 +1407,7 @@ pub(crate) async fn replan_break(
         &row.fault,
         &row.fingerprint,
         slot,
+        None,
     )
     .await?;
     let cause = Cause::parse(&row.cause).unwrap_or(Cause::ConnectionMissed);
@@ -1518,6 +1576,7 @@ async fn post_preview(
                         "none",
                         "",
                         ReplanSlot::Request,
+                        None,
                     )
                     .await?;
                     Ok(Json(set).into_response())

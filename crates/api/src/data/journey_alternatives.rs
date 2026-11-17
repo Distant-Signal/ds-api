@@ -235,6 +235,25 @@ pub struct SuggestionSet {
     /// Set by the route on read: stored suggestions that need a re-plan.
     #[serde(default)]
     pub stale: bool,
+    /// What the leg's train had done when `GET .../alternatives` planned
+    /// these, so the app can word a confirmation for "I missed this train"
+    /// (DS-534). Facts only: they never refuse a request. `null` on a
+    /// break's stored suggestions.
+    #[serde(default)]
+    pub leg: Option<AlternativesLegFacts>,
+}
+
+/// What the replaced leg's train had done (the facts a "did you really miss
+/// it?" check shows; DS data never blocks the traveller's word).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, ts_rs::TS)]
+#[serde(rename_all = "camelCase")]
+pub struct AlternativesLegFacts {
+    /// The train has left the leg's boarding station (its live departure
+    /// has passed). A leg with no train yet has not.
+    pub departed: bool,
+    /// The train ran to the leg's alighting station (never true for a
+    /// cancelled train).
+    pub arrived: bool,
 }
 
 impl SuggestionSet {
@@ -716,6 +735,7 @@ pub fn build_set(
         trigger: inputs.trigger.clone(),
         suggestions,
         stale: false,
+        leg: None,
     }
 }
 

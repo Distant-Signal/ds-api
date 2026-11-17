@@ -35,6 +35,26 @@ now have an opaque id and the numeric one is **deprecated**.
   requests that named an object by its numeric id (`kind` is `journey`,
   `leg`, `tracking` or `device`). It is the evidence for stage 3 below.
 
+## 2026-11-17: Alternatives can start from another station and say what the train did
+
+**Additive** (DS-534, the missed-train redesign, part 2); no migration or grant. The deployed frontend is unaffected: it sends neither new thing.
+
+- `GET /Journeys/{id}/legs/{legId}/alternatives` takes an optional `from`
+  (a station CRS, any case): search from there instead of the leg's
+  boarding station. `from` that is not three letters, or not a station DS
+  knows, is `400` (`invalid_station`: "Enter a valid station. Station codes
+  are three letters, like WOK or EUS." / "We don't recognise that
+  station."). The search time is unchanged (the later of now and when the
+  traveller could board). The route rejects unknown query parameters, so a
+  client sends `from` only once the api serving it is at this version.
+- The returned `SuggestionSet` gains `leg: {departed, arrived} | null`
+  (`AlternativesLegFacts`): whether the leg's train has left its boarding
+  station and whether it ran to its alighting station (never `true` for a
+  cancelled train). Facts for a confirmation, never a refusal. `null` on a
+  break's stored suggestions, as before this change.
+- `trigger.originName` is the leg's boarding station even when `from`
+  moves the search; `originCrs` and `originName` are where it started.
+
 ## 2026-11-17: "I missed this train" no longer waits for the train to arrive
 
 **Behaviour change** (DS-534, the missed-train redesign, part 1); no new field, migration or grant. Additive for every client; nothing a client calls changes shape.
