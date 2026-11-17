@@ -2948,7 +2948,12 @@ pub struct JourneyListItem {
     #[serde(skip_serializing_if = "String::is_empty")]
     #[ts(optional = nullable)]
     pub created_via: String,
+    // Deprecated (DS-534): use `leg_public_id`.
     pub leg_id: i64,
+    // The current leg's opaque id (`data::public_id`). Not selected by the
+    // list query: filled after it.
+    #[sqlx(default)]
+    pub leg_public_id: String,
     pub origin_crs: Option<String>,
     pub destination_crs: Option<String>,
     /// The current leg's own `journey_legs.service_date` -- the date the
@@ -2986,7 +2991,12 @@ pub struct JourneyListItem {
     #[ts(as = "crate::ts_values::MatchMode")]
     #[schemars(with = "crate::ts_values::MatchMode")]
     pub match_mode: String,
+    // Deprecated (DS-534): use `train_subscription_public_id`.
     pub train_subscription_id: Option<i64>,
+    // The tracked train's opaque id (`data::public_id`); filled after the
+    // list query, `null` with `train_subscription_id`.
+    #[sqlx(default)]
+    pub train_subscription_public_id: Option<String>,
     #[ts(as = "Option<crate::ts_values::ResolutionStatus>")]
     #[schemars(with = "Option<crate::ts_values::ResolutionStatus>")]
     pub resolution_status: Option<String>,
@@ -3655,8 +3665,24 @@ pub(crate) async fn list_journeys_for_user_capped(
     let templates: std::collections::HashMap<i64, i64> = templates.into_iter().collect();
     let mut leave_by = crate::data::leave_by::for_journeys(pool, &ids, user_id).await?;
     let mut public_ids = crate::data::journey_public_id::public_ids(pool, &ids).await?;
+    let leg_ids: Vec<i64> = rows.iter().map(|row| row.leg_id).collect();
+    let leg_public_ids =
+        crate::data::public_id::public_ids::<crate::data::public_id::Leg, _>(pool, &leg_ids)
+            .await?;
+    let tracking_ids: Vec<i64> = rows
+        .iter()
+        .filter_map(|row| row.train_subscription_id)
+        .collect();
+    let tracking_public_ids = crate::data::public_id::public_ids::<
+        crate::data::public_id::Tracking,
+        _,
+    >(pool, &tracking_ids)
+    .await?;
     for row in &mut rows {
         row.public_id = public_ids.remove(&row.id).unwrap_or_default();
+        row.leg_public_id = crate::data::public_id::lookup(&leg_public_ids, row.leg_id);
+        row.train_subscription_public_id =
+            crate::data::public_id::lookup_opt(&tracking_public_ids, row.train_subscription_id);
         row.open_break_id = open.get(&row.id).copied();
         row.source_template_id = templates.get(&row.id).copied();
         let own = leave_by.remove(&row.id).unwrap_or_default();

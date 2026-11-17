@@ -100,8 +100,17 @@ pub struct Suggestion {
     pub delay_minutes: Option<i64>,
     /// The last current leg this alternative replaces.
     pub through_leg_id: i64,
+    // Deprecated (DS-534): `through_leg_id`. This is that leg's opaque id,
+    // filled when the set is served ([`SuggestionSet::fill_leg_public_ids`]);
+    // empty in a stored set.
+    #[serde(default)]
+    pub through_leg_public_id: String,
     /// The later booked leg it gets you to in time for, kept (§5.5).
     pub rejoins_leg_id: Option<i64>,
+    // `rejoins_leg_id`'s opaque id (DS-534); `null` with it. Filled with
+    // `through_leg_public_id`.
+    #[serde(default)]
+    pub rejoins_leg_public_id: Option<String>,
     pub legs: Vec<SuggestionLeg>,
     pub cost: i64,
     pub fit: Option<Fit>,
@@ -199,7 +208,12 @@ impl Suggestion {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, ts_rs::TS)]
 #[serde(rename_all = "camelCase")]
 pub struct TriggerTrain {
+    // Deprecated (DS-534): use `leg_public_id`.
     pub leg_id: i64,
+    // `leg_id`'s opaque id, filled when the set is served
+    // ([`SuggestionSet::fill_leg_public_ids`]); empty in a stored set.
+    #[serde(default)]
+    pub leg_public_id: String,
     /// Its timetabled departure from the leg's boarding station.
     pub departure: Option<DateTime<Utc>>,
     pub origin_name: Option<String>,
@@ -218,6 +232,10 @@ pub struct SuggestionSet {
     pub fingerprint: String,
     /// The first leg replaced.
     pub from_leg_id: i64,
+    // `from_leg_id`'s opaque id (DS-534), filled when the set is served
+    // ([`SuggestionSet::fill_leg_public_ids`]); empty in a stored set.
+    #[serde(default)]
+    pub from_leg_public_id: String,
     pub origin_crs: String,
     pub origin_name: Option<String>,
     pub destination_crs: String,
@@ -257,6 +275,38 @@ pub struct AlternativesLegFacts {
 }
 
 impl SuggestionSet {
+    /// Fills every leg reference's opaque id (DS-534) from the legs'
+    /// `public_id`s. A stored set carries none (a leg's id is as short-lived
+    /// as the plan it belongs to), so a set is filled each time it is
+    /// served; a leg that no longer exists leaves its reference empty.
+    ///
+    /// # Errors
+    /// The lookup failed.
+    pub async fn fill_leg_public_ids(&mut self, pool: &PgPool) -> anyhow::Result<()> {
+        let mut ids = vec![self.from_leg_id];
+        ids.extend(self.trigger.iter().map(|trigger| trigger.leg_id));
+        for suggestion in &self.suggestions {
+            ids.push(suggestion.through_leg_id);
+            ids.extend(suggestion.rejoins_leg_id);
+        }
+        ids.sort_unstable();
+        ids.dedup();
+        let public =
+            crate::data::public_id::public_ids::<crate::data::public_id::Leg, _>(pool, &ids)
+                .await?;
+        self.from_leg_public_id = crate::data::public_id::lookup(&public, self.from_leg_id);
+        if let Some(trigger) = &mut self.trigger {
+            trigger.leg_public_id = crate::data::public_id::lookup(&public, trigger.leg_id);
+        }
+        for suggestion in &mut self.suggestions {
+            suggestion.through_leg_public_id =
+                crate::data::public_id::lookup(&public, suggestion.through_leg_id);
+            suggestion.rejoins_leg_public_id =
+                crate::data::public_id::lookup_opt(&public, suggestion.rejoins_leg_id);
+        }
+        Ok(())
+    }
+
     /// Whether these suggestions need re-planning (§5.4): planned for other
     /// inputs, too old, or the first one's first train is about to leave.
     pub fn is_stale(&self, fingerprint: &str, now: DateTime<Utc>) -> bool {
@@ -707,7 +757,9 @@ pub fn build_set(
                 change_count: candidate.changes,
                 delay_minutes,
                 through_leg_id: planned.through_leg_id,
+                through_leg_public_id: String::new(),
                 rejoins_leg_id: planned.rejoins_leg_id,
+                rejoins_leg_public_id: None,
                 legs: legs.clone(),
                 cost: ranked.cost,
                 fit: ranked.fit,
@@ -725,6 +777,7 @@ pub fn build_set(
         generated_at: inputs.now,
         fingerprint: inputs.fingerprint.clone(),
         from_leg_id: inputs.from_leg_id,
+        from_leg_public_id: String::new(),
         origin_name: names.get(&inputs.origin_crs).cloned(),
         origin_crs: inputs.origin_crs.clone(),
         destination_name: names.get(&inputs.destination_crs).cloned(),

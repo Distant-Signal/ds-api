@@ -60,7 +60,10 @@ pub(crate) struct TrackIrishTrainResponse {
     journey_id: i64,
     // The journey's opaque id.
     journey_public_id: String,
+    // Deprecated (DS-534): use `tracking_public_id`.
     tracking_id: i64,
+    // The tracked train's opaque id.
+    tracking_public_id: String,
 }
 
 pub(crate) async fn post_irish_train(
@@ -202,6 +205,12 @@ async fn track(app: &App, user_id: &str, body: &[u8]) -> Result<Response, RouteE
             .await
             .map_err(|err| internal(&err))?,
             tracking_id: tracked.tracking_id,
+            tracking_public_id: crate::data::public_id::public_id::<
+                crate::data::public_id::Tracking,
+                _,
+            >(&app.database, tracked.tracking_id)
+            .await
+            .map_err(|err| internal(&err))?,
         }),
     )
         .into_response())

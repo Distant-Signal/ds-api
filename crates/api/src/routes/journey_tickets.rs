@@ -757,6 +757,7 @@ mod tests {
         crate::data::train_tracking::TrackedTrainState {
             service: ServiceModeFields::default(),
             id: 1,
+            public_id: String::new(),
             service_date: "2026-08-29".parse().unwrap(),
             pin_origin_crs: Some("KGX".to_string()),
             pin_destination_crs: Some("EDB".to_string()),

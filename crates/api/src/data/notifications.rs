@@ -135,7 +135,11 @@ async fn evict_push_subscriptions_over_cap(pool: &PgPool, user_id: &str) -> Resu
 #[derive(Debug, Clone, sqlx::FromRow, serde::Serialize, ts_rs::TS)]
 #[serde(rename_all = "camelCase")]
 pub struct PushDevice {
+    // Deprecated (DS-534): use `public_id`.
     pub id: i64,
+    // The opaque id `DELETE /notifications/devices/{id}` accepts
+    // (`data::public_id`).
+    pub public_id: String,
     /// "Chrome on Android"; `None` when it could not be worked out.
     pub label: Option<String>,
     pub created_at: chrono::DateTime<chrono::Utc>,
@@ -150,7 +154,7 @@ pub struct PushDevice {
 /// `user_id`'s push subscriptions, most recently used first.
 pub async fn list_push_devices(pool: &PgPool, user_id: &str) -> Result<Vec<PushDevice>> {
     Ok(sqlx::query_as(
-        "SELECT id, device_label AS label, created_at, \
+        "SELECT id, public_id, device_label AS label, created_at, \
                 GREATEST(last_seen_at, COALESCE(last_pushed_at, last_seen_at)) AS last_used_at, \
                 encode(sha256(convert_to(endpoint, 'UTF8')), 'hex') AS endpoint_sha256 \
          FROM push_subscriptions WHERE user_id = $1 \

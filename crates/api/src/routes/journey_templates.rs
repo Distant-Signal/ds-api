@@ -380,7 +380,10 @@ pub(crate) struct MaterializeTemplateResponse {
     journey_id: i64,
     // The new journey's opaque id.
     journey_public_id: String,
+    // Deprecated (DS-534): use `leg_public_ids`.
     leg_ids: Vec<i64>,
+    // `leg_ids`' opaque ids, in the same order.
+    leg_public_ids: Vec<String>,
 }
 
 #[derive(Debug, Serialize, ts_rs::TS)]
@@ -1378,9 +1381,16 @@ async fn post_materialize_journey_template(
         crate::data::journey_public_id::public_id(&app.database, materialized.journey_id)
             .await
             .map_err(internal_error("read the journey's public id"))?;
+    let leg_public_ids = crate::data::public_id::public_ids::<crate::data::public_id::Leg, _>(
+        &app.database,
+        &materialized.leg_ids,
+    )
+    .await
+    .map_err(internal_error("read the legs' public ids"))?;
     Ok(Json(MaterializeTemplateResponse {
         journey_id: materialized.journey_id,
         journey_public_id,
+        leg_public_ids: crate::data::public_id::lookup_all(&leg_public_ids, &materialized.leg_ids),
         leg_ids: materialized.leg_ids,
     }))
 }

@@ -1416,6 +1416,7 @@ pub async fn remove_journey_from_group(
 struct GroupTrainRow {
     group_id: String,
     train_subscription_id: i64,
+    train_subscription_public_id: String,
     pin_origin_crs: Option<String>,
     pin_destination_crs: Option<String>,
     pin_origin_name: Option<String>,
@@ -1448,7 +1449,10 @@ struct GroupTrainRow {
 #[derive(Debug, Clone, Serialize, ts_rs::TS)]
 #[serde(rename_all = "camelCase")]
 pub struct GroupTrain {
+    // Deprecated (DS-534): use `train_subscription_public_id`.
     pub train_subscription_id: i64,
+    // The tracked train's opaque id (`data::public_id`).
+    pub train_subscription_public_id: String,
     pub pin_origin_crs: Option<String>,
     pub pin_destination_crs: Option<String>,
     pub pin_origin_name: Option<String>,
@@ -1542,6 +1546,7 @@ impl From<GroupTrainRow> for GroupTrain {
         );
         GroupTrain {
             train_subscription_id: row.train_subscription_id,
+            train_subscription_public_id: row.train_subscription_public_id,
             pin_origin_crs: row.pin_origin_crs,
             pin_destination_crs: row.pin_destination_crs,
             pin_origin_name: row.pin_origin_name,
@@ -2016,6 +2021,7 @@ where
 pub async fn list_group_trains(pool: &PgPool, group_id: &str) -> Result<Vec<GroupTrain>> {
     let rows: Vec<GroupTrainRow> = sqlx::query_as(
         "SELECT gt.group_id, gt.train_subscription_id, \
+                ts.public_id AS train_subscription_public_id, \
                 COALESCE(ts.pin_origin_crs, tr.origin_crs) AS pin_origin_crs, \
                 COALESCE(ts.pin_destination_crs, tr.destination_crs) AS pin_destination_crs, \
                 COALESCE(so.name, tr.origin_name) AS pin_origin_name, \
@@ -2181,6 +2187,7 @@ struct SharedTrainRow {
     group_id: String,
     group_name: String,
     train_subscription_id: i64,
+    train_subscription_public_id: String,
     pin_origin_crs: Option<String>,
     pin_destination_crs: Option<String>,
     pin_origin_name: Option<String>,
@@ -2216,7 +2223,10 @@ struct SharedTrainRow {
 pub struct SharedTrain {
     pub group_id: String,
     pub group_name: String,
+    // Deprecated (DS-534): use `train_subscription_public_id`.
     pub train_subscription_id: i64,
+    // The tracked train's opaque id (`data::public_id`).
+    pub train_subscription_public_id: String,
     pub pin_origin_crs: Option<String>,
     pub pin_destination_crs: Option<String>,
     pub pin_origin_name: Option<String>,
@@ -2309,6 +2319,7 @@ impl From<SharedTrainRow> for SharedTrain {
             group_id: row.group_id,
             group_name: row.group_name,
             train_subscription_id: row.train_subscription_id,
+            train_subscription_public_id: row.train_subscription_public_id,
             pin_origin_crs: row.pin_origin_crs,
             pin_destination_crs: row.pin_destination_crs,
             pin_origin_name: row.pin_origin_name,
@@ -2397,7 +2408,7 @@ impl From<SharedTrainRow> for SharedTrain {
 pub async fn list_shared_trains_for_user(pool: &PgPool, user_id: &str) -> Result<Vec<SharedTrain>> {
     let rows: Vec<SharedTrainRow> = sqlx::query_as(
         "SELECT g.id AS group_id, g.name AS group_name, \
-                gt.train_subscription_id, \
+                gt.train_subscription_id, ts.public_id AS train_subscription_public_id, \
                 COALESCE(ts.pin_origin_crs, tr.origin_crs) AS pin_origin_crs, \
                 COALESCE(ts.pin_destination_crs, tr.destination_crs) AS pin_destination_crs, \
                 COALESCE(so.name, tr.origin_name) AS pin_origin_name, \
@@ -7192,6 +7203,7 @@ mod group_train_wire_shape_tests {
     fn group_train_json_never_includes_ticket_or_notification_fields() {
         let train = GroupTrain {
             train_subscription_id: 1,
+            train_subscription_public_id: "t_00000000000000000000000000000001".to_string(),
             pin_origin_crs: Some("WOK".to_string()),
             pin_destination_crs: None,
             pin_origin_name: Some("Woking".to_string()),
@@ -7253,6 +7265,7 @@ mod group_train_wire_shape_tests {
                 "status",
                 "trackingPhase",
                 "trainSubscriptionId",
+                "trainSubscriptionPublicId",
                 "trainUid",
             ]
         );
@@ -7381,6 +7394,7 @@ mod group_train_wire_shape_tests {
         let expected = Some("2026-10-21T07:15:00Z".parse().unwrap());
         let train = GroupTrain {
             train_subscription_id: 1,
+            train_subscription_public_id: "t_00000000000000000000000000000001".to_string(),
             pin_origin_crs: None,
             pin_destination_crs: None,
             pin_origin_name: None,
@@ -7412,6 +7426,7 @@ mod group_train_wire_shape_tests {
             group_id: "group-1".to_string(),
             group_name: "Family".to_string(),
             train_subscription_id: train.train_subscription_id,
+            train_subscription_public_id: train.train_subscription_public_id.clone(),
             pin_origin_crs: None,
             pin_destination_crs: None,
             pin_origin_name: None,
@@ -7528,6 +7543,7 @@ mod shared_train_wire_shape_tests {
             group_id: "group-1".to_string(),
             group_name: "Family".to_string(),
             train_subscription_id: 1,
+            train_subscription_public_id: "t_00000000000000000000000000000001".to_string(),
             pin_origin_crs: Some("WOK".to_string()),
             pin_destination_crs: None,
             pin_origin_name: Some("Woking".to_string()),
@@ -7602,6 +7618,7 @@ mod shared_train_wire_shape_tests {
                 "status",
                 "trackingPhase",
                 "trainSubscriptionId",
+                "trainSubscriptionPublicId",
                 "trainUid",
             ]
         );
@@ -7619,6 +7636,7 @@ mod shared_train_wire_shape_tests {
             group_id: "group-1".to_string(),
             group_name: "Family".to_string(),
             train_subscription_id: 1,
+            train_subscription_public_id: "t_00000000000000000000000000000001".to_string(),
             pin_origin_crs: None,
             pin_destination_crs: None,
             pin_origin_name: None,
@@ -7739,6 +7757,7 @@ mod display_name_collapse_tests {
         GroupTrainRow {
             group_id: "group-1".to_string(),
             train_subscription_id: 1,
+            train_subscription_public_id: "t_00000000000000000000000000000001".to_string(),
             pin_origin_crs: None,
             pin_destination_crs: None,
             pin_origin_name: None,
@@ -7763,6 +7782,7 @@ mod display_name_collapse_tests {
             group_id: "group-1".to_string(),
             group_name: "Family".to_string(),
             train_subscription_id: 1,
+            train_subscription_public_id: "t_00000000000000000000000000000001".to_string(),
             pin_origin_crs: None,
             pin_destination_crs: None,
             pin_origin_name: None,

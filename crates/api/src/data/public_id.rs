@@ -229,14 +229,17 @@ impl<'de, K: Kind> Deserialize<'de> for PublicRef<K> {
 ///
 /// # Errors
 /// The query failed.
-pub async fn public_ids<K: Kind>(
-    pool: &PgPool,
+pub async fn public_ids<'e, K: Kind, E: sqlx::PgExecutor<'e>>(
+    executor: E,
     ids: &[i64],
 ) -> anyhow::Result<HashMap<i64, String>> {
     if ids.is_empty() {
         return Ok(HashMap::new());
     }
-    let rows: Vec<(i64, String)> = sqlx::query_as(K::BATCH).bind(ids).fetch_all(pool).await?;
+    let rows: Vec<(i64, String)> = sqlx::query_as(K::BATCH)
+        .bind(ids)
+        .fetch_all(executor)
+        .await?;
     Ok(rows.into_iter().collect())
 }
 

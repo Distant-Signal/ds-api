@@ -137,9 +137,17 @@ pub(crate) struct ItineraryLegRequest {
 #[derive(Debug, Serialize, Deserialize, ts_rs::TS)]
 #[serde(rename_all = "camelCase")]
 pub(crate) struct ItineraryLegResponse {
+    // Deprecated (DS-534): use `leg_public_id`.
     leg_id: i64,
+    // The leg's opaque id. Absent from a response stored before DS-534,
+    // which an `Idempotency-Key` replay still reads.
+    #[serde(default)]
+    leg_public_id: String,
     /// `None` (`null`) for an untracked leg, which tracks no train.
     tracking_id: Option<i64>,
+    // `tracking_id`'s opaque id (DS-534); `null` with it.
+    #[serde(default)]
+    tracking_public_id: Option<String>,
     /// `train` or `untracked`. Absent from a response stored before
     /// 2026-10-20 and replayed (always a train leg then).
     #[serde(default = "train_kind")]
@@ -161,8 +169,18 @@ pub(crate) struct ItineraryResponse {
     journey_id: i64,
     // The new journey's opaque id.
     journey_public_id: String,
+    // Deprecated (DS-534): use `leg_public_id`.
     leg_id: i64,
+    // The first leg's opaque id. Absent from a response stored before
+    // DS-534, which an `Idempotency-Key` replay still reads.
+    #[serde(default)]
+    leg_public_id: String,
+    // Deprecated (DS-534): use `tracking_public_id`.
     tracking_id: i64,
+    // The first train leg's tracking opaque id; absent from a response
+    // stored before DS-534.
+    #[serde(default)]
+    tracking_public_id: String,
     #[ts(as = "Option<crate::ts_values::ResolutionStatus>")]
     resolution_status: Option<String>,
     legs: Vec<ItineraryLegResponse>,
@@ -883,6 +901,24 @@ async fn save_itinerary(
             "an itinerary with a train leg created none"
         )));
     };
+    // On the transaction's own connection: the rows are not committed yet.
+    let created_leg_ids: Vec<i64> = created.iter().map(|&(leg_id, _)| leg_id).collect();
+    let created_tracking_ids: Vec<i64> = created
+        .iter()
+        .filter_map(|&(_, tracking_id)| tracking_id)
+        .collect();
+    let leg_public_ids = crate::data::public_id::public_ids::<crate::data::public_id::Leg, _>(
+        &mut *tx,
+        &created_leg_ids,
+    )
+    .await
+    .map_err(internal("read the legs' public ids"))?;
+    let tracking_public_ids = crate::data::public_id::public_ids::<
+        crate::data::public_id::Tracking,
+        _,
+    >(&mut *tx, &created_tracking_ids)
+    .await
+    .map_err(internal("read the tracked trains' public ids"))?;
     let response = ItineraryResponse {
         journey_id,
         // On the transaction's own connection: a pool of one has no other.
@@ -890,13 +926,20 @@ async fn save_itinerary(
             .await
             .map_err(internal("read the journey's public id"))?,
         leg_id: first_leg_id,
+        leg_public_id: crate::data::public_id::lookup(&leg_public_ids, first_leg_id),
         tracking_id: first_tracking_id,
+        tracking_public_id: crate::data::public_id::lookup(&tracking_public_ids, first_tracking_id),
         resolution_status: None,
         legs: created
             .iter()
             .map(|&(leg_id, tracking_id)| ItineraryLegResponse {
                 leg_id,
+                leg_public_id: crate::data::public_id::lookup(&leg_public_ids, leg_id),
                 tracking_id,
+                tracking_public_id: crate::data::public_id::lookup_opt(
+                    &tracking_public_ids,
+                    tracking_id,
+                ),
                 kind: if tracking_id.is_some() {
                     journeys::LEG_KIND_TRAIN
                 } else {

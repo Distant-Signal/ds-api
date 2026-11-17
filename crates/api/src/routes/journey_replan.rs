@@ -873,6 +873,7 @@ pub(crate) async fn plan_suggestions(
     let name_of = |crs: Option<String>| crs.and_then(|c| names.get(c.trim()).cloned());
     let trigger = Some(TriggerTrain {
         leg_id: legs[index].id,
+        leg_public_id: String::new(),
         departure: booked_departure,
         origin_name: board.as_ref().and_then(|crs| names.get(crs).cloned()),
         destination_name: name_of(analysis.alight_crs(index)),
@@ -930,7 +931,10 @@ pub(crate) struct OpenBreakSummary {
     #[schemars(with = "crate::ts_values::BreakFault")]
     pub fault: String,
     pub severity: i16,
+    // Deprecated (DS-534): use `trigger_leg_public_id`.
     pub trigger_leg_id: Option<i64>,
+    // The trigger leg's opaque id; `null` with it.
+    pub trigger_leg_public_id: Option<String>,
     pub detected_at: DateTime<Utc>,
     pub suggestions_ready: bool,
     pub stale: bool,
@@ -954,6 +958,7 @@ impl OpenBreakSummary {
             fault: row.fault.clone(),
             severity: row.severity,
             trigger_leg_id: row.trigger_leg_id,
+            trigger_leg_public_id: row.trigger_leg_public_id.clone(),
             detected_at: row.detected_at,
             suggestions_ready: set.is_some(),
             stale: set
@@ -1250,6 +1255,7 @@ async fn get_alternatives(
             )
             .await?;
             set.leg = Some(analysis.leg_facts(index));
+            fill_leg_public_ids(&app, &mut set).await;
             Ok(Json(set).into_response())
         }
         .await,
@@ -1336,7 +1342,10 @@ pub(crate) struct BreakResponse {
     severity: i16,
     #[ts(as = "crate::ts_values::BreakStatus")]
     status: String,
+    // Deprecated (DS-534): use `trigger_leg_public_id`.
     trigger_leg_id: Option<i64>,
+    // The trigger leg's opaque id; `null` with it.
+    trigger_leg_public_id: Option<String>,
     detected_at: DateTime<Utc>,
     #[ts(as = "Option<crate::ts_values::BreakOpenedVia>")]
     opened_via: Option<String>,
@@ -1372,11 +1381,30 @@ impl BreakResponse {
             severity: row.severity,
             status: row.status,
             trigger_leg_id: row.trigger_leg_id,
+            trigger_leg_public_id: row.trigger_leg_public_id,
             detected_at: row.detected_at,
             opened_via: row.opened_via,
             suggestions,
             stale,
         }
+    }
+
+    /// Fills the suggestions' leg opaque ids (a stored set carries none).
+    /// Best effort: if the lookup fails they stay empty and the numeric ids
+    /// still answer.
+    async fn with_leg_public_ids(mut self, app: &App) -> Self {
+        if let Some(set) = &mut self.suggestions {
+            fill_leg_public_ids(app, set).await;
+        }
+        self
+    }
+}
+
+/// [`SuggestionSet::fill_leg_public_ids`], best effort: if the lookup fails
+/// the opaque ids stay empty and the numeric ids still answer.
+async fn fill_leg_public_ids(app: &App, set: &mut SuggestionSet) {
+    if let Err(err) = set.fill_leg_public_ids(&app.database).await {
+        tracing::warn!(error = ?err, "could not read the suggestions' leg public ids");
     }
 }
 
@@ -1463,7 +1491,12 @@ async fn get_current_break(
                 )
                 .increment(1);
             }
-            Ok(Json(BreakResponse::from_row(row, now_utc())).into_response())
+            Ok(Json(
+                BreakResponse::from_row(row, now_utc())
+                    .with_leg_public_ids(&app)
+                    .await,
+            )
+            .into_response())
         }
         .await,
     )
@@ -1524,7 +1557,8 @@ async fn post_dismiss(
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 struct PreviewBody {
     break_id: Option<i64>,
-    from_leg_id: Option<i64>,
+    /// The leg's `publicId`, or its deprecated numeric `id` (DS-534).
+    from_leg_id: Option<crate::data::public_id::LegRef>,
 }
 
 /// `POST /Journeys/{id}/replan/preview` `{breakId?, fromLegId?}`: plans the
@@ -1547,14 +1581,32 @@ async fn post_preview(
             let open = journey_breaks::open_break(&app.database, journey_id)
                 .await
                 .map_err(internal("read break"))?;
-            match (open, body.break_id, body.from_leg_id) {
+            let from_leg_id = match &body.from_leg_id {
+                Some(from) => Some(
+                    from.resolve(&app.database)
+                        .await
+                        .map_err(|err| internal("resolve the leg")(err.into()))?,
+                ),
+                None => None,
+            };
+            match (open, body.break_id, from_leg_id) {
                 (Some(row), Some(id), _) if row.id == id => {
                     let row = replan_break(&app, &row, &analysis, ReplanSlot::Request).await?;
-                    Ok(Json(BreakResponse::from_row(row, now)).into_response())
+                    Ok(Json(
+                        BreakResponse::from_row(row, now)
+                            .with_leg_public_ids(&app)
+                            .await,
+                    )
+                    .into_response())
                 }
                 (Some(row), None, from) if from.is_none() || from == row.trigger_leg_id => {
                     let row = replan_break(&app, &row, &analysis, ReplanSlot::Request).await?;
-                    Ok(Json(BreakResponse::from_row(row, now)).into_response())
+                    Ok(Json(
+                        BreakResponse::from_row(row, now)
+                            .with_leg_public_ids(&app)
+                            .await,
+                    )
+                    .into_response())
                 }
                 (_, Some(_), _) => Err(RouteError::coded(
                     StatusCode::CONFLICT,
@@ -1567,7 +1619,7 @@ async fn post_preview(
                         .iter()
                         .position(|leg| leg.id == leg_id)
                         .ok_or_else(not_found)?;
-                    let set = plan_suggestions(
+                    let mut set = plan_suggestions(
                         &app,
                         journey_id,
                         &analysis,
@@ -1579,6 +1631,7 @@ async fn post_preview(
                         None,
                     )
                     .await?;
+                    fill_leg_public_ids(&app, &mut set).await;
                     Ok(Json(set).into_response())
                 }
                 (_, None, None) => Err(RouteError::coded(
@@ -1685,16 +1738,14 @@ async fn suggestion_trains(
 }
 
 /// `409 suggestion_stale` with the fresh suggestions in the body.
-fn stale_response(row: BreakRow, now: DateTime<Utc>) -> Response {
+async fn stale_response(app: &App, row: BreakRow, now: DateTime<Utc>) -> Response {
     metrics::counter!(ds_runtime::metrics::metric_name(
         "api_journey_replan_stale_total"
     ))
     .increment(1);
-    (
-        StatusCode::CONFLICT,
-        Json(SuggestionStaleResponse::new(row, now)),
-    )
-        .into_response()
+    let mut response = SuggestionStaleResponse::new(row, now);
+    response.break_ = response.break_.with_leg_public_ids(app).await;
+    (StatusCode::CONFLICT, Json(response)).into_response()
 }
 
 /// The body of `409 suggestion_stale`: the coded error, with the break's
@@ -1816,7 +1867,7 @@ async fn post_accept(
                 });
                 match found {
                     Some((suggestion, rank, from_leg_id)) => (row, suggestion, rank, from_leg_id),
-                    None => return Ok(stale_response(row, now)),
+                    None => return Ok(stale_response(&app, row, now).await),
                 }
             };
             let trains = suggestion_trains(&app, &chosen).await?;
@@ -2436,6 +2487,7 @@ mod wire_tests {
             journey_public_id: "j_00000000000000000000000000000004".to_string(),
             revision_no: 3,
             new_leg_ids: vec![9],
+            new_leg_public_ids: vec!["l_00000000000000000000000000000009".to_string()],
             undo_revision_no: Some(2),
         })
         .unwrap();
@@ -2443,7 +2495,9 @@ mod wire_tests {
             value,
             serde_json::json!({
                 "journeyId": 4, "journeyPublicId": "j_00000000000000000000000000000004",
-                "revisionNo": 3, "newLegIds": [9], "undoRevisionNo": 2
+                "revisionNo": 3, "newLegIds": [9],
+                "newLegPublicIds": ["l_00000000000000000000000000000009"],
+                "undoRevisionNo": 2
             })
         );
     }
@@ -2466,6 +2520,7 @@ mod wire_tests {
             legs: vec![journey_revisions::RevisionLeg {
                 position: 0,
                 source_leg_id: Some(7),
+                source_leg_public_id: Some("l_00000000000000000000000000000007".to_string()),
                 kind: "untracked".to_string(),
                 train_uid: None,
                 service_date: NaiveDate::from_ymd_opt(2026, 9, 17).unwrap(),
@@ -2530,6 +2585,7 @@ mod wire_tests {
             fault: "operator".to_string(),
             severity: 2,
             trigger_leg_id: Some(7),
+            trigger_leg_public_id: Some("l_00000000000000000000000000000007".to_string()),
             trigger_trains_id: Some(70),
             break_position: 0,
             fingerprint: "f".to_string(),

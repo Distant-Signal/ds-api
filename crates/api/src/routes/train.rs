@@ -109,7 +109,10 @@ pub fn router() -> Router {
 #[derive(Debug, Serialize, ts_rs::TS)]
 #[serde(rename_all = "camelCase")]
 pub(crate) struct TrackPinResponse {
+    // Deprecated (DS-534): use `tracking_public_id`.
     tracking_id: i64,
+    // The tracked train's opaque id (`data::public_id`).
+    tracking_public_id: String,
     #[ts(as = "crate::ts_values::ResolutionStatus")]
     resolution_status: &'static str,
     /// The one-leg journey the pin now belongs to (DS-124). Additive
@@ -312,8 +315,16 @@ async fn track_pin(
     let journey_public_id = crate::data::journey_public_id::public_id(&app.database, journey_id)
         .await
         .map_err(internal_error("read the journey's public id"))?;
+    let tracking_public_id =
+        crate::data::public_id::public_id::<crate::data::public_id::Tracking, _>(
+            &app.database,
+            tracking_id,
+        )
+        .await
+        .map_err(internal_error("read the tracked train's public id"))?;
     Ok(Json(TrackPinResponse {
         tracking_id,
+        tracking_public_id,
         resolution_status,
         journey_id,
         journey_public_id,
@@ -850,7 +861,10 @@ async fn schedule_only_public_state(
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
 struct TrackByUidResponse {
+    // Deprecated (DS-534): use `tracking_public_id`.
     tracking_id: i64,
+    // The tracked train's opaque id (`data::public_id`).
+    tracking_public_id: String,
     /// The train's journey (DS-124): the new one-leg journey, or, when one
     /// of the caller's journeys already had the train, the first of those.
     /// Additive (2026-10-22). Deprecated (DS-534): use `journey_public_id`.
@@ -976,8 +990,16 @@ async fn track_by_uid(
         crate::data::journey_public_id::public_id(&app.database, tracked.journey_id)
             .await
             .map_err(internal_error("read the journey's public id"))?;
+    let tracking_public_id =
+        crate::data::public_id::public_id::<crate::data::public_id::Tracking, _>(
+            &app.database,
+            tracked.tracking_id,
+        )
+        .await
+        .map_err(internal_error("read the tracked train's public id"))?;
     Ok(Json(TrackByUidResponse {
         tracking_id: tracked.tracking_id,
+        tracking_public_id,
         journey_id: tracked.journey_id,
         journey_public_id,
     }))

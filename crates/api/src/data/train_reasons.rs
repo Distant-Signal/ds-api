@@ -486,6 +486,7 @@ mod tests {
         crate::data::train_tracking::TrackedTrainState {
             service: crate::data::schedule_services::ServiceModeFields::default(),
             id,
+            public_id: String::new(),
             service_date,
             pin_origin_crs: None,
             pin_destination_crs: None,

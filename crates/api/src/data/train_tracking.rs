@@ -639,7 +639,11 @@ pub use ds_store::tracking::{
 #[derive(Debug, Clone, sqlx::FromRow, Serialize, ts_rs::TS, schemars::JsonSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct TrackedTrainState {
+    // Deprecated (DS-534): use `public_id`.
     pub id: i64,
+    // The opaque id every `/Train/{trackingId}` route accepts
+    // (`data::public_id`).
+    pub public_id: String,
     pub service_date: chrono::NaiveDate,
     /// `Option`, not `String`. `20260906130000_nullable_pin_columns.sql`
     /// dropped this column's `NOT NULL`, and
@@ -995,7 +999,7 @@ impl crate::data::tracking_phase::PhaseRow for TrackedTrainState {
 // updated assertions for the concrete, tested shape of that gap.
 const TRACKED_TRAIN_STATE_SELECT: &str = concat!(
     "\
-    SELECT tt.id, tt.service_date, \
+    SELECT tt.id, tt.public_id, tt.service_date, \
            COALESCE(tt.pin_origin_crs, tr.origin_crs) AS pin_origin_crs, \
            COALESCE(tt.pin_destination_crs, tr.destination_crs) AS pin_destination_crs, \
            COALESCE(tt.pin_scheduled_departure, tr.scheduled_departure) AS pin_scheduled_departure, \
@@ -1035,7 +1039,11 @@ const TRACKED_TRAIN_STATE_SELECT: &str = concat!(
 #[derive(Debug, Clone, sqlx::FromRow, Serialize, ts_rs::TS)]
 #[serde(rename_all = "camelCase")]
 pub struct TrackedTrainListItem {
+    // Deprecated (DS-534): use `public_id`.
     pub id: i64,
+    // The opaque id every `/Train/{trackingId}` route accepts
+    // (`data::public_id`).
+    pub public_id: String,
     pub service_date: chrono::NaiveDate,
     /// `Option`, not `String` -- see `TrackedTrainState::pin_origin_crs`'s
     /// own doc comment for the full reasoning. `GET /Train/mine` returns
@@ -1277,7 +1285,7 @@ impl crate::data::stop_delay::PublicDelayFields for TrackedTrainListItem {
 static LIST_TRACKED_TRAINS_SQL: std::sync::LazyLock<String> = std::sync::LazyLock::new(|| {
     use crate::data::travel_order::{day_start_sql, order_by_sql, train_arrived_sql};
     format!(
-        "SELECT tt.id, tt.service_date, \
+        "SELECT tt.id, tt.public_id, tt.service_date, \
                 COALESCE(tt.pin_origin_crs, tr.origin_crs) AS pin_origin_crs, \
                 COALESCE(tt.pin_destination_crs, tr.destination_crs) AS pin_destination_crs, \
                 COALESCE(so.name, tr.origin_name) AS pin_origin_name, \
