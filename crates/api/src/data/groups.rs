@@ -201,6 +201,10 @@ pub struct GroupDetail {
     pub id: String,
     pub name: String,
     pub owner_id: String,
+    /// The owner's opaque id (`group_members.public_id`).
+    pub owner_member_id: String,
+    /// The caller's own opaque id in this group.
+    pub member_id: String,
     pub owner_name: Option<String>,
     /// Set only when `owner_name` is `None`; see `GroupMember.display_tag`.
     pub owner_tag: Option<String>,
@@ -213,6 +217,8 @@ struct GroupDetailRow {
     id: String,
     name: String,
     owner_id: String,
+    owner_member_id: String,
+    member_id: String,
     owner_name: Option<String>,
     owner_username: Option<String>,
     member_count: i64,
@@ -241,7 +247,8 @@ pub async fn get_group_detail(
 ) -> Result<Option<GroupDetail>> {
     let row: Option<GroupDetailRow> = sqlx::query_as(
         "SELECT g.id, g.name, \
-                owner_m.user_id AS owner_id, owner_u.name AS owner_name, \
+                owner_m.user_id AS owner_id, owner_m.public_id AS owner_member_id, \
+                caller.public_id AS member_id, owner_u.name AS owner_name, \
                 owner_u.username AS owner_username, \
                 (SELECT COUNT(*) FROM group_members gm2 WHERE gm2.group_id = g.id) AS member_count, \
                 caller.role AS role \
@@ -275,6 +282,8 @@ impl From<GroupDetailRow> for GroupDetail {
             id: row.id,
             name: row.name,
             owner_id: row.owner_id,
+            owner_member_id: row.owner_member_id,
+            member_id: row.member_id,
             owner_name: owner.label,
             owner_tag: owner.tag,
             member_count: row.member_count,
@@ -358,6 +367,7 @@ pub async fn delete_group(pool: &PgPool, group_id: &str, actor_user_id: &str) ->
 #[derive(Debug, Clone, sqlx::FromRow)]
 struct GroupMemberRow {
     user_id: String,
+    public_id: String,
     name: Option<String>,
     username: Option<String>,
     role: String,
@@ -377,7 +387,16 @@ struct GroupMemberRow {
 #[derive(Debug, Clone, Serialize, ts_rs::TS)]
 #[serde(rename_all = "camelCase")]
 pub struct GroupMember {
-    pub user_id: String,
+    /// Deprecated (DS-534 L12): the account id, present ONLY on the
+    /// caller's own row and `null` on everybody else's. Use `memberId` and
+    /// `isMe`. Removed in a later release.
+    pub user_id: Option<String>,
+    /// The member's opaque id within this group (`group_members.public_id`):
+    /// stable for the membership, different in every group, and not an
+    /// account id. The `{member}` of the member routes.
+    pub member_id: String,
+    /// Whether this is the caller's own membership.
+    pub is_me: bool,
     pub display_name: Option<String>,
     /// Set when -- and only when -- `display_name` is `None`: six hex
     /// characters the frontend appends to its own placeholder, so a group
@@ -401,7 +420,9 @@ impl From<GroupMemberRow> for GroupMember {
         // `display_name_collapse_tests` below.
         let display = users::MemberDisplay::of(row.name, row.username, &row.user_id);
         GroupMember {
-            user_id: row.user_id,
+            user_id: None,
+            member_id: row.public_id,
+            is_me: false,
             display_name: display.label,
             display_tag: display.tag,
             role: GroupRole::from_db(&row.role),
@@ -415,9 +436,13 @@ impl From<GroupMemberRow> for GroupMember {
 /// to the top). No permission check here: any current member may view the
 /// full member list (spec §3) -- the route's own `get_member_role` call
 /// gates "is the caller even a member at all."
-pub async fn list_members(pool: &PgPool, group_id: &str) -> Result<Vec<GroupMember>> {
+pub async fn list_members(
+    pool: &PgPool,
+    group_id: &str,
+    viewer_user_id: &str,
+) -> Result<Vec<GroupMember>> {
     let rows: Vec<GroupMemberRow> = sqlx::query_as(
-        "SELECT gm.user_id, u.name, u.username, gm.role, gm.joined_at \
+        "SELECT gm.user_id, gm.public_id, u.name, u.username, gm.role, gm.joined_at \
          FROM group_members gm \
          JOIN users u ON u.id = gm.user_id \
          WHERE gm.group_id = $1 \
@@ -426,7 +451,49 @@ pub async fn list_members(pool: &PgPool, group_id: &str) -> Result<Vec<GroupMemb
     .bind(group_id)
     .fetch_all(pool)
     .await?;
-    Ok(rows.into_iter().map(GroupMember::from).collect())
+    Ok(rows
+        .into_iter()
+        .map(|row| {
+            let mine = row.user_id == viewer_user_id;
+            let mut member = GroupMember::from(row);
+            if mine {
+                member.user_id = Some(viewer_user_id.to_string());
+                member.is_me = true;
+            }
+            member
+        })
+        .collect())
+}
+
+/// A member named by a members route's `{member}` segment.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ResolvedMember {
+    pub user_id: String,
+    pub member_id: String,
+}
+
+/// Resolves a members route's `{member}` segment to a membership of
+/// `group_id`: the opaque `memberId` the member list shows, or -- for one
+/// release, because the pinned frontend still sends it -- the caller's OWN
+/// account id (never anyone else's, so a route cannot be used to test
+/// whether an account id belongs to a member). `None` when the segment
+/// names no membership of the group.
+pub async fn resolve_member(
+    pool: &PgPool,
+    group_id: &str,
+    caller_user_id: &str,
+    segment: &str,
+) -> Result<Option<ResolvedMember>> {
+    let row: Option<(String, String)> = sqlx::query_as(
+        "SELECT user_id, public_id FROM group_members \
+         WHERE group_id = $1 AND (public_id = $2 OR (user_id = $2 AND user_id = $3))",
+    )
+    .bind(group_id)
+    .bind(segment)
+    .bind(caller_user_id)
+    .fetch_optional(pool)
+    .await?;
+    Ok(row.map(|(user_id, member_id)| ResolvedMember { user_id, member_id }))
 }
 
 /// Promotes a plain `member` to `admin`. A no-op (`false`) if the target
@@ -1404,7 +1471,18 @@ pub struct GroupTrain {
     #[ts(skip)]
     pub working_delay_minutes: Option<i32>,
     pub custom_name: Option<String>,
-    pub added_by: String,
+    /// Deprecated (DS-534 L12): the account id of the member who added it, present
+    /// ONLY when that member is the caller and `null` for everybody else.
+    /// Use `addedByMemberId` and `addedByIsMe`. Removed in a later release.
+    pub added_by: Option<String>,
+    /// The opaque, per-group id of the member who added it
+    /// (`group_members.public_id`); `null` when they have since left.
+    pub added_by_member_id: Option<String>,
+    /// Whether the member who added it is the caller.
+    pub added_by_is_me: bool,
+    #[serde(skip_serializing)]
+    #[ts(skip)]
+    pub added_by_user_id: String,
     pub added_by_name: Option<String>,
     /// Set only when `added_by_name` is `None`, and appended by the
     /// frontend to its "a member" placeholder so two sharers whose `IdP`
@@ -1472,7 +1550,10 @@ impl From<GroupTrainRow> for GroupTrain {
             trains_id: row.trains_id,
             working_delay_minutes: row.delay_minutes,
             custom_name: row.custom_name,
-            added_by: row.added_by,
+            added_by: None,
+            added_by_member_id: None,
+            added_by_is_me: false,
+            added_by_user_id: row.added_by,
             // The sharer's `users.name`, else their `users.username` --
             // never the raw internal user_id, and never their email (see
             // `users::MemberDisplay`: attribution shown to a whole group
@@ -1578,7 +1659,18 @@ pub struct GroupJourney {
     #[serde(skip_serializing)]
     #[ts(skip)]
     pub working_delay_minutes: Option<i32>,
-    pub added_by: String,
+    /// Deprecated (DS-534 L12): the account id of the member who added it, present
+    /// ONLY when that member is the caller and `null` for everybody else.
+    /// Use `addedByMemberId` and `addedByIsMe`. Removed in a later release.
+    pub added_by: Option<String>,
+    /// The opaque, per-group id of the member who added it
+    /// (`group_members.public_id`); `null` when they have since left.
+    pub added_by_member_id: Option<String>,
+    /// Whether the member who added it is the caller.
+    pub added_by_is_me: bool,
+    #[serde(skip_serializing)]
+    #[ts(skip)]
+    pub added_by_user_id: String,
     pub added_by_name: Option<String>,
     /// Same contract as `GroupTrain.added_by_tag`.
     pub added_by_tag: Option<String>,
@@ -1665,7 +1757,10 @@ impl From<GroupJourneyRow> for GroupJourney {
             delay_provisional: false,
             trains_id: row.trains_id,
             working_delay_minutes: row.delay_minutes,
-            added_by: row.added_by,
+            added_by: None,
+            added_by_member_id: None,
+            added_by_is_me: false,
+            added_by_user_id: row.added_by,
             added_by_name: added_by.label,
             added_by_tag: added_by.tag,
             service: crate::data::schedule_services::OptionalServiceModeFields(None),
@@ -2126,7 +2221,18 @@ pub struct SharedTrain {
     #[ts(skip)]
     pub working_delay_minutes: Option<i32>,
     pub custom_name: Option<String>,
-    pub added_by: String,
+    /// Deprecated (DS-534 L12): the account id of the member who added it, present
+    /// ONLY when that member is the caller and `null` for everybody else.
+    /// Use `addedByMemberId` and `addedByIsMe`. Removed in a later release.
+    pub added_by: Option<String>,
+    /// The opaque, per-group id of the member who added it
+    /// (`group_members.public_id`); `null` when they have since left.
+    pub added_by_member_id: Option<String>,
+    /// Whether the member who added it is the caller.
+    pub added_by_is_me: bool,
+    #[serde(skip_serializing)]
+    #[ts(skip)]
+    pub added_by_user_id: String,
     pub added_by_name: Option<String>,
     /// Same contract as `GroupTrain.added_by_tag`.
     pub added_by_tag: Option<String>,
@@ -2193,7 +2299,10 @@ impl From<SharedTrainRow> for SharedTrain {
             trains_id: row.trains_id,
             working_delay_minutes: row.delay_minutes,
             custom_name: row.custom_name,
-            added_by: row.added_by,
+            added_by: None,
+            added_by_member_id: None,
+            added_by_is_me: false,
+            added_by_user_id: row.added_by,
             // Same "name, else username, else nothing -- and never an
             // email" collapse `GroupTrain::from` already applies, via the
             // same `users::MemberDisplay`; see its own comment. This shape
@@ -2376,7 +2485,18 @@ pub struct SharedJourney {
     #[serde(skip_serializing)]
     #[ts(skip)]
     pub working_delay_minutes: Option<i32>,
-    pub added_by: String,
+    /// Deprecated (DS-534 L12): the account id of the member who added it, present
+    /// ONLY when that member is the caller and `null` for everybody else.
+    /// Use `addedByMemberId` and `addedByIsMe`. Removed in a later release.
+    pub added_by: Option<String>,
+    /// The opaque, per-group id of the member who added it
+    /// (`group_members.public_id`); `null` when they have since left.
+    pub added_by_member_id: Option<String>,
+    /// Whether the member who added it is the caller.
+    pub added_by_is_me: bool,
+    #[serde(skip_serializing)]
+    #[ts(skip)]
+    pub added_by_user_id: String,
     pub added_by_name: Option<String>,
     pub added_by_tag: Option<String>,
     /// `serviceMode`/`liveTracking` of the summarised leg's train, from
@@ -2464,7 +2584,10 @@ impl From<SharedJourneyRow> for SharedJourney {
             delay_provisional: false,
             trains_id: row.trains_id,
             working_delay_minutes: row.delay_minutes,
-            added_by: row.added_by,
+            added_by: None,
+            added_by_member_id: None,
+            added_by_is_me: false,
+            added_by_user_id: row.added_by,
             added_by_name: added_by.label,
             added_by_tag: added_by.tag,
             service: crate::data::schedule_services::OptionalServiceModeFields(None),
@@ -2795,7 +2918,18 @@ struct GroupCustomLineRow {
 pub struct GroupCustomLine {
     pub line_id: String,
     pub line_name: String,
-    pub granted_by: String,
+    /// Deprecated (DS-534 L12): the account id of the member who shared it, present
+    /// ONLY when that member is the caller and `null` for everybody else.
+    /// Use `grantedByMemberId` and `grantedByIsMe`. Removed in a later release.
+    pub granted_by: Option<String>,
+    /// The opaque, per-group id of the member who shared it
+    /// (`group_members.public_id`); `null` when they have since left.
+    pub granted_by_member_id: Option<String>,
+    /// Whether the member who shared it is the caller.
+    pub granted_by_is_me: bool,
+    #[serde(skip_serializing)]
+    #[ts(skip)]
+    pub granted_by_user_id: String,
     pub granted_by_name: Option<String>,
     /// Same contract, same derivation, as `GroupTrain.added_by_tag`: set
     /// only when there is no showable name, so a group whose `IdP` can name
@@ -2813,7 +2947,10 @@ impl From<GroupCustomLineRow> for GroupCustomLine {
         GroupCustomLine {
             line_id: row.line_id,
             line_name: row.line_name,
-            granted_by: row.granted_by,
+            granted_by: None,
+            granted_by_member_id: None,
+            granted_by_is_me: false,
+            granted_by_user_id: row.granted_by,
             // The sharer's `users.name`, else their `users.username` --
             // never the raw internal user id, and never their email (see
             // `users::MemberDisplay`: attribution shown to a whole group
@@ -2875,7 +3012,18 @@ pub struct SharedCustomLine {
     pub group_name: String,
     pub line_id: String,
     pub line_name: String,
-    pub granted_by: String,
+    /// Deprecated (DS-534 L12): the account id of the member who shared it, present
+    /// ONLY when that member is the caller and `null` for everybody else.
+    /// Use `grantedByMemberId` and `grantedByIsMe`. Removed in a later release.
+    pub granted_by: Option<String>,
+    /// The opaque, per-group id of the member who shared it
+    /// (`group_members.public_id`); `null` when they have since left.
+    pub granted_by_member_id: Option<String>,
+    /// Whether the member who shared it is the caller.
+    pub granted_by_is_me: bool,
+    #[serde(skip_serializing)]
+    #[ts(skip)]
+    pub granted_by_user_id: String,
     pub granted_by_name: Option<String>,
     /// Same contract as `GroupCustomLine.granted_by_tag`.
     pub granted_by_tag: Option<String>,
@@ -2893,7 +3041,10 @@ impl From<SharedCustomLineRow> for SharedCustomLine {
             group_name: row.group_name,
             line_id: row.line_id,
             line_name: row.line_name,
-            granted_by: row.granted_by,
+            granted_by: None,
+            granted_by_member_id: None,
+            granted_by_is_me: false,
+            granted_by_user_id: row.granted_by,
             // Same "name, else username, else nothing -- and never an
             // email" collapse `GroupCustomLine::from` already applies, via
             // the same `users::MemberDisplay`; see its own comment. This
@@ -3010,6 +3161,150 @@ pub async fn groups_shared_with_line(
         .into_iter()
         .map(|(id, name)| LineGroupRef { id, name })
         .collect())
+}
+
+/// A list item that names the member who shared it. The sharer's account id
+/// is held in a field that is never serialised; the wire carries the
+/// opaque per-group `memberId` and `isMe` instead, filled in by
+/// [`attribute_members`] (DS-534 L12). An item that skips that call
+/// serialises neither id, so a forgotten call fails safe.
+pub trait Attributed {
+    /// The group the item was shared into, when the item carries it.
+    fn group_id(&self) -> Option<&str>;
+    /// The sharer's account id.
+    fn sharer_user_id(&self) -> &str;
+    /// Records the sharer's opaque id, and whether they are `viewer`.
+    fn set_sharer(&mut self, member_id: Option<String>, viewer: &str);
+}
+
+impl Attributed for GroupTrain {
+    fn group_id(&self) -> Option<&str> {
+        None
+    }
+    fn sharer_user_id(&self) -> &str {
+        &self.added_by_user_id
+    }
+    fn set_sharer(&mut self, member_id: Option<String>, viewer: &str) {
+        self.added_by_is_me = self.added_by_user_id == viewer;
+        self.added_by = self.added_by_is_me.then(|| viewer.to_string());
+        self.added_by_member_id = member_id;
+    }
+}
+
+impl Attributed for GroupJourney {
+    fn group_id(&self) -> Option<&str> {
+        None
+    }
+    fn sharer_user_id(&self) -> &str {
+        &self.added_by_user_id
+    }
+    fn set_sharer(&mut self, member_id: Option<String>, viewer: &str) {
+        self.added_by_is_me = self.added_by_user_id == viewer;
+        self.added_by = self.added_by_is_me.then(|| viewer.to_string());
+        self.added_by_member_id = member_id;
+    }
+}
+
+impl Attributed for SharedTrain {
+    fn group_id(&self) -> Option<&str> {
+        Some(self.group_id.as_str())
+    }
+    fn sharer_user_id(&self) -> &str {
+        &self.added_by_user_id
+    }
+    fn set_sharer(&mut self, member_id: Option<String>, viewer: &str) {
+        self.added_by_is_me = self.added_by_user_id == viewer;
+        self.added_by = self.added_by_is_me.then(|| viewer.to_string());
+        self.added_by_member_id = member_id;
+    }
+}
+
+impl Attributed for SharedJourney {
+    fn group_id(&self) -> Option<&str> {
+        Some(self.group_id.as_str())
+    }
+    fn sharer_user_id(&self) -> &str {
+        &self.added_by_user_id
+    }
+    fn set_sharer(&mut self, member_id: Option<String>, viewer: &str) {
+        self.added_by_is_me = self.added_by_user_id == viewer;
+        self.added_by = self.added_by_is_me.then(|| viewer.to_string());
+        self.added_by_member_id = member_id;
+    }
+}
+
+impl Attributed for GroupCustomLine {
+    fn group_id(&self) -> Option<&str> {
+        None
+    }
+    fn sharer_user_id(&self) -> &str {
+        &self.granted_by_user_id
+    }
+    fn set_sharer(&mut self, member_id: Option<String>, viewer: &str) {
+        self.granted_by_is_me = self.granted_by_user_id == viewer;
+        self.granted_by = self.granted_by_is_me.then(|| viewer.to_string());
+        self.granted_by_member_id = member_id;
+    }
+}
+
+impl Attributed for SharedCustomLine {
+    fn group_id(&self) -> Option<&str> {
+        Some(self.group_id.as_str())
+    }
+    fn sharer_user_id(&self) -> &str {
+        &self.granted_by_user_id
+    }
+    fn set_sharer(&mut self, member_id: Option<String>, viewer: &str) {
+        self.granted_by_is_me = self.granted_by_user_id == viewer;
+        self.granted_by = self.granted_by_is_me.then(|| viewer.to_string());
+        self.granted_by_member_id = member_id;
+    }
+}
+
+/// Fills each item's sharer attribution for `viewer`: the sharer's opaque
+/// per-group member id, whether the sharer is the viewer, and the
+/// deprecated account id only when it is the viewer's own. `group_id` is the
+/// group of every item that does not carry its own (the group-scoped
+/// lists). One query for the whole list.
+pub async fn attribute_members<T: Attributed>(
+    pool: &PgPool,
+    viewer: &str,
+    group_id: Option<&str>,
+    items: &mut [T],
+) -> Result<()> {
+    if items.is_empty() {
+        return Ok(());
+    }
+    let group_of = |item: &T| item.group_id().or(group_id).map(str::to_string);
+    let mut group_ids: Vec<String> = items.iter().filter_map(&group_of).collect();
+    group_ids.sort_unstable();
+    group_ids.dedup();
+    let mut user_ids: Vec<String> = items
+        .iter()
+        .map(|item| item.sharer_user_id().to_string())
+        .collect();
+    user_ids.sort_unstable();
+    user_ids.dedup();
+    let rows: Vec<(String, String, String)> = sqlx::query_as(
+        "SELECT group_id, user_id, public_id FROM group_members \
+         WHERE group_id = ANY($1) AND user_id = ANY($2)",
+    )
+    .bind(&group_ids)
+    .bind(&user_ids)
+    .fetch_all(pool)
+    .await?;
+    let ids: std::collections::HashMap<(String, String), String> = rows
+        .into_iter()
+        .map(|(group, user, public_id)| ((group, user), public_id))
+        .collect();
+    for item in items.iter_mut() {
+        let member_id = group_of(&*item).and_then(|group| {
+            ids.get(&(group, item.sharer_user_id().to_string()))
+                .cloned()
+        });
+        item.set_sharer(member_id, viewer);
+    }
+    Ok(())
 }
 
 #[cfg(test)]
@@ -4637,7 +4932,7 @@ mod db_tests {
         let trains = list_group_trains(&pool, &group_id).await.expect("list");
         assert_eq!(trains.len(), 1);
         assert_eq!(trains[0].train_subscription_id, train_id);
-        assert_eq!(trains[0].added_by, "TEST-GROUPS-LISTTRAINS-OWNER");
+        assert_eq!(trains[0].added_by_user_id, "TEST-GROUPS-LISTTRAINS-OWNER");
         assert!(trains[0].added_by_name.is_some());
 
         sqlx::query("DELETE FROM train_subscriptions WHERE id = $1")
@@ -5175,7 +5470,7 @@ mod db_tests {
         assert_eq!(journeys.len(), 1);
         assert_eq!(journeys[0].journey_id, journey_id);
         assert_eq!(journeys[0].leg_count, 1);
-        assert_eq!(journeys[0].added_by, "TEST-GROUPS-LISTJOURNEY-1");
+        assert_eq!(journeys[0].added_by_user_id, "TEST-GROUPS-LISTJOURNEY-1");
 
         sqlx::query("DELETE FROM journeys WHERE id = $1")
             .bind(journey_id)
@@ -5895,7 +6190,7 @@ mod db_tests {
         assert_eq!(shared[0].train_subscription_id, train_id);
         assert_eq!(shared[0].group_id, group_id);
         assert_eq!(shared[0].group_name, "Shared Mine Test");
-        assert_eq!(shared[0].added_by, "TEST-GROUPS-SHAREDMINE-SHARER");
+        assert_eq!(shared[0].added_by_user_id, "TEST-GROUPS-SHAREDMINE-SHARER");
         assert_eq!(
             shared[0].added_by_name.as_deref(),
             Some("TEST-GROUPS-SHAREDMINE-SHARER"),
@@ -6571,7 +6866,7 @@ mod db_tests {
         assert_eq!(in_a.len(), 1);
         assert_eq!(in_a[0].line_id, line_id);
         assert_eq!(in_a[0].line_name, "Grant List Line");
-        assert_eq!(in_a[0].granted_by, "TEST-GRANT-LIST-OWNER");
+        assert_eq!(in_a[0].granted_by_user_id, "TEST-GRANT-LIST-OWNER");
         assert!(in_a[0].granted_by_name.is_some());
 
         let groups = groups_shared_with_line(&pool, &line_id, "TEST-GRANT-LIST-OWNER")
@@ -6699,7 +6994,10 @@ mod custom_line_grant_wire_shape_tests {
         let value = serde_json::to_value(GroupCustomLine {
             line_id: "custom-my-commute".to_string(),
             line_name: "My Commute".to_string(),
-            granted_by: "user-1".to_string(),
+            granted_by: None,
+            granted_by_member_id: None,
+            granted_by_is_me: false,
+            granted_by_user_id: "user-1".to_string(),
             granted_by_name: Some("Alex".to_string()),
             granted_by_tag: None,
         })
@@ -6715,6 +7013,8 @@ mod custom_line_grant_wire_shape_tests {
             keys,
             vec![
                 "grantedBy",
+                "grantedByIsMe",
+                "grantedByMemberId",
                 "grantedByName",
                 "grantedByTag",
                 "lineId",
@@ -6735,7 +7035,10 @@ mod custom_line_grant_wire_shape_tests {
             group_name: "Family".to_string(),
             line_id: "custom-my-commute".to_string(),
             line_name: "My Commute".to_string(),
-            granted_by: "user-1".to_string(),
+            granted_by: None,
+            granted_by_member_id: None,
+            granted_by_is_me: false,
+            granted_by_user_id: "user-1".to_string(),
             granted_by_name: Some("Alex".to_string()),
             granted_by_tag: None,
         })
@@ -6751,6 +7054,8 @@ mod custom_line_grant_wire_shape_tests {
             keys,
             vec![
                 "grantedBy",
+                "grantedByIsMe",
+                "grantedByMemberId",
                 "grantedByName",
                 "grantedByTag",
                 "groupId",
@@ -6855,7 +7160,10 @@ mod group_train_wire_shape_tests {
             trains_id: None,
             working_delay_minutes: None,
             custom_name: None,
-            added_by: "user-1".to_string(),
+            added_by: None,
+            added_by_member_id: None,
+            added_by_is_me: false,
+            added_by_user_id: "user-1".to_string(),
             added_by_name: Some("Alex".to_string()),
             added_by_tag: None,
             service: crate::data::schedule_services::ServiceModeFields::default(),
@@ -6876,6 +7184,8 @@ mod group_train_wire_shape_tests {
             keys,
             vec![
                 "addedBy",
+                "addedByIsMe",
+                "addedByMemberId",
                 "addedByName",
                 "addedByTag",
                 "customName",
@@ -6924,7 +7234,10 @@ mod group_train_wire_shape_tests {
             delay_provisional: false,
             trains_id: None,
             working_delay_minutes: None,
-            added_by: "user-1".to_string(),
+            added_by: None,
+            added_by_member_id: None,
+            added_by_is_me: false,
+            added_by_user_id: "user-1".to_string(),
             added_by_name: Some("Alex".to_string()),
             added_by_tag: None,
             service: crate::data::schedule_services::OptionalServiceModeFields(None),
@@ -6957,6 +7270,8 @@ mod group_train_wire_shape_tests {
             keys_of(&untracked),
             vec![
                 "addedBy",
+                "addedByIsMe",
+                "addedByMemberId",
                 "addedByName",
                 "addedByTag",
                 "customName",
@@ -7032,7 +7347,10 @@ mod group_train_wire_shape_tests {
             trains_id: Some(1),
             working_delay_minutes: None,
             custom_name: None,
-            added_by: "user-1".to_string(),
+            added_by: None,
+            added_by_member_id: None,
+            added_by_is_me: false,
+            added_by_user_id: "user-1".to_string(),
             added_by_name: None,
             added_by_tag: None,
             service: crate::data::schedule_services::ServiceModeFields::default(),
@@ -7060,7 +7378,10 @@ mod group_train_wire_shape_tests {
             trains_id: Some(1),
             working_delay_minutes: None,
             custom_name: None,
-            added_by: "user-1".to_string(),
+            added_by: None,
+            added_by_member_id: None,
+            added_by_is_me: false,
+            added_by_user_id: "user-1".to_string(),
             added_by_name: None,
             added_by_tag: None,
             service: train.service,
@@ -7107,7 +7428,10 @@ mod group_train_wire_shape_tests {
             delay_provisional: false,
             trains_id: None,
             working_delay_minutes: None,
-            added_by: "user-1".to_string(),
+            added_by: None,
+            added_by_member_id: None,
+            added_by_is_me: false,
+            added_by_user_id: "user-1".to_string(),
             added_by_name: None,
             added_by_tag: None,
             service: journey.service,
@@ -7169,7 +7493,10 @@ mod shared_train_wire_shape_tests {
             trains_id: None,
             working_delay_minutes: None,
             custom_name: None,
-            added_by: "user-1".to_string(),
+            added_by: None,
+            added_by_member_id: None,
+            added_by_is_me: false,
+            added_by_user_id: "user-1".to_string(),
             added_by_name: Some("Alex".to_string()),
             added_by_tag: None,
             service: crate::data::schedule_services::ServiceModeFields::default(),
@@ -7201,6 +7528,8 @@ mod shared_train_wire_shape_tests {
             keys,
             vec![
                 "addedBy",
+                "addedByIsMe",
+                "addedByMemberId",
                 "addedByName",
                 "addedByTag",
                 "customName",
@@ -7295,7 +7624,9 @@ mod group_member_wire_shape_tests {
     #[test]
     fn group_member_json_never_includes_a_raw_email_field() {
         let member = GroupMember {
-            user_id: "user-1".to_string(),
+            user_id: Some("user-1".to_string()),
+            member_id: "member-1".to_string(),
+            is_me: true,
             display_name: Some("Alex".to_string()),
             display_tag: None,
             role: GroupRole::Member,
@@ -7311,7 +7642,15 @@ mod group_member_wire_shape_tests {
         keys.sort_unstable();
         assert_eq!(
             keys,
-            vec!["displayName", "displayTag", "joinedAt", "role", "userId"]
+            vec![
+                "displayName",
+                "displayTag",
+                "isMe",
+                "joinedAt",
+                "memberId",
+                "role",
+                "userId"
+            ]
         );
     }
 }
@@ -7337,6 +7676,7 @@ mod display_name_collapse_tests {
     fn member_row(name: Option<&str>, username: Option<&str>) -> GroupMemberRow {
         GroupMemberRow {
             user_id: "user-1".to_string(),
+            public_id: "member-1".to_string(),
             name: name.map(str::to_string),
             username: username.map(str::to_string),
             role: "member".to_string(),
@@ -7453,6 +7793,8 @@ mod display_name_collapse_tests {
             id: "group-1".to_string(),
             name: "Family".to_string(),
             owner_id: "user-1".to_string(),
+            owner_member_id: "member-1".to_string(),
+            member_id: "member-2".to_string(),
             owner_name: name.map(str::to_string),
             owner_username: username.map(str::to_string),
             member_count: 2,

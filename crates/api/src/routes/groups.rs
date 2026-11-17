@@ -40,15 +40,15 @@ pub fn router() -> Router {
         )
         .route("/groups/{id}/members", axum::routing::get(list_members))
         .route(
-            "/groups/{id}/members/{user_id}",
+            "/groups/{id}/members/{member}",
             axum::routing::delete(remove_member),
         )
         .route(
-            "/groups/{id}/members/{user_id}/promote",
+            "/groups/{id}/members/{member}/promote",
             axum::routing::post(promote_member),
         )
         .route(
-            "/groups/{id}/members/{user_id}/demote",
+            "/groups/{id}/members/{member}/demote",
             axum::routing::post(demote_member),
         )
         .route(
@@ -267,7 +267,16 @@ async fn list_groups(
 pub(crate) struct GroupDetailResponse {
     id: String,
     name: String,
-    owner_id: String,
+    /// Deprecated (DS-534 L12): the owner's account id, present ONLY when
+    /// the caller is the owner and `null` otherwise. Use `ownerMemberId`.
+    /// Removed in a later release.
+    owner_id: Option<String>,
+    /// The owner's opaque id in this group; compare it with the member
+    /// list's `memberId`.
+    owner_member_id: String,
+    /// The caller's own opaque id in this group (the member list's row with
+    /// `isMe`).
+    member_id: String,
     owner_name: Option<String>,
     /// Present only when `owner_name` is absent -- the distinguishing
     /// suffix for the generic placeholder; see
@@ -306,7 +315,9 @@ async fn get_group(
     Ok(Json(GroupDetailResponse {
         id: detail.id,
         name: detail.name,
-        owner_id: detail.owner_id,
+        owner_id: detail.role.is_owner().then_some(detail.owner_id),
+        owner_member_id: detail.owner_member_id,
+        member_id: detail.member_id,
         owner_name: detail.owner_name,
         owner_tag: detail.owner_tag,
         member_count: detail.member_count,
@@ -361,13 +372,28 @@ async fn list_members(
 ) -> Result<Json<Vec<groups::GroupMember>>, (StatusCode, String)> {
     require_member(&app, &group_id, &user.id).await?;
 
-    let members = groups::list_members(&app.database, &group_id)
+    let members = groups::list_members(&app.database, &group_id, &user.id)
         .await
         .map_err(internal_error("list members"))?;
     Ok(Json(members))
 }
 
-/// `DELETE /groups/{id}/members/{userId}` -- self-removal ("leave") is
+/// The membership a members route's `{member}` segment names, or `404`
+/// (`groups::resolve_member`: the opaque member id, or the caller's own
+/// account id).
+async fn resolve_target(
+    app: &App,
+    group_id: &str,
+    caller_user_id: &str,
+    member: &str,
+) -> Result<groups::ResolvedMember, (StatusCode, String)> {
+    groups::resolve_member(&app.database, group_id, caller_user_id, member)
+        .await
+        .map_err(internal_error("resolve member"))?
+        .ok_or((StatusCode::NOT_FOUND, "no member with that id".to_string()))
+}
+
+/// `DELETE /groups/{id}/members/{member}` -- self-removal ("leave") is
 /// always allowed for any member; removing someone ELSE requires
 /// `admin`/`owner`, and can never target the `owner` row regardless of the
 /// caller's own role (spec §3: "an admin can never remove the owner" --
@@ -390,9 +416,12 @@ async fn list_members(
 async fn remove_member(
     State(app): State<App>,
     user: AuthenticatedUser,
-    Path((group_id, target_user_id)): Path<(String, String)>,
+    Path((group_id, member)): Path<(String, String)>,
 ) -> Result<StatusCode, (StatusCode, String)> {
     let caller_role = require_member(&app, &group_id, &user.id).await?;
+    let target_user_id = resolve_target(&app, &group_id, &user.id, &member)
+        .await?
+        .user_id;
 
     let is_self = target_user_id == user.id;
     if !is_self && !caller_role.can_manage() {
@@ -427,16 +456,22 @@ async fn remove_member(
 #[derive(Debug, Serialize, ts_rs::TS)]
 #[serde(rename_all = "camelCase")]
 pub(crate) struct RoleChangeResponse {
-    user_id: String,
+    /// Deprecated (DS-534 L12): always `null` (the target of a role change
+    /// is never the caller). Use `memberId`. Removed in a later release.
+    user_id: Option<String>,
+    /// The opaque id of the member whose role changed.
+    member_id: String,
     role: GroupRole,
 }
 
 async fn promote_member(
     State(app): State<App>,
     user: AuthenticatedUser,
-    Path((group_id, target_user_id)): Path<(String, String)>,
+    Path((group_id, member)): Path<(String, String)>,
 ) -> Result<Json<RoleChangeResponse>, (StatusCode, String)> {
     require_role(&app, &group_id, &user.id, GroupRole::is_owner).await?;
+    let target = resolve_target(&app, &group_id, &user.id, &member).await?;
+    let target_user_id = target.user_id;
 
     let target_role = groups::get_member_role(&app.database, &group_id, &target_user_id)
         .await
@@ -456,7 +491,8 @@ async fn promote_member(
         return Err((StatusCode::NOT_FOUND, "no member with that id".to_string()));
     }
     Ok(Json(RoleChangeResponse {
-        user_id: target_user_id,
+        user_id: None,
+        member_id: target.member_id,
         role: GroupRole::Admin,
     }))
 }
@@ -495,7 +531,7 @@ fn demote_rejection(target_role: Option<GroupRole>) -> Option<(StatusCode, Strin
     }
 }
 
-/// `POST /groups/{id}/members/{userId}/demote` -- the inverse of
+/// `POST /groups/{id}/members/{member}/demote` -- the inverse of
 /// `promote_member`, returning an `admin` to a plain `member` while
 /// leaving their membership (and anything they've shared into the group)
 /// untouched.
@@ -520,9 +556,11 @@ fn demote_rejection(target_role: Option<GroupRole>) -> Option<(StatusCode, Strin
 async fn demote_member(
     State(app): State<App>,
     user: AuthenticatedUser,
-    Path((group_id, target_user_id)): Path<(String, String)>,
+    Path((group_id, member)): Path<(String, String)>,
 ) -> Result<Json<RoleChangeResponse>, (StatusCode, String)> {
     require_role(&app, &group_id, &user.id, GroupRole::is_owner).await?;
+    let target = resolve_target(&app, &group_id, &user.id, &member).await?;
+    let target_user_id = target.user_id;
 
     let target_role = groups::get_member_role(&app.database, &group_id, &target_user_id)
         .await
@@ -542,7 +580,8 @@ async fn demote_member(
         return Err((StatusCode::NOT_FOUND, "no member with that id".to_string()));
     }
     Ok(Json(RoleChangeResponse {
-        user_id: target_user_id,
+        user_id: None,
+        member_id: target.member_id,
         role: GroupRole::Member,
     }))
 }
@@ -674,9 +713,12 @@ async fn list_group_trains_route(
 ) -> Result<Json<Vec<groups::GroupTrain>>, (StatusCode, String)> {
     require_member(&app, &group_id, &user.id).await?;
 
-    let trains = groups::list_group_trains(&app.database, &group_id)
+    let mut trains = groups::list_group_trains(&app.database, &group_id)
         .await
         .map_err(internal_error("list group trains"))?;
+    groups::attribute_members(&app.database, &user.id, Some(&group_id), &mut trains)
+        .await
+        .map_err(internal_error("attribute group trains"))?;
     Ok(Json(trains))
 }
 
@@ -696,9 +738,12 @@ async fn list_shared_trains_route(
     State(app): State<App>,
     user: AuthenticatedUser,
 ) -> Result<Json<Vec<groups::SharedTrain>>, (StatusCode, String)> {
-    let trains = groups::list_shared_trains_for_user(&app.database, &user.id)
+    let mut trains = groups::list_shared_trains_for_user(&app.database, &user.id)
         .await
         .map_err(internal_error("list shared trains"))?;
+    groups::attribute_members(&app.database, &user.id, None, &mut trains)
+        .await
+        .map_err(internal_error("attribute shared trains"))?;
     Ok(Json(trains))
 }
 
@@ -778,6 +823,9 @@ async fn list_group_journeys_route(
     let mut journeys = groups::list_group_journeys(&app.database, &group_id)
         .await
         .map_err(internal_error("list group journeys"))?;
+    groups::attribute_members(&app.database, &user.id, Some(&group_id), &mut journeys)
+        .await
+        .map_err(internal_error("attribute group journeys"))?;
     mark_followed(&app, &user.id, &mut journeys, |j| {
         (j.journey_id, &mut j.following)
     })
@@ -818,6 +866,9 @@ async fn list_shared_journeys_route(
     let mut journeys = groups::list_shared_journeys_for_user(&app.database, &user.id)
         .await
         .map_err(internal_error("list shared journeys"))?;
+    groups::attribute_members(&app.database, &user.id, None, &mut journeys)
+        .await
+        .map_err(internal_error("attribute shared journeys"))?;
     mark_followed(&app, &user.id, &mut journeys, |j| {
         (j.journey_id, &mut j.following)
     })
@@ -896,9 +947,12 @@ async fn list_group_custom_lines_route(
 ) -> Result<Json<Vec<groups::GroupCustomLine>>, (StatusCode, String)> {
     require_member(&app, &group_id, &user.id).await?;
 
-    let lines = groups::list_group_custom_lines(&app.database, &group_id)
+    let mut lines = groups::list_group_custom_lines(&app.database, &group_id)
         .await
         .map_err(internal_error("list group custom lines"))?;
+    groups::attribute_members(&app.database, &user.id, Some(&group_id), &mut lines)
+        .await
+        .map_err(internal_error("attribute group custom lines"))?;
     Ok(Json(lines))
 }
 
@@ -1004,9 +1058,12 @@ async fn list_shared_custom_lines_route(
     State(app): State<App>,
     user: AuthenticatedUser,
 ) -> Result<Json<Vec<groups::SharedCustomLine>>, (StatusCode, String)> {
-    let lines = groups::list_shared_custom_lines_for_user(&app.database, &user.id)
+    let mut lines = groups::list_shared_custom_lines_for_user(&app.database, &user.id)
         .await
         .map_err(internal_error("list shared custom lines"))?;
+    groups::attribute_members(&app.database, &user.id, None, &mut lines)
+        .await
+        .map_err(internal_error("attribute shared custom lines"))?;
     Ok(Json(lines))
 }
 
@@ -1357,6 +1414,20 @@ mod db_tests {
         .expect("seed fixture group membership");
     }
 
+    /// The opaque member id (`group_members.public_id`) the members routes
+    /// take; a made-up one for a user who is not a member.
+    async fn member_ref(pool: &PgPool, group_id: &str, user_id: &str) -> String {
+        let row: Option<(String,)> = sqlx::query_as(
+            "SELECT public_id FROM group_members WHERE group_id = $1 AND user_id = $2",
+        )
+        .bind(group_id)
+        .bind(user_id)
+        .fetch_optional(pool)
+        .await
+        .expect("read a member id");
+        row.map_or_else(|| "no-such-member".to_string(), |(id,)| id)
+    }
+
     /// Seeds one bare tracked train owned by `user_id` and returns its id
     /// -- same minimal column set `crate::data::groups::db_tests`' own
     /// helper of this name inserts, for the same reason (nothing under
@@ -1519,7 +1590,10 @@ mod db_tests {
         let router = test_router(test_app(pool.clone()));
         let (status, body) = delete_request(
             router,
-            format!("/groups/{group_id}/members/TEST-ROUTE-GROUPS-RM-OWNER"),
+            format!(
+                "/groups/{group_id}/members/{}",
+                member_ref(&pool, &group_id, "TEST-ROUTE-GROUPS-RM-OWNER").await
+            ),
             Some(&admin_token),
         )
         .await;
@@ -1572,7 +1646,10 @@ mod db_tests {
         // distinction the frontend's promote control has to mirror.
         let (status, _body) = post_json(
             router,
-            format!("/groups/{group_id}/members/TEST-ROUTE-GROUPS-PROMO-MEMBER/promote"),
+            format!(
+                "/groups/{group_id}/members/{}/promote",
+                member_ref(&pool, &group_id, "TEST-ROUTE-GROUPS-PROMO-MEMBER").await
+            ),
             Some(&admin_token),
             None,
         )
@@ -1626,14 +1703,21 @@ mod db_tests {
         let router = test_router(test_app(pool.clone()));
         let (status, body) = post_json(
             router,
-            format!("/groups/{group_id}/members/TEST-ROUTE-GROUPS-DEMO-ADMIN/demote"),
+            format!(
+                "/groups/{group_id}/members/{}/demote",
+                member_ref(&pool, &group_id, "TEST-ROUTE-GROUPS-DEMO-ADMIN").await
+            ),
             Some(&owner_token),
             None,
         )
         .await;
 
         assert_eq!(status, StatusCode::OK);
-        assert_eq!(body["userId"], "TEST-ROUTE-GROUPS-DEMO-ADMIN");
+        assert_eq!(
+            body["memberId"],
+            member_ref(&pool, &group_id, "TEST-ROUTE-GROUPS-DEMO-ADMIN").await
+        );
+        assert!(body["userId"].is_null());
         assert_eq!(body["role"], "member");
 
         let target_role =
@@ -1688,7 +1772,10 @@ mod db_tests {
         // every other admin.
         let (status, _body) = post_json(
             test_router(test_app(pool.clone())),
-            format!("/groups/{group_id}/members/TEST-ROUTE-GROUPS-DEMO2-TARGET/demote"),
+            format!(
+                "/groups/{group_id}/members/{}/demote",
+                member_ref(&pool, &group_id, "TEST-ROUTE-GROUPS-DEMO2-TARGET").await
+            ),
             Some(&admin_token),
             None,
         )
@@ -1698,7 +1785,10 @@ mod db_tests {
         // ...and neither can a plain member.
         let (status, _body) = post_json(
             test_router(test_app(pool.clone())),
-            format!("/groups/{group_id}/members/TEST-ROUTE-GROUPS-DEMO2-TARGET/demote"),
+            format!(
+                "/groups/{group_id}/members/{}/demote",
+                member_ref(&pool, &group_id, "TEST-ROUTE-GROUPS-DEMO2-TARGET").await
+            ),
             Some(&member_token),
             None,
         )
@@ -1711,7 +1801,10 @@ mod db_tests {
         // doc's own 403-vs-404 policy).
         let (status, _body) = post_json(
             test_router(test_app(pool.clone())),
-            format!("/groups/{group_id}/members/TEST-ROUTE-GROUPS-DEMO2-TARGET/demote"),
+            format!(
+                "/groups/{group_id}/members/{}/demote",
+                member_ref(&pool, &group_id, "TEST-ROUTE-GROUPS-DEMO2-TARGET").await
+            ),
             Some(&outsider_token),
             None,
         )
@@ -1769,7 +1862,10 @@ mod db_tests {
         // supported exit, and it transfers ownership first.
         let (status, body) = post_json(
             test_router(test_app(pool.clone())),
-            format!("/groups/{group_id}/members/TEST-ROUTE-GROUPS-DEMO3-OWNER/demote"),
+            format!(
+                "/groups/{group_id}/members/{}/demote",
+                member_ref(&pool, &group_id, "TEST-ROUTE-GROUPS-DEMO3-OWNER").await
+            ),
             Some(&owner_token),
             None,
         )
@@ -1789,7 +1885,10 @@ mod db_tests {
         // a silent success -- the mirror of `promote_member`'s own 409.
         let (status, body) = post_json(
             test_router(test_app(pool.clone())),
-            format!("/groups/{group_id}/members/TEST-ROUTE-GROUPS-DEMO3-MEMBER/demote"),
+            format!(
+                "/groups/{group_id}/members/{}/demote",
+                member_ref(&pool, &group_id, "TEST-ROUTE-GROUPS-DEMO3-MEMBER").await
+            ),
             Some(&owner_token),
             None,
         )
@@ -1804,7 +1903,10 @@ mod db_tests {
         // `promote_member`/`remove_member` give.
         let (status, _body) = post_json(
             test_router(test_app(pool.clone())),
-            format!("/groups/{group_id}/members/TEST-ROUTE-GROUPS-DEMO3-NOBODY/demote"),
+            format!(
+                "/groups/{group_id}/members/{}/demote",
+                member_ref(&pool, &group_id, "TEST-ROUTE-GROUPS-DEMO3-NOBODY").await
+            ),
             Some(&owner_token),
             None,
         )
@@ -1895,6 +1997,84 @@ mod db_tests {
         .await;
     }
 
+    /// DS-534 L12: the member list and the group detail give a co-member
+    /// opaque ids, and an account id only for the caller's own row.
+    #[tokio::test]
+    #[ignore = "requires a live database; run with `cargo test -p api \
+                member_list_and_detail_carry_opaque_ids_and_only_the_callers_own_account_id \
+                -- --ignored --test-threads=1`"]
+    async fn member_list_and_detail_carry_opaque_ids_and_only_the_callers_own_account_id() {
+        let pool = connect().await;
+        seed_session(&pool, "TEST-ROUTE-GROUPS-OPAQUE-OWNER").await;
+        let viewer_token = seed_session(&pool, "TEST-ROUTE-GROUPS-OPAQUE-VIEWER").await;
+        let group_id = crate::data::groups::create_group(
+            &pool,
+            "Route Test Opaque Ids",
+            "TEST-ROUTE-GROUPS-OPAQUE-OWNER",
+        )
+        .await
+        .expect("create fixture group");
+        seed_membership(
+            &pool,
+            &group_id,
+            "TEST-ROUTE-GROUPS-OPAQUE-VIEWER",
+            "member",
+        )
+        .await;
+        let owner_member_id = member_ref(&pool, &group_id, "TEST-ROUTE-GROUPS-OPAQUE-OWNER").await;
+        let viewer_member_id =
+            member_ref(&pool, &group_id, "TEST-ROUTE-GROUPS-OPAQUE-VIEWER").await;
+        assert_ne!(owner_member_id, "TEST-ROUTE-GROUPS-OPAQUE-OWNER");
+
+        let router = test_router(test_app(pool.clone()));
+        let (status, members) = request(
+            router.clone(),
+            format!("/groups/{group_id}/members"),
+            Some(&viewer_token),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        let members = members.as_array().expect("an array of members");
+        assert_eq!(members.len(), 2, "got {members:?}");
+        for member in members {
+            let member_id = member.get("memberId").and_then(Value::as_str);
+            if member_id == Some(viewer_member_id.as_str()) {
+                assert_eq!(member.get("isMe"), Some(&Value::Bool(true)));
+                assert_eq!(
+                    member.get("userId").and_then(Value::as_str),
+                    Some("TEST-ROUTE-GROUPS-OPAQUE-VIEWER")
+                );
+            } else {
+                assert_eq!(member_id, Some(owner_member_id.as_str()));
+                assert_eq!(member.get("isMe"), Some(&Value::Bool(false)));
+                assert_eq!(member.get("userId"), Some(&Value::Null));
+            }
+        }
+
+        let (status, detail) =
+            request(router, format!("/groups/{group_id}"), Some(&viewer_token)).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(detail.get("ownerId"), Some(&Value::Null));
+        assert_eq!(
+            detail.get("ownerMemberId").and_then(Value::as_str),
+            Some(owner_member_id.as_str())
+        );
+        assert_eq!(
+            detail.get("memberId").and_then(Value::as_str),
+            Some(viewer_member_id.as_str())
+        );
+
+        cleanup(
+            &pool,
+            &group_id,
+            &[
+                "TEST-ROUTE-GROUPS-OPAQUE-OWNER",
+                "TEST-ROUTE-GROUPS-OPAQUE-VIEWER",
+            ],
+        )
+        .await;
+    }
+
     #[tokio::test]
     #[ignore = "requires a live database; see the plan's Global Constraints for the \
                 DATABASE_URL incantation, then run with `cargo test -p api \
@@ -1960,6 +2140,16 @@ mod db_tests {
             rows[0].get("addedByName").and_then(Value::as_str),
             Some("TEST-ROUTE-GROUPS-SHARED-SHARER")
         );
+        // DS-534 L12: the sharer's account id never reaches a co-member;
+        // the opaque per-group member id does.
+        let sharer_member_id =
+            member_ref(&pool, &group_id, "TEST-ROUTE-GROUPS-SHARED-SHARER").await;
+        assert_eq!(rows[0].get("addedBy"), Some(&Value::Null));
+        assert_eq!(
+            rows[0].get("addedByMemberId").and_then(Value::as_str),
+            Some(sharer_member_id.as_str())
+        );
+        assert_eq!(rows[0].get("addedByIsMe"), Some(&Value::Bool(false)));
         assert!(
             rows[0].get("tickets").is_none() && rows[0].get("notificationsEnabled").is_none(),
             "spec §4's never-shown fields must not appear on this route either"
