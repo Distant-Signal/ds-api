@@ -3,6 +3,54 @@
 Changes to the Distant Signal (DS) HTTP API that a client such as DS-MCP
 needs to know about. Newest first. Field names are as served (camelCase).
 
+## 2026-11-17: Opaque journey ids (stage 1 of 3)
+
+Additive (DS-534); needs ds-core's `journeys.public_id` migration
+(`20261117100000`) applied first. The numeric journey id is a global
+sequence: it shows how many journeys the platform holds and invites probing
+of neighbouring ids. Journeys now have an opaque `publicId`; the numeric
+`id` is **deprecated** and will stop being returned.
+
+- **Format.** `j_` and 32 lowercase hex digits (122 random bits, not derived
+  from the numeric id), 34 characters. Treat it as an opaque string. It can
+  never be all digits.
+- **Every route that takes a journey id takes either form** in the path
+  (`/Journeys/{journeyId}` and everything under it: legs, `calendar.ics`,
+  `share-link`, `station-buffer`, `follow`, `repeat`, `move`,
+  `regular-plan/accept`, tickets, `alternatives`, `replace`, `breaks`,
+  `replan`, `revisions`, `suggestions-muted`, `operator-filter`;
+  `DELETE /groups/{id}/journeys/{journeyId}`), including the delegated routes
+  and `/v1/Journeys/{journeyId}` for personal tokens. `POST
+  /groups/{id}/journeys` and `POST /JourneyTemplates` (`fromJourney`) take
+  either in `journeyId`, as a number or a string. A segment that parses as
+  an integer is a numeric id; anything else must have the `j_` shape, else
+  `400`.
+- **`404` is uniform.** Ownership is still decided in SQL on the resolved
+  journey. A public id nobody has, one that is someone else's, and a numeric
+  id nobody owns answer the same `404`.
+- **Responses add the opaque id next to the numeric one.** `publicId` beside
+  `id` on `GET /Journeys/mine` rows and `GET /Journeys/{id}`. `journeyPublicId`
+  beside `journeyId` on `POST /Journeys`, `POST /Journeys/itinerary`, `POST
+  /Journeys/irish-train`, tracking a train by pin and `POST
+  /Train/by-uid/{uid}/{date}/track`, the template `materialize` response, the
+  saved-again answer of Recently deleted (`restore`), the
+  replace, accept and revert answer (`ReplaceResponse`), breaks, `GET
+  /Journeys/reliability` (trains and journeys), and the group and shared
+  journey rows. `journeyPublicIds` and `singleLegJourneyPublicIds` beside
+  `journeyIds` and `singleLegJourneyIds` on the tracked-train list and state,
+  in the same order.
+- **Not changed yet:** the numeric ids stay in every response and on the
+  tracked-train and journey template routes (a template's own id is a
+  different id); `deletedJourneyIds`, a recently deleted journey's
+  `journeyId` and a connected app's deletion log name journeys that no
+  longer exist, so they have no public id; the calendar feed's event UIDs
+  (`journey-{id}@host`) keep their numeric id so subscribers do not see every
+  event replaced.
+- **Plan.** Stage 2 (after the website and notifier use `publicId`): stop
+  returning the numeric `id`, `journeyId`, `journeyIds` and
+  `singleLegJourneyIds` (a breaking change, announced here first). Stage 3:
+  stop accepting numeric ids on the routes.
+
 ## 2026-11-17: Opaque member ids in group responses
 
 Additive (DS-534 assessment L12); needs ds-core v0.16.0's

@@ -37,6 +37,7 @@ use crate::data::calendar_feed::{self, RESOURCE_TYPE};
 use crate::data::unlisted_links;
 use crate::ics::{self, Calendar};
 use crate::routes::feeds::Site;
+use crate::routes::journey_ref::JourneyId;
 
 pub fn router() -> Router {
     Router::new().route("/calendar/{token}", get(feed)).route(
@@ -215,7 +216,7 @@ async fn feed(State(app): State<App>, Path(token): Path<String>) -> Response {
 pub(crate) async fn journey_calendar(
     State(app): State<App>,
     user: AuthenticatedUser,
-    Path(journey_id): Path<i64>,
+    JourneyId(journey_id): JourneyId,
 ) -> Response {
     if !calendar_feed::enabled() {
         return disabled();

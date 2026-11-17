@@ -19,7 +19,7 @@
 //! `GET .../repeat?basis=current`.
 
 use axum::Json;
-use axum::extract::{Path, Query, State};
+use axum::extract::{Query, State};
 use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
 use chrono::{NaiveDate, NaiveTime, Timelike};
@@ -36,6 +36,7 @@ use crate::data::regular_plan::{self, ChoiceReason, PlanOption};
 use crate::data::trip_planning_itinerary::TimeBound;
 use crate::data::{journey_breaks, journeys};
 use crate::routes::journey_itinerary::RouteError;
+use crate::routes::journey_ref::JourneyId;
 use crate::routes::journey_replan::{internal, now_utc, replaced_response, require_owner};
 use crate::routes::trips::ReplanSlot;
 
@@ -149,7 +150,7 @@ async fn template_options(app: &App, journey_id: i64) -> Result<PlanOptions, Rou
 async fn get_repeat(
     State(app): State<App>,
     user: DelegatedOrSessionUser<ReadScope>,
-    Path(journey_id): Path<i64>,
+    JourneyId(journey_id): JourneyId,
     Query(params): Query<RepeatParams>,
 ) -> Response {
     let delegated = user.is_bearer();
@@ -358,7 +359,7 @@ fn started() -> RouteError {
 async fn post_move(
     State(app): State<App>,
     user: AuthenticatedUser,
-    Path(journey_id): Path<i64>,
+    JourneyId(journey_id): JourneyId,
     Json(body): Json<MoveBody>,
 ) -> Response {
     crate::routes::journey_replan::render(move_journey(&app, &user.id, journey_id, body).await)

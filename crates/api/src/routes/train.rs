@@ -114,6 +114,8 @@ pub(crate) struct TrackPinResponse {
     /// The one-leg journey the pin now belongs to (DS-124). Additive
     /// (2026-10-22).
     journey_id: i64,
+    // Deprecated (DS-534): `journey_id`. This is that journey's opaque id.
+    journey_public_id: String,
 }
 
 #[derive(Debug, Deserialize, ts_rs::TS)]
@@ -306,10 +308,14 @@ async fn track_pin(
         tracing::warn!(error = ?err, tracking_id, "backlog match attempt failed; pin remains pending");
     }
 
+    let journey_public_id = crate::data::journey_public_id::public_id(&app.database, journey_id)
+        .await
+        .map_err(internal_error("read the journey's public id"))?;
     Ok(Json(TrackPinResponse {
         tracking_id,
         resolution_status,
         journey_id,
+        journey_public_id,
     }))
 }
 
@@ -836,14 +842,20 @@ async fn schedule_only_public_state(
     Ok(crate::data::schedule_services::attach_one(&app.database, state).await)
 }
 
+#[expect(
+    clippy::struct_field_names,
+    reason = "a wire response: the camelCase names are the contract"
+)]
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
 struct TrackByUidResponse {
     tracking_id: i64,
     /// The train's journey (DS-124): the new one-leg journey, or, when one
     /// of the caller's journeys already had the train, the first of those.
-    /// Additive (2026-10-22).
+    /// Additive (2026-10-22). Deprecated (DS-534): use `journey_public_id`.
     journey_id: i64,
+    // That journey's opaque id.
+    journey_public_id: String,
 }
 
 /// `POST /Train/by-uid/{train_uid}/{date}/track` -- the NR-primary tracking
@@ -959,9 +971,14 @@ async fn track_by_uid(
 
     enrich_shared_train(&app, tracked.tracking_id, trains_id, &train_uid, date).await;
 
+    let journey_public_id =
+        crate::data::journey_public_id::public_id(&app.database, tracked.journey_id)
+            .await
+            .map_err(internal_error("read the journey's public id"))?;
     Ok(Json(TrackByUidResponse {
         tracking_id: tracked.tracking_id,
         journey_id: tracked.journey_id,
+        journey_public_id,
     }))
 }
 

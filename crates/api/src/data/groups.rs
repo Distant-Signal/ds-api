@@ -1575,6 +1575,7 @@ impl From<GroupTrainRow> for GroupTrain {
 #[derive(Debug, Clone, sqlx::FromRow)]
 struct GroupJourneyRow {
     journey_id: i64,
+    journey_public_id: String,
     custom_name: Option<String>,
     leg_count: i64,
     // First-leg (lowest surviving `leg_order`, not necessarily `= 1` --
@@ -1627,7 +1628,10 @@ struct GroupJourneyRow {
 #[derive(Debug, Clone, Serialize, ts_rs::TS)]
 #[serde(rename_all = "camelCase")]
 pub struct GroupJourney {
+    // Deprecated (DS-534): use `journey_public_id`.
     pub journey_id: i64,
+    // The journey's opaque id.
+    pub journey_public_id: String,
     pub custom_name: Option<String>,
     pub leg_count: i64,
     pub pin_origin_crs: Option<String>,
@@ -1741,6 +1745,7 @@ impl From<GroupJourneyRow> for GroupJourney {
             users::MemberDisplay::of(row.added_by_name, row.added_by_username, &row.added_by);
         GroupJourney {
             journey_id: row.journey_id,
+            journey_public_id: row.journey_public_id,
             custom_name: row.custom_name,
             leg_count: row.leg_count,
             pin_origin_crs: row.pin_origin_crs,
@@ -2075,7 +2080,7 @@ static LIST_GROUP_JOURNEYS_SQL: std::sync::LazyLock<String> = std::sync::LazyLoc
     );
     format!(
         "WITH {ranked} \
-         SELECT gj.journey_id, j.custom_name, \
+         SELECT gj.journey_id, j.public_id AS journey_public_id, j.custom_name, \
                 (SELECT COUNT(*) FROM journey_legs jl2 WHERE jl2.journey_id = j.id) AS leg_count, \
                 COALESCE(ts.pin_origin_crs, tr.origin_crs) AS pin_origin_crs, \
                 COALESCE(ts.pin_destination_crs, tr.destination_crs) AS pin_destination_crs, \
@@ -2415,6 +2420,7 @@ struct SharedJourneyRow {
     group_id: String,
     group_name: String,
     journey_id: i64,
+    journey_public_id: String,
     custom_name: Option<String>,
     leg_count: i64,
     pin_origin_crs: Option<String>,
@@ -2457,7 +2463,10 @@ struct SharedJourneyRow {
 pub struct SharedJourney {
     pub group_id: String,
     pub group_name: String,
+    // Deprecated (DS-534): use `journey_public_id`.
     pub journey_id: i64,
+    // The journey's opaque id.
+    pub journey_public_id: String,
     pub custom_name: Option<String>,
     pub leg_count: i64,
     pub pin_origin_crs: Option<String>,
@@ -2572,6 +2581,7 @@ impl From<SharedJourneyRow> for SharedJourney {
             group_id: row.group_id,
             group_name: row.group_name,
             journey_id: row.journey_id,
+            journey_public_id: row.journey_public_id,
             custom_name: row.custom_name,
             leg_count: row.leg_count,
             pin_origin_crs: row.pin_origin_crs,
@@ -2700,7 +2710,7 @@ static LIST_SHARED_JOURNEYS_SQL: std::sync::LazyLock<String> = std::sync::LazyLo
     format!(
         "WITH {ranked} \
          SELECT g.id AS group_id, g.name AS group_name, \
-                gj.journey_id, j.custom_name, \
+                gj.journey_id, j.public_id AS journey_public_id, j.custom_name, \
                 (SELECT COUNT(*) FROM journey_legs jl2 WHERE jl2.journey_id = j.id) AS leg_count, \
                 COALESCE(ts.pin_origin_crs, tr.origin_crs) AS pin_origin_crs, \
                 COALESCE(ts.pin_destination_crs, tr.destination_crs) AS pin_destination_crs, \
@@ -7222,6 +7232,7 @@ mod group_train_wire_shape_tests {
     fn group_journey() -> GroupJourney {
         GroupJourney {
             journey_id: 1,
+            journey_public_id: "j_00000000000000000000000000000001".to_string(),
             custom_name: None,
             leg_count: 2,
             pin_origin_crs: None,
@@ -7292,6 +7303,7 @@ mod group_train_wire_shape_tests {
                 "following",
                 "irishTrain",
                 "journeyId",
+                "journeyPublicId",
                 "kind",
                 "lastDestinationCrs",
                 "lastDestinationName",
@@ -7416,6 +7428,7 @@ mod group_train_wire_shape_tests {
             group_id: "group-1".to_string(),
             group_name: "Family".to_string(),
             journey_id: journey.journey_id,
+            journey_public_id: journey.journey_public_id.clone(),
             custom_name: None,
             leg_count: journey.leg_count,
             pin_origin_crs: None,

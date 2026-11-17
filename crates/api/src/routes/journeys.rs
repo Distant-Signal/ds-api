@@ -30,6 +30,7 @@ use crate::data::{
     train_tracking, unlisted_links,
 };
 use crate::routes::journey_itinerary::RouteError;
+use crate::routes::journey_ref::{JourneyId, LegParam};
 
 /// The `resource_type` discriminator this file passes to every
 /// `crate::data::unlisted_links` call -- routing-layer wiring only, kept out
@@ -74,8 +75,8 @@ pub fn router() -> Router {
         // same-position dynamic one regardless of registration order (see
         // `routes::train`'s own `literal_route_wins_over_same_position_dynamic_route`
         // precedent, and `/groups/join/{token}`'s identical shape). A real
-        // journey id is always digits (`Path<i64>` extraction), so the
-        // literal `shared` segment can never collide with one.
+        // journey id is all digits or a `j_` id (`JourneyId` extraction), so
+        // the literal `shared` segment can never collide with one.
         .route(
             "/Journeys/shared/{token}",
             axum::routing::get(get_journey_by_share_token),
@@ -823,7 +824,10 @@ mod wire_format_tests {
 #[derive(Debug, Serialize, ts_rs::TS)]
 #[serde(rename_all = "camelCase")]
 pub(crate) struct CreateJourneyResponse {
+    // Deprecated (DS-534): use `journey_public_id`.
     journey_id: i64,
+    // The new journey's opaque id.
+    journey_public_id: String,
     leg_id: i64,
     /// `None` only for a `window`-mode leg -- no train is bound yet.
     tracking_id: Option<i64>,
@@ -1002,6 +1006,7 @@ async fn post_journey(
 
             Ok(Json(CreateJourneyResponse {
                 journey_id,
+                journey_public_id: journey_public_id(&app, journey_id).await?,
                 leg_id,
                 tracking_id: Some(tracking_id),
                 resolution_status: Some(resolution_status),
@@ -1091,6 +1096,7 @@ async fn post_journey(
 
             Ok(Json(CreateJourneyResponse {
                 journey_id,
+                journey_public_id: journey_public_id(&app, journey_id).await?,
                 leg_id,
                 tracking_id: Some(tracking_id),
                 resolution_status: None,
@@ -1130,6 +1136,7 @@ async fn post_journey(
 
             Ok(Json(CreateJourneyResponse {
                 journey_id,
+                journey_public_id: journey_public_id(&app, journey_id).await?,
                 leg_id,
                 tracking_id: None,
                 resolution_status: None,
@@ -1148,6 +1155,7 @@ async fn post_journey(
             .map_err(internal_error("create journey (untracked leg)"))?;
             Ok(Json(CreateJourneyResponse {
                 journey_id,
+                journey_public_id: journey_public_id(&app, journey_id).await?,
                 leg_id,
                 tracking_id: None,
                 resolution_status: None,
@@ -1170,7 +1178,7 @@ async fn post_journey(
 async fn post_journey_leg(
     State(app): State<App>,
     user: AuthenticatedUser,
-    Path(journey_id): Path<i64>,
+    JourneyId(journey_id): JourneyId,
     Query(query): Query<AddLegQuery>,
     Json(request): Json<AddJourneyLegRequest>,
 ) -> Result<Json<AddLegResponse>, (StatusCode, String)> {
@@ -1384,7 +1392,8 @@ struct AddLegQuery {
 async fn put_journey_leg(
     State(app): State<App>,
     user: AuthenticatedUser,
-    Path((journey_id, leg_id)): Path<(i64, i64)>,
+    JourneyId(journey_id): JourneyId,
+    Path(LegParam { leg_id }): Path<LegParam>,
     Json(request): Json<UntrackedLegRequest>,
 ) -> Result<StatusCode, (StatusCode, String)> {
     let leg = request.validate(&app.database).await?;
@@ -1434,6 +1443,16 @@ async fn reject_uncallable_train_leg(
         Some(rejection) => Err((StatusCode::UNPROCESSABLE_ENTITY, rejection.message)),
         None => Ok(()),
     }
+}
+
+/// A journey's opaque id for a response (DS-534).
+pub(crate) async fn journey_public_id(
+    app: &App,
+    journey_id: i64,
+) -> Result<String, (StatusCode, String)> {
+    crate::data::journey_public_id::public_id(&app.database, journey_id)
+        .await
+        .map_err(internal_error("read the journey's public id"))
 }
 
 fn internal_error(operation: &'static str) -> impl Fn(anyhow::Error) -> (StatusCode, String) {
@@ -1519,7 +1538,10 @@ pub(crate) async fn get_my_journeys(
 #[derive(Debug, Serialize, ts_rs::TS, schemars::JsonSchema)]
 #[serde(rename_all = "camelCase")]
 pub(crate) struct JourneyDetailResponse {
+    // Deprecated (DS-534): use `public_id`.
     id: i64,
+    // The opaque id journey routes accept in place of `id`.
+    public_id: String,
     custom_name: Option<String>,
     created_at: DateTime<Utc>,
     legs: Vec<JourneyLegDetailResponse>,
@@ -1611,7 +1633,7 @@ pub(crate) struct StationBufferResponse {
 async fn put_station_buffer(
     State(app): State<App>,
     user: AuthenticatedUser,
-    Path(journey_id): Path<i64>,
+    JourneyId(journey_id): JourneyId,
     Json(body): Json<StationBufferBody>,
 ) -> Result<Json<StationBufferResponse>, (StatusCode, String)> {
     crate::data::leave_by::validate_station_buffer(body.minutes)
@@ -1790,7 +1812,7 @@ pub(crate) struct LegSkipResponse {
 pub(crate) async fn get_journey(
     State(app): State<App>,
     user: DelegatedOrSessionUser<ReadScope>,
-    Path(journey_id): Path<i64>,
+    JourneyId(journey_id): JourneyId,
 ) -> axum::response::Response {
     use axum::response::IntoResponse;
     let delegated = user.is_bearer();
@@ -1863,7 +1885,7 @@ async fn get_journey_inner(
 async fn create_journey_share_link(
     State(app): State<App>,
     user: AuthenticatedUser,
-    Path(journey_id): Path<i64>,
+    JourneyId(journey_id): JourneyId,
 ) -> Result<Json<ShareLinkResponse>, (StatusCode, String)> {
     require_journey_ownership(&app, journey_id, &user.id).await?;
 
@@ -1901,7 +1923,7 @@ async fn create_journey_share_link(
 async fn extend_journey_share_link(
     State(app): State<App>,
     user: AuthenticatedUser,
-    Path(journey_id): Path<i64>,
+    JourneyId(journey_id): JourneyId,
 ) -> Result<Json<ShareLinkResponse>, (StatusCode, String)> {
     require_journey_ownership(&app, journey_id, &user.id).await?;
 
@@ -1932,7 +1954,7 @@ async fn extend_journey_share_link(
 async fn revoke_journey_share_link(
     State(app): State<App>,
     user: AuthenticatedUser,
-    Path(journey_id): Path<i64>,
+    JourneyId(journey_id): JourneyId,
 ) -> Result<StatusCode, (StatusCode, String)> {
     require_journey_ownership(&app, journey_id, &user.id).await?;
 
@@ -1973,7 +1995,7 @@ struct FollowRequest {
 async fn follow_journey(
     State(app): State<App>,
     user: AuthenticatedUser,
-    Path(journey_id): Path<i64>,
+    JourneyId(journey_id): JourneyId,
     body: axum::body::Bytes,
 ) -> Result<Json<journey_follows::FollowedFrom>, (StatusCode, String)> {
     let request: FollowRequest = if body.iter().all(u8::is_ascii_whitespace) {
@@ -2018,7 +2040,7 @@ async fn follow_journey(
 async fn unfollow_journey(
     State(app): State<App>,
     user: AuthenticatedUser,
-    Path(journey_id): Path<i64>,
+    JourneyId(journey_id): JourneyId,
 ) -> Result<StatusCode, (StatusCode, String)> {
     journey_follows::unfollow_journey(&app.database, &user.id, journey_id)
         .await
@@ -2544,6 +2566,7 @@ async fn build_journey_detail_response(
     Ok(JourneyDetailResponse {
         id: summary.id,
         disrupted: replan.open_break.is_some(),
+        public_id: summary.public_id,
         custom_name: summary.custom_name,
         created_at: summary.created_at,
         created_via: is_owner.then_some(summary.created_via),
@@ -2807,7 +2830,8 @@ fn validate_leg_search(search: &journeys::LegSearch) -> Result<(), (StatusCode, 
 async fn get_leg_candidates(
     State(app): State<App>,
     user: AuthenticatedUser,
-    Path((journey_id, leg_id)): Path<(i64, i64)>,
+    JourneyId(journey_id): JourneyId,
+    Path(LegParam { leg_id }): Path<LegParam>,
     Query(params): Query<CandidatesParams>,
 ) -> Result<Json<LegCandidatesResponse>, (StatusCode, String)> {
     let leg = journeys::get_owned_leg(&app.database, journey_id, leg_id, &user.id)
@@ -3150,7 +3174,8 @@ struct MatchLegResponse {
 async fn post_leg_train(
     State(app): State<App>,
     user: AuthenticatedUser,
-    Path((journey_id, leg_id)): Path<(i64, i64)>,
+    JourneyId(journey_id): JourneyId,
+    Path(LegParam { leg_id }): Path<LegParam>,
     Json(body): Json<MatchLegRequest>,
 ) -> Result<Json<MatchLegResponse>, (StatusCode, String)> {
     // Ownership-checked read first -- same 404-never-403 posture as every
@@ -3285,7 +3310,8 @@ async fn post_leg_train(
 async fn delete_journey_leg(
     State(app): State<App>,
     user: AuthenticatedUser,
-    Path((journey_id, leg_id)): Path<(i64, i64)>,
+    JourneyId(journey_id): JourneyId,
+    Path(LegParam { leg_id }): Path<LegParam>,
 ) -> Result<StatusCode, (StatusCode, String)> {
     let deleted = journeys::delete_leg(&app.database, journey_id, leg_id, &user.id)
         .await
@@ -3326,7 +3352,7 @@ async fn delete_journey_leg(
 async fn delete_journey(
     State(app): State<App>,
     user: DelegatedOrSessionUser<DeleteScope>,
-    Path(journey_id): Path<i64>,
+    JourneyId(journey_id): JourneyId,
 ) -> axum::response::Response {
     use crate::auth::delegated::Via;
     use crate::data::delegated::DelegatedDeleteOutcome;
@@ -3710,6 +3736,145 @@ mod db_tests {
             })
         };
         (status, value)
+    }
+
+    /// DS-534: every journey route takes the opaque id or the legacy
+    /// numeric one, responses carry both, and a public id that is unknown,
+    /// someone else's or a legacy id nobody owns all answer the same 404.
+    #[tokio::test]
+    #[ignore = "requires a live database; see this plan's Global Constraints for the \
+                DATABASE_URL incantation, then run with `cargo test -p api \
+                journey_routes_take_the_public_id -- --ignored --test-threads=1`"]
+    async fn journey_routes_take_the_public_id_and_the_legacy_id() {
+        let pool = connect().await;
+        let _trains = crate::test_support::fixture_trains_cleanup(&pool).await;
+        let owner = "TEST-ROUTE-PUBLIC-ID-OWNER";
+        let bystander = "TEST-ROUTE-PUBLIC-ID-BYSTANDER";
+        let owner_token = seed_session(&pool, owner).await;
+        let bystander_token = seed_session(&pool, bystander).await;
+        let router = test_router(test_app(pool.clone()));
+
+        let (status, created) = post_json(
+            router.clone(),
+            "/Journeys".to_string(),
+            Some(&owner_token),
+            serde_json::json!({
+                "leg": {
+                    "mode": "window",
+                    "originCrs": "WAT",
+                    "destinationCrs": "RDG",
+                    "serviceDate": "2026-09-22",
+                    "departWindow": { "after": "08:00:00" }
+                }
+            }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        let journey_id = created["journeyId"].as_i64().expect("journeyId present");
+        let public_id = created["journeyPublicId"]
+            .as_str()
+            .expect("journeyPublicId present")
+            .to_string();
+        assert!(
+            crate::data::journey_public_id::is_public_id(&public_id),
+            "{public_id}"
+        );
+
+        let (status, by_number) = request(
+            router.clone(),
+            format!("/Journeys/{journey_id}"),
+            Some(&owner_token),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        let (status, by_public) = request(
+            router.clone(),
+            format!("/Journeys/{public_id}"),
+            Some(&owner_token),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(by_number, by_public);
+        assert_eq!(by_public["id"], journey_id);
+        assert_eq!(by_public["publicId"], public_id.as_str());
+
+        // The list carries both ids too.
+        let (status, list) = request(
+            router.clone(),
+            "/Journeys/mine".to_string(),
+            Some(&owner_token),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(list[0]["id"], journey_id);
+        assert_eq!(list[0]["publicId"], public_id.as_str());
+
+        // A sub-resource by either id (one that reads nothing outside the
+        // journey, so the answer is the id's and not a search's).
+        for id in [journey_id.to_string(), public_id.clone()] {
+            let (status, _) = request(
+                router.clone(),
+                format!("/Journeys/{id}/revisions"),
+                Some(&owner_token),
+            )
+            .await;
+            assert_eq!(status, StatusCode::OK, "revisions by {id}");
+        }
+
+        // 404 uniformity: someone else's journey by either id, a public id
+        // no journey has, and a numeric id no journey has.
+        let unknown_public = "j_ffffffffffffffffffffffffffffffff";
+        let mut denied = Vec::new();
+        for (token, id) in [
+            (&bystander_token, public_id.clone()),
+            (&bystander_token, journey_id.to_string()),
+            (&owner_token, unknown_public.to_string()),
+            (&owner_token, "999999999".to_string()),
+        ] {
+            denied.push(request(router.clone(), format!("/Journeys/{id}"), Some(token)).await);
+        }
+        for answer in &denied {
+            assert_eq!(answer.0, StatusCode::NOT_FOUND);
+            assert_eq!(answer, &denied[0], "the 404s differ: {denied:?}");
+        }
+
+        // A malformed id is still a 400, and an unauthenticated request
+        // for a real public id is a 401, not a 404.
+        let (status, _) = request(
+            router.clone(),
+            "/Journeys/j_not-an-id".to_string(),
+            Some(&owner_token),
+        )
+        .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        let (status, _) = request(router.clone(), format!("/Journeys/{public_id}"), None).await;
+        assert_eq!(status, StatusCode::UNAUTHORIZED);
+
+        // Deleting by the public id deletes the journey.
+        let (status, _) = delete_request(
+            router.clone(),
+            format!("/Journeys/{public_id}"),
+            Some(&bystander_token),
+        )
+        .await;
+        assert_eq!(status, StatusCode::NOT_FOUND, "a bystander cannot delete");
+        let (status, _) = delete_request(
+            router.clone(),
+            format!("/Journeys/{public_id}"),
+            Some(&owner_token),
+        )
+        .await;
+        assert!(status.is_success(), "{status}");
+        let (status, _) = request(
+            router,
+            format!("/Journeys/{journey_id}"),
+            Some(&owner_token),
+        )
+        .await;
+        assert_eq!(status, StatusCode::NOT_FOUND);
+
+        cleanup_user(&pool, owner).await;
+        cleanup_user(&pool, bystander).await;
     }
 
     #[test]

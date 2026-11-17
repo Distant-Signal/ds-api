@@ -2933,7 +2933,12 @@ pub(crate) async fn delete_journey_row_releasing_trains(
 #[derive(Debug, Clone, sqlx::FromRow, Serialize, ts_rs::TS, schemars::JsonSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct JourneyListItem {
+    // Deprecated (DS-534): use `public_id`. Still returned while clients move.
     pub id: i64,
+    // The opaque id every journey route accepts (`data::journey_public_id`).
+    // Not selected by the list query: filled after it.
+    #[sqlx(default)]
+    pub public_id: String,
     pub custom_name: Option<String>,
     pub created_at: DateTime<Utc>,
     /// `'web'`, or the delegated client that saved the journey (spec
@@ -3649,7 +3654,9 @@ pub(crate) async fn list_journeys_for_user_capped(
     .await?;
     let templates: std::collections::HashMap<i64, i64> = templates.into_iter().collect();
     let mut leave_by = crate::data::leave_by::for_journeys(pool, &ids, user_id).await?;
+    let mut public_ids = crate::data::journey_public_id::public_ids(pool, &ids).await?;
     for row in &mut rows {
+        row.public_id = public_ids.remove(&row.id).unwrap_or_default();
         row.open_break_id = open.get(&row.id).copied();
         row.source_template_id = templates.get(&row.id).copied();
         let own = leave_by.remove(&row.id).unwrap_or_default();
@@ -3670,6 +3677,8 @@ pub(crate) async fn list_journeys_for_user_capped(
 #[derive(Debug, Clone, sqlx::FromRow)]
 pub struct JourneySummaryRow {
     pub id: i64,
+    /// `journeys.public_id` (DS-534).
+    pub public_id: String,
     pub custom_name: Option<String>,
     pub created_at: DateTime<Utc>,
     pub user_id: String,
@@ -3695,7 +3704,7 @@ pub async fn get_journey_summary(
     journey_id: i64,
 ) -> anyhow::Result<Option<JourneySummaryRow>> {
     let row = sqlx::query_as::<_, JourneySummaryRow>(
-        "SELECT id, custom_name, created_at, user_id, created_via, source_template_id \
+        "SELECT id, public_id, custom_name, created_at, user_id, created_via, source_template_id \
          FROM journeys WHERE id = $1",
     )
     .bind(journey_id)

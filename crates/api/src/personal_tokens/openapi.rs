@@ -159,8 +159,8 @@ fn describe(generator: &mut Generator, path: &str) -> Option<(&'static str, Body
                 "journey_id",
                 "path",
                 true,
-                json!({ "type": "integer", "format": "int64" }),
-                "The journey's id, from /v1/Journeys/mine.",
+                string(),
+                "The journey's publicId from /v1/Journeys/mine (the deprecated numeric id is accepted too).",
             )],
         ),
         "/v1/Line/Mode/{mode}/Status" => (

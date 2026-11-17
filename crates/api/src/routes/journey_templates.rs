@@ -139,7 +139,10 @@ pub(crate) enum CreateJourneyTemplateRequest {
     FromJourney {
         #[serde(default)]
         custom_name: Option<String>,
-        journey_id: i64,
+        // The journey's `publicId`, or its deprecated numeric `id`
+        // (DS-534).
+        #[ts(type = "number | string")]
+        journey_id: crate::data::journey_public_id::JourneyRef,
     },
     /// A regular journey from a plan (regular journeys design §4.2): the
     /// target it was planned for, the plan's options and the itinerary the
@@ -373,7 +376,10 @@ pub(crate) struct SkipTemplateDateResponse {
 #[derive(Debug, Serialize, ts_rs::TS)]
 #[serde(rename_all = "camelCase")]
 pub(crate) struct MaterializeTemplateResponse {
+    // Deprecated (DS-534): use `journey_public_id`.
     journey_id: i64,
+    // The new journey's opaque id.
+    journey_public_id: String,
     leg_ids: Vec<i64>,
 }
 
@@ -591,6 +597,10 @@ async fn post_journey_template(
             // doc comment.
             let custom_name = train_tracking::validate_custom_name(custom_name.as_deref())
                 .map_err(|msg| (StatusCode::BAD_REQUEST, msg))?;
+            let journey_id = journey_id
+                .resolve(&app.database)
+                .await
+                .map_err(|err| internal_error("resolve the journey id")(err.into()))?;
             // Ownership, not mere readability -- Judgment Call 3.
             let owner = journeys::journey_owner(&app.database, journey_id)
                 .await
@@ -1364,8 +1374,13 @@ async fn post_materialize_journey_template(
             "no journey template with that id".to_string(),
         ));
     };
+    let journey_public_id =
+        crate::data::journey_public_id::public_id(&app.database, materialized.journey_id)
+            .await
+            .map_err(internal_error("read the journey's public id"))?;
     Ok(Json(MaterializeTemplateResponse {
         journey_id: materialized.journey_id,
+        journey_public_id,
         leg_ids: materialized.leg_ids,
     }))
 }

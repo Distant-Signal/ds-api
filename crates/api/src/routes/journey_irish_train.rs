@@ -49,10 +49,17 @@ pub(crate) struct TrackIrishTrainRequest {
 
 /// `POST /Journeys/irish-train`'s response: the one-leg journey and the
 /// tracked train (`GET /Train/{trackingId}`).
+#[expect(
+    clippy::struct_field_names,
+    reason = "a wire response: the camelCase names are the contract"
+)]
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, ts_rs::TS)]
 #[serde(rename_all = "camelCase")]
 pub(crate) struct TrackIrishTrainResponse {
+    // Deprecated (DS-534): use `journey_public_id`.
     journey_id: i64,
+    // The journey's opaque id.
+    journey_public_id: String,
     tracking_id: i64,
 }
 
@@ -188,6 +195,12 @@ async fn track(app: &App, user_id: &str, body: &[u8]) -> Result<Response, RouteE
         status,
         Json(TrackIrishTrainResponse {
             journey_id: tracked.journey_id,
+            journey_public_id: crate::data::journey_public_id::public_id(
+                &app.database,
+                tracked.journey_id,
+            )
+            .await
+            .map_err(|err| internal(&err))?,
             tracking_id: tracked.tracking_id,
         }),
     )
