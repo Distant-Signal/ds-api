@@ -1968,6 +1968,15 @@ async fn post_revert(
                 .zip(&target.legs)
                 .position(|(leg, old)| old.source_leg_id != Some(leg.id))
                 .unwrap_or(current.len().min(target.legs.len()));
+            // That plan is this one with more legs after it (one deleted
+            // since, say): a replacement needs a leg to replace, so the
+            // last leg is rebuilt as that plan had it, followed by the rest
+            // (review J4: this was a 409).
+            let first_diff = if first_diff == current.len() && target.legs.len() > current.len() {
+                first_diff.saturating_sub(1)
+            } else {
+                first_diff
+            };
             let (Some(from), Some(through)) = (current.get(first_diff), current.last()) else {
                 return Err(RouteError::coded(
                     StatusCode::CONFLICT,
@@ -2004,7 +2013,13 @@ async fn post_revert(
                         old.planned_arrival,
                         &old.transit_mode,
                     ) else {
-                        continue;
+                        // Refused, never left out: the plan gone back to
+                        // would silently lose a leg (review J4).
+                        return Err(RouteError::coded(
+                            StatusCode::CONFLICT,
+                            "revision_gone",
+                            "That plan has a leg with no times.",
+                        ));
                     };
                     // Its stops and network ride as that plan had them
                     // (DS-237; a revision from before keeps none). The

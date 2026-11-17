@@ -1619,3 +1619,111 @@ async fn the_sweep_keeps_a_skipped_stop_break_a_page_read_opened() {
     assert_eq!(break_count(&pool, journey_id).await, 1);
     exec(&pool, "DELETE FROM station_samples WHERE crs = 'ZRC'").await;
 }
+
+/// A two-leg journey RP0001 then RP0004 that is no longer being planned
+/// (a dismissed break on it); returns its id and leg ids.
+async fn create_started_two_leg_journey(
+    pool: &PgPool,
+    router: &axum::Router,
+    token: &str,
+) -> (i64, Vec<i64>) {
+    let (status, body) = call(
+        router,
+        "POST",
+        "/Journeys/itinerary",
+        Some(token),
+        Some(serde_json::json!({
+            "legs": [
+                { "trainUid": "RP0001", "serviceDate": DATE, "originCrs": "ZRC", "destinationCrs": "ZRD" },
+                { "trainUid": "RP0004", "serviceDate": DATE, "originCrs": "ZRD", "destinationCrs": "ZRE" }
+            ]
+        })),
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let journey_id = body["journeyId"].as_i64().expect("journeyId");
+    let legs: Vec<i64> = body["legs"]
+        .as_array()
+        .expect("legs")
+        .iter()
+        .map(|leg| leg["legId"].as_i64().expect("legId"))
+        .collect();
+    sqlx::query(
+        "INSERT INTO journey_breaks (journey_id, user_id, cause, fault, severity, \
+             trigger_leg_id, break_position, fingerprint, status, resolved_at) \
+         VALUES ($1, $2, 'connection_missed', 'operator', 1, $3, 2, '', 'dismissed', now())",
+    )
+    .bind(journey_id)
+    .bind(USER)
+    .bind(legs[1])
+    .execute(pool)
+    .await
+    .expect("seed a dismissed break");
+    (journey_id, legs)
+}
+
+/// Going back to a plan that had more legs after the current ones (review
+/// J4): the missing legs come back, where this was a 409.
+#[tokio::test]
+#[ignore = "requires a live database: DATABASE_URL"]
+async fn reverting_to_a_longer_plan_brings_its_later_legs_back() {
+    let _now = pin_now();
+    let pool = connect().await;
+    let _cleanup = cleanup(&pool).await;
+    seed_timetable(&pool).await;
+    seed_onward(&pool).await;
+    let token = seed_session(&pool, USER).await;
+    let router = router(pool.clone());
+    let (journey_id, legs) = create_started_two_leg_journey(&pool, &router, &token).await;
+
+    // Deleting the second leg, once started, is a plan of its own.
+    let (status, body) = call(
+        &router,
+        "DELETE",
+        &format!("/Journeys/{journey_id}/legs/{}", legs[1]),
+        Some(&token),
+        None,
+        None,
+    )
+    .await;
+    assert!(status.is_success(), "{status} {body}");
+    let (_, revisions) = call(
+        &router,
+        "GET",
+        &format!("/Journeys/{journey_id}/revisions"),
+        Some(&token),
+        None,
+        None,
+    )
+    .await;
+    assert_eq!(revisions["revisions"][0]["revisionNo"], 2, "{revisions}");
+    assert_eq!(revisions["revisions"][1]["canRevert"], true, "{revisions}");
+
+    let (status, body) = call(
+        &router,
+        "POST",
+        &format!("/Journeys/{journey_id}/revisions/1/revert"),
+        Some(&token),
+        None,
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let (_, detail) = call(
+        &router,
+        "GET",
+        &format!("/Journeys/{journey_id}"),
+        Some(&token),
+        None,
+        None,
+    )
+    .await;
+    let uids: Vec<&str> = detail["legs"]
+        .as_array()
+        .expect("legs")
+        .iter()
+        .filter_map(|leg| leg["trackedTrainState"]["trainUid"].as_str())
+        .collect();
+    assert_eq!(uids, ["RP0001", "RP0004"], "{detail}");
+}
