@@ -38,7 +38,7 @@ use std::time::Duration;
 
 use clap::Parser;
 use config::Config;
-use sink::{ChunkPart, DatedProduct, DbSink, LinePopulation, PublishSink, SinkError};
+use sink::{ChunkPart, DatedProduct, DbSink, LinePopulation, PublishSink, RunLockLost, SinkError};
 
 /// A publish failure that must NOT be retried within this cycle -- see
 /// [`publish_with_retry`] and [`SinkError::defers_final_chunk`].
@@ -675,6 +675,9 @@ struct CycleOutcome {
     /// The products refused this cycle, each recorded as a
     /// `rejected` run signal once the cycle's publishes are done.
     newly_rejected: Vec<String>,
+    /// The run lock's connection went ([`RunLockLost`]): the cycle publishes
+    /// nothing more and [`poll_once`] fails, writing no marker.
+    lock_lost: bool,
 }
 
 impl CycleOutcome {
@@ -706,6 +709,13 @@ impl CycleOutcome {
     /// is retryable.
     fn failed(&mut self, product: impl Into<String>, err: &anyhow::Error) {
         let product = product.into();
+        if err.downcast_ref::<RunLockLost>().is_some() {
+            // Not the product's fault, so neither retryable nor permanent
+            // against it: the run stops, and the next one starts over.
+            tracing::error!(error = %err, product, "stopping: the run lock is gone");
+            self.lock_lost = true;
+            return;
+        }
         if err.downcast_ref::<RefusedToClear>().is_some() {
             tracing::error!(error = %err, product, "refusing to clear this product's date");
             self.permanent(product);
@@ -733,6 +743,18 @@ impl CycleOutcome {
                 self.retryable(product);
             }
         }
+    }
+
+    /// Checks the run lock ahead of a publish step that has no
+    /// [`publish_with_retry`] of its own: `false` (and the cycle is marked
+    /// lost) once its connection has gone. Sticky, so a lost lock is not
+    /// asked about again.
+    async fn run_lock_held(&mut self, sink: &impl PublishSink) -> bool {
+        if !self.lock_lost && sink.ensure_run_lock_held().await.is_err() {
+            tracing::error!("stopping: the run lock is gone");
+            self.lock_lost = true;
+        }
+        !self.lock_lost
     }
 
     /// Records a successful publish of `product`.
@@ -969,18 +991,26 @@ struct PartialDelivery {
 /// brand-new diff publish whose first chunk makes `api` discard whatever the
 /// abandoned attempt had staged, never a continuation of it.
 ///
-/// A [`DeferToNextCycle`] error is returned at once, without retrying. And
+/// A [`DeferToNextCycle`] error is returned at once, without retrying, and so
+/// is [`RunLockLost`] (checked before every attempt, see
+/// [`PublishSink::ensure_run_lock_held`]). And
 /// attempts never overlap: each is awaited to completion (a timed-out
 /// request is dropped, i.e. its connection closed) before the next starts --
 /// what can still be in flight is the SERVER's work for a timed-out final
 /// chunk, which is exactly the case `DeferToNextCycle` covers.
 async fn publish_with_retry(
+    sink: &impl PublishSink,
     retry: &config::PublishRetry,
     product: &str,
     mut attempt: impl AsyncFnMut() -> anyhow::Result<()>,
 ) -> anyhow::Result<()> {
     let mut tries: u32 = 0;
     loop {
+        // Before every attempt, the first and each retry: a lost lock
+        // stops the product here, never publishing beside another run.
+        sink.ensure_run_lock_held()
+            .await
+            .map_err(anyhow::Error::new)?;
         match attempt().await {
             Ok(()) => {
                 if tries > 0 {
@@ -988,6 +1018,7 @@ async fn publish_with_retry(
                 }
                 return Ok(());
             }
+            Err(err) if err.downcast_ref::<RunLockLost>().is_some() => return Err(err),
             Err(err) if err.downcast_ref::<DeferToNextCycle>().is_some() => {
                 tracing::warn!(
                     error = ?err,
@@ -1124,10 +1155,13 @@ async fn poll_once(
     // is now recorded like every other publish: the remaining six still get
     // their chance this cycle, and the unadvanced marker is what guarantees
     // this one is retried on the next.
-    if !outcome.is_published(product::STANOX_CRS) {
-        match publish_with_retry(&config.publish_retry, product::STANOX_CRS, async || {
-            Ok(sink.stanox_crs(&records).await?)
-        })
+    if !outcome.is_published(product::STANOX_CRS) && !outcome.lock_lost {
+        match publish_with_retry(
+            sink,
+            &config.publish_retry,
+            product::STANOX_CRS,
+            async || Ok(sink.stanox_crs(&records).await?),
+        )
         .await
         {
             Ok(()) => outcome.succeeded(product::STANOX_CRS),
@@ -1155,10 +1189,13 @@ async fn poll_once(
         })
         .collect();
 
-    if !outcome.is_published(product::TIPLOC_CRS) {
-        match publish_with_retry(&config.publish_retry, product::TIPLOC_CRS, async || {
-            Ok(sink.tiploc_crs(&tiploc_crs_records).await?)
-        })
+    if !outcome.is_published(product::TIPLOC_CRS) && !outcome.lock_lost {
+        match publish_with_retry(
+            sink,
+            &config.publish_retry,
+            product::TIPLOC_CRS,
+            async || Ok(sink.tiploc_crs(&tiploc_crs_records).await?),
+        )
         .await
         {
             Ok(()) => outcome.succeeded(product::TIPLOC_CRS),
@@ -1166,7 +1203,7 @@ async fn poll_once(
         }
     }
 
-    if !outcome.is_published(product::TIPLOC_LOCATIONS) {
+    if !outcome.is_published(product::TIPLOC_LOCATIONS) && !outcome.lock_lost {
         publish_tiploc_locations(
             sink,
             config,
@@ -1179,7 +1216,9 @@ async fn poll_once(
         .await;
     }
 
-    if outcome.is_published(product::FIXED_LINKS) {
+    if outcome.lock_lost {
+        // Stopping: the check below returns.
+    } else if outcome.is_published(product::FIXED_LINKS) {
         tracing::debug!("fixed links already published for this delivery; skipping");
     } else if let Some(alf_path) = &delivery.alf_path {
         publish_fixed_links(sink, config, alf_path, source_sequence, &mut outcome).await;
@@ -1191,15 +1230,27 @@ async fn poll_once(
         );
     }
 
-    publish_cif_derived_products(
-        sink,
-        config,
-        &delivery.mca_path,
-        &records,
-        &tiploc_crs_records,
-        &mut outcome,
-    )
-    .await;
+    // A run that lost its lock builds nothing more (the CIF index is the
+    // cycle's biggest allocation) and publishes nothing more.
+    if outcome.run_lock_held(sink).await {
+        publish_cif_derived_products(
+            sink,
+            config,
+            &delivery.mca_path,
+            &records,
+            &tiploc_crs_records,
+            &mut outcome,
+        )
+        .await;
+    }
+    if outcome.lock_lost {
+        // The partial state is dropped (it was taken above): products
+        // published under a lock that was lost mid-run are republished.
+        return Err(anyhow::Error::new(RunLockLost).context(format!(
+            "delivery {} stopped before it finished publishing",
+            delivery.dir_name
+        )));
+    }
 
     // In Postgres too, for the alert when this is a CronJob run (DS-241).
     for product in std::mem::take(&mut outcome.newly_rejected) {
@@ -1250,6 +1301,13 @@ async fn poll_once(
     state.last_processed_delivery = Some(delivery.dir_name.clone());
 
     if outcome.fully_published() {
+        // The marker is a publish step too: not under a lost lock.
+        if !outcome.run_lock_held(sink).await {
+            return Err(anyhow::Error::new(RunLockLost).context(format!(
+                "delivery {} published, but its completion marker was not written",
+                delivery.dir_name
+            )));
+        }
         telemetry::set_last_published_delivery(&delivery.dir_name);
         record_completed_publish(sink, &delivery.dir_name).await;
         return Ok(CycleReport::Published {
@@ -1426,6 +1484,7 @@ async fn publish_tiploc_locations(
         "built tiploc_locations"
     );
     match publish_with_retry(
+        sink,
         &config.publish_retry,
         product::TIPLOC_LOCATIONS,
         async || Ok(sink.tiploc_locations(&records).await?),
@@ -1511,9 +1570,12 @@ async fn publish_fixed_links(
         })
         .collect();
 
-    match publish_with_retry(&config.publish_retry, product::FIXED_LINKS, async || {
-        Ok(sink.fixed_links(&records).await?)
-    })
+    match publish_with_retry(
+        sink,
+        &config.publish_retry,
+        product::FIXED_LINKS,
+        async || Ok(sink.fixed_links(&records).await?),
+    )
     .await
     {
         Ok(()) => outcome.succeeded(product::FIXED_LINKS),
@@ -1844,6 +1906,9 @@ async fn publish_cif_derived_products(
             .is_some()
     });
     for date in dates {
+        if !outcome.run_lock_held(sink).await {
+            return;
+        }
         publish_schedule_destination_departures(
             sink,
             config,
@@ -1870,6 +1935,11 @@ async fn publish_cif_derived_products(
         // Fifth: every schedule's service mode for the date, so `api` can
         // label buses and ferries (TRUST never reports them).
         publish_schedule_services(sink, config, &index, date, window_has_schedules, outcome).await;
+        // The associations are a publish step of their own, outside the
+        // retry wrapper: not under a lost lock.
+        if !outcome.run_lock_held(sink).await {
+            return;
+        }
         // Sixth, best effort: the date's CIF joins and divides (DS-152),
         // for the late-start prediction's cap. Never a tracked product.
         publish_schedule_associations(sink, &associations, date).await;
@@ -1972,7 +2042,7 @@ async fn publish_schedule_line_population(
                 population: serde_json::json!(population),
             };
             drop(population);
-            match publish_with_retry(&config.publish_retry, &key, async || {
+            match publish_with_retry(sink, &config.publish_retry, &key, async || {
                 Ok(sink.line_population(&body).await?)
             })
             .await
@@ -2219,7 +2289,7 @@ async fn publish_schedule_network_departures(
     let by_crs = schedule_query::departures_by_crs(index, today, now, &tiploc_to_crs);
     let rows = schedule_network_departures_rows(by_crs, today);
 
-    match publish_with_retry(&config.publish_retry, &key, async || {
+    match publish_with_retry(sink, &config.publish_retry, &key, async || {
         Ok(sink.network_departures(&rows).await?)
     })
     .await
@@ -2428,7 +2498,7 @@ async fn publish_schedule_destination_departures(
     // Rebuilt from the index on every attempt: the rows are produced lazily
     // and consumed by the publish, and each attempt is a fresh diff publish
     // under a new `publish_id` (see `publish_with_retry`).
-    let result = publish_with_retry(&config.publish_retry, &key, async || {
+    let result = publish_with_retry(sink, &config.publish_retry, &key, async || {
         let by_destination =
             schedule_query::departures_by_destination_crs(index, today, now, &tiploc_to_crs);
         let rows = schedule_destination_departures_row_iter(by_destination, today);
@@ -2622,7 +2692,7 @@ async fn publish_schedule_calling_points_full(
     }
     // A fresh lazy row iterator (and so a fresh `publish_id`) per attempt --
     // see `publish_with_retry`.
-    let result = publish_with_retry(&config.publish_retry, &key, async || {
+    let result = publish_with_retry(sink, &config.publish_retry, &key, async || {
         let rows = schedule_calling_points_full_row_iter(index, date);
         post_date_scoped_row_stream(
             sink,
@@ -2710,7 +2780,7 @@ async fn publish_schedule_services(
         );
         return;
     }
-    let result = publish_with_retry(&config.publish_retry, &key, async || {
+    let result = publish_with_retry(sink, &config.publish_retry, &key, async || {
         Ok(sink.services(date, &rows).await?)
     })
     .await;
@@ -3040,6 +3110,9 @@ async fn post_date_scoped_row_stream(
             final_total_rows: Some(0),
             empty_service_date: Some(service_date),
         };
+        sink.ensure_run_lock_held()
+            .await
+            .map_err(anyhow::Error::new)?;
         return sink.publish_part(product, &[], part).await.map_err(|err| {
             if err.defers_final_chunk() {
                 anyhow::Error::new(DeferToNextCycle(format!(
@@ -3077,6 +3150,10 @@ async fn post_date_scoped_row_stream(
             final_total_rows,
             empty_service_date: None,
         };
+        // Every chunk: the final one deletes what the date no longer has.
+        sink.ensure_run_lock_held()
+            .await
+            .map_err(anyhow::Error::new)?;
         sink.publish_part(product, &chunk, part)
             .await
             .map_err(|err: SinkError| {
@@ -5782,7 +5859,7 @@ mod final_chunk_retry_tests {
         sink.fail_final_chunks(fake::CALLING_POINTS_FULL, u64::MAX, fail);
         let rows = rows(3);
 
-        let result = publish_with_retry(&retry(), "test/2026-09-27", async || {
+        let result = publish_with_retry(&sink, &retry(), "test/2026-09-27", async || {
             post_date_scoped_row_stream(
                 &sink,
                 DatedProduct::CallingPointsFull,
@@ -6427,7 +6504,7 @@ mod db_sink_tests {
             .await
             .unwrap();
         let mut attempts = 0;
-        let result = publish_with_retry(&retry(), "test", async || {
+        let result = publish_with_retry(&db, &retry(), "test", async || {
             attempts += 1;
             publish_calling_points(&db, date, "ZP2A003").await
         })
@@ -6533,6 +6610,34 @@ mod db_sink_tests {
         );
         first.unlock_run().await;
         assert!(second.try_lock_run().await.unwrap(), "free once released");
+        second
+            .ensure_run_lock_held()
+            .await
+            .expect("the holder still holds it");
+
+        // Its connection goes (a database restart, a network drop): the run
+        // is told, and stays told.
+        sqlx::query(
+            "SELECT pg_terminate_backend(pid) FROM pg_stat_activity \
+             WHERE application_name = $1 AND pid <> pg_backend_pid()",
+        )
+        .bind("distant-signal-schedule-reference-lock")
+        .execute(&pool)
+        .await
+        .unwrap();
+        let mut lost = false;
+        for _ in 0..50 {
+            if second.ensure_run_lock_held().await.is_err() {
+                lost = true;
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
+        assert!(lost, "the check noticed the lock's connection went");
+        assert!(
+            second.ensure_run_lock_held().await.is_err(),
+            "and a lost lock stays lost"
+        );
         second.unlock_run().await;
     }
 
@@ -6696,6 +6801,10 @@ mod publish_memory_harness {
 
         fn unlock_run(&self) -> impl Future<Output = ()> {
             ready(())
+        }
+
+        fn ensure_run_lock_held(&self) -> impl Future<Output = Result<(), RunLockLost>> {
+            ready(Ok(()))
         }
 
         fn record_signal(
@@ -7026,6 +7135,154 @@ mod once_mode_tests {
             usize::try_from(ONCE_SEED_ATTEMPTS).unwrap()
         );
         assert_eq!(sink.count(fake::STANOX_CRS), 0);
+    }
+
+    /// Whether `err` is a stop for a lost run lock (and so exits 1, the Job's
+    /// retry).
+    fn is_lock_lost(err: &anyhow::Error) -> bool {
+        err.chain()
+            .any(|cause| cause.downcast_ref::<RunLockLost>().is_some())
+    }
+
+    /// A run whose lock connection has already gone publishes nothing: it
+    /// reads its marker, finds the lock gone before the first product, writes
+    /// no product and no completion marker, and exits 1 (the next run starts
+    /// over). The lock is released on the way out all the same.
+    #[tokio::test]
+    async fn a_lost_run_lock_stops_the_run_before_any_publish() {
+        let sink = FakePublishSink::new();
+        sink.lose_run_lock_after(0);
+        let storage = tempfile::tempdir().unwrap();
+        write_fixture_delivery(storage.path(), DELIVERY);
+
+        let result = run_once(&sink, &config(storage.path())).await;
+        assert_eq!(status(&result), 1, "{result:?}");
+        assert!(is_lock_lost(result.as_ref().unwrap_err()), "{result:?}");
+        for product in PRODUCTS {
+            assert_eq!(sink.count(product), 0, "{product}");
+        }
+        assert_eq!(sink.count(fake::PUBLISHES), 0, "no completion marker");
+        assert!(!sink.holds_run_lock(), "released on the way out");
+        assert_eq!(
+            sink.run_lock_checks(),
+            1,
+            "a lost lock is not asked about again by the products that follow"
+        );
+    }
+
+    /// Lost after the crosswalk products: the CIF-derived products (the
+    /// index build and every date's publish) never start, the lost lock is
+    /// not recorded against any product (no rejection signal), and no marker
+    /// is written.
+    #[tokio::test]
+    async fn a_lock_lost_after_the_crosswalks_skips_the_cif_products() {
+        let sink = FakePublishSink::new();
+        // stanox_crs, tiploc_crs and tiploc_locations each check once.
+        sink.lose_run_lock_after(3);
+        let storage = tempfile::tempdir().unwrap();
+        write_fixture_delivery(storage.path(), DELIVERY);
+
+        let result = run_once(&sink, &config(storage.path())).await;
+        assert_eq!(status(&result), 1, "{result:?}");
+        assert!(is_lock_lost(result.as_ref().unwrap_err()), "{result:?}");
+        for product in [fake::STANOX_CRS, fake::TIPLOC_CRS, fake::TIPLOC_LOCATIONS] {
+            assert_eq!(sink.count(product), 1, "{product} went before the loss");
+        }
+        for product in [
+            fake::NETWORK_DEPARTURES,
+            fake::DESTINATION_DEPARTURES,
+            fake::CALLING_POINTS_FULL,
+            fake::SERVICES,
+            fake::PUBLISHES,
+        ] {
+            assert_eq!(sink.count(product), 0, "{product} must not publish");
+        }
+        let signals = sink.signals();
+        assert!(
+            signals.iter().all(|(kind, _)| kind != "rejected"),
+            "{signals:?}"
+        );
+        assert!(!sink.holds_run_lock());
+    }
+
+    /// Lost halfway through the dates: what published before stays, nothing
+    /// publishes after, and the delivery's completion marker is not written.
+    #[tokio::test]
+    async fn a_lock_lost_mid_publish_stops_at_the_next_step() {
+        let full = FakePublishSink::new();
+        let storage = tempfile::tempdir().unwrap();
+        write_fixture_delivery(storage.path(), DELIVERY);
+        let config = config(storage.path());
+        run_once(&full, &config).await.expect("a full run");
+        let checks = full.run_lock_checks();
+        assert!(checks > 6, "the dates are checked one by one: {checks}");
+
+        let sink = FakePublishSink::new();
+        sink.lose_run_lock_after(checks / 2);
+        let result = run_once(&sink, &config).await;
+        assert_eq!(status(&result), 1, "{result:?}");
+        assert!(is_lock_lost(result.as_ref().unwrap_err()), "{result:?}");
+        assert!(
+            sink.count(fake::CALLING_POINTS_FULL) > 0,
+            "the dates before the loss published"
+        );
+        assert!(
+            sink.count(fake::CALLING_POINTS_FULL) < full.count(fake::CALLING_POINTS_FULL),
+            "the dates after it did not"
+        );
+        assert_eq!(sink.count(fake::PUBLISHES), 0, "no completion marker");
+        assert!(!sink.holds_run_lock());
+    }
+
+    /// The check runs before every attempt: a product whose first try
+    /// failed transiently is not retried once the lock is gone.
+    #[tokio::test]
+    async fn a_lost_run_lock_is_not_retried() {
+        let sink = FakePublishSink::new();
+        let storage = tempfile::tempdir().unwrap();
+        let retry = config(storage.path()).publish_retry;
+        sink.lose_run_lock_after(1);
+        let mut attempts = 0;
+        let result = publish_with_retry(&sink, &retry, "test", async || {
+            attempts += 1;
+            Err(anyhow::Error::new(SinkError::Transient(anyhow::anyhow!(
+                "scripted"
+            ))))
+        })
+        .await;
+        let err = result.expect_err("the second attempt is refused");
+        assert!(is_lock_lost(&err), "{err:?}");
+        assert_eq!(attempts, 1, "no attempt under a lost lock");
+        assert_eq!(sink.run_lock_checks(), 2);
+    }
+
+    /// The final chunk of a date deletes what the date no longer has, so it
+    /// is checked on its own: a lock lost before it leaves the date's old
+    /// rows alone (the earlier chunks only staged).
+    #[tokio::test]
+    async fn a_lock_lost_before_the_final_chunk_never_sends_it() {
+        let sink = FakePublishSink::new();
+        let rows: Vec<serde_json::Value> = (0..=(2 * PUBLISH_CHUNK_ROWS))
+            .map(|seq| serde_json::json!({ "seq": seq }))
+            .collect();
+        sink.lose_run_lock_after(2);
+        let err = post_date_scoped_row_stream(
+            &sink,
+            DatedProduct::CallingPointsFull,
+            rows.into_iter(),
+            EmptyPublish::Refuse,
+        )
+        .await
+        .expect_err("the third chunk is refused");
+        assert!(is_lock_lost(&err), "{err:?}");
+        let calls = sink.calls_to(fake::CALLING_POINTS_FULL);
+        assert_eq!(calls.len(), 2, "two chunks went, not the third");
+        assert!(
+            calls
+                .iter()
+                .all(|call| !call.query.contains("last_chunk=true")),
+            "the final chunk, the delete, was never sent"
+        );
     }
 
     /// What a Deployment cycle reports (it ignores it; a run's exit reads it).

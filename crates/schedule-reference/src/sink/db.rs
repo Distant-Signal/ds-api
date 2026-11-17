@@ -16,7 +16,7 @@
 //! | `services` | `post_schedule_services` | `schedule::services::replace_for_date`, then `schedule::turnarounds::replace_inferred_for_date` (no api route; best effort) |
 //! | `associations` | none | `schedule::associations::replace_for_date` (DS-152; best effort, logged by the caller) |
 //! | `record_completed_publish`, `last_completed_publish` | `/schedule-reference-publishes` | `schedule::{insert,last_completed}_schedule_reference_publish` |
-//! | `try_lock_run`, `unlock_run` | none | `schedule::reference_signals::RunLock` (DS-241) |
+//! | `try_lock_run`, `unlock_run`, `ensure_run_lock_held` | none | `schedule::reference_signals::RunLock` (DS-241) |
 //! | `record_signal`, `settled_delivery` | none | `schedule::reference_signals::{record, settled_delivery}` (DS-241) |
 //!
 //! The CIF-derived rows arrive as the JSON values the api's routes take and
@@ -35,7 +35,7 @@ use sqlx::PgPool;
 
 use ds_store::schedule::reference_signals::{self, RunLock};
 
-use super::{ChunkPart, DatedProduct, LinePopulation, PublishSink, Signal, SinkError};
+use super::{ChunkPart, DatedProduct, LinePopulation, PublishSink, RunLockLost, Signal, SinkError};
 
 /// The `operation` labels this sink records.
 pub(crate) const OPERATIONS: [&str; 12] = [
@@ -60,7 +60,13 @@ pub(crate) struct DbSink<'a> {
     pool: PgPool,
     lines: &'a [common::LineDefinition],
     /// The run lock while held ([`PublishSink::try_lock_run`]).
-    run_lock: std::sync::Mutex<Option<RunLock>>,
+    ///
+    /// A `tokio` mutex: [`RunLock::ensure_held`] runs a query on the lock's
+    /// own connection while this is held.
+    run_lock: tokio::sync::Mutex<Option<RunLock>>,
+    /// The run lock's connection went ([`PublishSink::ensure_run_lock_held`]):
+    /// every later check fails at once, without another query.
+    run_lock_lost: std::sync::atomic::AtomicBool,
 }
 
 impl<'a> DbSink<'a> {
@@ -68,7 +74,8 @@ impl<'a> DbSink<'a> {
         Self {
             pool,
             lines,
-            run_lock: std::sync::Mutex::new(None),
+            run_lock: tokio::sync::Mutex::new(None),
+            run_lock_lost: std::sync::atomic::AtomicBool::new(false),
         }
     }
 }
@@ -380,7 +387,8 @@ impl PublishSink for DbSink<'_> {
     }
 
     async fn try_lock_run(&self) -> Result<bool, SinkError> {
-        if self.run_lock.lock().is_ok_and(|held| held.is_some()) {
+        let mut held = self.run_lock.lock().await;
+        if held.is_some() {
             return Ok(true);
         }
         let Some(lock) = RunLock::try_acquire(&self.pool, RUN_LOCK_APPLICATION_NAME)
@@ -389,21 +397,35 @@ impl PublishSink for DbSink<'_> {
         else {
             return Ok(false);
         };
-        match self.run_lock.lock() {
-            Ok(mut held) => {
-                *held = Some(lock);
-                Ok(true)
-            }
-            Err(_) => Err(SinkError::Transient(anyhow::anyhow!(
-                "the run lock's state is poisoned"
-            ))),
-        }
+        *held = Some(lock);
+        self.run_lock_lost
+            .store(false, std::sync::atomic::Ordering::Release);
+        Ok(true)
     }
 
     async fn unlock_run(&self) {
-        let lock = self.run_lock.lock().ok().and_then(|mut held| held.take());
+        let lock = self.run_lock.lock().await.take();
         if let Some(lock) = lock {
             lock.release().await;
+        }
+    }
+
+    async fn ensure_run_lock_held(&self) -> Result<(), RunLockLost> {
+        use std::sync::atomic::Ordering;
+        if self.run_lock_lost.load(Ordering::Acquire) {
+            return Err(RunLockLost);
+        }
+        let mut held = self.run_lock.lock().await;
+        let Some(lock) = held.as_mut() else {
+            return Ok(());
+        };
+        match lock.ensure_held().await {
+            Ok(()) => Ok(()),
+            Err(err) => {
+                tracing::error!(error = ?err, "the schedule-reference run lock is gone");
+                self.run_lock_lost.store(true, Ordering::Release);
+                Err(RunLockLost)
+            }
         }
     }
 
