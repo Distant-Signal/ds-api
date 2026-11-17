@@ -22,6 +22,15 @@
 //!   name escaped and truncated: the publisher controls it) and
 //!   `schedule_feed_source_unexpected_objects_total{reason}` once per
 //!   generation.
+//! - **ignored** (not expected, but its name matches `BUCKET_IGNORED_KEYS`:
+//!   a known benign file the publisher drops beside the feed, such as the
+//!   SMART `CORPUSExtract.csv.gz`): never downloaded, exactly like an
+//!   unexpected object, but not counted as one and not logged at warn. One
+//!   info line and `schedule_feed_source_ignored_objects_total` once per
+//!   generation. Expected wins: a name both lists match is expected (and,
+//!   if it does not route or is too big, unexpected, never ignored). An
+//!   unsafe name (a path, hidden, control characters, too long) is always
+//!   unexpected, whatever the ignore list says.
 //!
 //! An expected object that fails verification [`MAX_FETCH_FAILURES`] times
 //! (that generation: its size, CRC32C or MD5 do not match its metadata, or
@@ -36,10 +45,10 @@
 //! object cannot starve newer ones (the byte budget still counts what it
 //! received).
 //!
-//! Once a confirmed or unexpected object is `BUCKET_DELETE_MIN_AGE_SECS`
-//! old it is deleted with `ifGenerationMatch`: a newer upload in between is
-//! never lost (412), and one already gone (404) is fine. The ingest outcome
-//! never gates the delete.
+//! Once a confirmed, unexpected or ignored object is
+//! `BUCKET_DELETE_MIN_AGE_SECS` old it is deleted with `ifGenerationMatch`:
+//! a newer upload in between is never lost (412), and one already gone (404)
+//! is fine. The ingest outcome never gates the delete.
 //!
 //! Guards: a confirmed generation is never downloaded again, even across
 //! restarts; at most `BUCKET_MAX_DOWNLOADS_PER_POLL` downloads a poll, and
@@ -89,6 +98,9 @@ pub(crate) const DELIVERIES_METRIC: &str = "schedule_feed_source_deliveries_tota
 pub(crate) const OBJECT_KINDS: [&str; 2] = ["cif", "corpus"];
 pub(crate) const ERRORS_METRIC: &str = "schedule_feed_source_errors_total";
 pub(crate) const UNEXPECTED_METRIC: &str = "schedule_feed_source_unexpected_objects_total";
+/// Objects matching `BUCKET_IGNORED_KEYS`, once per generation (only the
+/// `source` label: the names are publisher-controlled).
+pub(crate) const IGNORED_METRIC: &str = "schedule_feed_source_ignored_objects_total";
 pub(crate) const DOWNLOAD_CAPPED_METRIC: &str = "schedule_feed_source_download_capped";
 pub(crate) const DOWNLOADED_BYTES_METRIC: &str = "schedule_feed_source_downloaded_bytes_total";
 pub(crate) const POLL_DURATION_METRIC: &str = "schedule_feed_source_poll_duration_seconds";
@@ -132,6 +144,9 @@ pub(crate) struct BucketSettings {
     pub max_bytes_per_hour: u64,
     pub max_bytes_per_day: u64,
     pub max_backoff: Duration,
+    /// `BUCKET_IGNORED_KEYS`: known benign names, never downloaded and not
+    /// reported as unexpected (`None`: nothing is ignored).
+    pub ignored: Option<FilePattern>,
 }
 
 /// The bucket source's directories under `storage_dir`.
@@ -180,6 +195,9 @@ enum Class {
     /// Expected, but it failed verification [`MAX_FETCH_FAILURES`] times:
     /// never downloaded again by this process, and never deleted.
     GaveUp,
+    /// A known benign name (`BUCKET_IGNORED_KEYS`): handled as
+    /// [`Class::Unexpected`] but reported quietly.
+    Ignored,
 }
 
 /// A wall clock (tests substitute their own).
@@ -252,7 +270,7 @@ pub(crate) struct BucketSource {
     capped: bool,
     /// Consecutive failed polls (the backoff exponent).
     failures: u32,
-    /// `(name, generation)` already reported as unexpected.
+    /// `(name, generation)` already reported as unexpected or ignored.
     reported: HashSet<(String, i64)>,
     /// Failed verifications of each listed `(name, generation)` not yet
     /// confirmed (in memory: a restart retries it).
@@ -414,6 +432,7 @@ impl BucketSource {
             match *class {
                 Class::Unexpected(reason) => self.report_unexpected(object, reason),
                 Class::GaveUp => self.report_gave_up(object),
+                Class::Ignored => self.report_ignored(object),
                 Class::Confirmed => {}
                 Class::New => {
                     if downloads >= self.settings.max_downloads_per_poll || refused_by_budget {
@@ -478,8 +497,22 @@ impl BucketSource {
     }
 
     fn classify(&self, object: &ObjectMeta) -> Class {
-        if !is_safe_name(&object.name) || !self.settings.expected.matches(&object.name) {
+        if !is_safe_name(&object.name) {
             return Class::Unexpected("name");
+        }
+        if !self.settings.expected.matches(&object.name) {
+            // Expected wins: only a name the expected list does not match
+            // can be ignored.
+            let ignored = self
+                .settings
+                .ignored
+                .as_ref()
+                .is_some_and(|ignored| ignored.matches(&object.name));
+            return if ignored {
+                Class::Ignored
+            } else {
+                Class::Unexpected("name")
+            };
         }
         if !(self.settings.routing.is_cif(&object.name)
             || self.settings.routing.is_corpus(&object.name))
@@ -562,6 +595,23 @@ impl BucketSource {
             generation = object.generation,
             reason,
             "unexpected object in the schedule-feed bucket: never downloaded, deleted unread once BUCKET_DELETE_MIN_AGE_SECS old"
+        );
+    }
+
+    fn report_ignored(&mut self, object: &ObjectMeta) {
+        if !self
+            .reported
+            .insert((object.name.clone(), object.generation))
+        {
+            return;
+        }
+        metrics::counter!(ds_runtime::metrics::metric_name(IGNORED_METRIC), "source" => SOURCE)
+            .increment(1);
+        tracing::info!(
+            object = %shown(&object.name),
+            bytes = object.size,
+            generation = object.generation,
+            "ignored object in the schedule-feed bucket (BUCKET_IGNORED_KEYS): never downloaded, deleted unread once BUCKET_DELETE_MIN_AGE_SECS old"
         );
     }
 
@@ -911,6 +961,8 @@ pub(crate) fn register_metrics() {
     }
     metrics::counter!(ds_runtime::metrics::metric_name(DOWNLOADED_BYTES_METRIC), "source" => SOURCE)
         .increment(0);
+    metrics::counter!(ds_runtime::metrics::metric_name(IGNORED_METRIC), "source" => SOURCE)
+        .increment(0);
 }
 
 /// A name the reader may write to disk: one path component, not hidden,
@@ -1130,6 +1182,7 @@ pub(crate) mod tests {
                 max_bytes_per_hour: 2000,
                 max_bytes_per_day: 3000,
                 max_backoff: Duration::from_secs(3600),
+                ignored: None,
             }
         }
 
@@ -1331,6 +1384,112 @@ pub(crate) mod tests {
         assert_eq!(f.bucket.names(), ["NLC20261009.xml.gz"]);
         assert_eq!(source.reported.len(), 3);
         assert!(!f.incoming().join("probe.txt").exists());
+    }
+
+    const IGNORED_SERIES: &str =
+        "distant_signal_schedule_feed_source_ignored_objects_total{source=\"bucket\"} ";
+
+    fn unexpected_series(reason: &str) -> String {
+        format!(
+            "distant_signal_schedule_feed_source_unexpected_objects_total{{source=\"bucket\",reason=\"{reason}\"}} "
+        )
+    }
+
+    /// An ignored name is handled as an unexpected one (never fetched,
+    /// deleted unread once old enough) but counted only as ignored, once
+    /// per generation.
+    #[tokio::test]
+    async fn ignored_objects_are_never_fetched_counted_quietly_and_deleted_once_old() {
+        let recorder = metrics_exporter_prometheus::PrometheusBuilder::new().build_recorder();
+        let handle = recorder.handle();
+        let _guard = metrics::set_default_local_recorder(&recorder);
+        let f = Fixture::new().await;
+        let mut settings = Fixture::settings();
+        settings.ignored = Some(FilePattern::parse("CORPUSExtract.csv.gz").unwrap());
+        let young = f.created(Duration::from_secs(60));
+        f.bucket.put("CORPUSExtract.csv.gz", b"smart", 4, young);
+        f.bucket.put("probe.txt", b"hello", 3, young);
+        let mut source = f.source(settings);
+        let r = handle.render();
+        assert_eq!(sample(&r, IGNORED_SERIES).as_deref(), Some("0"));
+
+        source.poll_once().await;
+        source.poll_once().await;
+        assert_eq!(f.gets().await, 0, "never downloaded");
+        assert!(!f.incoming().join("CORPUSExtract.csv.gz").exists());
+        let r = handle.render();
+        assert_eq!(sample(&r, IGNORED_SERIES).as_deref(), Some("1"));
+        assert_eq!(
+            sample(&r, &unexpected_series("name")).as_deref(),
+            Some("1"),
+            "only probe.txt is unexpected"
+        );
+        // Too young to delete; once BUCKET_DELETE_MIN_AGE_SECS old, both are
+        // deleted unread.
+        let mut names = f.bucket.names();
+        names.sort();
+        assert_eq!(names, ["CORPUSExtract.csv.gz", "probe.txt"]);
+        f.advance(Duration::from_secs(3600));
+        source.poll_once().await;
+        assert_eq!(f.bucket.names(), [] as [String; 0]);
+        assert_eq!(f.gets().await, 0);
+
+        // The next day's upload is a new generation: counted again, still
+        // never unexpected.
+        f.bucket.put(
+            "CORPUSExtract.csv.gz",
+            b"smart-2",
+            5,
+            f.created(Duration::from_secs(1)),
+        );
+        source.poll_once().await;
+        let r = handle.render();
+        assert_eq!(sample(&r, IGNORED_SERIES).as_deref(), Some("2"));
+        assert_eq!(sample(&r, &unexpected_series("name")).as_deref(), Some("1"));
+        assert_eq!(f.gets().await, 0);
+    }
+
+    /// Expected wins over ignored, and an unsafe name is unexpected however
+    /// the ignore list matches it.
+    #[tokio::test]
+    async fn expected_wins_over_ignored_and_unsafe_names_stay_unexpected() {
+        let f = Fixture::new().await;
+        let mut settings = Fixture::settings();
+        // CORPUS off: an expected CORPUSExtract.json.gz does not route.
+        settings.routing = Routing::defaults();
+        settings.ignored = Some(FilePattern::parse("timetable_full.zip,*CORPUSExtract*").unwrap());
+        settings.expected = FilePattern::parse("timetable_full.zip,CORPUSExtract.json.gz").unwrap();
+        let young = f.created(Duration::from_secs(60));
+        f.bucket.put("timetable_full.zip", b"zip", 1, young);
+        f.bucket.put("CORPUSExtract.json.gz", b"json", 2, young);
+        f.bucket.put(".CORPUSExtract.csv.gz", b"hidden", 4, young);
+        f.bucket
+            .put("sub/CORPUSExtract.csv.gz", b"nested", 5, young);
+        f.bucket.put("CORPUSExtract.csv.gz", b"smart", 6, young);
+        let source = f.source(settings);
+        let objects = source.client.list_root().await.unwrap();
+        let class = |name: &str| source.classify(objects.iter().find(|o| o.name == name).unwrap());
+        assert_eq!(class("timetable_full.zip"), Class::New, "expected wins");
+        assert_eq!(
+            class("CORPUSExtract.json.gz"),
+            Class::Unexpected("unroutable"),
+            "expected wins, even when it then does not route"
+        );
+        assert_eq!(class(".CORPUSExtract.csv.gz"), Class::Unexpected("name"));
+        assert_eq!(class("sub/CORPUSExtract.csv.gz"), Class::Unexpected("name"));
+        assert_eq!(class("CORPUSExtract.csv.gz"), Class::Ignored);
+
+        // With no ignore list, the same name is unexpected, as before.
+        let plain = f.source(Fixture::settings());
+        assert_eq!(
+            plain.classify(
+                objects
+                    .iter()
+                    .find(|o| o.name == "CORPUSExtract.csv.gz")
+                    .unwrap()
+            ),
+            Class::Unexpected("name")
+        );
     }
 
     #[tokio::test]
@@ -1685,6 +1844,7 @@ pub(crate) mod tests {
                 LAST_NEW_OBJECT_METRIC,
                 ERRORS_METRIC,
                 UNEXPECTED_METRIC,
+                IGNORED_METRIC,
                 DOWNLOAD_CAPPED_METRIC,
                 DOWNLOADED_BYTES_METRIC,
                 POLL_DURATION_METRIC,
@@ -1697,6 +1857,7 @@ pub(crate) mod tests {
                 "schedule_feed_source_last_new_object_seconds",
                 "schedule_feed_source_errors_total",
                 "schedule_feed_source_unexpected_objects_total",
+                "schedule_feed_source_ignored_objects_total",
                 "schedule_feed_source_download_capped",
                 "schedule_feed_source_downloaded_bytes_total",
                 "schedule_feed_source_poll_duration_seconds",
