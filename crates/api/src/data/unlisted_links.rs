@@ -134,10 +134,11 @@ pub async fn revoke_link(
     Ok(result.rows_affected() > 0)
 }
 
-/// SQL fragment: journey `resource_id` is owned by user `$owner` (the
-/// journey share link's ownership rule, `journeys.user_id`).
+/// SQL fragment: journey `$1` is owned by user `$2` (the journey share
+/// link's ownership rule, `journeys.user_id`). Compares `journeys.id` as a
+/// number so the primary key is used, not a cast of every journey id.
 const JOURNEY_OWNED_BY: &str =
-    "EXISTS (SELECT 1 FROM journeys j WHERE j.id::text = resource_id AND j.user_id = ";
+    "EXISTS (SELECT 1 FROM journeys j WHERE j.id = $1::bigint AND j.user_id = $2)";
 
 /// [`revoke_link`] for a journey share link, with the owner check in the
 /// `UPDATE` itself: `owner_user_id` must own journey `journey_id`.
@@ -148,10 +149,10 @@ pub async fn revoke_journey_link(
 ) -> anyhow::Result<bool> {
     let result = sqlx::query(&format!(
         "UPDATE unlisted_links SET revoked_at = NOW() \
-         WHERE resource_type = 'journey' AND resource_id = $1 AND revoked_at IS NULL \
-           AND {JOURNEY_OWNED_BY}$2)"
+         WHERE resource_type = 'journey' AND resource_id = $1::bigint::text AND revoked_at IS NULL \
+           AND {JOURNEY_OWNED_BY}"
     ))
-    .bind(journey_id.to_string())
+    .bind(journey_id)
     .bind(owner_user_id)
     .execute(pool)
     .await?;
@@ -169,11 +170,11 @@ pub async fn extend_journey_link(
     let expires_at = Utc::now() + ttl;
     let result = sqlx::query(&format!(
         "UPDATE unlisted_links SET expires_at = $3 \
-         WHERE resource_type = 'journey' AND resource_id = $1 AND revoked_at IS NULL \
+         WHERE resource_type = 'journey' AND resource_id = $1::bigint::text AND revoked_at IS NULL \
            AND (expires_at IS NULL OR expires_at > NOW()) \
-           AND {JOURNEY_OWNED_BY}$2)"
+           AND {JOURNEY_OWNED_BY}"
     ))
-    .bind(journey_id.to_string())
+    .bind(journey_id)
     .bind(owner_user_id)
     .bind(expires_at)
     .execute(pool)
