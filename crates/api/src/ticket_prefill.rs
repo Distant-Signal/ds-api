@@ -26,12 +26,12 @@ fn mac_hex(
     leg_id: i64,
     departure: Option<DateTime<Utc>>,
     expires_at: i64,
-) -> String {
+) -> Option<String> {
     let mut key = Sha256::new();
     key.update(b"distant-signal ticket prefill v1\0");
     key.update(secret.as_bytes());
-    let mut mac = <Hmac<Sha256> as Mac>::new_from_slice(&key.finalize())
-        .expect("HMAC accepts a key of any length");
+    // Cannot fail for a 32-byte key; `None` (never a MAC of nothing) if it did.
+    let mut mac = <Hmac<Sha256> as Mac>::new_from_slice(&key.finalize()).ok()?;
     // The user id is length-prefixed so no two inputs share an encoding.
     let departure = departure.map_or_else(String::new, |at| {
         at.to_rfc3339_opts(SecondsFormat::Nanos, true)
@@ -43,10 +43,11 @@ fn mac_hex(
         )
         .as_bytes(),
     );
-    format!("{:x}", mac.finalize().into_bytes())
+    Some(format!("{:x}", mac.finalize().into_bytes()))
 }
 
-/// The token for a pass read for `leg_id` that gave `departure`.
+/// The token for a pass read for `leg_id` that gave `departure`; `None` only
+/// if the MAC could not be keyed.
 #[must_use]
 pub fn issue(
     secret: &str,
@@ -54,12 +55,10 @@ pub fn issue(
     leg_id: i64,
     departure: Option<DateTime<Utc>>,
     now: DateTime<Utc>,
-) -> String {
+) -> Option<String> {
     let expires_at = now.timestamp().saturating_add(TOKEN_TTL_SECS);
-    format!(
-        "{expires_at}.{}",
-        mac_hex(secret, user_id, leg_id, departure, expires_at)
-    )
+    let mac = mac_hex(secret, user_id, leg_id, departure, expires_at)?;
+    Some(format!("{expires_at}.{mac}"))
 }
 
 /// Whether `token` was issued by [`issue`] for these, and has not expired.
@@ -82,7 +81,9 @@ pub fn verify(
     if expires_at < now || expires_at > now.saturating_add(TOKEN_TTL_SECS) {
         return false;
     }
-    let expected = mac_hex(secret, user_id, leg_id, departure, expires_at);
+    let Some(expected) = mac_hex(secret, user_id, leg_id, departure, expires_at) else {
+        return false;
+    };
     expected.as_bytes().ct_eq(mac.as_bytes()).into()
 }
 
@@ -98,7 +99,7 @@ mod tests {
     fn a_token_matches_only_its_own_user_leg_and_departure() {
         let now = at("2026-11-17T12:00:00Z");
         let departure = Some(at("2026-11-17T13:30:00Z"));
-        let token = issue("secret", "user-1", 7, departure, now);
+        let token = issue("secret", "user-1", 7, departure, now).unwrap();
         assert!(verify("secret", "user-1", 7, departure, &token, now));
         assert!(!verify("secret", "user-2", 7, departure, &token, now));
         assert!(!verify("secret", "user-1", 8, departure, &token, now));
@@ -117,7 +118,7 @@ mod tests {
     #[test]
     fn a_token_expires_and_a_forged_expiry_fails() {
         let now = at("2026-11-17T12:00:00Z");
-        let token = issue("secret", "user-1", 7, None, now);
+        let token = issue("secret", "user-1", 7, None, now).unwrap();
         let later = now + chrono::Duration::seconds(TOKEN_TTL_SECS);
         assert!(verify("secret", "user-1", 7, None, &token, later));
         let expired = later + chrono::Duration::seconds(1);

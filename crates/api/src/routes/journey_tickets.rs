@@ -294,7 +294,8 @@ async fn post_leg_ticket_pkpass(
         leg_id,
         ticket.current_departure_date,
         Utc::now(),
-    );
+    )
+    .ok_or_else(|| internal_error("sign the pass prefill")(anyhow::anyhow!("MAC key rejected")))?;
     Ok(Json(prefill(&ticket, leg_date, token)))
 }
 

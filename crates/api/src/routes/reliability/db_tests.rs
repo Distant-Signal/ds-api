@@ -654,9 +654,10 @@ async fn delay_repay_with_and_without_a_ticket_type() {
         }
         body
     };
-    let at: chrono::DateTime<chrono::Utc> = departure.parse().expect("departure");
+    let at: chrono::DateTime<Utc> = departure.parse().expect("departure");
     let issue = |leg: i64, user: &str, departure| {
-        crate::ticket_prefill::issue("test-secret", user, leg, departure, chrono::Utc::now())
+        crate::ticket_prefill::issue("test-secret", user, leg, departure, Utc::now())
+            .expect("token")
     };
     for (what, body) in [
         ("no token", wallet(None, departure)),
