@@ -7506,6 +7506,7 @@ mod check_mode_tests {
     /// A newer delivery landing afterwards is still picked up.
     #[tokio::test]
     async fn a_marker_ahead_of_the_pvc_is_not_a_waiting_delivery() {
+        const NEWEST: &str = "20261102T210000Z";
         let sink = FakePublishSink::new().with_last_completed(Some(NEWER));
         let storage = tempfile::tempdir().unwrap();
         write_fixture_delivery(storage.path(), DELIVERY);
@@ -7524,7 +7525,6 @@ mod check_mode_tests {
             "a publish run does not republish the older delivery either"
         );
 
-        const NEWEST: &str = "20261102T210000Z";
         write_fixture_delivery(storage.path(), NEWEST);
         assert_eq!(
             run_check(&sink, &config).await.unwrap(),
