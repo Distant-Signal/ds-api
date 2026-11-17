@@ -39,12 +39,18 @@ last service date).
 Either stops the push only; the train's own push then goes out as before.
 
 A dismissed break stays dismissed: while it is the journey's latest
-break, neither a page read nor the sweep opens a new one for the same cause
-on the same leg (so it is never pushed twice), even if that leg recovers in
-between and then goes wrong the same way again. The fingerprint is not
-compared: it follows the live times, which move every few minutes. A
-different cause or a different leg opens a new break, and once that one
-exists the dismissal no longer holds anything back.
+break and the leg has not recovered since, neither a page read nor the
+sweep opens a new one for the same cause on the same leg (so it is never
+pushed twice). The fingerprint is not compared: it follows the live times,
+which move every few minutes. When a page read or the sweep finds the
+journey working again (no break detected), it stamps `cleared_at` on the
+dismissed break; after that, the same cause on the same leg going wrong
+again opens a new break (and may push). A different cause or a different
+leg opens a new break at once, and once any new break exists the dismissal
+holds nothing back. `cleared_at` needs ds-core's
+`20261117110000_journey_breaks_cleared_at.sql` (api after migration).
+Nothing is stamped when the journey cannot be judged (no live timings) or
+is all travelled: unknown is not healthy.
 
 ## Metrics
 

@@ -1560,6 +1560,142 @@ async fn a_dismissed_break_is_not_opened_again_for_the_same_cause() {
     assert!(detail["openBreak"].is_null(), "{detail}");
 }
 
+/// A dismissed break holds a repeat back only until the leg recovers
+/// (review J1 follow-up): an ETA tick alone never reopens it, a recovery
+/// marks it cleared, and the same cancellation after that is a new break.
+#[tokio::test]
+#[ignore = "requires a live database: DATABASE_URL"]
+async fn a_dismissed_break_reopens_for_the_same_cause_only_after_the_leg_recovers() {
+    use chrono::TimeZone;
+    let _now = pin_now();
+    let pool = connect().await;
+    let _cleanup = cleanup(&pool).await;
+    seed_timetable(&pool).await;
+    let token = seed_session(&pool, USER).await;
+    let router = router(pool.clone());
+    let (journey_id, _) = create_journey(&router, &token).await;
+    seed_live(&pool, "RP0001", "cancelled", 0, "2099-05-05T07:00:00Z").await;
+    let journey = format!("/Journeys/{journey_id}");
+    let app = crate::test_support::inert_app(pool.clone());
+    let now = chrono::Utc.with_ymd_and_hms(2099, 5, 5, 8, 30, 0).unwrap();
+    let cleared = || async {
+        let (cleared,): (bool,) = sqlx::query_as(
+            "SELECT cleared_at IS NOT NULL FROM journey_breaks WHERE journey_id = $1 \
+             ORDER BY id LIMIT 1",
+        )
+        .bind(journey_id)
+        .fetch_one(&pool)
+        .await
+        .expect("first break");
+        cleared
+    };
+
+    let (_, detail) = call(&router, "GET", &journey, Some(&token), None, None).await;
+    let break_id = detail["openBreak"]["id"].as_i64().expect("open break");
+    let (status, body) = call(
+        &router,
+        "POST",
+        &format!("/Journeys/{journey_id}/breaks/{break_id}/dismiss"),
+        Some(&token),
+        Some(serde_json::json!({ "reason": "notTravelling" })),
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::NO_CONTENT, "{body}");
+
+    // Still cancelled, and the live times move (an ETA tick): no new break.
+    seed_live(&pool, "RP0001", "cancelled", 7, "2099-05-05T07:05:00Z").await;
+    let (_, detail) = call(&router, "GET", &journey, Some(&token), None, None).await;
+    assert!(detail["openBreak"].is_null(), "{detail}");
+    let swept = crate::journey_break_sweep::run_sweep(&app, now)
+        .await
+        .expect("sweep");
+    assert_eq!(swept.breaks, 0, "{swept:?}");
+    assert_eq!(break_count(&pool, journey_id).await, 1);
+    assert!(!cleared().await);
+
+    // The leg recovers: the read marks the dismissed break cleared.
+    exec(
+        &pool,
+        &format!(
+            "UPDATE train_current_state SET status = 'awaiting_activation' WHERE trains_id IN \
+             (SELECT id FROM trains WHERE service_date = '{DATE}' AND train_uid = 'RP0001')"
+        ),
+    )
+    .await;
+    let (_, detail) = call(&router, "GET", &journey, Some(&token), None, None).await;
+    assert!(detail["openBreak"].is_null(), "{detail}");
+    assert!(cleared().await);
+    assert_eq!(break_count(&pool, journey_id).await, 1);
+
+    // Cancelled again, the same way: a new break opens, by read and sweep.
+    seed_live(&pool, "RP0001", "cancelled", 0, "2099-05-05T07:10:00Z").await;
+    let (_, detail) = call(&router, "GET", &journey, Some(&token), None, None).await;
+    let new_id = detail["openBreak"]["id"].as_i64().expect("a new break");
+    assert_ne!(new_id, break_id, "{detail}");
+    assert_eq!(break_count(&pool, journey_id).await, 2);
+    let swept = crate::journey_break_sweep::run_sweep(&app, now)
+        .await
+        .expect("sweep");
+    assert_eq!(swept.recovered, 0, "{swept:?}");
+    assert_eq!(break_count(&pool, journey_id).await, 2);
+}
+
+/// The sweep marks a dismissed break cleared when it finds the leg
+/// healthy, with no page read.
+#[tokio::test]
+#[ignore = "requires a live database: DATABASE_URL"]
+async fn the_sweep_marks_a_dismissed_break_cleared_once_the_leg_recovers() {
+    use chrono::TimeZone;
+    let _now = pin_now();
+    let pool = connect().await;
+    let _cleanup = cleanup(&pool).await;
+    seed_timetable(&pool).await;
+    let token = seed_session(&pool, USER).await;
+    let router = router(pool.clone());
+    let (journey_id, _) = create_journey(&router, &token).await;
+    seed_live(&pool, "RP0001", "cancelled", 0, "2099-05-05T07:00:00Z").await;
+    let journey = format!("/Journeys/{journey_id}");
+    let (_, detail) = call(&router, "GET", &journey, Some(&token), None, None).await;
+    let break_id = detail["openBreak"]["id"].as_i64().expect("open break");
+    let (status, body) = call(
+        &router,
+        "POST",
+        &format!("/Journeys/{journey_id}/breaks/{break_id}/dismiss"),
+        Some(&token),
+        Some(serde_json::json!({ "reason": "notTravelling" })),
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::NO_CONTENT, "{body}");
+    exec(
+        &pool,
+        &format!(
+            "UPDATE train_current_state SET status = 'awaiting_activation' WHERE trains_id IN \
+             (SELECT id FROM trains WHERE service_date = '{DATE}' AND train_uid = 'RP0001')"
+        ),
+    )
+    .await;
+    let app = crate::test_support::inert_app(pool.clone());
+    let now = chrono::Utc.with_ymd_and_hms(2099, 5, 5, 8, 30, 0).unwrap();
+    crate::journey_break_sweep::run_sweep(&app, now)
+        .await
+        .expect("sweep");
+    let (cleared,): (bool,) =
+        sqlx::query_as("SELECT cleared_at IS NOT NULL FROM journey_breaks WHERE id = $1")
+            .bind(break_id)
+            .fetch_one(&pool)
+            .await
+            .expect("break");
+    assert!(cleared);
+    // Marked once: a second healthy sweep leaves it be.
+    assert!(
+        !crate::data::journey_breaks::clear_dismissed(&pool, journey_id)
+            .await
+            .expect("clear")
+    );
+}
+
 /// A skipped stop is judged alike by a page read and the sweep (review
 /// J2): the break a read opens is confirmed by the sweep, not ended as
 /// recovered and opened again by the next read.
