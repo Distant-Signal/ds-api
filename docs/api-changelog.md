@@ -3,6 +3,29 @@
 Changes to the Distant Signal (DS) HTTP API that a client such as DS-MCP
 needs to know about. Newest first. Field names are as served (camelCase).
 
+## 2026-11-17: Journey break and replan fixes
+
+Behaviour fixes (DS-534); no field, migration or grant change.
+
+- A dismissed break stays dismissed: while it is the journey's latest
+  break, `GET /Journeys/{id}` and the break sweep no longer open a new one
+  for the same cause on the same leg, even after that leg recovers and goes
+  wrong again (`openBreak` stays `null`, nothing is pushed again). A
+  different cause or leg still opens one.
+- `POST /Journeys/{id}/revisions/{no}/revert` to a plan with more legs after
+  the current ones now brings them back (it was a `409 revision_gone`); a
+  plan with an untracked leg missing its times or mode is refused with
+  `409 revision_gone` instead of being restored without that leg.
+- An `Idempotency-Key` on `.../replan/accept`, `.../legs/{legId}/replace` and
+  `.../revert` now covers the journey (and leg) in the path: the same key
+  sent for another journey or leg is a `409 idempotency_conflict`, never the
+  first request's answer replayed.
+- `DELETE /Journeys/{id}/legs/{legId}` on a journey's last leg records the
+  journey under Recently deleted when that is on, as `DELETE /Journeys/{id}`
+  does.
+- `PUT /Journeys/{id}/operator-filter` answers `404` for a journey that isn't
+  the caller's before checking the filter (it could answer `400` first).
+
 ## 2026-11-17: Review fixes: boards, stop points, line trains, groups
 
 No migration, grant or schema change (DS-534). Response shapes are
