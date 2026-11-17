@@ -591,6 +591,7 @@ pub fn router(app: &App, edge: &crate::edge::EdgeSettings) -> Router {
         );
     Router::new()
         .nest("/v1", v1)
+        .layer(axum::middleware::from_fn(crate::text_guard::reject_nul_input))
         // Innermost first: the unavailable mark, the envelope, the time
         // limit, the gate, and the credential strip outermost.
         .layer(axum::middleware::from_fn_with_state(

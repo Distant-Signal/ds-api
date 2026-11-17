@@ -62,6 +62,17 @@ Behaviour fixes (DS-534); no field, migration or grant change.
 - Personal API tokens: a `403 insufficient_scope` is charged to the
   token's own rate bucket, so a token past it gets `429 rate_limited`.
 
+## 2026-11-17: Authenticated-stage security fixes
+
+Behaviour changes from the DS-534 assessment; no migration, grant or
+response-shape change.
+
+- A NUL character (U+0000) in any user text is now a `400` ("That text
+  contains a character that can't be used."), not a `500`: a JSON body with
+  a `\u0000` escape in a string (custom names, group names, line names,
+  notes, labels and every other field) or a `%00` in the URL is refused up
+  front, on the public and the token listeners. Postgres cannot store it.
+
 ## 2026-11-17: Journey break and replan fixes
 
 Behaviour fixes (DS-534); no field, migration or grant change.

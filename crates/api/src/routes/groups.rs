@@ -205,6 +205,7 @@ fn validate_group_name(name: &str) -> Result<String, String> {
     if trimmed.is_empty() {
         return Err("Enter a name for this group.".to_string());
     }
+    crate::text_guard::reject_nul(trimmed)?;
     if trimmed.chars().count() > MAX_GROUP_NAME_LENGTH {
         return Err(format!(
             "That name is too long. Group names can be at most {MAX_GROUP_NAME_LENGTH} \

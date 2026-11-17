@@ -484,6 +484,10 @@ async fn server_main() -> anyhow::Result<()> {
             "/public",
             routes::public_router().merge(api::readiness::router(readiness)),
         )
+        // A NUL in a JSON body or the URI is a `400`, not a Postgres 500.
+        .layer(axum::middleware::from_fn(
+            api::text_guard::reject_nul_input,
+        ))
         .layer(edge_settings.public_timeout_layer());
 
     // Unlike the other seven binaries, api's own PUBLIC listener stays up
