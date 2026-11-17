@@ -355,13 +355,34 @@ impl MultiSource {
         } else {
             let mut out = std::fs::OpenOptions::new()
                 .create(true)
+                .read(true)
                 .append(true)
                 .open(&self.ledger)?;
-            writeln!(out, "{}", serde_json::to_string(entry)?)?;
+            let mut line = serde_json::to_string(entry)?;
+            line.push('\n');
+            // A crash part-way through an earlier append can leave its line
+            // with no newline; starting this one on that line would make
+            // `entries` skip both. Start it on a line of its own.
+            if !ends_with_newline_or_empty(&mut out)? {
+                line.insert(0, '\n');
+            }
+            out.write_all(line.as_bytes())?;
             out.sync_all()?;
         }
         Ok(())
     }
+}
+
+/// Whether `file` is empty or its last byte is a newline.
+fn ends_with_newline_or_empty(file: &mut std::fs::File) -> std::io::Result<bool> {
+    use std::io::{Read as _, Seek as _, SeekFrom};
+    if file.metadata()?.len() == 0 {
+        return Ok(true);
+    }
+    file.seek(SeekFrom::End(-1))?;
+    let mut last = [0u8; 1];
+    file.read_exact(&mut last)?;
+    Ok(last[0] == b'\n')
 }
 
 /// One delivery source as the scan and CORPUS cycles see it: its landing
@@ -772,6 +793,37 @@ mod tests {
             entries.last().unwrap().arrival.sha256,
             format!("{:x}", 2 * LEDGER_KEEP - 1)
         );
+    }
+
+    /// B3: a crash part-way through an append leaves a torn last line with
+    /// no newline. The next decision still lands on a line of its own, so
+    /// only the torn one is lost.
+    #[test]
+    fn an_append_after_a_torn_line_is_kept() {
+        let dir = tempfile::tempdir().unwrap();
+        let multi = MultiSource::new(dir.path(), Precedence::default(), 120);
+        multi.record(&arrival(SourceId::Sftp, "aa", 0), Settled::Accepted);
+        let path = dir.path().join(LEDGER_FILE);
+        let whole = std::fs::read(&path).unwrap();
+        multi.record(&arrival(SourceId::Bucket, "bb", 1), Settled::Superseded);
+        // Tear the second line in half, newline and all.
+        let torn = std::fs::read(&path).unwrap();
+        let cut = whole.len() + (torn.len() - whole.len()) / 2;
+        std::fs::write(&path, &torn[..cut]).unwrap();
+        assert_eq!(multi.entries().len(), 1);
+
+        multi.record(&arrival(SourceId::Bucket, "cc", 2), Settled::Duplicate);
+        let entries = multi.entries();
+        assert_eq!(entries.len(), 2, "{entries:?}");
+        assert_eq!(entries[0].arrival.sha256, "aa");
+        assert_eq!(entries[1].arrival.sha256, "cc");
+        assert_eq!(entries[1].outcome, Settled::Duplicate);
+        // And a clean ledger gains no blank lines.
+        multi.record(&arrival(SourceId::Sftp, "dd", 3), Settled::Accepted);
+        let text = std::fs::read_to_string(&path).unwrap();
+        assert!(text.ends_with("}\n"), "{text:?}");
+        assert!(!text[cut..].contains("\n\n"), "{text:?}");
+        assert_eq!(multi.entries().len(), 3);
     }
 
     #[test]
