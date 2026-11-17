@@ -133,13 +133,28 @@ pub fn parse_pass_json(pass: &serde_json::Value) -> anyhow::Result<PartialTicket
     tracing::debug!(barcode_format = ?barcode_format(pass), "parsed .pkpass");
 
     Ok(PartialTicket {
-        operator,
-        ticket_type,
-        origin_crs: origin,
-        destination_crs: destination,
+        operator: operator.map(capped),
+        ticket_type: ticket_type.map(capped),
+        origin_crs: origin.map(capped),
+        destination_crs: destination.map(capped),
         current_departure_date,
         source,
     })
+}
+
+/// The most characters [`parse_pass_json`] keeps of one text field. A
+/// `pass.json` may be up to a megabyte, and an uncapped name made the parse
+/// child's reply overflow its 64 KiB cap, which surfaced as a 500 rather
+/// than a bad file (review 2026-11). No real operator, station or ticket
+/// type name comes near this.
+const MAX_FIELD_CHARS: usize = 200;
+
+/// `value` cut to [`MAX_FIELD_CHARS`] characters.
+fn capped(value: String) -> String {
+    match value.char_indices().nth(MAX_FIELD_CHARS) {
+        Some((end, _)) => value[..end].to_string(),
+        None => value,
+    }
 }
 
 fn semantics_origin_destination(semantics: &serde_json::Value) -> Option<(String, String)> {
@@ -292,6 +307,33 @@ mod pass_json_tests {
         assert_eq!(ticket.origin_crs, Some("Kings Cross".to_string()));
         assert_eq!(ticket.destination_crs, Some("Edinburgh".to_string()));
         assert_eq!(ticket.source, "pkpass-semantics");
+    }
+
+    /// Review 2026-11: a huge text field is cut short, so the parse child's
+    /// reply stays under its cap and the upload is not a 500.
+    #[test]
+    fn long_text_fields_are_capped() {
+        let long = "é".repeat(100_000);
+        let pass = json!({
+            "organizationName": long,
+            "boardingPass": {
+                "transitType": "PKTransitTypeTrain",
+                "semantics": {
+                    "departureStationName": long,
+                    "destinationStationName": "Edinburgh"
+                }
+            }
+        });
+        let ticket = parse_pass_json(&pass).unwrap();
+        assert_eq!(
+            ticket.operator.map(|o| o.chars().count()),
+            Some(MAX_FIELD_CHARS)
+        );
+        assert_eq!(
+            ticket.origin_crs.map(|o| o.chars().count()),
+            Some(MAX_FIELD_CHARS)
+        );
+        assert_eq!(ticket.destination_crs, Some("Edinburgh".to_string()));
     }
 
     #[test]

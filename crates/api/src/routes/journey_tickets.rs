@@ -504,8 +504,11 @@ fn is_irish(state: &crate::data::train_tracking::TrackedTrainState) -> bool {
 
 /// The live delay and outcome, or the leg's recorded outcome where the
 /// live data says nothing (its train's data is pruned after about 30
-/// days): a recorded delay is a measurement, and a recorded cancellation
-/// means the train never got there.
+/// days): a recorded delay is a measurement at the leg's destination, so
+/// the train got there, even when it was cancelled later on (a delay with
+/// a cancellation is a train cancelled after the passenger got off,
+/// `leg_outcomes`); a recorded cancellation with no delay means the train
+/// never got there.
 fn with_recorded(
     delay: Option<crate::data::stop_delay::StopDelay>,
     outcome: Option<delay_repay_rules::Outcome>,
@@ -525,10 +528,10 @@ fn with_recorded(
         })
     });
     let outcome = outcome.or_else(|| {
-        if recorded_cancelled == Some(true) {
-            Some(delay_repay_rules::Outcome::NotReached)
+        if recorded_delay.is_some() {
+            Some(delay_repay_rules::Outcome::Arrived)
         } else {
-            recorded_delay.map(|_| delay_repay_rules::Outcome::Arrived)
+            (recorded_cancelled == Some(true)).then_some(delay_repay_rules::Outcome::NotReached)
         }
     });
     (delay, outcome)
@@ -608,7 +611,13 @@ pub(crate) async fn leg_delay_repays(
             } else {
                 (None, None)
             };
-            let (delay, outcome) = with_recorded(live_delay, live_outcome, input.recorded);
+            // A leg with no destination was recorded, before 2026-11-17,
+            // with the delay wherever its train last reported: not an
+            // arrival there, so only its cancellation is read.
+            let recorded = input
+                .recorded
+                .map(|(minutes, cancelled)| (minutes.filter(|_| destination.is_some()), cancelled));
+            let (delay, outcome) = with_recorded(live_delay, live_outcome, recorded);
             let (measured_at_crs, measured_at_name) = destination.unzip();
             Some(build_leg_delay_repay(
                 input.ticket,
@@ -873,6 +882,11 @@ mod tests {
         let (delay, outcome) = with_recorded(None, None, Some((None, Some(true))));
         assert_eq!(delay, None);
         assert_eq!(outcome, Some(Outcome::NotReached));
+        // Review 2026-11 (C3): cancelled after reaching the leg's destination
+        // (it reported there 20 minutes late) still arrived, with its delay.
+        let (delay, outcome) = with_recorded(None, None, Some((Some(20), Some(true))));
+        assert_eq!(delay, Some(arrived(20)));
+        assert_eq!(outcome, Some(Outcome::Arrived));
         // Live data, when there is any, wins.
         let (delay, outcome) =
             with_recorded(Some(projected(5)), None, Some((Some(42), Some(false))));

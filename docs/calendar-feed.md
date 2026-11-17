@@ -56,6 +56,13 @@ Repeating journeys appear as the journeys the notifier has made from them
 (a regular journey's occurrences are journeys, up to a few days ahead), not
 as a recurrence rule.
 
+A feed reads the caller's 500 newest journeys in the journeys list's
+order (`calendar_feed::FEED_LIST_LIMIT`: still to come first, then
+travelled, newest first), more than the list's own 100, so a run of
+planned journeys does not push out last week's or a claim reminder from
+up to 28 days ago. A journey with 500 newer ones gets no event or
+reminder.
+
 The description carries the data licences' credits as the Atom feeds do
 (`routes::feeds::Credit`: National Rail, Network Rail, and TfL when a
 journey has a non-train leg), the non-affiliation statement and the
@@ -103,6 +110,12 @@ it says what most train companies do and that the company's may differ.
 A cancelled train gets a reminder at any operator. When the journey has
 several trains, the last one's operator is used, because the delay is the
 one at the final arrival.
+
+There is no reminder, for a delay or a cancellation, when the journey's
+last train is an Iarnród Éireann train (Delay Repay does not cover it) or
+has no destination (its delay would be the train's running delay wherever
+it was, not the delay where the journey ends), matching the estimate on
+the journey's Delay Repay panel.
 
 ## Privacy
 

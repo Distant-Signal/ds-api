@@ -49,6 +49,15 @@ pub const PAST_DAYS: i64 = 7;
 /// passed when the feed is first read.
 pub const REMINDER_DAYS_BEFORE: [u32; 2] = [7, 1];
 
+/// How many journeys a feed reads. The journeys list puts the journeys
+/// still to come first, then the travelled ones newest first, and its own
+/// cap (`train_tracking::MINE_LIST_LIMIT`, 100) let a user with many
+/// planned journeys (a regular journey's occurrences among them) lose the
+/// last week's plans and the claim reminders of up to 28 days ago. A feed
+/// is read every 8 to 24 hours, so it can afford a deliberately larger
+/// read; a journey past this many newer ones gets no event or reminder.
+pub const FEED_LIST_LIMIT: i64 = 500;
+
 static ENABLED: AtomicBool = AtomicBool::new(false);
 
 /// Reads [`CALENDAR_ENABLED_ENV`] (default false) once, at startup, and
@@ -98,6 +107,26 @@ pub struct JourneyFacts {
     /// The ATOC code of the last train's operator, when known
     /// (`data::train_operator`).
     pub operator_atoc: Option<String>,
+    /// Whether Delay Repay can apply to the journey's end at all: its last
+    /// train is a GB train (not an Iarnród Éireann `ie:` one, which Delay
+    /// Repay does not cover) with a known destination, so its delay is the
+    /// one measured where the journey ends, as
+    /// `journey_tickets::leg_delay_repays` requires. Without one there is no
+    /// reminder, for a delay or a cancellation.
+    pub delay_repay_applies: bool,
+}
+
+/// [`JourneyFacts::delay_repay_applies`] from the last train leg's uid and
+/// destination. With no destination the journeys list falls back to the
+/// train's running delay wherever it is, which says nothing about where
+/// the journey ends.
+pub fn delay_repay_applies(
+    final_train_uid: Option<&str>,
+    final_destination_crs: Option<&str>,
+) -> bool {
+    let last_train_irish =
+        final_train_uid.is_some_and(common::island_of_ireland::tracking::is_train_uid);
+    !last_train_irish && final_destination_crs.is_some()
 }
 
 impl From<&JourneyListItem> for JourneyFacts {
@@ -108,6 +137,10 @@ impl From<&JourneyListItem> for JourneyFacts {
                 .unwrap_or_else(|| "somewhere".to_string())
         };
         let single_untracked = item.leg_count == 1 && item.kind == "untracked";
+        let delay_repay_applies = delay_repay_applies(
+            item.final_train_uid.as_deref(),
+            item.final_destination_crs.as_deref(),
+        );
         Self {
             id: item.id,
             departs_at: item.departs_at,
@@ -117,7 +150,7 @@ impl From<&JourneyListItem> for JourneyFacts {
             travelled: item.travelled,
             has_train_leg: item.train_leg_count > 0,
             cancelled: item.cancelled_leg_count > 0,
-            final_delay_minutes: if item.final_arrival_delay_provisional {
+            final_delay_minutes: if item.final_arrival_delay_provisional || !delay_repay_applies {
                 None
             } else {
                 item.final_arrival_delay_minutes
@@ -125,6 +158,7 @@ impl From<&JourneyListItem> for JourneyFacts {
             service_date: item.final_service_date.unwrap_or(item.first_service_date),
             untracked: item.kind == "untracked" || item.leg_count > item.train_leg_count,
             operator_atoc: None,
+            delay_repay_applies,
         }
     }
 }
@@ -177,7 +211,7 @@ pub fn journey_event(facts: &JourneyFacts, site: &Site, since: DateTime<Utc>) ->
 /// Signal does not know the ticket. The alarm carries its own hedge because
 /// a pop-up shows nothing else.
 pub fn claim_reminder(facts: &JourneyFacts, site: &Site, today: NaiveDate) -> Option<Event> {
-    if !facts.travelled || !facts.has_train_leg {
+    if !facts.travelled || !facts.has_train_leg || !facts.delay_repay_applies {
         return None;
     }
     let rule = claim_rule_for(facts.operator_atoc.as_deref());
@@ -266,10 +300,22 @@ pub async fn feed_events(
     site: &Site,
     now: DateTime<Utc>,
 ) -> anyhow::Result<Vec<Event>> {
-    let rows = crate::data::journeys::list_journeys_for_user(
+    feed_events_capped(pool, user_id, site, now, FEED_LIST_LIMIT).await
+}
+
+/// [`feed_events`] reading at most `limit` journeys.
+pub(crate) async fn feed_events_capped(
+    pool: &sqlx::PgPool,
+    user_id: &str,
+    site: &Site,
+    now: DateTime<Utc>,
+    limit: i64,
+) -> anyhow::Result<Vec<Event>> {
+    let rows = crate::data::journeys::list_journeys_for_user_capped(
         pool,
         user_id,
         crate::data::journeys::ListInclude::default(),
+        limit,
     )
     .await?;
     events_for_rows(pool, &rows, site, now, now - Duration::days(PAST_DAYS)).await
@@ -371,6 +417,7 @@ mod tests {
             service_date: NaiveDate::from_ymd_opt(2026, 11, 10).unwrap(),
             untracked: false,
             operator_atoc: None,
+            delay_repay_applies: true,
         }
     }
 
@@ -498,6 +545,25 @@ mod tests {
         assert!(claim_reminder(&late(), &site(), after).is_none());
         let on_day = NaiveDate::from_ymd_opt(2026, 12, 8).unwrap();
         assert!(claim_reminder(&late(), &site(), on_day).is_some());
+    }
+
+    /// Review 2026-11 (C2): an Irish last train, or one with no destination
+    /// (whose delay would be the running delay wherever the train was), gets
+    /// no reminder, late or cancelled, as Delay Repay's estimate gives none.
+    #[test]
+    fn no_reminder_when_delay_repay_cannot_apply_to_the_last_train() {
+        assert!(delay_repay_applies(Some("C12345"), Some("KGX")));
+        assert!(!delay_repay_applies(Some("ie:A123"), Some("KGX")));
+        assert!(!delay_repay_applies(Some("IE:A123"), None));
+        assert!(!delay_repay_applies(Some("C12345"), None));
+        let today = NaiveDate::from_ymd_opt(2026, 11, 11).unwrap();
+        let mut f = late();
+        f.delay_repay_applies = false;
+        f.final_delay_minutes = Some(40);
+        assert!(claim_reminder(&f, &site(), today).is_none());
+        f.final_delay_minutes = None;
+        f.cancelled = true;
+        assert!(claim_reminder(&f, &site(), today).is_none());
     }
 
     #[test]

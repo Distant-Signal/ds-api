@@ -247,17 +247,31 @@ struct LegRun {
     recorded: bool,
 }
 
+impl LegRun {
+    /// Whether the train is known not to have got the passenger to the
+    /// leg's destination: cancelled, with no delay measured there. A
+    /// measured delay there (a report at the destination) means it was
+    /// cancelled only after the passenger got off.
+    fn not_reached(&self) -> bool {
+        self.cancelled && self.delay.is_none_or(|d| d.provisional)
+    }
+}
+
 /// [`LegRun`] from the recorded outcome, else the live state (`live` is
 /// the public delay at the leg's destination, read for the unrecorded
 /// legs whose train is still held). `None` when nothing is known.
 fn leg_run(row: &LegRow, live: Option<StopDelay>) -> Option<LegRun> {
     if row.recorded {
         let cancelled = row.final_cancelled.unwrap_or(false);
-        if row.final_delay.is_none() && !cancelled {
+        // A leg with no destination was recorded, before 2026-11-17, with
+        // the delay wherever its train last reported: not an arrival there,
+        // so not read as one (a cancelled train would read as arrived).
+        let final_delay = row.final_delay.filter(|_| row.destination_crs.is_some());
+        if final_delay.is_none() && !cancelled {
             return None;
         }
         return Some(LegRun {
-            delay: row.final_delay.map(|minutes| StopDelay {
+            delay: final_delay.map(|minutes| StopDelay {
                 minutes,
                 basis: DelayBasis::Public,
                 provisional: false,
@@ -492,7 +506,7 @@ fn journey_delay_repay(
     // otherwise the baseline is the plan travelled, and the last leg's own
     // delay is the journey's.
     let booked = baseline.filter(|b| b.superseded && b.operator_fault_after);
-    let outcome = run.cancelled.then_some(Outcome::NotReached);
+    let outcome = run.not_reached().then_some(Outcome::NotReached);
     let atoc = booked
         .and_then(|b| b.atoc_code.clone())
         .or_else(|| last.atoc_code.clone())
@@ -549,7 +563,7 @@ fn journey_delay_repay(
         destination_crs: destination_crs.clone(),
         destination_name: destination_name.clone(),
         booked_arrival,
-        actual_arrival: actual_arrival.filter(|_| !run.cancelled),
+        actual_arrival: actual_arrival.filter(|_| !run.not_reached()),
         against_booked_plan: booked.is_some(),
         different_destination: different,
         delay_repay: delay_repay_rules::assess(delay_repay_rules::AssessInputs {
@@ -759,5 +773,34 @@ mod tests {
         );
         assert_eq!(response.journeys[0].actual_arrival, None);
         assert_eq!(response.trains.len(), 2, "the Irish train still counts");
+    }
+
+    /// Review 2026-11 (C3): a train cancelled after it reported at the
+    /// leg's destination got the passenger there, with its delay.
+    #[test]
+    fn a_train_cancelled_after_the_destination_arrived() {
+        let input = readings(vec![recorded(leg(1, 11, 1), Some(20), true)]);
+        let response = assemble(&input);
+        let journey = &response.journeys[0];
+        assert_eq!(journey.delay_repay.outcome, None);
+        assert_eq!(journey.delay_repay.delay_minutes, Some(20));
+        assert!(journey.actual_arrival.is_some());
+        assert!(
+            response.trains[0].cancelled,
+            "the train itself was cancelled"
+        );
+    }
+
+    /// An older row for a leg with no destination holds the delay wherever
+    /// the train last reported: a cancelled one is still not reached.
+    #[test]
+    fn a_recorded_delay_without_a_destination_is_not_an_arrival() {
+        let mut nowhere = recorded(leg(1, 11, 1), Some(20), true);
+        nowhere.destination_crs = None;
+        let run = leg_run(&nowhere, None).expect("a cancellation is known");
+        assert!(run.not_reached());
+        assert_eq!(run.delay, None);
+        nowhere.final_cancelled = Some(false);
+        assert_eq!(leg_run(&nowhere, None), None);
     }
 }
