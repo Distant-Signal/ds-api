@@ -392,3 +392,59 @@ async fn every_calendar_route_is_404_while_the_feature_is_off() {
     calendar_feed::set_enabled_for_tests(true);
     cleanup(&pool, "TEST-CAL-D").await;
 }
+
+/// Review 2026-11 (C5): a feed reads past the journeys list's 100-row
+/// cap, so last week's journey is not crowded out by a hundred planned
+/// ones (the list puts journeys still to come first).
+#[tokio::test]
+#[ignore = "requires a live database; run with `DATABASE_URL=... cargo test -p api calendar_db_tests -- --ignored --test-threads=1`"]
+async fn a_feed_reads_past_the_journeys_list_cap() {
+    let pool = connect().await;
+    cleanup(&pool, "TEST-CAL-E").await;
+    let user = "TEST-CAL-E1";
+    seed_user(&pool, user).await;
+    let departure = Utc::now() - Duration::days(2);
+    let leg = crate::data::journeys::validate_untracked_leg(
+        UntrackedLegInput {
+            transit_mode: "tube",
+            origin_name: Some("Brixton"),
+            destination_name: Some("Oxford Circus"),
+            line_name: Some("Victoria"),
+            planned_departure: Some(departure),
+            planned_arrival: Some(departure + Duration::minutes(20)),
+        },
+        crate::routes::london_today(),
+    )
+    .expect("a valid leg");
+    let (past, _) = create_journey_with_untracked_leg(&pool, user, None, &leg)
+        .await
+        .expect("seed the past journey");
+    let cap = crate::data::train_tracking::MINE_LIST_LIMIT;
+    for _ in 0..cap {
+        seed_journey(&pool, user).await;
+    }
+    let site = crate::routes::feeds::Site {
+        origin: ORIGIN.to_string(),
+        host: "example.invalid".to_string(),
+    };
+    let uid = format!("journey-{past}@example.invalid");
+    let capped = calendar_feed::feed_events_capped(&pool, user, &site, Utc::now(), cap)
+        .await
+        .expect("capped feed");
+    assert!(
+        !capped.iter().any(|event| event.uid == uid),
+        "the list's own cap drops it"
+    );
+    let events = calendar_feed::feed_events(&pool, user, &site, Utc::now())
+        .await
+        .expect("feed");
+    assert!(events.iter().any(|event| event.uid == uid));
+    assert_eq!(
+        events
+            .iter()
+            .filter(|event| event.uid.starts_with("journey-"))
+            .count(),
+        usize::try_from(cap).unwrap() + 1
+    );
+    cleanup(&pool, "TEST-CAL-E").await;
+}
