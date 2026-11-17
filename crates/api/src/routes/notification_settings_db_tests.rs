@@ -692,3 +692,152 @@ async fn the_device_list_names_each_device_and_removes_only_the_callers() {
     .await;
     assert_eq!(theirs_list.as_array().map(Vec::len), Some(1));
 }
+
+/// A public id (`d_`/`t_`) read straight from the table.
+async fn public_id_of(pool: &PgPool, table: &str, id: i64) -> String {
+    sqlx::query_scalar(&format!("SELECT public_id FROM {table} WHERE id = $1"))
+        .bind(id)
+        .fetch_one(pool)
+        .await
+        .expect("read public id")
+}
+
+async fn device_exists(pool: &PgPool, public_id: &str) -> bool {
+    sqlx::query_scalar("SELECT EXISTS (SELECT 1 FROM push_subscriptions WHERE public_id = $1)")
+        .bind(public_id)
+        .fetch_one(pool)
+        .await
+        .expect("read push subscription")
+}
+
+/// DS-534: a device is named by its `d_` id or its numeric one; an unknown
+/// id, someone else's and a legacy id nobody owns all answer the same 404,
+/// and another kind's id is a 400.
+#[tokio::test]
+#[ignore = "requires DATABASE_URL (a migrated database)"]
+async fn a_device_is_deleted_by_its_public_id_or_its_numeric_one() {
+    const OWNER: &str = "TEST-NOTIFSET-DEVPUB-OWNER";
+    const OTHER: &str = "TEST-NOTIFSET-DEVPUB-OTHER";
+    let pool = connect().await;
+    let _cleanup = cleanup(&pool, &[OWNER, OTHER]).await;
+    let token = seed_session(&pool, OWNER).await;
+    let other_token = seed_session(&pool, OTHER).await;
+    let first = seed_push_subscription(&pool, OWNER, "https://push.example/devpub-first").await;
+    let second = seed_push_subscription(&pool, OWNER, "https://push.example/devpub-second").await;
+    let first_public = public_id_of(&pool, "push_subscriptions", first).await;
+    let second_public = public_id_of(&pool, "push_subscriptions", second).await;
+    assert!(first_public.starts_with("d_"), "{first_public}");
+    let router = router(pool.clone());
+
+    let mut denied = Vec::new();
+    for (token, id) in [
+        (&other_token, first_public.clone()),
+        (&other_token, first.to_string()),
+        (&token, "d_ffffffffffffffffffffffffffffffff".to_string()),
+        (&token, "999999999999".to_string()),
+    ] {
+        denied.push(
+            call(
+                &router,
+                "DELETE",
+                &format!("/public/notifications/devices/{id}"),
+                Some(token),
+                None,
+            )
+            .await,
+        );
+    }
+    for answer in &denied {
+        assert_eq!(answer.0, StatusCode::NOT_FOUND);
+        assert_eq!(answer, &denied[0], "the 404s differ: {denied:?}");
+    }
+    let (status, _) = call(
+        &router,
+        "DELETE",
+        "/public/notifications/devices/l_0123456789abcdef0123456789abcdef",
+        Some(&token),
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "another kind's id");
+
+    for id in [first_public.clone(), second.to_string()] {
+        let (status, body) = call(
+            &router,
+            "DELETE",
+            &format!("/public/notifications/devices/{id}"),
+            Some(&token),
+            None,
+        )
+        .await;
+        assert_eq!(status, StatusCode::NO_CONTENT, "{id}: {body}");
+    }
+    assert!(!device_exists(&pool, &first_public).await);
+    assert!(!device_exists(&pool, &second_public).await);
+}
+
+/// DS-534: a tracked train is named by its `t_` id or its numeric one, with
+/// the same uniform 404 for an unknown or foreign id and a 400 for another
+/// kind's id.
+#[tokio::test]
+#[ignore = "requires DATABASE_URL (a migrated database)"]
+async fn a_tracked_train_is_named_by_its_public_id_or_its_numeric_one() {
+    const OWNER: &str = "TEST-NOTIFSET-TRKPUB-OWNER";
+    const OTHER: &str = "TEST-NOTIFSET-TRKPUB-OTHER";
+    let pool = connect().await;
+    let _cleanup = cleanup(&pool, &[OWNER, OTHER]).await;
+    let token = seed_session(&pool, OWNER).await;
+    let other_token = seed_session(&pool, OTHER).await;
+    let tracking_id = seed_tracked_train(&pool, OWNER).await;
+    let public = public_id_of(&pool, "train_subscriptions", tracking_id).await;
+    assert!(public.starts_with("t_"), "{public}");
+    let router = router(pool.clone());
+
+    for id in [public.clone(), tracking_id.to_string()] {
+        for enabled in [false, true] {
+            let (status, body) = call(
+                &router,
+                "PATCH",
+                &format!("/Train/{id}"),
+                Some(&token),
+                Some(json!({ "notificationsEnabled": enabled })),
+            )
+            .await;
+            assert_eq!(status, StatusCode::OK, "{id}: {body}");
+            assert_eq!(notifications_enabled(&pool, tracking_id).await, enabled);
+        }
+    }
+
+    let mut denied = Vec::new();
+    for (token, id) in [
+        (&other_token, public.clone()),
+        (&other_token, tracking_id.to_string()),
+        (&token, "t_ffffffffffffffffffffffffffffffff".to_string()),
+        (&token, "999999999999".to_string()),
+    ] {
+        denied.push(
+            call(
+                &router,
+                "PATCH",
+                &format!("/Train/{id}"),
+                Some(token),
+                Some(json!({ "notificationsEnabled": false })),
+            )
+            .await,
+        );
+    }
+    for answer in &denied {
+        assert_eq!(answer.0, StatusCode::NOT_FOUND);
+        assert_eq!(answer, &denied[0], "the 404s differ: {denied:?}");
+    }
+    assert!(notifications_enabled(&pool, tracking_id).await);
+    let (status, _) = call(
+        &router,
+        "PATCH",
+        "/Train/l_0123456789abcdef0123456789abcdef",
+        Some(&token),
+        Some(json!({ "notificationsEnabled": false })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "another kind's id");
+}

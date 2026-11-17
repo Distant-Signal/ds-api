@@ -512,6 +512,9 @@ async fn server_main() -> anyhow::Result<()> {
         // increase()/rate(). See `api::route_metrics`.
         api::route_metrics::register();
         api::edge::register_panic_metric();
+        // Requests that name an object by its numeric id, per kind: the
+        // gate for refusing numeric ids (DS-534).
+        data::public_id::register_metrics();
         // The trip-plan graph builds' counter and timing (DS-225).
         routes::trips::register_graph_metrics();
         // "I missed this train" confirmations, by what the train had done.

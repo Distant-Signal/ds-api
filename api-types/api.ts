@@ -3915,7 +3915,7 @@ customName: string | null, };
 /**
  * `POST /Journeys/{id}/legs/{legId}/replace`'s body.
  */
-export type ReplaceRequest = { cause: AlternativesCause, legs: Array<ItineraryLegRequest>, throughLegId?: number | null, };
+export type ReplaceRequest = { cause: AlternativesCause, legs: Array<ItineraryLegRequest>, throughLegId?: number | string | null, };
 
 /**
  * What a replacement answers (`POST .../replan/accept`, `.../replace`,

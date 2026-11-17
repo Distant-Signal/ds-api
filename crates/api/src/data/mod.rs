@@ -50,6 +50,7 @@ pub mod planner_operators;
 pub mod planner_snapshot;
 pub mod platform_confirmation;
 pub mod preferences;
+pub mod public_id;
 pub mod pushport_platform;
 pub mod queries;
 pub mod quota;

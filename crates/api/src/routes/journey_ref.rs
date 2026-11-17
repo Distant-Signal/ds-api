@@ -1,18 +1,22 @@
-//! The `journey_id` path parameter, in either of its two forms (DS-534).
+//! The id path parameters, in either of their two forms (DS-534).
 //!
 //! `JourneyId` replaces `Path<i64>` on every journey route: it reads the
 //! route's `{journey_id}` capture, which is the deprecated numeric id or a
 //! public `j_...` id (`data::journey_public_id`), and yields the internal
-//! id. The other captures of a route (a leg, a break, a revision) are read
-//! with a `Path` of one of the small structs below, which ignore the
-//! captures they do not name.
+//! id. `LegId` (`{leg_id}`, `l_`), `TrackingId` (`{tracking_id}`, and
+//! `{train_subscription_id}` on the group route, `t_`) and `DeviceId`
+//! (`{id}` on the device route, `d_`) do the same for the other kinds
+//! (`data::public_id`). The other captures of a route (a break, a
+//! revision) are read with a `Path` of one of the small structs below,
+//! which ignore the captures they do not name.
 //!
-//! An unknown public id yields `NO_SUCH_JOURNEY`, not a rejection: the
+//! An unknown public id yields `NO_SUCH_ROW`, not a rejection: the
 //! handler's own ownership predicate then finds nothing and answers its
-//! usual 404, so a missing journey, someone else's journey and a mistyped
-//! public id look the same, and an unauthenticated request still gets the
+//! usual 404, so a missing row, someone else's row and a mistyped public
+//! id look the same, and an unauthenticated request still gets the
 //! handler's 401 first when its auth extractor runs first. A capture that
-//! is neither form is rejected with 400, as `Path<i64>` did.
+//! is neither form (including another kind's public id) is rejected with
+//! 400, as `Path<i64>` did.
 
 use axum::extract::{FromRequestParts, RawPathParams};
 use axum::http::StatusCode;
@@ -20,7 +24,47 @@ use axum::http::request::Parts;
 use serde::Deserialize;
 
 use crate::app::App;
-use crate::data::journey_public_id::JourneyRef;
+use crate::data::public_id::{Device, Journey, Kind, Leg, PublicRef, Tracking};
+
+/// The internal id of the object of kind `K` that the first capture of
+/// `names` the route has holds.
+async fn resolve<K: Kind>(
+    parts: &mut Parts,
+    app: &App,
+    names: &[&str],
+) -> Result<i64, (StatusCode, String)> {
+    let params = RawPathParams::from_request_parts(parts, app)
+        .await
+        .map_err(|err| (StatusCode::BAD_REQUEST, err.to_string()))?;
+    let raw = params
+        .iter()
+        .find(|(name, _)| names.contains(name))
+        .map(|(_, value)| value)
+        .ok_or_else(|| {
+            tracing::error!(?names, "id extractor on a route with no such capture");
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "internal error".to_string(),
+            )
+        })?;
+    let reference = PublicRef::<K>::parse(raw).ok_or_else(|| {
+        (
+            StatusCode::BAD_REQUEST,
+            format!("Invalid URL: {}", PublicRef::<K>::expected()),
+        )
+    })?;
+    reference.resolve(&app.database).await.map_err(|err| {
+        let err = anyhow::Error::from(err);
+        if let Some(unavailable) = crate::unavailable::response_for(&err) {
+            return unavailable;
+        }
+        tracing::error!(error = ?err, kind = K::LABEL, "id lookup failed");
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "internal error".to_string(),
+        )
+    })
+}
 
 /// The internal id of the journey a route's `{journey_id}` capture names.
 #[derive(Debug, Clone, Copy)]
@@ -30,45 +74,50 @@ impl FromRequestParts<App> for JourneyId {
     type Rejection = (StatusCode, String);
 
     async fn from_request_parts(parts: &mut Parts, app: &App) -> Result<Self, Self::Rejection> {
-        let params = RawPathParams::from_request_parts(parts, app)
+        resolve::<Journey>(parts, app, &["journey_id"])
             .await
-            .map_err(|err| (StatusCode::BAD_REQUEST, err.to_string()))?;
-        let raw = params
-            .iter()
-            .find(|(name, _)| *name == "journey_id")
-            .map(|(_, value)| value)
-            .ok_or_else(|| {
-                tracing::error!("JourneyId extractor on a route with no {{journey_id}} capture");
-                (
-                    StatusCode::INTERNAL_SERVER_ERROR,
-                    "internal error".to_string(),
-                )
-            })?;
-        let journey = JourneyRef::parse(raw).ok_or_else(|| {
-            (
-                StatusCode::BAD_REQUEST,
-                "Invalid URL: a journey id is a number or a j_ id".to_string(),
-            )
-        })?;
-        let id = journey.resolve(&app.database).await.map_err(|err| {
-            let err = anyhow::Error::from(err);
-            if let Some(unavailable) = crate::unavailable::response_for(&err) {
-                return unavailable;
-            }
-            tracing::error!(error = ?err, "journey id lookup failed");
-            (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                "internal error".to_string(),
-            )
-        })?;
-        Ok(Self(id))
+            .map(Self)
     }
 }
 
-/// `{leg_id}` next to a `{journey_id}`.
-#[derive(Debug, Deserialize)]
-pub struct LegParam {
-    pub leg_id: i64,
+/// The internal id of the journey leg a route's `{leg_id}` capture names.
+#[derive(Debug, Clone, Copy)]
+pub struct LegId(pub i64);
+
+impl FromRequestParts<App> for LegId {
+    type Rejection = (StatusCode, String);
+
+    async fn from_request_parts(parts: &mut Parts, app: &App) -> Result<Self, Self::Rejection> {
+        resolve::<Leg>(parts, app, &["leg_id"]).await.map(Self)
+    }
+}
+
+/// The internal id of the tracked train (`train_subscriptions` row) a
+/// route's `{tracking_id}` capture, or the group route's
+/// `{train_subscription_id}`, names.
+#[derive(Debug, Clone, Copy)]
+pub struct TrackingId(pub i64);
+
+impl FromRequestParts<App> for TrackingId {
+    type Rejection = (StatusCode, String);
+
+    async fn from_request_parts(parts: &mut Parts, app: &App) -> Result<Self, Self::Rejection> {
+        resolve::<Tracking>(parts, app, &["tracking_id", "train_subscription_id"])
+            .await
+            .map(Self)
+    }
+}
+
+/// The internal id of the push device a route's `{id}` capture names.
+#[derive(Debug, Clone, Copy)]
+pub struct DeviceId(pub i64);
+
+impl FromRequestParts<App> for DeviceId {
+    type Rejection = (StatusCode, String);
+
+    async fn from_request_parts(parts: &mut Parts, app: &App) -> Result<Self, Self::Rejection> {
+        resolve::<Device>(parts, app, &["id"]).await.map(Self)
+    }
 }
 
 /// `{break_id}` next to a `{journey_id}`.
