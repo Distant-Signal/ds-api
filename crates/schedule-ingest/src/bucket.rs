@@ -23,6 +23,19 @@
 //!   `schedule_feed_source_unexpected_objects_total{reason}` once per
 //!   generation.
 //!
+//! An expected object that fails verification [`MAX_FETCH_FAILURES`] times
+//! (that generation: its size, CRC32C or MD5 do not match its metadata, or
+//! it has no CRC32C) is given up on until a restart or a new generation.
+//! Only the object's own fault counts: a transport error, an HTTP error, a
+//! token failure, revoked access or a local disk error never does, so an
+//! outage or a full volume cannot make the reader give up on a real
+//! delivery. A given-up object is never downloaded again, and
+//! never deleted (the bucket's lifecycle rule removes it), reported once
+//! as `schedule_feed_source_unexpected_objects_total{reason="failed"}`. A
+//! failed fetch never uses one of the poll's download slots, so such an
+//! object cannot starve newer ones (the byte budget still counts what it
+//! received).
+//!
 //! Once a confirmed or unexpected object is `BUCKET_DELETE_MIN_AGE_SECS`
 //! old it is deleted with `ifGenerationMatch`: a newer upload in between is
 //! never lost (412), and one already gone (404) is fine. The ingest outcome
@@ -46,7 +59,7 @@
 //! changes nothing but the timing, and with the subscription failing the
 //! source polls every `BUCKET_POLL_INTERVAL_SECS` as before.
 
-use std::collections::{HashSet, VecDeque};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -85,8 +98,19 @@ pub(crate) const POLL_DURATION_METRIC: &str = "schedule_feed_source_poll_duratio
 /// exchange failure (which leaves it at 0), so `auth` errors while
 /// `access_revoked` is 0 are the transient ones.
 pub(crate) const ERROR_KINDS: [&str; 6] = ["auth", "list", "get", "verify", "delete", "size"];
-/// `reason` of [`UNEXPECTED_METRIC`].
-pub(crate) const UNEXPECTED_REASONS: [&str; 3] = ["name", "size", "unroutable"];
+/// `reason` of [`UNEXPECTED_METRIC`]. `failed`: an expected object given
+/// up on after [`MAX_FETCH_FAILURES`] failed verifications (kept, not
+/// deleted).
+pub(crate) const UNEXPECTED_REASONS: [&str; 4] = ["name", "size", "unroutable", "failed"];
+
+/// Failed verifications of one generation before it is given up on. With
+/// the default poll interval and backoff ceiling (300 s, 3600 s) that is
+/// about eight hours of failing polls.
+pub(crate) const MAX_FETCH_FAILURES: u32 = 10;
+/// Longest object name downloaded: on-disk names add a prefix to it
+/// (`.partial-`, `.landing-`, or the archive's `<created>-<generation>-`,
+/// up to 38 bytes), and a file name is at most 255 bytes.
+const MAX_NAME_BYTES: usize = 200;
 
 /// Confirmed generations kept in the seen ledger.
 const SEEN_KEEP: usize = 200;
@@ -153,6 +177,9 @@ enum Class {
     Confirmed,
     /// Never downloaded; deleted once old enough.
     Unexpected(&'static str),
+    /// Expected, but it failed verification [`MAX_FETCH_FAILURES`] times:
+    /// never downloaded again by this process, and never deleted.
+    GaveUp,
 }
 
 /// A wall clock (tests substitute their own).
@@ -227,6 +254,9 @@ pub(crate) struct BucketSource {
     failures: u32,
     /// `(name, generation)` already reported as unexpected.
     reported: HashSet<(String, i64)>,
+    /// Failed verifications of each listed `(name, generation)` not yet
+    /// confirmed (in memory: a restart retries it).
+    fetch_failures: HashMap<(String, i64), u32>,
     clock: Clock,
     /// Pub/Sub on: the wake-up, and the poll interval while it is healthy.
     wake: Option<(Arc<Wake>, Duration)>,
@@ -268,6 +298,7 @@ impl BucketSource {
             capped: false,
             failures: 0,
             reported: HashSet::new(),
+            fetch_failures: HashMap::new(),
             clock,
             wake: None,
         }
@@ -357,6 +388,12 @@ impl BucketSource {
             Err(err) => return Err(self.fail("list", &err)),
         };
         self.set_revoked(false, None);
+        // Forget the failures of generations no longer listed.
+        self.fetch_failures.retain(|(name, generation), _| {
+            objects
+                .iter()
+                .any(|o| o.name == *name && o.generation == *generation)
+        });
         let mut objects: Vec<(ObjectMeta, Class)> = objects
             .into_iter()
             .map(|object| {
@@ -376,6 +413,7 @@ impl BucketSource {
         for (object, class) in &mut objects {
             match *class {
                 Class::Unexpected(reason) => self.report_unexpected(object, reason),
+                Class::GaveUp => self.report_gave_up(object),
                 Class::Confirmed => {}
                 Class::New => {
                     if downloads >= self.settings.max_downloads_per_poll || refused_by_budget {
@@ -385,9 +423,14 @@ impl BucketSource {
                         refused_by_budget = true;
                         continue;
                     }
-                    downloads += 1;
+                    // Only a fetch that lands uses a slot: one that keeps
+                    // failing must not starve newer objects (its bytes
+                    // still count against the budget).
                     match self.fetch(object).await {
-                        Ok(()) => *class = Class::Confirmed,
+                        Ok(()) => {
+                            downloads += 1;
+                            *class = Class::Confirmed;
+                        }
                         Err(Some(err)) => return Err(err),
                         Err(None) => failed = true,
                     }
@@ -398,7 +441,9 @@ impl BucketSource {
 
         let now = (self.clock)();
         for (object, class) in &objects {
-            if matches!(class, Class::New) {
+            // Only what was confirmed or never expected is deleted: an
+            // object given up on stays for a person (or the lifecycle rule).
+            if matches!(class, Class::New | Class::GaveUp) {
                 continue;
             }
             let age = now
@@ -450,9 +495,49 @@ impl BucketSource {
             .any(|s| s.name == object.name && s.generation == object.generation)
         {
             Class::Confirmed
+        } else if self
+            .fetch_failures
+            .get(&(object.name.clone(), object.generation))
+            .is_some_and(|&n| n >= MAX_FETCH_FAILURES)
+        {
+            Class::GaveUp
         } else {
             Class::New
         }
+    }
+
+    /// Counts a failed verification of `object`'s generation. Only the
+    /// object's own fault is counted, never a transport, HTTP, token or
+    /// local disk error: those are not the object's, and counting them
+    /// would give up on real deliveries during an outage.
+    fn count_fetch_failure(&mut self, object: &ObjectMeta) {
+        let failures = self
+            .fetch_failures
+            .entry((object.name.clone(), object.generation))
+            .or_insert(0);
+        *failures = failures.saturating_add(1);
+    }
+
+    fn report_gave_up(&mut self, object: &ObjectMeta) {
+        if !self
+            .reported
+            .insert((object.name.clone(), object.generation))
+        {
+            return;
+        }
+        metrics::counter!(
+            ds_runtime::metrics::metric_name(UNEXPECTED_METRIC),
+            "source" => SOURCE,
+            "reason" => "failed"
+        )
+        .increment(1);
+        tracing::error!(
+            object = %shown(&object.name),
+            bytes = object.size,
+            generation = object.generation,
+            failures = MAX_FETCH_FAILURES,
+            "giving up on a bucket object that keeps failing verification: not downloaded again until a restart or a new upload, and never deleted by the reader"
+        );
     }
 
     fn report_unexpected(&mut self, object: &ObjectMeta, reason: &'static str) {
@@ -503,6 +588,14 @@ impl BucketSource {
     /// `Err(Some(Revoked))` stops the poll; `Err(None)` is a counted
     /// failure that leaves the object for a later poll.
     async fn fetch(&mut self, object: &ObjectMeta) -> Result<(), Option<PollError>> {
+        // Every object GCS lists has a CRC32C; one without can never pass
+        // verification, so it is not downloaded only to be refused.
+        if object.crc32c.is_none() {
+            count_error("verify");
+            self.count_fetch_failure(object);
+            tracing::warn!(object = %shown(&object.name), generation = object.generation, "bucket object has no CRC32C in its metadata; not downloading it");
+            return Err(None);
+        }
         let partial = self.dirs.root.join(format!(".partial-{}", object.name));
         let result = self.download_to(object, &partial).await;
         // Every byte received counts against the caps, a failed
@@ -517,6 +610,9 @@ impl BucketSource {
             Ok((sha256, _)) => sha256,
             Err((kind, err, _)) => {
                 let _ = std::fs::remove_file(&partial);
+                if kind == "verify" {
+                    self.count_fetch_failure(object);
+                }
                 return Err(match self.fail(kind, &err) {
                     PollError::Revoked => Some(PollError::Revoked),
                     PollError::Failed => None,
@@ -818,10 +914,11 @@ pub(crate) fn register_metrics() {
 }
 
 /// A name the reader may write to disk: one path component, not hidden,
-/// no control characters, at most 255 bytes.
+/// no control characters, at most [`MAX_NAME_BYTES`] (so every prefixed
+/// on-disk name still fits a file name).
 fn is_safe_name(name: &str) -> bool {
     !name.is_empty()
-        && name.len() <= 255
+        && name.len() <= MAX_NAME_BYTES
         && !name.starts_with('.')
         && !name.contains(['/', '\\'])
         && !name.chars().any(char::is_control)
@@ -1391,6 +1488,166 @@ pub(crate) mod tests {
             .unwrap();
     }
 
+    /// An `NLC*.xml.gz` name of `len` bytes.
+    fn nlc_name(len: usize) -> String {
+        format!("NLC{}.xml.gz", "9".repeat(len - "NLC.xml.gz".len()))
+    }
+
+    /// B2: the longest name allowed still fits on disk with every prefix
+    /// the reader adds; a longer one is unexpected, never fetched.
+    #[tokio::test]
+    async fn the_longest_allowed_name_lands_and_a_longer_one_is_never_fetched() {
+        let f = Fixture::new().await;
+        let longest = nlc_name(MAX_NAME_BYTES);
+        let too_long = nlc_name(MAX_NAME_BYTES + 1);
+        let created = f.created(Duration::from_secs(60));
+        f.bucket.put(&longest, b"nlc", i64::MAX, created);
+        f.bucket.put(&too_long, b"nlc", 2, created);
+        let mut source = f.source(Fixture::settings());
+        assert_eq!(source.poll_once().await, Duration::from_secs(300));
+        assert_eq!(std::fs::read(f.incoming().join(&longest)).unwrap(), b"nlc");
+        assert_eq!(f.gets().await, 1);
+        assert!(source.reported.contains(&(too_long, 2)));
+    }
+
+    /// B2: objects whose fetch keeps failing use none of the poll's
+    /// download slots, so a newer good object still lands; after
+    /// `MAX_FETCH_FAILURES` they are given up on: never fetched again,
+    /// reported once (`reason="failed"`) and never deleted, however old.
+    #[tokio::test]
+    async fn failing_objects_never_starve_newer_ones_and_are_given_up_on() {
+        let recorder = metrics_exporter_prometheus::PrometheusBuilder::new().build_recorder();
+        let handle = recorder.handle();
+        let _guard = metrics::set_default_local_recorder(&recorder);
+        let failed = "distant_signal_schedule_feed_source_unexpected_objects_total{source=\"bucket\",reason=\"failed\"} ";
+
+        let f = Fixture::new().await;
+        let old = f.created(Duration::from_secs(7200));
+        f.bucket.put("NLC1.xml.gz", b"good", 1, old);
+        f.bucket.put("NLC2.xml.gz", b"good", 2, old);
+        for (o, bytes) in f.bucket.0.lock().unwrap().iter_mut() {
+            *bytes = b"evil".to_vec();
+            assert!(o["crc32c"].is_string());
+        }
+        f.bucket.put(
+            "timetable_full.zip",
+            b"zip",
+            3,
+            f.created(Duration::from_secs(60)),
+        );
+        let mut settings = Fixture::settings();
+        settings.max_bytes_per_hour = u64::MAX / 4;
+        settings.max_bytes_per_day = u64::MAX / 4;
+        let mut source = f.source(settings);
+        source.poll_once().await;
+        assert_eq!(
+            std::fs::read(f.incoming().join("timetable_full.zip")).unwrap(),
+            b"zip",
+            "the two failing objects used no slot"
+        );
+        assert_eq!(f.gets().await, 3);
+
+        for _ in 1..MAX_FETCH_FAILURES {
+            source.poll_once().await;
+        }
+        let gets = f.gets().await;
+        assert_eq!(gets, 1 + 2 * MAX_FETCH_FAILURES as usize);
+        assert_eq!(sample(&handle.render(), failed).as_deref(), Some("0"));
+        for _ in 0..3 {
+            source.poll_once().await;
+        }
+        assert_eq!(f.gets().await, gets, "given up on: never fetched again");
+        assert_eq!(sample(&handle.render(), failed).as_deref(), Some("2"));
+        let mut names = f.bucket.names();
+        names.sort();
+        assert_eq!(
+            names,
+            ["NLC1.xml.gz", "NLC2.xml.gz", "timetable_full.zip"],
+            "the old given-up ones kept, not deleted (the zip is too young)"
+        );
+        assert!(!f.incoming().join("NLC1.xml.gz").exists());
+
+        // A new generation is a new object: tried again.
+        f.bucket
+            .put("NLC1.xml.gz", b"fixed", 4, f.created(Duration::ZERO));
+        source.poll_once().await;
+        assert_eq!(
+            std::fs::read(f.incoming().join("NLC1.xml.gz")).unwrap(),
+            b"fixed"
+        );
+    }
+
+    /// B2: a download that fails for the bucket's or the network's reasons
+    /// (here a 503 for every media GET, listings fine) is never held
+    /// against the object: however many polls fail, it is not given up on,
+    /// and it lands once downloads work again.
+    #[tokio::test]
+    async fn transport_failures_never_give_up_on_an_object() {
+        let f = Fixture::new().await;
+        f.bucket.put(
+            "timetable_full.zip",
+            b"zip",
+            1,
+            f.created(Duration::from_secs(60)),
+        );
+        // One media GET a poll: the outage answers the first
+        // `MAX_FETCH_FAILURES + 1` of them, then the bucket answers again.
+        let failing = MAX_FETCH_FAILURES + 1;
+        Mock::given(method("GET"))
+            .and(query_param("alt", "media"))
+            .respond_with(ResponseTemplate::new(503))
+            .with_priority(1)
+            .up_to_n_times(u64::from(failing))
+            .mount(&f.server)
+            .await;
+        let mut source = f.source(Fixture::settings());
+        for _ in 0..failing {
+            source.poll_once().await;
+        }
+        assert_eq!(f.gets().await, failing as usize);
+        assert!(
+            source.fetch_failures.is_empty(),
+            "{:?}",
+            source.fetch_failures
+        );
+        assert!(source.reported.is_empty());
+        assert!(!f.incoming().join("timetable_full.zip").exists());
+        assert_eq!(source.poll_once().await, Duration::from_secs(300));
+        assert_eq!(
+            std::fs::read(f.incoming().join("timetable_full.zip")).unwrap(),
+            b"zip"
+        );
+    }
+
+    /// B6: an object listed with no CRC32C is never downloaded (it could
+    /// never pass verification), nor deleted.
+    #[tokio::test]
+    async fn an_object_without_a_crc32c_is_never_downloaded() {
+        let f = Fixture::new().await;
+        f.bucket.put(
+            "timetable_full.zip",
+            b"zip",
+            1,
+            f.created(Duration::from_secs(7200)),
+        );
+        f.bucket.0.lock().unwrap()[0]
+            .0
+            .as_object_mut()
+            .unwrap()
+            .remove("crc32c");
+        let mut source = f.source(Fixture::settings());
+        assert_eq!(
+            source.poll_once().await,
+            Duration::from_secs(600),
+            "backs off"
+        );
+        source.poll_once().await;
+        assert_eq!(f.gets().await, 0);
+        assert_eq!(f.bucket.names(), ["timetable_full.zip"], "not deleted");
+        assert!(!f.incoming().join("timetable_full.zip").exists());
+        assert_eq!(source.seen, []);
+    }
+
     #[test]
     fn backoff_doubles_to_the_ceiling() {
         let poll = Duration::from_secs(300);
@@ -1403,10 +1660,19 @@ pub(crate) mod tests {
 
     #[test]
     fn unsafe_names_are_never_written_and_logged_names_are_escaped() {
-        for bad in ["", ".seen", "a/b", "a\\b", "a\nb", &"x".repeat(256)] {
+        for bad in [
+            "",
+            ".seen",
+            "a/b",
+            "a\\b",
+            "a\nb",
+            &"x".repeat(256),
+            &"x".repeat(201),
+        ] {
             assert!(!is_safe_name(bad), "{bad:?}");
         }
         assert!(is_safe_name("NLC20261009.xml.gz"));
+        assert!(is_safe_name(&"x".repeat(MAX_NAME_BYTES)));
         assert_eq!(shown("a\nb"), "a\\nb");
         assert!(shown(&"é".repeat(300)).len() <= MAX_LOGGED_NAME + 3);
     }

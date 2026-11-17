@@ -655,14 +655,17 @@ async fn size_crc32c_and_md5_mismatches_are_refused_and_retried() {
             [("timetable_full.zip".to_string(), generation)],
             "{case}: kept in the bucket"
         );
-        assert!(
-            !std::fs::read_dir(f.bucket_dir()).unwrap().any(|e| e
-                .unwrap()
-                .file_name()
-                .to_string_lossy()
-                .starts_with(".partial-")),
-            "{case}: no partial download left"
-        );
+        // An object with no CRC32C is never downloaded, so the folder may
+        // not exist yet.
+        let partial_left = std::fs::read_dir(f.bucket_dir()).is_ok_and(|mut entries| {
+            entries.any(|e| {
+                e.unwrap()
+                    .file_name()
+                    .to_string_lossy()
+                    .starts_with(".partial-")
+            })
+        });
+        assert!(!partial_left, "{case}: no partial download left");
 
         *f.proxy.tamper() = Tamper::default();
         source.poll_once().await;
