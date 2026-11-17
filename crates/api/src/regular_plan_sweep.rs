@@ -51,7 +51,7 @@ use chrono::{DateTime, Duration, NaiveDate, NaiveTime, TimeZone, Timelike, Utc};
 use sqlx::types::Json;
 
 use crate::app::App;
-use crate::data::journey_replace::{self, RegularWrite, Replaced, Replacement};
+use crate::data::journey_replace::{self, Freeze, RegularWrite, Replaced, Replacement};
 use crate::data::journey_revisions::{Reason, RevisionMeta};
 use crate::data::regular_journeys::{self, PlanOptions, UsualItinerary};
 use crate::data::regular_plan::{self, PlanOption, StoredPlan};
@@ -525,6 +525,7 @@ async fn plan_occurrence(
             trigger_fate: "not_used",
             now,
             idempotency: None,
+            freeze: Freeze::Arrived,
             regular: Some(RegularWrite {
                 plan: &plan,
                 status: "committed",

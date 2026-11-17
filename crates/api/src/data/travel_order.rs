@@ -64,7 +64,21 @@ pub(crate) fn train_arrived_sql(
     crs: &str,
     delay_minutes: &str,
 ) -> String {
-    let today = "(now() AT TIME ZONE 'Europe/London')::date";
+    train_arrived_sql_at(trains_id, uid, date, crs, delay_minutes, "now()")
+}
+
+/// [`train_arrived_sql`] judged at `now` (a SQL `timestamptz` expression,
+/// `now()` for the real clock): the journey routes judge a leg at the
+/// instant they were asked, which a test can pin.
+pub(crate) fn train_arrived_sql_at(
+    trains_id: &str,
+    uid: &str,
+    date: &str,
+    crs: &str,
+    delay_minutes: &str,
+    now: &str,
+) -> String {
+    let today = format!("(({now}) AT TIME ZONE 'Europe/London')::date");
     let arrival = scheduled_arrival_sql(uid, date, crs);
     format!(
         "(CASE WHEN ({date}) < {today} - 1 THEN TRUE \
@@ -73,13 +87,13 @@ pub(crate) fn train_arrived_sql(
                             WHERE tme.trains_id = ({trains_id}) \
                               AND UPPER(tme.loc_crs) = UPPER({crs}) \
                               AND tme.event_type = 'ARRIVAL' \
-                              AND tme.actual_timestamp <= now()) THEN TRUE \
+                              AND tme.actual_timestamp <= ({now})) THEN TRUE \
                ELSE COALESCE({arrival} \
                                  + (CASE WHEN ({delay_minutes}) IS NULL \
                                          THEN {TRAVEL_ARRIVAL_GRACE_MINUTES} \
                                          ELSE GREATEST({delay_minutes}, 0) END) \
                                    * INTERVAL '1 minute', \
-                             ((({date}) + 1)::timestamp AT TIME ZONE 'Europe/London')) <= now() \
+                             ((({date}) + 1)::timestamp AT TIME ZONE 'Europe/London')) <= ({now}) \
           END)"
     )
 }
