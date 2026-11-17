@@ -166,20 +166,30 @@ pub async fn token_gate(State(app): State<App>, mut request: Request, next: Next
         .map(|ConnectInfo(addr)| *addr);
     let client = client_ip(request.headers(), peer, settings.trust_cf_connecting_ip);
     let failure_bucket = client.map(BucketKey::AuthFailure);
-    // A client over its failure budget is refused before any lookup.
-    if let Some(key) = failure_bucket
-        && let Some(wait) = tokens.limiter.would_refuse(
+    // A client over its failure budget is NOT refused up front: a request
+    // that authenticates with a valid token goes through (a full bucket,
+    // e.g. one shared peer address behind a proxy, must not lock out
+    // legitimate callers). Every request that fails to authenticate while
+    // the bucket is full gets the rate-limited response instead.
+    let over_budget = failure_bucket.and_then(|key| {
+        tokens.limiter.would_refuse(
             key,
             settings.auth_failure_per_minute,
             settings.auth_failure_burst,
             Instant::now(),
         )
-    {
-        note_rate_limited("personal_auth_failure");
-        return reject(Rejection::RateLimitedAuth, None, client, rate_limited(wait));
-    }
+    });
     // Charges the failure bucket, then refuses.
     let fail = |reason: Rejection, token_id: Option<i64>, response: Response| {
+        if let Some(wait) = over_budget {
+            note_rate_limited("personal_auth_failure");
+            return reject(
+                Rejection::RateLimitedAuth,
+                token_id,
+                client,
+                rate_limited(wait),
+            );
+        }
         if let Some(key) = failure_bucket {
             let _ = tokens.limiter.check_all(
                 &[(

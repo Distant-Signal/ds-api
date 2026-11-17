@@ -573,6 +573,15 @@ async fn server_main() -> anyhow::Result<()> {
             trust_cf_connecting_ip = app.personal_tokens.settings.trust_cf_connecting_ip,
             "personal API tokens enabled: accepted only on this listener"
         );
+        if !app.personal_tokens.settings.trust_cf_connecting_ip {
+            // Not a startup error: a dev stack legitimately runs without a
+            // trusted proxy. Behind a shared proxy every client then shares
+            // one failed-authentication bucket (keyed on the socket peer).
+            tracing::warn!(
+                "PERSONAL_TOKENS_TRUST_CF_CONNECTING_IP is false: the failed-authentication \
+                 bucket is keyed on the socket peer, which behind a proxy is one shared address"
+            );
+        }
     } else {
         tracing::info!("PERSONAL_TOKENS_ENABLED is false: personal API tokens are off");
     }
