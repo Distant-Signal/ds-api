@@ -39,6 +39,7 @@ pub mod leg_outcomes;
 pub mod leg_tickets;
 pub mod leg_validation;
 pub mod line_train_summaries;
+pub mod live_stops;
 pub mod notification_settings;
 pub mod notifications;
 pub mod operator_groups;
