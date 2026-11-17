@@ -24,7 +24,7 @@ use serde::{Deserialize, Serialize};
 use crate::app::{App, Router};
 use crate::auth::AuthenticatedUser;
 use crate::data::groups::{self, GroupRole};
-use crate::routes::journey_ref::{GroupParam, JourneyId};
+use crate::routes::journey_ref::{GroupParam, JourneyId, TrackingId};
 use crate::usage_events::FeatureEvent;
 
 pub fn router() -> Router {
@@ -754,7 +754,9 @@ async fn list_shared_trains_route(
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct AddGroupTrainRequest {
-    train_subscription_id: i64,
+    /// The tracked train's `publicId`, or its deprecated numeric `id`
+    /// (DS-534).
+    train_subscription_id: crate::data::public_id::TrackingRef,
 }
 
 /// Any current member may add one of their OWN tracked trains (spec §3);
@@ -768,14 +770,15 @@ async fn add_group_train(
 ) -> Result<StatusCode, (StatusCode, String)> {
     require_member(&app, &group_id, &user.id).await?;
 
-    let added = groups::add_train_to_group(
-        &app.database,
-        &group_id,
-        req.train_subscription_id,
-        &user.id,
-    )
-    .await
-    .map_err(internal_error("add train to group"))?;
+    let train_subscription_id = req
+        .train_subscription_id
+        .resolve(&app.database)
+        .await
+        .map_err(|err| internal_error("resolve the tracking id")(err.into()))?;
+    let added =
+        groups::add_train_to_group(&app.database, &group_id, train_subscription_id, &user.id)
+            .await
+            .map_err(internal_error("add train to group"))?;
     if !added {
         return Err((
             StatusCode::NOT_FOUND,
@@ -792,7 +795,8 @@ async fn add_group_train(
 async fn remove_group_train(
     State(app): State<App>,
     user: AuthenticatedUser,
-    Path((group_id, train_subscription_id)): Path<(String, i64)>,
+    Path(GroupParam { id: group_id }): Path<GroupParam>,
+    TrackingId(train_subscription_id): TrackingId,
 ) -> Result<StatusCode, (StatusCode, String)> {
     let role = require_member(&app, &group_id, &user.id).await?;
 

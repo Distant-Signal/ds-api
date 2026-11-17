@@ -46,7 +46,7 @@ use crate::data::journey_replace::{self, Freeze, Replaced, Replacement};
 use crate::data::journey_revisions::{self, Reason, RevisionMeta};
 use crate::data::{journeys, train_tracking};
 use crate::routes::journey_itinerary::RouteError;
-use crate::routes::journey_ref::{BreakParam, JourneyId, LegParam, RevisionParam};
+use crate::routes::journey_ref::{BreakParam, JourneyId, LegId, RevisionParam};
 use crate::routes::trips::{ReplanQuery, ReplanSlot};
 
 pub fn router() -> Router {
@@ -1173,7 +1173,7 @@ async fn get_alternatives(
     State(app): State<App>,
     user: AuthenticatedUser,
     JourneyId(journey_id): JourneyId,
-    Path(LegParam { leg_id }): Path<LegParam>,
+    LegId(leg_id): LegId,
     Query(params): Query<AlternativesParams>,
 ) -> Response {
     render(
@@ -1820,13 +1820,28 @@ async fn post_accept(
 }
 
 /// `POST /Journeys/{id}/legs/{legId}/replace`'s body.
-#[derive(Debug, Deserialize, Serialize, ts_rs::TS)]
+#[derive(Debug, Deserialize, ts_rs::TS)]
 #[ts(rename = "ReplaceRequest", optional_fields = nullable)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub(crate) struct ReplaceBody {
     cause: AskCause,
     legs: Vec<crate::routes::journey_itinerary::ItineraryLegRequest>,
+    // The last leg replaced: its `publicId`, or its deprecated numeric
+    // `id` (DS-534).
     #[serde(default)]
+    #[ts(type = "number | string | null", optional = nullable)]
+    through_leg_id: Option<crate::data::public_id::LegRef>,
+}
+
+/// What an `Idempotency-Key` on a replace hashes: the request with
+/// `throughLegId` as the internal id it resolved to, so a retry that names
+/// the leg in the other form hashes the same (and a numeric request hashes
+/// as it did before public ids).
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct ReplaceHashBody<'a> {
+    cause: AskCause,
+    legs: &'a [crate::routes::journey_itinerary::ItineraryLegRequest],
     through_leg_id: Option<i64>,
 }
 
@@ -1844,13 +1859,34 @@ async fn post_replace(
     State(app): State<App>,
     user: AuthenticatedUser,
     JourneyId(journey_id): JourneyId,
-    Path(LegParam { leg_id }): Path<LegParam>,
+    LegId(leg_id): LegId,
     headers: HeaderMap,
     Json(body): Json<ReplaceBody>,
 ) -> Response {
     render(
         async {
-            let idempotency = idempotency(&headers, &("replace", journey_id, leg_id, &body))?;
+            let through_leg_id = match &body.through_leg_id {
+                Some(through) => Some(
+                    through
+                        .resolve(&app.database)
+                        .await
+                        .map_err(|err| internal("resolve the through leg")(err.into()))?,
+                ),
+                None => None,
+            };
+            let idempotency = idempotency(
+                &headers,
+                &(
+                    "replace",
+                    journey_id,
+                    leg_id,
+                    ReplaceHashBody {
+                        cause: body.cause,
+                        legs: &body.legs,
+                        through_leg_id,
+                    },
+                ),
+            )?;
             if body.legs.is_empty()
                 || i64::try_from(body.legs.len()).unwrap_or(i64::MAX)
                     > journeys::MAX_LEGS_PER_JOURNEY
@@ -1942,7 +1978,7 @@ async fn post_replace(
                     journey_id,
                     user_id: &user.id,
                     from_leg_id: leg_id,
-                    through_leg_id: body.through_leg_id,
+                    through_leg_id,
                     legs: &resolved,
                     meta,
                     trigger_fate: fate,

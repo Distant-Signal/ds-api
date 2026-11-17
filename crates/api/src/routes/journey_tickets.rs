@@ -25,7 +25,7 @@
 use std::sync::LazyLock;
 
 use axum::Json;
-use axum::extract::{DefaultBodyLimit, Multipart, Path, State};
+use axum::extract::{DefaultBodyLimit, Multipart, State};
 use axum::http::StatusCode;
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
@@ -38,7 +38,7 @@ use crate::data::leg_tickets::{
 use crate::data::schedule_services::{ServiceMode, ServiceModeFields};
 use crate::data::ticket_subprocess::{ParseFailure, TicketKind, TicketParser};
 use crate::data::{delay_repay_rules, ticket_extraction, ticket_precheck, ticket_subprocess};
-use crate::routes::journey_ref::{JourneyId, LegParam};
+use crate::routes::journey_ref::{JourneyId, LegId};
 
 pub fn router() -> Router {
     Router::new()
@@ -137,7 +137,7 @@ async fn put_leg_ticket(
     State(app): State<App>,
     user: AuthenticatedUser,
     JourneyId(journey_id): JourneyId,
-    Path(LegParam { leg_id }): Path<LegParam>,
+    LegId(leg_id): LegId,
     Json(body): Json<LegTicketBody>,
 ) -> Result<Json<LegTicket>, (StatusCode, String)> {
     let name = crate::data::train_tracking::validate_custom_name(body.name.as_deref())
@@ -206,7 +206,7 @@ async fn delete_leg_ticket(
     State(app): State<App>,
     user: AuthenticatedUser,
     JourneyId(journey_id): JourneyId,
-    Path(LegParam { leg_id }): Path<LegParam>,
+    LegId(leg_id): LegId,
 ) -> Result<StatusCode, (StatusCode, String)> {
     match leg_tickets::lookup_leg(&app.database, &user.id, journey_id, leg_id)
         .await
@@ -280,7 +280,7 @@ async fn post_leg_ticket_pkpass(
     State(app): State<App>,
     user: AuthenticatedUser,
     JourneyId(journey_id): JourneyId,
-    Path(LegParam { leg_id }): Path<LegParam>,
+    LegId(leg_id): LegId,
     multipart: Multipart,
 ) -> Result<Json<LegTicketPrefill>, (StatusCode, String)> {
     let leg_date = match leg_tickets::lookup_leg(&app.database, &user.id, journey_id, leg_id)

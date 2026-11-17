@@ -41,6 +41,7 @@ use serde::{Deserialize, Serialize};
 use crate::app::{App, Router};
 use crate::auth::AuthenticatedUser;
 use crate::data::{eta_blend, schedule_matching, train_tracking};
+use crate::routes::journey_ref::TrackingId;
 use crate::usage_events::FeatureEvent;
 
 /// The ticket routes removed on 2026-11-06, every method: ticket details
@@ -340,7 +341,7 @@ async fn get_my_tracked_trains(
 async fn get_by_tracking_id(
     State(app): State<App>,
     user: AuthenticatedUser,
-    Path(tracking_id): Path<i64>,
+    TrackingId(tracking_id): TrackingId,
 ) -> Result<Json<train_tracking::TrackedTrainState>, (StatusCode, String)> {
     match train_tracking::tracked_train_owner(&app.database, tracking_id)
         .await
@@ -393,7 +394,7 @@ async fn get_by_tracking_id(
 async fn delete_tracked_train(
     State(app): State<App>,
     user: AuthenticatedUser,
-    Path(tracking_id): Path<i64>,
+    TrackingId(tracking_id): TrackingId,
 ) -> Result<StatusCode, (StatusCode, String)> {
     let deleted = crate::data::journeys::stop_tracking_train(&app.database, tracking_id, &user.id)
         .await
@@ -419,7 +420,7 @@ async fn delete_tracked_train(
 async fn post_tracked_train_name(
     State(app): State<App>,
     user: AuthenticatedUser,
-    Path(tracking_id): Path<i64>,
+    TrackingId(tracking_id): TrackingId,
     Json(body): Json<RenameRequest>,
 ) -> Result<Json<RenameResponse>, (StatusCode, String)> {
     let normalized = train_tracking::validate_custom_name(body.custom_name.as_deref())
@@ -458,7 +459,7 @@ struct TrackedTrainPatch {
 async fn patch_tracked_train(
     State(app): State<App>,
     user: AuthenticatedUser,
-    Path(tracking_id): Path<i64>,
+    TrackingId(tracking_id): TrackingId,
     Json(body): Json<TrackedTrainPatch>,
 ) -> Result<Json<TrackedTrainPatch>, (StatusCode, String)> {
     let updated = train_tracking::set_notifications_enabled(

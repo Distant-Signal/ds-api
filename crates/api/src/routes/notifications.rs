@@ -11,6 +11,7 @@ use serde::Deserialize;
 use crate::app::{App, Router};
 use crate::auth::AuthenticatedUser;
 use crate::data::notifications;
+use crate::routes::journey_ref::DeviceId;
 
 pub fn router() -> Router {
     Router::new()
@@ -50,7 +51,7 @@ async fn get_devices(
 async fn delete_device(
     State(app): State<App>,
     user: AuthenticatedUser,
-    axum::extract::Path(id): axum::extract::Path<i64>,
+    DeviceId(id): DeviceId,
 ) -> Result<StatusCode, (StatusCode, String)> {
     match notifications::delete_push_device(&app.database, &user.id, id).await {
         Ok(true) => Ok(StatusCode::NO_CONTENT),

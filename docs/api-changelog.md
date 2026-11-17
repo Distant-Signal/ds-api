@@ -3,6 +3,38 @@
 Changes to the Distant Signal (DS) HTTP API that a client such as DS-MCP
 needs to know about. Newest first. Field names are as served (camelCase).
 
+## 2026-11-18: Opaque leg, tracking and device ids (stage 1 of 3)
+
+Additive (DS-534); needs ds-core v0.17.0's `public_id` migrations on
+`journey_legs`, `train_subscriptions` and `push_subscriptions` applied first
+(`20261118100000` to `20261118120200`). Same reason and same plan as the
+journey ids below: the numeric ids are global sequences. Journey legs,
+tracked trains (`train_subscriptions`, the "tracking id") and push devices
+now have an opaque id and the numeric one is **deprecated**.
+
+- **Formats.** Each is a one-letter prefix, an underscore and 32 lowercase
+  hex digits (122 random bits, not derived from the numeric id), 34
+  characters: `l_` a leg, `t_` a tracked train, `d_` a push device (`j_` a
+  journey, as before). Treat them as opaque strings. They can never be all
+  digits.
+- **Routes take either form.** A leg in `{legId}` on `/Journeys/{journeyId}/legs/{legId}`
+  and its `candidates`, `train`, `ticket`, `ticket/pkpass`, `alternatives`
+  and `replace`; a tracked train in `/Train/{trackingId}` and
+  `/Train/{trackingId}/name`, and in `DELETE
+  /groups/{id}/trains/{trainSubscriptionId}`; a device in `DELETE
+  /notifications/devices/{id}`. Request bodies take either, as a number or a
+  string: `throughLegId` of `POST .../legs/{legId}/replace` (an `Idempotency-Key`
+  retry that names the leg in the other form is the same request, not a
+  `409`) and `trainSubscriptionId` of `POST /groups/{id}/trains`. A segment
+  that parses as an integer is a numeric id; anything else must have the
+  kind's shape, else `400` (another kind's id, such as a `t_` id where a leg
+  is expected, is a `400`).
+- **`404` is uniform**, as for journeys: an id nobody has, someone else's,
+  and a numeric id nobody owns answer the same `404`.
+- **Counter.** `distant_signal_legacy_id_requests_total{kind}` counts the
+  requests that named an object by its numeric id (`kind` is `journey`,
+  `leg`, `tracking` or `device`). It is the evidence for stage 3 below.
+
 ## 2026-11-17: "I missed this train" no longer waits for the train to arrive
 
 **Behaviour change** (DS-534, the missed-train redesign, part 1); no new field, migration or grant. Additive for every client; nothing a client calls changes shape.

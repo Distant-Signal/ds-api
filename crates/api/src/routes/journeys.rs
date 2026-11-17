@@ -30,7 +30,7 @@ use crate::data::{
     train_tracking, unlisted_links,
 };
 use crate::routes::journey_itinerary::RouteError;
-use crate::routes::journey_ref::{JourneyId, LegParam};
+use crate::routes::journey_ref::{JourneyId, LegId};
 
 /// The `resource_type` discriminator this file passes to every
 /// `crate::data::unlisted_links` call -- routing-layer wiring only, kept out
@@ -1393,7 +1393,7 @@ async fn put_journey_leg(
     State(app): State<App>,
     user: AuthenticatedUser,
     JourneyId(journey_id): JourneyId,
-    Path(LegParam { leg_id }): Path<LegParam>,
+    LegId(leg_id): LegId,
     Json(request): Json<UntrackedLegRequest>,
 ) -> Result<StatusCode, (StatusCode, String)> {
     let leg = request.validate(&app.database).await?;
@@ -2831,7 +2831,7 @@ async fn get_leg_candidates(
     State(app): State<App>,
     user: AuthenticatedUser,
     JourneyId(journey_id): JourneyId,
-    Path(LegParam { leg_id }): Path<LegParam>,
+    LegId(leg_id): LegId,
     Query(params): Query<CandidatesParams>,
 ) -> Result<Json<LegCandidatesResponse>, (StatusCode, String)> {
     let leg = journeys::get_owned_leg(&app.database, journey_id, leg_id, &user.id)
@@ -3175,7 +3175,7 @@ async fn post_leg_train(
     State(app): State<App>,
     user: AuthenticatedUser,
     JourneyId(journey_id): JourneyId,
-    Path(LegParam { leg_id }): Path<LegParam>,
+    LegId(leg_id): LegId,
     Json(body): Json<MatchLegRequest>,
 ) -> Result<Json<MatchLegResponse>, (StatusCode, String)> {
     // Ownership-checked read first -- same 404-never-403 posture as every
@@ -3311,7 +3311,7 @@ async fn delete_journey_leg(
     State(app): State<App>,
     user: AuthenticatedUser,
     JourneyId(journey_id): JourneyId,
-    Path(LegParam { leg_id }): Path<LegParam>,
+    LegId(leg_id): LegId,
 ) -> Result<StatusCode, (StatusCode, String)> {
     let deleted = journeys::delete_leg(&app.database, journey_id, leg_id, &user.id)
         .await
@@ -3872,6 +3872,105 @@ mod db_tests {
         )
         .await;
         assert_eq!(status, StatusCode::NOT_FOUND);
+
+        cleanup_user(&pool, owner).await;
+        cleanup_user(&pool, bystander).await;
+    }
+
+    /// DS-534: a leg is named by its `l_` id or its numeric one. The
+    /// owner's request reaches the handler's own checks by either form; an
+    /// unknown id, someone else's leg and a numeric id nobody owns all
+    /// answer the same 404; another kind's id is a 400.
+    #[tokio::test]
+    #[ignore = "requires a live database; see this plan's Global Constraints for the \
+                DATABASE_URL incantation, then run with `cargo test -p api \
+                leg_routes_take_the_public_id -- --ignored --test-threads=1`"]
+    async fn leg_routes_take_the_public_id_and_the_legacy_id() {
+        let pool = connect().await;
+        let _trains = crate::test_support::fixture_trains_cleanup(&pool).await;
+        let owner = "TEST-ROUTE-LEG-PUBLIC-ID-OWNER";
+        let bystander = "TEST-ROUTE-LEG-PUBLIC-ID-BYSTANDER";
+        let owner_token = seed_session(&pool, owner).await;
+        let bystander_token = seed_session(&pool, bystander).await;
+        let router = test_router(test_app(pool.clone()));
+
+        let (status, created) = post_json(
+            router.clone(),
+            "/Journeys".to_string(),
+            Some(&owner_token),
+            serde_json::json!({
+                "leg": {
+                    "mode": "window",
+                    "originCrs": "WAT",
+                    "destinationCrs": "RDG",
+                    "serviceDate": "2026-09-22",
+                    "departWindow": { "after": "08:00:00" }
+                }
+            }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        let journey_id = created["journeyId"].as_i64().expect("journeyId present");
+        let (leg_id, leg_public_id): (i64, String) =
+            sqlx::query_as("SELECT id, public_id FROM journey_legs WHERE journey_id = $1")
+                .bind(journey_id)
+                .fetch_one(&pool)
+                .await
+                .expect("read the leg");
+        assert!(leg_public_id.starts_with("l_"), "{leg_public_id}");
+        assert_eq!(leg_public_id.len(), 34);
+
+        // A train that cannot be a train id is refused with a 400 once the
+        // handler has found the leg: that is the answer for the owner by
+        // either form.
+        let body = serde_json::json!({ "trainUid": "!!", "serviceDate": "2026-09-22" });
+        for id in [leg_id.to_string(), leg_public_id.clone()] {
+            let (status, answer) = post_json(
+                router.clone(),
+                format!("/Journeys/{journey_id}/legs/{id}/train"),
+                Some(&owner_token),
+                body.clone(),
+            )
+            .await;
+            assert_eq!(status, StatusCode::BAD_REQUEST, "{id}: {answer:?}");
+        }
+
+        let mut denied = Vec::new();
+        for (token, id) in [
+            (&bystander_token, leg_public_id.clone()),
+            (&bystander_token, leg_id.to_string()),
+            (
+                &owner_token,
+                "l_ffffffffffffffffffffffffffffffff".to_string(),
+            ),
+            (&owner_token, "999999999".to_string()),
+        ] {
+            denied.push(
+                post_json(
+                    router.clone(),
+                    format!("/Journeys/{journey_id}/legs/{id}/train"),
+                    Some(token),
+                    body.clone(),
+                )
+                .await,
+            );
+        }
+        for answer in &denied {
+            assert_eq!(answer.0, StatusCode::NOT_FOUND, "{denied:?}");
+            assert_eq!(answer, &denied[0], "the 404s differ: {denied:?}");
+        }
+
+        // Another kind's public id, or garbage, is a 400.
+        for id in ["t_0123456789abcdef0123456789abcdef", "l_not-an-id"] {
+            let (status, _) = post_json(
+                router.clone(),
+                format!("/Journeys/{journey_id}/legs/{id}/train"),
+                Some(&owner_token),
+                body.clone(),
+            )
+            .await;
+            assert_eq!(status, StatusCode::BAD_REQUEST, "{id}");
+        }
 
         cleanup_user(&pool, owner).await;
         cleanup_user(&pool, bystander).await;
