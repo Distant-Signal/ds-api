@@ -14,6 +14,7 @@ use sqlx::PgPool;
 
 #[cfg(test)]
 use crate::data::eta_blend::london_to_utc;
+use crate::data::live_stops::{LiveStopFallbacks, ScheduleSource};
 use crate::data::queries;
 use crate::data::tiploc_locations::LocationInfo;
 
@@ -382,14 +383,55 @@ pub struct JourneyStopsRequest<'a> {
 /// parse, or its fallback read fails) is that train's own `Err`, so one bad
 /// leg still can't blank the others; a failure of a shared read is the
 /// outer `Err`.
-#[expect(
-    clippy::too_many_lines,
-    reason = "long but linear; splitting it would scatter its shared state across helpers"
-)]
+///
+/// CIF stops only: the live-only fallbacks (`data::live_stops`) are
+/// [`build_journey_stops_batch_sourced`]'s.
 pub async fn build_journey_stops_batch(
     pool: &PgPool,
     requests: &[JourneyStopsRequest<'_>],
 ) -> anyhow::Result<Vec<anyhow::Result<Option<Vec<JourneyStop>>>>> {
+    Ok(
+        build_journey_stops_batch_sourced(pool, requests, LiveStopFallbacks::OFF)
+            .await?
+            .into_iter()
+            .map(|built| built.map(|sourced| sourced.map(|sourced| sourced.stops)))
+            .collect(),
+    )
+}
+
+/// A train's stops and where they came from.
+#[derive(Debug, Clone)]
+pub struct SourcedStops {
+    pub stops: Vec<JourneyStop>,
+    pub source: ScheduleSource,
+}
+
+/// [`build_journey_stops`] for one train, with its stops' source and the
+/// live-only fallbacks `fallbacks` allows (`data::live_stops`).
+pub async fn build_journey_stops_sourced(
+    pool: &PgPool,
+    request: &JourneyStopsRequest<'_>,
+    fallbacks: LiveStopFallbacks,
+) -> anyhow::Result<Option<SourcedStops>> {
+    build_journey_stops_batch_sourced(pool, std::slice::from_ref(request), fallbacks)
+        .await?
+        .pop()
+        .unwrap_or(Ok(None))
+}
+
+/// [`build_journey_stops_batch`] with each train's stops' source. A train
+/// with no CIF stops gets the live-only fallbacks `fallbacks` allows
+/// (`data::live_stops`: Darwin's schedule, else the stops TRUST has
+/// reported); [`LiveStopFallbacks::OFF`] is CIF only.
+#[expect(
+    clippy::too_many_lines,
+    reason = "long but linear; splitting it would scatter its shared state across helpers"
+)]
+pub async fn build_journey_stops_batch_sourced(
+    pool: &PgPool,
+    requests: &[JourneyStopsRequest<'_>],
+    fallbacks: LiveStopFallbacks,
+) -> anyhow::Result<Vec<anyhow::Result<Option<SourcedStops>>>> {
     let mut raws: Vec<anyhow::Result<Option<Vec<RawCallingPoint>>>> =
         Vec::with_capacity(requests.len());
     for request in requests {
@@ -409,6 +451,12 @@ pub async fn build_journey_stops_batch(
         };
         raws.push(raw.map(|raw| (!raw.is_empty()).then_some(raw)));
     }
+    // Live-only trains (no CIF stops): Darwin's schedule, else TRUST's
+    // reports, when allowed. Its Push Port calls join the overlay's below.
+    let mut sources = vec![ScheduleSource::Cif; requests.len()];
+    let fallback_darwin_calls =
+        crate::data::live_stops::fill_fallbacks(pool, requests, &mut raws, &mut sources, fallbacks)
+            .await;
 
     // `tiploc_key`, not the raw stored value, on BOTH sides -- see that
     // function's own doc comment for the padding bug this closes. Shared
@@ -444,7 +492,7 @@ pub async fn build_journey_stops_batch(
         })
         .collect();
     if !built.iter().any(|stops| matches!(stops, Ok(Some(_)))) {
-        return Ok(built);
+        return Ok(with_sources(built, &sources));
     }
 
     // Station names and current boards, batched over every distinct CRS
@@ -552,7 +600,11 @@ pub async fn build_journey_stops_batch(
             .collect();
         trains.sort();
         trains.dedup();
-        ds_store::darwin::calls_for_trains(pool, &trains).await?
+        let mut calls = ds_store::darwin::calls_for_trains(pool, &trains).await?;
+        for (key, fallback) in fallback_darwin_calls {
+            calls.entry(key).or_insert(fallback);
+        }
+        calls
     };
     let now = Utc::now();
 
@@ -604,7 +656,20 @@ pub async fn build_journey_stops_batch(
         }
     }
 
-    Ok(built)
+    Ok(with_sources(built, &sources))
+}
+
+fn with_sources(
+    built: Vec<anyhow::Result<Option<Vec<JourneyStop>>>>,
+    sources: &[ScheduleSource],
+) -> Vec<anyhow::Result<Option<SourcedStops>>> {
+    built
+        .into_iter()
+        .zip(sources)
+        .map(|(built, &source)| {
+            built.map(|stops| stops.map(|stops| SourcedStops { stops, source }))
+        })
+        .collect()
 }
 
 /// `queries::movement_events_for_train` for several trains in one query,

@@ -240,6 +240,8 @@ fn config_defaults() -> ds_runtime::service_args::ConfigDefaults {
             data::day_overrides::DAY_OVERRIDES_ENABLED_ENV,
             Some("false"),
         )
+        .env(data::live_stops::DARWIN_ENABLED_ENV, Some("false"))
+        .env(data::live_stops::TRUST_ENABLED_ENV, Some("false"))
         .env(data::calendar_feed::CALENDAR_ENABLED_ENV, Some("false"))
         .env(data::webhooks::WEBHOOKS_ENABLED_ENV, Some("false"))
         .env(data::recently_deleted::ENABLED_ENV, Some("false"))
@@ -309,6 +311,17 @@ async fn server_main() -> anyhow::Result<()> {
         enabled = day_overrides,
         "regular journey different times on some days ({})",
         data::day_overrides::DAY_OVERRIDES_ENABLED_ENV
+    );
+
+    // DARWIN_STOPS_FALLBACK_ENABLED and TRUST_STOPS_FALLBACK_ENABLED (both
+    // default off): stops for live-only trains. See `data::live_stops`.
+    let live_stops = data::live_stops::init_from_env();
+    tracing::info!(
+        darwin = live_stops.darwin,
+        trust = live_stops.trust,
+        "live-only train stops fallbacks ({}, {})",
+        data::live_stops::DARWIN_ENABLED_ENV,
+        data::live_stops::TRUST_ENABLED_ENV
     );
 
     let calendar_feed = data::calendar_feed::init_from_env();
