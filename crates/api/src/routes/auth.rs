@@ -691,9 +691,21 @@ async fn backchannel_logout(
         axum::extract::rejection::FormRejection,
     >,
 ) -> Response {
-    let Ok(axum::extract::Form(form)) = form else {
-        tracing::warn!("back-channel logout rejected: no logout_token form field");
-        return backchannel_response(StatusCode::BAD_REQUEST, Some("invalid_request"));
+    let form = match form {
+        Ok(axum::extract::Form(form)) => form,
+        Err(rejection) => {
+            // The route's body cap answers 413 (the rejection says so); every
+            // other failure is a missing or malformed `logout_token`.
+            if rejection.status() == StatusCode::PAYLOAD_TOO_LARGE {
+                tracing::warn!("back-channel logout rejected: body too large");
+                return backchannel_response(
+                    StatusCode::PAYLOAD_TOO_LARGE,
+                    Some("invalid_request"),
+                );
+            }
+            tracing::warn!("back-channel logout rejected: no logout_token form field");
+            return backchannel_response(StatusCode::BAD_REQUEST, Some("invalid_request"));
+        }
     };
     if form.logout_token.len() > BACKCHANNEL_MAX_TOKEN_BYTES {
         tracing::warn!("back-channel logout rejected: logout_token too long");
