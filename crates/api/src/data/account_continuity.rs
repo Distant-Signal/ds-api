@@ -243,7 +243,10 @@ pub async fn login(
 }
 
 /// Moves the account `from` to `to`: the `users` row (cascading to every
-/// foreign key) and the one copied id without a foreign key.
+/// foreign key) and the copied ids without a foreign key:
+/// `group_train_share_moves.added_by` and a calendar feed link's
+/// `unlisted_links.resource_id` (the owner's id), so the feed's address
+/// keeps working and the account page can still show and revoke it.
 async fn rekey(conn: &mut sqlx::PgConnection, from: &str, to: &str) -> Result<()> {
     sqlx::query("UPDATE users SET id = $2 WHERE id = $1")
         .bind(from)
@@ -255,6 +258,15 @@ async fn rekey(conn: &mut sqlx::PgConnection, from: &str, to: &str) -> Result<()
         .bind(to)
         .execute(&mut *conn)
         .await?;
+    sqlx::query(
+        "UPDATE unlisted_links SET resource_id = $2 \
+         WHERE resource_type = $3 AND resource_id = $1",
+    )
+    .bind(from)
+    .bind(to)
+    .bind(crate::data::calendar_feed::RESOURCE_TYPE)
+    .execute(&mut *conn)
+    .await?;
     Ok(())
 }
 
@@ -371,7 +383,7 @@ mod db_tests {
 
     /// A public user's first `ds-sso` login takes over their account, with
     /// their session, personal API token, delegated grant and pin, and the
-    /// copied `group_train_share_moves.added_by`.
+    /// copied `group_train_share_moves.added_by` and calendar feed link.
     #[tokio::test]
     #[ignore = "requires a live database; run with `cargo test -p api account_continuity -- \
                 --ignored --test-threads=1`"]
@@ -407,6 +419,7 @@ mod db_tests {
             .await
             .expect("insert pin");
         let share_move = seed_share_move(&pool, OLD).await;
+        let feed_token = seed_feed_link(&pool, OLD).await;
 
         let result = login(&pool, &identity(NEW), &discord(DISCORD))
             .await
@@ -453,11 +466,47 @@ mod db_tests {
         assert_eq!(pins, 1);
         assert_eq!(share_move.added_by().await, NEW);
         share_move.clear().await;
+        assert_feed_link_moved(&pool, &feed_token, NEW).await;
 
         // The next login is the ordinary path.
         let again = login_again(&pool, NEW, DISCORD).await;
         assert_eq!(again.outcome, Outcome::Upserted);
         clear(&pool, &[OLD, NEW]).await;
+    }
+
+    /// A calendar feed link for `user`; returns its token.
+    async fn seed_feed_link(pool: &PgPool, user: &str) -> String {
+        crate::data::unlisted_links::rotate_link(
+            pool,
+            crate::data::calendar_feed::RESOURCE_TYPE,
+            user,
+            user,
+            None,
+        )
+        .await
+        .expect("mint a calendar feed link")
+        .token
+    }
+
+    /// The calendar feed link follows a re-key: its token resolves to the
+    /// new id and the account page sees it as the active link.
+    async fn assert_feed_link_moved(pool: &PgPool, token: &str, to: &str) {
+        let resolved = crate::data::unlisted_links::resolve_link(pool, token)
+            .await
+            .expect("resolve the feed token")
+            .expect("the feed link survives the re-key");
+        assert_eq!(resolved.resource_id, to);
+        assert!(
+            crate::data::unlisted_links::get_active_link(
+                pool,
+                crate::data::calendar_feed::RESOURCE_TYPE,
+                to
+            )
+            .await
+            .expect("active link lookup")
+            .is_some(),
+            "the account page sees the moved link"
+        );
     }
 
     async fn login_again(pool: &PgPool, sub: &str, discord_id: &str) -> Login {
