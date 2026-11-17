@@ -1045,6 +1045,28 @@ pub async fn invalidate_all_sessions_and_reissue(
         .execute(&mut *tx)
         .await?;
     }
+    if options.share_links {
+        // The journey share links the user created, named by type: the
+        // table is polymorphic, so a future resource type must not be
+        // swept up here (the calendar feed has its own flag). The same
+        // `revoked_at = NOW()` as `unlisted_links::revoke_journey_link`.
+        sqlx::query(
+            "UPDATE unlisted_links SET revoked_at = NOW() \
+             WHERE created_by = $1 AND resource_type = 'journey' AND revoked_at IS NULL",
+        )
+        .bind(user_id)
+        .execute(&mut *tx)
+        .await?;
+    }
+    if options.invite_links {
+        sqlx::query(
+            "UPDATE group_invite_links SET revoked_at = NOW() \
+             WHERE created_by = $1 AND revoked_at IS NULL",
+        )
+        .bind(user_id)
+        .execute(&mut *tx)
+        .await?;
+    }
     if options.personal_tokens {
         crate::data::personal_tokens::revoke_all_for_user(
             &mut *tx,
@@ -1075,17 +1097,26 @@ pub async fn invalidate_all_sessions_and_reissue(
     Ok(token)
 }
 
-/// What else "log out other sessions" ends besides the sessions. Both are
+/// What else "log out other sessions" ends besides the sessions. Each is
 /// off by default: a feed link and a personal token exist to keep a
 /// calendar app or a device working across the user's own logouts, so they
 /// are revoked only when the request asks (`revokeCalendarFeed`,
-/// `revokePersonalTokens`).
+/// `revokePersonalTokens`), and so are the share and invite links the user
+/// created (`revokeShareLinks`, `revokeInviteLinks`).
+#[expect(
+    clippy::struct_excessive_bools,
+    reason = "independent opt-in flags, one per kind of credential or link"
+)]
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct RevokeOthersOptions {
     /// Revoke the calendar feed link (docs/calendar-feed.md).
     pub calendar_feed: bool,
     /// Revoke every personal API token (docs/personal-api-tokens.md).
     pub personal_tokens: bool,
+    /// Revoke the journey share links the user created (`revokeShareLinks`).
+    pub share_links: bool,
+    /// Revoke the group invite links the user created (`revokeInviteLinks`).
+    pub invite_links: bool,
 }
 
 /// Whether a session created at `login_at` counts as a recent login at
@@ -2258,6 +2289,7 @@ mod db_tests {
             RevokeOthersOptions {
                 calendar_feed: true,
                 personal_tokens: true,
+                ..RevokeOthersOptions::default()
             },
         )
         .await
@@ -2281,6 +2313,173 @@ mod db_tests {
             .execute(&pool)
             .await
             .expect("cleanup test user");
+    }
+
+    /// Whether the unlisted link `hash` is still live.
+    async fn link_live(pool: &PgPool, hash: &str) -> bool {
+        sqlx::query_scalar::<_, i64>(
+            "SELECT COUNT(*) FROM unlisted_links WHERE token_hash = $1 AND revoked_at IS NULL",
+        )
+        .bind(hash)
+        .fetch_one(pool)
+        .await
+        .unwrap()
+            == 1
+    }
+
+    /// Whether `owner` still has a live group invite link.
+    async fn invite_live(pool: &PgPool, owner: &str) -> bool {
+        sqlx::query_scalar::<_, i64>(
+            "SELECT COUNT(*) FROM group_invite_links \
+             WHERE created_by = $1 AND revoked_at IS NULL",
+        )
+        .bind(owner)
+        .fetch_one(pool)
+        .await
+        .unwrap()
+            == 1
+    }
+
+    /// The two users of the share and invite link test; returns their ids.
+    async fn links_test_users(pool: &PgPool) -> Vec<String> {
+        let mut ids = Vec::new();
+        for sub in ["TEST-USER-LINKS-A", "TEST-USER-LINKS-B"] {
+            let identity = OidcIdentity {
+                sub: sub.to_string(),
+                name: None,
+                preferred_username: Some(sub.to_lowercase()),
+                groups: Vec::new(),
+            };
+            ids.push(upsert_user(pool, &identity).await.expect("upsert user").id);
+        }
+        ids
+    }
+
+    /// Removes what the share and invite link test created.
+    async fn links_test_cleanup(pool: &PgPool, groups: &[&String], user_ids: &[String]) {
+        sqlx::query("DELETE FROM unlisted_links WHERE token_hash LIKE 'links-%'")
+            .execute(pool)
+            .await
+            .unwrap();
+        for group in groups {
+            sqlx::query("DELETE FROM groups WHERE id = $1")
+                .bind(group)
+                .execute(pool)
+                .await
+                .unwrap();
+        }
+        sqlx::query("DELETE FROM users WHERE id = ANY($1)")
+            .bind(user_ids)
+            .execute(pool)
+            .await
+            .unwrap();
+    }
+
+    /// `revokeShareLinks` and `revokeInviteLinks` each end only their own
+    /// kind of link, and only the caller's: the calendar feed (its own
+    /// flag), any other resource type and another user's links are untouched.
+    #[tokio::test]
+    #[ignore = "requires a live database; run with `cargo test -p api \
+                reissue_revokes_share_and_invite_links -- --ignored --test-threads=1`"]
+    async fn reissue_revokes_share_and_invite_links_separately_and_only_the_callers() {
+        use sqlx::postgres::PgPoolOptions;
+
+        let database_url =
+            std::env::var("DATABASE_URL").expect("DATABASE_URL must be set to run this test");
+        let pool = PgPoolOptions::new()
+            .connect(&database_url)
+            .await
+            .expect("connect to postgres");
+        let ids = links_test_users(&pool).await;
+        let (a, b) = (ids[0].clone(), ids[1].clone());
+        let lifetime = SessionLifetime::try_new(14, 24, 90).unwrap();
+        let login_at = chrono::Utc::now() - chrono::Duration::hours(1);
+        for (hash, kind, resource, owner) in [
+            ("links-a-feed", "calendar_feed", a.as_str(), a.as_str()),
+            ("links-a-share", "journey", "TEST-LINKS-J1", a.as_str()),
+            ("links-b-share", "journey", "TEST-LINKS-J2", b.as_str()),
+            ("links-a-other", "widget-links", "TEST-LINKS-W1", a.as_str()),
+        ] {
+            sqlx::query(
+                "INSERT INTO unlisted_links (token_hash, resource_type, resource_id, created_by) \
+                 VALUES ($1, $2, $3, $4)",
+            )
+            .bind(hash)
+            .bind(kind)
+            .bind(resource)
+            .bind(owner)
+            .execute(&pool)
+            .await
+            .unwrap();
+        }
+        let group_a = crate::data::groups::create_group(&pool, "Links test", &a)
+            .await
+            .unwrap();
+        crate::data::groups::rotate_invite_link(&pool, &group_a, &a)
+            .await
+            .unwrap();
+        let group_b = crate::data::groups::create_group(&pool, "Links test B", &b)
+            .await
+            .unwrap();
+        crate::data::groups::rotate_invite_link(&pool, &group_b, &b)
+            .await
+            .unwrap();
+
+        // Default: sessions only.
+        invalidate_all_sessions_and_reissue(
+            &pool,
+            &a,
+            lifetime,
+            login_at,
+            RevokeOthersOptions::default(),
+        )
+        .await
+        .unwrap();
+        assert!(link_live(&pool, "links-a-feed").await);
+        assert!(link_live(&pool, "links-a-share").await);
+        assert!(invite_live(&pool, &a).await);
+
+        // Share links only: a's journey link goes; the feed, a's invite
+        // link and b's links stay.
+        invalidate_all_sessions_and_reissue(
+            &pool,
+            &a,
+            lifetime,
+            login_at,
+            RevokeOthersOptions {
+                share_links: true,
+                ..RevokeOthersOptions::default()
+            },
+        )
+        .await
+        .unwrap();
+        assert!(link_live(&pool, "links-a-feed").await);
+        assert!(!link_live(&pool, "links-a-share").await);
+        // Only the journey type: another resource type of a's survives.
+        assert!(link_live(&pool, "links-a-other").await);
+        assert!(link_live(&pool, "links-b-share").await);
+        assert!(invite_live(&pool, &a).await);
+        assert!(invite_live(&pool, &b).await);
+
+        // Invite links only: a's invite link goes; the feed and b's stay.
+        invalidate_all_sessions_and_reissue(
+            &pool,
+            &a,
+            lifetime,
+            login_at,
+            RevokeOthersOptions {
+                invite_links: true,
+                ..RevokeOthersOptions::default()
+            },
+        )
+        .await
+        .unwrap();
+        assert!(link_live(&pool, "links-a-feed").await);
+        assert!(!invite_live(&pool, &a).await);
+        assert!(invite_live(&pool, &b).await);
+        assert!(link_live(&pool, "links-b-share").await);
+
+        links_test_cleanup(&pool, &[&group_a, &group_b], &ids).await;
     }
 
     /// `revoke_all_sessions` (admin revoke, back-channel logout) ends every

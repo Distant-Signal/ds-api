@@ -17,7 +17,7 @@ Code: `crates/api/src/routes/admin.rs`, `crates/api/src/routes/auth.rs`
 
 | Who | How | Effect |
 | --- | --- | --- |
-| The user | Account menu, "log out other sessions" (`POST /api/auth/sessions/revoke-others`) | Ends all of their sessions and reissues one for the current browser. The optional body `{"revokeCalendarFeed": true, "revokePersonalTokens": true}` (both default false) also revokes the calendar feed link and every personal API token |
+| The user | Account menu, "log out other sessions" (`POST /api/auth/sessions/revoke-others`) | Ends all of their sessions and reissues one for the current browser. The optional body `{"revokeCalendarFeed": true, "revokePersonalTokens": true, "revokeShareLinks": true, "revokeInviteLinks": true}` (all default false) also revokes the calendar feed link, every personal API token, the journey share links the user created and the group invite links the user created |
 | An admin | `POST /api/admin/users/revoke-sessions` | Ends all of the target user's sessions |
 | Authentik | Back-channel logout to `POST /api/auth/backchannel-logout` | Ends all of that user's sessions |
 

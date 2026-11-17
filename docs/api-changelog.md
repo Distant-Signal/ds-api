@@ -3,6 +3,18 @@
 Changes to the Distant Signal (DS) HTTP API that a client such as DS-MCP
 needs to know about. Newest first. Field names are as served (camelCase).
 
+## 2026-11-17: Revoke the share and invite links on "log out other sessions"
+
+No migration, grant or response change (DS-534).
+
+- `POST /public/auth/sessions/revoke-others` takes two more optional body
+  flags beside `revokeCalendarFeed` and `revokePersonalTokens`:
+  `revokeShareLinks` revokes the journey share links the caller created,
+  and `revokeInviteLinks` the group invite links the caller created. Both
+  default to false (an empty body or `{}` is as before), and each is
+  independent: `revokeShareLinks` leaves the calendar feed link alone (it
+  has its own flag), and neither touches another user's links.
+
 ## 2026-11-17: an account re-key ends the old sessions; stricter re-key match (both optional)
 
 No route, field or schema change. When account continuity re-keys an

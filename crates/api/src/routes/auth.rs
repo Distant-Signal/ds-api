@@ -641,10 +641,14 @@ fn logout_response(deleted: anyhow::Result<()>, secure: bool) -> Response {
     response
 }
 
-/// Optional body of `POST /auth/sessions/revoke-others`. Both flags are
-/// off unless sent: a calendar feed link and a personal API token exist to
-/// keep a calendar app or a device working across the user's own logouts,
-/// so ending other sessions leaves them alone by default.
+/// Optional body of `POST /auth/sessions/revoke-others`. Every flag is
+/// off unless sent: a calendar feed link, a personal API token and the share
+/// and invite links exist to keep working across the user's own logouts, so
+/// ending other sessions leaves them alone by default.
+#[expect(
+    clippy::struct_excessive_bools,
+    reason = "independent opt-in flags, one per kind of credential or link"
+)]
 #[derive(Debug, Default, Deserialize)]
 #[serde(rename_all = "camelCase", default)]
 struct RevokeOthersRequest {
@@ -652,6 +656,10 @@ struct RevokeOthersRequest {
     revoke_calendar_feed: bool,
     /// Also revoke every personal API token.
     revoke_personal_tokens: bool,
+    /// Also revoke the journey share links the user created.
+    revoke_share_links: bool,
+    /// Also revoke the group invite links the user created.
+    revoke_invite_links: bool,
 }
 
 /// "Log out everywhere" (M14/L6, 2026-09-26 Repeater Signal review): ends
@@ -700,6 +708,8 @@ async fn revoke_other_sessions(
         users::RevokeOthersOptions {
             calendar_feed: body.revoke_calendar_feed,
             personal_tokens: body.revoke_personal_tokens,
+            share_links: body.revoke_share_links,
+            invite_links: body.revoke_invite_links,
         },
     )
     .await
@@ -976,6 +986,12 @@ mod tests {
             serde_json::from_str(r#"{"revokeCalendarFeed": true, "revokePersonalTokens": true}"#)
                 .unwrap();
         assert!(both.revoke_calendar_feed && both.revoke_personal_tokens);
+        assert!(!both.revoke_share_links && !both.revoke_invite_links);
+        let links: RevokeOthersRequest =
+            serde_json::from_str(r#"{"revokeShareLinks": true, "revokeInviteLinks": true}"#)
+                .unwrap();
+        assert!(links.revoke_share_links && links.revoke_invite_links);
+        assert!(!links.revoke_calendar_feed && !links.revoke_personal_tokens);
     }
 
     /// The sign-up and missing-name-claims counters exist at 0 from
