@@ -1028,35 +1028,33 @@ async fn detail_extras_inner(
                 travelled: travelled.contains(&leg.id),
             })
             .collect();
-        match journey_breaks::detect(&facts, &timings.timings, &timings.connections) {
-            Some(found) => {
-                let detected = Detected {
-                    cause: found.cause,
-                    fault: "operator",
-                    severity: found.cause.base_severity(),
-                    trigger_leg_id: Some(found.trigger_leg_id),
-                    trigger_trains_id: found.trigger_trains_id,
-                    break_position: i32::try_from(found.index + 1)?,
-                    fingerprint: journey_breaks::fingerprint(
-                        found.cause,
-                        found.index,
-                        &timings.timings,
-                    ),
-                };
-                // `None`: the traveller dismissed this one; no banner.
-                open = journey_breaks::upsert_open(pool, journey_id, user_id, &detected, false)
-                    .await?
-                    .map(|(row, _)| row);
+        if let Some(found) = journey_breaks::detect(&facts, &timings.timings, &timings.connections)
+        {
+            let detected = Detected {
+                cause: found.cause,
+                fault: "operator",
+                severity: found.cause.base_severity(),
+                trigger_leg_id: Some(found.trigger_leg_id),
+                trigger_trains_id: found.trigger_trains_id,
+                break_position: i32::try_from(found.index + 1)?,
+                fingerprint: journey_breaks::fingerprint(
+                    found.cause,
+                    found.index,
+                    &timings.timings,
+                ),
+            };
+            // `None`: the traveller dismissed this one; no banner.
+            open = journey_breaks::upsert_open(pool, journey_id, user_id, &detected, false)
+                .await?
+                .map(|(row, _)| row);
+        } else {
+            if let Some(row) = open.take() {
+                let mut conn = pool.acquire().await?;
+                journey_breaks::resolve(&mut conn, row.id, "recovered", None, None).await?;
             }
-            None => {
-                if let Some(row) = open.take() {
-                    let mut conn = pool.acquire().await?;
-                    journey_breaks::resolve(&mut conn, row.id, "recovered", None, None).await?;
-                }
-                // Healthy: a dismissed break the leg has recovered from no
-                // longer holds a repeat back.
-                journey_breaks::clear_dismissed(pool, journey_id).await?;
-            }
+            // Healthy: a dismissed break the leg has recovered from no
+            // longer holds a repeat back.
+            journey_breaks::clear_dismissed(pool, journey_id).await?;
         }
     }
     let summary = journey_revisions::summary(pool, journey_id).await?;

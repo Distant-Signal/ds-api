@@ -161,6 +161,10 @@ pub enum Upserted {
     Same,
 }
 
+/// A journey's latest break as `upsert_open` reads it: `status`, `cause`,
+/// `trigger_leg_id` and `cleared_at`.
+type LatestBreak = (String, String, Option<i64>, Option<DateTime<Utc>>);
+
 /// Opens a break for `journey_id`, or updates the open one: cause, fault,
 /// trigger and fingerprint follow the latest detection; the severity only
 /// ever rises; with `confirm` (the sweep, not a page read),
@@ -190,7 +194,7 @@ pub async fn upsert_open(
     .fetch_optional(&mut *tx)
     .await?;
     if existing.is_none() {
-        let latest: Option<(String, String, Option<i64>, Option<DateTime<Utc>>)> = sqlx::query_as(
+        let latest: Option<LatestBreak> = sqlx::query_as(
             "SELECT status, cause, trigger_leg_id, cleared_at FROM journey_breaks \
              WHERE journey_id = $1 ORDER BY id DESC LIMIT 1",
         )
