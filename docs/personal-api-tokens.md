@@ -39,6 +39,10 @@ to the website's API is refused either way.
    response is wrapped as `{data, attribution}` with `Cache-Control:
    private, max-age=N`, an `ETag` and `DS-Poll-Interval: 60`.
 
+Test credentials, a narrower second trust root for automated checks (ds-sso
+client-credentials JWTs, reference routes only, off by default), are also
+accepted on this listener only: [test-auth.md](test-auth.md).
+
 On the website's listener and the delegated listener, any `dsp_` bearer is
 answered `401 invalid_token` before anything else reads it, and logged
 `event=personal_token_rejected reason=wrong_listener`. The frontend's `/api`
