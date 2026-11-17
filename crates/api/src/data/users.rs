@@ -1022,6 +1022,19 @@ pub async fn invalidate_all_sessions_and_reissue(
         .bind(user_id)
         .execute(&mut *tx)
         .await?;
+    // Delegated tokens are refused when issued before the later of the
+    // grant's `not_before` and `sessions_invalidated_at`
+    // (`auth::delegated`). The marker above is the caller's login time, no
+    // longer NOW(), so it would let a token issued since that login live
+    // on: move each live grant's `not_before` to now to keep "tokens issued
+    // before this are refused".
+    sqlx::query(
+        "UPDATE delegated_grants SET not_before = NOW() \
+         WHERE user_id = $1 AND revoked_at IS NULL",
+    )
+    .bind(user_id)
+    .execute(&mut *tx)
+    .await?;
     if options.calendar_feed {
         sqlx::query(
             "UPDATE unlisted_links SET revoked_at = NOW() \
@@ -2173,6 +2186,15 @@ mod db_tests {
         .await
         .unwrap();
 
+        sqlx::query(
+            "INSERT INTO delegated_grants (user_id, client, client_display_name, scopes) \
+             VALUES ($1, 'ds-mcp', 'Assistant', '{journeys:read}')",
+        )
+        .bind(&user.id)
+        .execute(&pool)
+        .await
+        .unwrap();
+
         // Default options: the session keeps its login time, and the feed
         // link and the token are left alone.
         let token = invalidate_all_sessions_and_reissue(
@@ -2209,6 +2231,19 @@ mod db_tests {
         .await
         .unwrap();
         assert_eq!((live_links, live_tokens), (1, 1));
+        // The marker is the (older) login time, so the grant's `not_before`
+        // is what refuses a delegated token issued since that login.
+        let refused_since_login: bool = sqlx::query_scalar(
+            "SELECT not_before > NOW() - INTERVAL '1 minute' FROM delegated_grants WHERE user_id = $1",
+        )
+        .bind(&user.id)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert!(
+            refused_since_login,
+            "delegated tokens issued before the reissue are refused"
+        );
 
         // Asked to: both go.
         invalidate_all_sessions_and_reissue(
