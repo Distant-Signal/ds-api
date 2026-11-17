@@ -500,7 +500,8 @@ async fn callback(
 
 /// The callback's upsert with account continuity on
 /// (`data::account_continuity`): logs an audit line and counts each
-/// re-key and each conflict. `Ok(None)` when a conflict refuses the login.
+/// re-key, each declined re-key and each conflict. `Ok(None)` when a
+/// conflict refuses the login.
 ///
 /// The audit line names the account ids (`users.id`, an opaque subject)
 /// and never the Discord id.
@@ -511,7 +512,11 @@ async fn continuity_login(
 ) -> anyhow::Result<Option<users::User>> {
     use crate::data::account_continuity::{self as continuity, Outcome};
 
-    let login = continuity::login(&app.database, identity, claims).await?;
+    let options = continuity::Options {
+        require_strong_match: app.config.account_continuity_require_strong_match,
+        revoke_tokens_on_rekey: app.config.account_continuity_revoke_tokens_on_rekey,
+    };
+    let login = continuity::login(&app.database, identity, claims, &options).await?;
     if let Outcome::Rekeyed { from, matched_by } = &login.outcome {
         tracing::warn!(
             audit = true,
@@ -519,11 +524,28 @@ async fn continuity_login(
             from_user_id = %from,
             to_user_id = %identity.sub,
             matched_by = matched_by.label(),
+            sessions_revoked = login.revoked.sessions,
+            tokens_revoked = login.revoked.tokens,
+            grants_revoked = login.revoked.grants,
             "account continuity: re-keyed an existing account to the login's new sub"
         );
         metrics::counter!(
             ds_runtime::metrics::metric_name(continuity::REKEYS_METRIC),
             "matched_by" => matched_by.label()
+        )
+        .increment(1);
+    }
+    if let Some(refusal) = login.refused {
+        tracing::warn!(
+            audit = true,
+            event = "account_rekey_refused",
+            reason = refusal.label(),
+            user_id = %identity.sub,
+            "account continuity: declined a weak re-key; the login creates a new account"
+        );
+        metrics::counter!(
+            ds_runtime::metrics::metric_name(continuity::REFUSED_METRIC),
+            "reason" => refusal.label()
         )
         .increment(1);
     }

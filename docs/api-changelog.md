@@ -3,6 +3,23 @@
 Changes to the Distant Signal (DS) HTTP API that a client such as DS-MCP
 needs to know about. Newest first. Field names are as served (camelCase).
 
+## 2026-11-17: an account re-key ends the old sessions; stricter re-key match (both optional)
+
+No route, field or schema change. When account continuity re-keys an
+existing account to a new login subject, the account's other sessions now
+end (the login that caused the re-key keeps its own), so the previous
+holder's cookies stop working; personal API tokens and delegated grants
+are kept, as before. `ACCOUNT_CONTINUITY_REVOKE_TOKENS_ON_REKEY` (default
+`false`) also revokes them. `ACCOUNT_CONTINUITY_REQUIRE_STRONG_MATCH`
+(default `false`) makes a primary-sub match need a matching Discord id; a
+weak one is declined and the login creates a new account
+(`distant_signal_api_account_rekey_refused_total{reason}`, registered at 0).
+`distant_signal_api_account_rekeys_total` and the `account_rekeyed` audit
+line stay, and the line gains the revoked counts. See
+[connected-apps.md](connected-apps.md), "What a re-key revokes" and "Strong
+match". DS-MCP: no change needed; a user whose grants were revoked connects
+again.
+
 ## 2026-11-17: Overnight walks, replayed movements and whole-word incident keywords
 
 Behaviour fixes that arrive with ds-core v0.15.0 (DS-534); no field,

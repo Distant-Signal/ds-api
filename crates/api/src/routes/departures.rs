@@ -554,6 +554,8 @@ mod db_tests {
             sso_post_login_redirect_url: "https://example.invalid/".to_string(),
             sso_discord_id_claim: String::new(),
             sso_primary_sub_claim: String::new(),
+            account_continuity_require_strong_match: false,
+            account_continuity_revoke_tokens_on_rekey: false,
             session_ttl_days: 14,
             session_max_age_days: 90,
             session_extend_throttle_hours: 24,

@@ -204,9 +204,10 @@ dedicated `ds-sso` instance for public login: Ranma-Config
 `users.id` is the `sub`, and the delegated, revoke and back-channel logout
 paths use a token's `sub` directly, so the api keeps `users.id` equal to
 the current `sub` and **re-keys an existing account in place** on its
-first login through the new provider. Sessions, personal API tokens,
-delegated grants and everything else the user owns follow, through the
-`ON UPDATE CASCADE` foreign keys (ds-core v0.1.1).
+first login through the new provider. Personal API tokens, delegated
+grants and everything else the user owns follow, through the
+`ON UPDATE CASCADE` foreign keys (ds-core v0.1.1); the account's existing
+sessions do not survive ("What a re-key revokes").
 
 **It is off by default.** Two api settings turn it on, each naming an
 ID-token claim (top-level; the api reads the ID token only, never
@@ -238,6 +239,57 @@ login without it keeps the stored one). Name and username follow the same
 rule on every login, re-keyed or not: a present claim overwrites, a missing
 one keeps the stored value.
 
+### What a re-key revokes
+
+A re-key moves the account to the new `sub`, so whoever held it before
+(a session cookie, a token) would otherwise keep a live credential for it.
+
+- **Sessions: always.** Every session of the re-keyed account is deleted
+  in the re-key's transaction (they authenticated under the previous
+  `sub`). The session the same login creates afterwards is not among them,
+  so the person is signed in on the device they used and signed out on
+  the others.
+- **Personal API tokens and delegated grants (connected apps): kept by
+  default.** They are the person's, and a person whose `sub` changed in a
+  migration between identity providers should not have to recreate them.
+  `ACCOUNT_CONTINUITY_REVOKE_TOKENS_ON_REKEY=true` (default `false`) also
+  revokes them (reason `admin`) for deployments that want the strict
+  behaviour; a user then makes new tokens and connects their apps again.
+- **Calendar feed links** follow the account, as before.
+
+The re-key is recorded in the `event=account_rekeyed` audit line (`from_user_id`,
+`to_user_id`, `matched_by`, and the `sessions_revoked`, `tokens_revoked` and
+`grants_revoked` counts) and the `distant_signal_api_account_rekeys_total`
+counter. There is no audit table: a new one needs a ds-core migration.
+
+### Strong match
+
+By default a login re-keys on the primary-sub claim alone when the matched
+account has no Discord id and the token carries none (the staff
+migration: staff accounts have no Discord id). That is a weak match: anyone
+who can set their own primary-sub claim at the identity provider takes the
+account over. `ACCOUNT_CONTINUITY_REQUIRE_STRONG_MATCH=true` (default
+`false`, because it would break the staff migration above) makes the
+primary sub need the Discord id as well: the account's stored Discord id and
+the token's must both be present and equal, which in practice means the
+Discord id match found it. A primary-sub match without that is
+**declined**, not an error: the login carries on as a new account (the same as
+when nothing matches), the old account and its sessions are untouched, an
+audit line `event=account_rekey_refused` (WARN) names the new `sub` and
+`distant_signal_api_account_rekey_refused_total{reason}` counts it, with
+`reason` `primary_sub_no_discord_id` (neither side has one) or
+`primary_sub_discord_id_unverified` (only one does). Turn it on once every
+account that has to migrate has its Discord id loaded (step 3 of the
+cut-over; staff included), and leave it off for a migration that has to
+match staff by primary sub alone.
+
+Either way the claims must be unforgeable by the user (see above). The
+identity provider side: map the Discord id and the primary sub claims in
+`ds-sso` from the source connection's identifier, never from a user-editable
+attribute, and unset `SSO_DISCORD_ID_CLAIM` and `SSO_PRIMARY_SUB_CLAIM`
+(`api.sso.discordIdClaim` and `api.sso.primarySubClaim`) once the cut-over is
+done and every account has moved: with both unset no login can re-key.
+
 Conflicts are never resolved automatically; an operator merges the
 accounts by hand:
 
@@ -252,7 +304,8 @@ Observability: an audit line (`audit=true`) `event=account_rekeyed` with
 `primary_sub`) per re-key, and `event=account_continuity_conflict` (ERROR)
 with `kind`, `user_id` and `login_refused` per conflict; the Discord id is
 never logged. Metrics:
-`distant_signal_api_account_rekeys_total{matched_by}` and
+`distant_signal_api_account_rekeys_total{matched_by}`,
+`distant_signal_api_account_rekey_refused_total{reason}` and
 `distant_signal_api_account_continuity_conflicts_total{kind}`.
 
 ### Cut-over
