@@ -340,7 +340,17 @@ async fn callback(
                 stored.return_to.as_deref(),
                 &app.config.sso_post_login_redirect_url,
             );
-            return login_failed_redirect(&target);
+            // The login state is already consumed: clear its cookie too.
+            let mut response = login_failed_redirect(&target);
+            response.headers_mut().append(
+                header::SET_COOKIE,
+                HeaderValue::from_str(&auth::clear_cookie_header(
+                    auth::LOGIN_STATE_COOKIE_NAME,
+                    cookie_secure(&app),
+                ))
+                .expect("cookie header value is always valid ASCII"),
+            );
+            return response;
         }
     };
 

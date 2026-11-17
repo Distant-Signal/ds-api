@@ -506,6 +506,7 @@ async fn server_main() -> anyhow::Result<()> {
         // a rare route's first request after a restart is visible to
         // increase()/rate(). See `api::route_metrics`.
         api::route_metrics::register();
+        api::edge::register_panic_metric();
         // The trip-plan graph builds' counter and timing (DS-225).
         routes::trips::register_graph_metrics();
         // Usage analytics' feature and event counters at 0 (DS-190).

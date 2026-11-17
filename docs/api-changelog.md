@@ -116,8 +116,8 @@ clients is unchanged. New limits are generous and aimed at abuse.
   share-link extend/revoke and break dismissal check the caller's role or
   ownership inside the write itself as well as in the route.
 - A handler panic answers a plain `500` (no detail) instead of dropping the
-  connection; `POST /Journeys/irish-train`'s date check no longer panics on
-  the largest date.
+  connection (counted in `api_handler_panics_total`); `POST
+  /Journeys/irish-train`'s date check no longer panics on the largest date.
 
 ## 2026-11-16: Stops for live-only trains
 

@@ -135,6 +135,12 @@ impl EdgeSettings {
     }
 }
 
+/// Keys the handler-panic counter at 0 so the first panic after a restart is
+/// visible to `increase()`/`rate()`.
+pub fn register_panic_metric() {
+    metrics::counter!(ds_runtime::metrics::metric_name("api_handler_panics_total")).increment(0);
+}
+
 /// A handler that panics answers a plain `500` instead of dropping the
 /// connection. The body names nothing: the panic message goes to the log
 /// only. Add as a `.layer(edge::catch_panic_layer())`, inside the trace
@@ -159,6 +165,9 @@ fn panic_response(panic: Box<dyn std::any::Any + Send + 'static>) -> axum::respo
         .or_else(|| panic.downcast_ref::<String>().cloned())
         .unwrap_or_else(|| "non-string panic payload".to_string());
     tracing::error!(%message, "a request handler panicked");
+    // Counted, so an alert on `increase(...[5m]) > 0` sees panics that the
+    // `500` would otherwise hide among ordinary server errors.
+    metrics::counter!(ds_runtime::metrics::metric_name("api_handler_panics_total")).increment(1);
     (StatusCode::INTERNAL_SERVER_ERROR, "internal server error").into_response()
 }
 
