@@ -72,6 +72,11 @@ response-shape change.
   a `\u0000` escape in a string (custom names, group names, line names,
   notes, labels and every other field) or a `%00` in the URL is refused up
   front, on the public and the token listeners. Postgres cannot store it.
+- `POST /notifications/subscribe`: every refused push endpoint (not https,
+  a private or loopback address, a name that does not resolve, malformed)
+  is the same `400`, "That push address can't be used. It must be a public
+  https address.". The distinct reasons were an internal-DNS probe; they
+  stay in the server log, without the URL.
 
 ## 2026-11-17: Journey break and replan fixes
 
