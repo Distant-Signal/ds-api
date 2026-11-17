@@ -9,7 +9,7 @@
 use std::future::{Future, ready};
 use std::sync::Mutex;
 
-use super::{ChunkPart, DatedProduct, LinePopulation, PublishSink, Signal, SinkError};
+use super::{ChunkPart, DatedProduct, LinePopulation, PublishSink, RunLockLost, Signal, SinkError};
 
 pub(crate) const STANOX_CRS: &str = "stanox-crs";
 pub(crate) const TIPLOC_CRS: &str = "tiploc-crs";
@@ -97,6 +97,11 @@ pub(crate) struct FakePublishSink {
     lock_held_elsewhere: Mutex<bool>,
     /// This sink holds the run lock.
     holding_run_lock: Mutex<bool>,
+    /// How many more [`PublishSink::ensure_run_lock_held`] checks pass before
+    /// the lock is lost ([`Self::lose_run_lock_after`]); `None` never loses it.
+    checks_until_lost: Mutex<Option<usize>>,
+    /// How many checks were made.
+    lock_checks: Mutex<usize>,
     /// The settled delivery, as the last `Settled` signal recorded it.
     settled: Mutex<Option<String>>,
 }
@@ -115,6 +120,17 @@ impl FakePublishSink {
     /// Another run holds (`true`) or released (`false`) the run lock.
     pub(crate) fn hold_run_lock_elsewhere(&self, held: bool) {
         *self.lock_held_elsewhere.lock().unwrap() = held;
+    }
+
+    /// The run lock's connection goes after `checks` more passing checks
+    /// ([`PublishSink::ensure_run_lock_held`]), and stays gone.
+    pub(crate) fn lose_run_lock_after(&self, checks: usize) {
+        *self.checks_until_lost.lock().unwrap() = Some(checks);
+    }
+
+    /// How many times the run lock was checked.
+    pub(crate) fn run_lock_checks(&self) -> usize {
+        *self.lock_checks.lock().unwrap()
     }
 
     /// Whether this sink holds the run lock now.
@@ -330,6 +346,21 @@ impl PublishSink for FakePublishSink {
     fn unlock_run(&self) -> impl Future<Output = ()> {
         *self.holding_run_lock.lock().unwrap() = false;
         ready(())
+    }
+
+    /// Not recorded as a call: a check is no write, and the tests that pin
+    /// a run's exact calls count writes.
+    fn ensure_run_lock_held(&self) -> impl Future<Output = Result<(), RunLockLost>> {
+        *self.lock_checks.lock().unwrap() += 1;
+        let answer = match self.checks_until_lost.lock().unwrap().as_mut() {
+            Some(0) => Err(RunLockLost),
+            Some(remaining) => {
+                *remaining -= 1;
+                Ok(())
+            }
+            None => Ok(()),
+        };
+        ready(answer)
     }
 
     fn record_signal(

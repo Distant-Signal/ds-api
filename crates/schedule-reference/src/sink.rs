@@ -70,6 +70,24 @@ impl std::error::Error for SinkError {
     }
 }
 
+/// The run lock's connection went (a database restart, a network drop), so
+/// another run may now hold the lock: the run stops instead of publishing
+/// beside it. Not a [`SinkError`]: it is never retried and never recorded
+/// against a product (`main::CycleOutcome::failed`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct RunLockLost;
+
+impl std::fmt::Display for RunLockLost {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(
+            "lost the schedule-reference run lock; stopping this run so it can't publish \
+             alongside another",
+        )
+    }
+}
+
+impl std::error::Error for RunLockLost {}
+
 /// Classifies a publish failure for `CycleOutcome` and the in-cycle retry:
 /// a [`SinkError::Rejected`] anywhere in the chain is a rejection of the
 /// data, any other [`SinkError`] is transient, and an error from outside a
@@ -185,6 +203,12 @@ pub(crate) trait PublishSink {
 
     /// Releases the run lock, if this sink holds it.
     async fn unlock_run(&self);
+
+    /// Checks that the run lock is still held, ahead of a publish step
+    /// ([`RunLockLost`] when its connection went, and so does every later
+    /// check of this run). A sink that never took the lock has nothing to
+    /// lose and answers `Ok`.
+    async fn ensure_run_lock_held(&self) -> Result<(), RunLockLost>;
 
     /// Records a run signal (`schedule_reference_signals`, DS-241) for
     /// `product` (`""` for a run-wide one).
