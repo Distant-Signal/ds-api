@@ -2678,23 +2678,25 @@ pub async fn delete_leg(
         // then, and the sweep's own "already has a leg on this date" guard
         // still sees it.
         record_template_occurrence_skips(&mut tx, journey_id).await?;
-        // Cascades into `journey_legs` for us (`ON DELETE CASCADE`) --
-        // deleting the leg row explicitly first would be redundant, not
-        // wrong, but this is the one statement, not two.
-        sqlx::query("DELETE FROM journeys WHERE id = $1")
-            .bind(journey_id)
-            .execute(&mut *tx)
-            .await?;
+        // The whole journey goes, as `DELETE /Journeys/{id}` deletes one:
+        // recorded under Recently deleted when that is on (review J3: a
+        // plain delete here left nothing to restore), its legs cascading
+        // and the leg's train released.
+        delete_journey_row_releasing_trains(
+            &mut tx,
+            journey_id,
+            user_id,
+            crate::data::recently_deleted::enabled(),
+        )
+        .await?;
     } else {
         sqlx::query("DELETE FROM journey_legs WHERE id = $1")
             .bind(leg_id)
             .execute(&mut *tx)
             .await?;
-    }
-    if let Some(train_subscription_id) = train_subscription_id {
-        release_leg_subscription(&mut tx, user_id, train_subscription_id, None, false).await?;
-    }
-    if !journey_also_deleted {
+        if let Some(train_subscription_id) = train_subscription_id {
+            release_leg_subscription(&mut tx, user_id, train_subscription_id, None, false).await?;
+        }
         crate::data::journey_revisions::record_plan_change(&mut tx, journey_id, Utc::now()).await?;
     }
 
