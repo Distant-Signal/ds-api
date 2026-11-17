@@ -33,7 +33,8 @@ order, and refuses (`401 invalid_token`) on the first failure:
    `TEST_AUTH_AUDIENCE`.
 4. `exp`, `nbf` (when present) and `iat` (required: a token without it is
    refused), each with the delegated verifier's 60-second clock-skew
-   leeway. A non-empty `sub`.
+   leeway. A lifetime (`exp` minus `iat`) of at most 24 hours: there is no
+   per-token revocation, so a long-lived token is refused. A non-empty `sub`.
 5. `groups` contains `TEST_AUTH_REQUIRED_GROUP`.
 
 ## Where it is accepted

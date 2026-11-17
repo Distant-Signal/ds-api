@@ -16,8 +16,9 @@
 //!   issuer's JWKS (OIDC discovery and the cached, cooled-down refetch of
 //!   [`ServiceTokenVerifier`], shared with the delegated verifier), the
 //!   exact `iss`, `aud`, `exp`, `nbf`, a required `iat`, the delegated
-//!   verifier's clock-skew leeway ([`CLOCK_SKEW_LEEWAY`]), a non-empty `sub`
-//!   and the required group in `groups`.
+//!   verifier's clock-skew leeway ([`CLOCK_SKEW_LEEWAY`]), a lifetime of at
+//!   most [`MAX_TOKEN_LIFETIME_SECS`], a non-empty `sub` and the required
+//!   group in `groups`.
 //! - **Routes.** `GET` only, and only the [`TOKEN_ROUTES`] entries whose
 //!   scope is one of [`ALLOWED_SCOPES`] (`lines:read`, `trains:read`):
 //!   reference data. `/v1/me`, journeys and preferences answer `403`.
@@ -63,6 +64,11 @@ pub const TEST_AUTH_ISSUER: &str =
 pub const DEFAULT_AUDIENCE: &str = "distant-signal-test";
 /// The group the token's `groups` claim must contain.
 pub const DEFAULT_REQUIRED_GROUP: &str = "ds-test";
+/// The longest a token may live (`exp` minus `iat`), in seconds. ds-sso
+/// issues one-hour tokens and there is no per-token revocation, so a token
+/// minted with a long life (a provider setting changed by mistake) is
+/// refused rather than trusted for weeks.
+pub const MAX_TOKEN_LIFETIME_SECS: i64 = 24 * 60 * 60;
 /// The sandbox principal is this prefix and the token's `sub`.
 pub const PRINCIPAL_PREFIX: &str = "test:";
 /// The scopes a test token holds: reference data only.
@@ -337,6 +343,9 @@ impl TestAuth {
         }
         if claims.iat.saturating_sub(leeway) > now {
             return Err(Refusal::NotYetValid);
+        }
+        if claims.exp.saturating_sub(claims.iat) > MAX_TOKEN_LIFETIME_SECS {
+            return Err(Refusal::Invalid);
         }
         if claims.sub.is_empty() {
             return Err(Refusal::Invalid);
@@ -1122,6 +1131,11 @@ mod tests {
                     "another group",
                     sign_token(&claims(&uri, |c| c["groups"] = json!(["srv-ds-mcp"]))),
                     Refusal::MissingGroup,
+                ),
+                (
+                    "a week-long token",
+                    sign_token(&claims(&uri, |c| c["exp"] = json!(now + 7 * 24 * 3600))),
+                    Refusal::Invalid,
                 ),
                 (
                     "an empty sub",
