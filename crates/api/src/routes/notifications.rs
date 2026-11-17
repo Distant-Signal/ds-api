@@ -145,6 +145,23 @@ const MAX_PUSH_ENDPOINT_CHARS: usize = 2048;
 const MAX_P256DH_CHARS: usize = 128;
 const MAX_AUTH_CHARS: usize = 64;
 
+/// What every refused push endpoint is told (scheme, address, DNS alike).
+const PUSH_ENDPOINT_REFUSED: &str =
+    "That push address can't be used. It must be a public https address.";
+
+/// Runs the SSRF guard on `endpoint`. One message for every refusal:
+/// telling "does not resolve" from "resolves to a disallowed address" would
+/// let a caller probe the cluster's internal DNS. The reason stays in the
+/// log, without the URL.
+async fn check_push_endpoint(endpoint: &str) -> Result<(), (StatusCode, String)> {
+    notifications::validate_push_endpoint(endpoint)
+        .await
+        .map_err(|reason| {
+            tracing::info!(reason, "refused a push endpoint");
+            (StatusCode::BAD_REQUEST, PUSH_ENDPOINT_REFUSED.to_string())
+        })
+}
+
 fn is_base64url(value: &str) -> bool {
     !value.is_empty()
         && value
@@ -201,9 +218,7 @@ async fn subscribe(
     // later issue a VAPID-signed POST to it from inside the cluster on
     // every notification: an SSRF vector.
     validate_subscribe_request(&body).map_err(|msg| (StatusCode::BAD_REQUEST, msg))?;
-    notifications::validate_push_endpoint(&body.endpoint)
-        .await
-        .map_err(|msg| (StatusCode::BAD_REQUEST, msg))?;
+    check_push_endpoint(&body.endpoint).await?;
 
     // The device list's label ("Chrome on Android"); only the label is kept.
     let device_label = headers
@@ -257,6 +272,28 @@ mod tests {
     const REAL_P256DH: &str =
         "BNcRdreALRFXTkOOUHK1EtK2wtaz5Ry4YfYCA_0QTpQtUbVlUls0VJXg7A8u-Ts1XbjhazAkj7I99e8QcYP7DkM";
     const REAL_AUTH: &str = "tBHItJI5svbpez7KI4CCXg";
+
+    /// A scheme, a private address, a loopback address and a name that does
+    /// not resolve all get the same answer.
+    #[tokio::test]
+    async fn every_refused_endpoint_gets_the_same_message() {
+        let mut answers = Vec::new();
+        for endpoint in [
+            "http://93.184.216.34/ep",
+            "https://10.0.0.7/ep",
+            "https://[::1]/ep",
+            "https://no-such-host.invalid/ep",
+            "not-a-url",
+        ] {
+            answers.push(check_push_endpoint(endpoint).await.unwrap_err());
+        }
+        for answer in &answers {
+            assert_eq!(answer.0, StatusCode::BAD_REQUEST);
+            assert_eq!(answer.1, PUSH_ENDPOINT_REFUSED);
+        }
+        assert!(!PUSH_ENDPOINT_REFUSED.contains("resolve"));
+        assert!(!PUSH_ENDPOINT_REFUSED.contains("disallowed"));
+    }
 
     #[test]
     fn a_real_browser_subscription_is_accepted() {

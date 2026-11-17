@@ -62,6 +62,32 @@ Behaviour fixes (DS-534); no field, migration or grant change.
 - Personal API tokens: a `403 insufficient_scope` is charged to the
   token's own rate bucket, so a token past it gets `429 rate_limited`.
 
+## 2026-11-17: Authenticated-stage security fixes
+
+Behaviour changes from the DS-534 assessment; no migration, grant or
+response-shape change.
+
+- A NUL character (U+0000) in any user text is now a `400` ("That text
+  contains a character that can't be used."), not a `500`: a JSON body with
+  a `\u0000` escape in a string (custom names, group names, line names,
+  notes, labels and every other field) or a `%00` in the URL is refused up
+  front, on the public and the token listeners. Postgres cannot store it.
+- `POST /notifications/subscribe`: every refused push endpoint (not https,
+  a private or loopback address, a name that does not resolve, malformed)
+  is the same `400`, "That push address can't be used. It must be a public
+  https address.". The distinct reasons were an internal-DNS probe; they
+  stay in the server log, without the URL.
+- `POST /public/lines` and `PUT /public/lines/{id}` (custom lines): at
+  most 100 stations per line (was 200; the longest catalogue line has 61).
+  Repeated station codes (ignoring case and spaces) are folded into one,
+  as before, before the "at least 2 stations" and the cap are checked.
+- Session-cookie mutations (POST, PUT, PATCH, DELETE) with no `Origin`
+  header are refused with `403` when `Sec-Fetch-Site` is `cross-site`
+  (defence in depth; the frontend proxy checks too). A request with
+  neither header (a non-browser client), or with `same-origin`,
+  `same-site` or `none`, is judged as before; a present `Origin` still
+  decides on its own. `same-site` stays allowed.
+
 ## 2026-11-17: Journey break and replan fixes
 
 Behaviour fixes (DS-534); no field, migration or grant change.

@@ -520,6 +520,7 @@ pub fn validate_custom_name(name: Option<&str>) -> Result<Option<String>, String
     if trimmed.is_empty() {
         return Ok(None);
     }
+    crate::text_guard::reject_nul(trimmed)?;
     if trimmed.chars().count() > CUSTOM_NAME_MAX_LENGTH {
         return Err(format!(
             "That name is too long. Custom names can be at most {CUSTOM_NAME_MAX_LENGTH} \
@@ -538,6 +539,14 @@ mod custom_name_tests {
         assert_eq!(
             validate_custom_name(Some("  My commute  ")),
             Ok(Some("My commute".to_string()))
+        );
+    }
+
+    #[test]
+    fn a_nul_is_refused_before_it_reaches_the_database() {
+        assert_eq!(
+            validate_custom_name(Some("a\0b")),
+            Err(crate::text_guard::NUL_MESSAGE.to_string())
         );
     }
 
