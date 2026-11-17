@@ -49,6 +49,10 @@ pub(crate) struct TrackIrishTrainRequest {
 
 /// `POST /Journeys/irish-train`'s response: the one-leg journey and the
 /// tracked train (`GET /Train/{trackingId}`).
+#[expect(
+    clippy::struct_field_names,
+    reason = "a wire response: the camelCase names are the contract"
+)]
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, ts_rs::TS)]
 #[serde(rename_all = "camelCase")]
 pub(crate) struct TrackIrishTrainResponse {

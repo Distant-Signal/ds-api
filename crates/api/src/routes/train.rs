@@ -842,6 +842,10 @@ async fn schedule_only_public_state(
     Ok(crate::data::schedule_services::attach_one(&app.database, state).await)
 }
 
+#[expect(
+    clippy::struct_field_names,
+    reason = "a wire response: the camelCase names are the contract"
+)]
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
 struct TrackByUidResponse {
