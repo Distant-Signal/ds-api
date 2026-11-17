@@ -111,6 +111,27 @@ destination and back onto a later leg are unchanged. The set's
 `trigger.originName` stays the leg's boarding station; its `originCrs` and
 `originName` are where the search started.
 
+**After midnight.** A search runs on the leg's own service date, on that
+date's clock, so one made between 00:00 and 04:00 the next morning (while
+the window is open) is at 1440 minutes or more. From there the alternatives
+also search the next service date from the same moment and merge the two
+plans (`across_midnight` on `ReplanQuery`, as `/Trips/plan?acrossMidnight=true`
+plans: the next date's minutes are shifted a day on, so the three searches,
+the next departures one by one and the rejoin onto a later leg, work
+unchanged). A train of the next date is offered with `serviceDate` of that
+date and its real instants; taking it replaces the leg with one dated the
+next day, whose own miss window is 04:00 the morning after that date. The
+original leg's window decides whether the request is allowed at all, so a
+leg dated the next day never makes it, or the ordering of the journey,
+wrong. Only a search that starts past midnight does this: before midnight the
+next morning's trains are not offered. Only the alternatives' searches ask
+for it: the regular journeys plan sweep never crosses midnight. With no
+timetable published for the next date it adds nothing.
+`distant_signal_api_replan_across_midnight_total` counts the searches that
+loaded the next date's graph. Today's graph and tomorrow's are prewarmed
+(`prewarm_graphs`), so after midnight the next date is today's and warm;
+the date before it is the one that may need building on the first search.
+
 **What the app can show.** The set carries `leg: {departed, arrived}`:
 whether the train has left the boarding station (its live departure has
 passed) and whether it ran to the alighting station (never for a cancelled

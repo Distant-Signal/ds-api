@@ -2908,9 +2908,49 @@ pub(crate) struct ReplanQuery {
     pub vias: Vec<StationChoice>,
     /// `/Trips/plan`'s `avoid`, `avoidStop` and `avoidChange`, as applied.
     pub avoid: trip_planning_itinerary::AvoidLists,
+    /// Also search the next service date from the same moment when the
+    /// time is past `date`'s midnight (1440 minutes or more), as
+    /// `/Trips/plan?acrossMidnight=true` does, and merge the two plans
+    /// ([`REPLAN_ACROSS_MIDNIGHT_METRIC`]). Off by default: only a journey's
+    /// alternatives ask ([`Self::across_midnight`]).
+    pub across_midnight: bool,
+}
+
+/// `api_replan_across_midnight_total`: journey searches that also loaded
+/// the next service date's graph because they ran past midnight on their
+/// own date (a missed-train search made between 00:00 and 04:00).
+pub const REPLAN_ACROSS_MIDNIGHT_METRIC: &str = "api_replan_across_midnight_total";
+
+/// Registers [`REPLAN_ACROSS_MIDNIGHT_METRIC`] at 0 at startup, so an
+/// alert's `increase()` sees the first one after a restart.
+pub fn register_replan_metrics() {
+    metrics::counter!(ds_runtime::metrics::metric_name(
+        REPLAN_ACROSS_MIDNIGHT_METRIC
+    ))
+    .increment(0);
 }
 
 impl ReplanQuery {
+    /// This search, also over the next service date when its time is past
+    /// `date`'s midnight (see [`Self::across_midnight`]).
+    #[must_use]
+    pub(crate) fn across_midnight(mut self) -> Self {
+        self.across_midnight = true;
+        self
+    }
+
+    /// The next service date to search too, when this query asks for it
+    /// and its time is past `date`'s midnight; `None` otherwise.
+    pub(crate) fn next_date_searched(&self) -> Option<NaiveDate> {
+        let minute = match self.searched_time() {
+            trip_planning_itinerary::TimeBound::DepartAfter(m)
+            | trip_planning_itinerary::TimeBound::ArriveBy(m) => m,
+        };
+        self.date
+            .succ_opt()
+            .filter(|_| self.across_midnight && minute >= 1440)
+    }
+
     /// A departure-time search from `depart_after_min` on `date`, with no
     /// vias or avoids: what a journey's alternatives ask.
     pub(crate) fn depart_after(
@@ -2933,6 +2973,7 @@ impl ReplanQuery {
             operator_rule,
             vias: Vec::new(),
             avoid: trip_planning_itinerary::AvoidLists::default(),
+            across_midnight: false,
         }
     }
 
@@ -3055,6 +3096,7 @@ pub(crate) async fn regular_plan_query(
         operator_rule,
         vias,
         avoid,
+        across_midnight: false,
     })
 }
 
@@ -3122,7 +3164,7 @@ pub(crate) async fn plan_for_journey(
     };
     let permit = Arc::new(permit);
     let marker = graph_marker(app, &transit_planning::enabled_networks()).await?;
-    let Some(graph) = load_graph(app, query.date, marker).await? else {
+    let Some(graph) = load_graph(app, query.date, marker.clone()).await? else {
         return Ok(None);
     };
     let inputs = DateInputs {
@@ -3146,17 +3188,48 @@ pub(crate) async fn plan_for_journey(
         // Journey alternatives and re-plans ride trains only (spec §9).
         transit: false,
     };
-    let plan = plan_on_date(
-        app,
-        &graph,
-        &inputs,
-        query.date,
-        query.searched_time(),
-        &permit,
-    )
-    .await?;
+    // Past midnight on `query.date`'s clock (`across_midnight`): the next
+    // date's trains too, from the same moment, planned concurrently under
+    // this permit and merged as `/Trips/plan?acrossMidnight=true` does, so
+    // the minutes stay on `query.date`'s clock (the next date's shifted a
+    // day on). A next date with no published timetable adds nothing.
+    let time = query.searched_time();
+    let next_date = query.next_date_searched();
+    let first_plan = plan_on_date(app, &graph, &inputs, query.date, time, &permit);
+    let second_plan = async {
+        let Some(next) = next_date else {
+            return Ok(None);
+        };
+        let Some(next_graph) = load_graph(app, next, marker).await? else {
+            return Ok(None);
+        };
+        metrics::counter!(ds_runtime::metrics::metric_name(
+            REPLAN_ACROSS_MIDNIGHT_METRIC
+        ))
+        .increment(1);
+        plan_on_date(
+            app,
+            &next_graph,
+            &inputs,
+            next,
+            time.a_day_earlier(),
+            &permit,
+        )
+        .await
+        .map(Some)
+    };
+    let (first, second) = tokio::try_join!(first_plan, second_plan)?;
+    let segments = match second {
+        Some(second) => crate::data::trip_plan_overnight::merge_across_midnight(
+            first.segments,
+            second.segments,
+            time,
+            query.results,
+        ),
+        None => first.segments,
+    };
     Ok(Some(
-        plan.segments
+        segments
             .into_iter()
             .next()
             .map(|segment| segment.itineraries)
@@ -3732,6 +3805,51 @@ mod transit_db_tests;
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn replan_query(minute: u32) -> ReplanQuery {
+        ReplanQuery::depart_after(
+            "ZRC".to_string(),
+            "ZRD".to_string(),
+            "2099-05-05".parse().expect("date"),
+            minute,
+            "fastest",
+            3,
+            None,
+        )
+    }
+
+    #[test]
+    fn a_replan_query_never_crosses_midnight_unless_asked() {
+        // The regular plan sweep builds its queries like this (and
+        // `regular_plan_query` writes the flag off): never across midnight,
+        // whatever the minute.
+        for minute in [0, 1439, 1440, 1700] {
+            let query = replan_query(minute);
+            assert!(!query.across_midnight, "{minute}");
+            assert_eq!(query.next_date_searched(), None, "{minute}");
+        }
+    }
+
+    #[test]
+    fn an_asking_replan_query_searches_the_next_date_only_past_midnight() {
+        assert_eq!(
+            replan_query(1439).across_midnight().next_date_searched(),
+            None
+        );
+        let next: NaiveDate = "2099-05-06".parse().expect("date");
+        for minute in [1440, 1650] {
+            assert_eq!(
+                replan_query(minute).across_midnight().next_date_searched(),
+                Some(next),
+                "{minute}"
+            );
+        }
+        // A day offset puts the time past midnight too.
+        let mut query = replan_query(30).across_midnight();
+        assert_eq!(query.next_date_searched(), None);
+        query.day_offset = 1;
+        assert_eq!(query.next_date_searched(), Some(next));
+    }
 
     /// An itinerary with no legs leaving at `departure_min` and arriving
     /// at `arrival_min`: all [`step_clock`] reads.
