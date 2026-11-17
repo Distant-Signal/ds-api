@@ -25,6 +25,24 @@ needs to know about. Newest first. Field names are as served (camelCase).
   ("That push address can't be used. It must be a public https
   address.") as every other bad endpoint. It was accepted with `204`.
 
+## 2026-11-17: Webhook address refusals share one message; group names refuse control characters
+
+Behaviour fixes (DS-534, round-2 security assessment); no field, migration or grant change. Not part of the 2026-11-17 deploy 2.
+
+- `POST /public/account/webhooks`: every refused address (not a URL, not
+  https, a username or password, a `#fragment`, a private or loopback
+  address, a name that does not resolve) is the same `400` with the message
+  "That address can't be used. It must be a public https address.". The
+  distinct messages ("address must be a valid URL", "address must start
+  with https://", "address must be a public https address that resolves")
+  were an internal-DNS probe; the reason stays in the server log. A private
+  address and an unresolvable name now give identical responses. Name and
+  secret messages are unchanged.
+- `POST /groups` and rename of a group: a name with a line break or
+  another control character is refused with `400` ("A group name can't
+  contain line breaks or control characters."), as place and leg names
+  already were. It was accepted with `200`.
+
 ## 2026-11-17: Personal account responses are `private, no-store`
 
 Behaviour fix (DS-534, round-2 security assessment); no field, migration or grant change. Not part of the 2026-11-17 deploy 2. The personal-token, webhook, connected-app and calendar-feed account routes (`/public/account/personal-tokens`, `/public/account/webhooks`, `/public/account/connected-apps` and its consent step, `/public/account/calendar-feed`) and the account data export sent `Cache-Control: no-store`; they now send `private, no-store`, as every other personal response does. The frontend proxy relays the value. `/v1` responses are unchanged.
