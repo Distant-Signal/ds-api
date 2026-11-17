@@ -719,8 +719,7 @@ mod source_args_tests {
     }
 
     #[test]
-    fn a_bucket_configuration_is_validated_at_start() {
-        parse(&BUCKET_ON).validate().unwrap();
+    fn bucket_ignored_keys_are_validated_at_start() {
         assert!(parse(&BUCKET_ON).bucket.ignored_keys().unwrap().is_none());
         for blank in ["", " , "] {
             let flag = format!("--bucket-ignored-keys={blank}");
@@ -738,6 +737,32 @@ mod source_args_tests {
         assert!(ignored.matches("corpusextract.CSV.GZ"));
         assert!(ignored.matches("timetable_full.zip.md5"));
         assert!(!ignored.matches("CORPUSExtract.json.gz"));
+
+        // BUCKET_ON with `extra` replacing (or adding) flags.
+        let refused = |extra: &[&str]| {
+            let mut args: Vec<&str> = BUCKET_ON.to_vec();
+            args.extend_from_slice(extra);
+            parse(&args).validate().unwrap_err().to_string()
+        };
+        for bad in [
+            "a/b.csv.gz",
+            "a\\b",
+            ".hidden",
+            "*",
+            "x.csv.gz, **",
+            "a\u{7}b",
+        ] {
+            let flag = format!("--bucket-ignored-keys={bad}");
+            assert!(
+                refused(&[&flag]).contains("BUCKET_IGNORED_KEYS"),
+                "{bad:?} is refused"
+            );
+        }
+    }
+
+    #[test]
+    fn a_bucket_configuration_is_validated_at_start() {
+        parse(&BUCKET_ON).validate().unwrap();
         let keyless = parse(&[
             "--bucket-source-enabled=true",
             "--sftp-source-enabled=false",
@@ -766,20 +791,6 @@ mod source_args_tests {
         };
         assert!(refused(&["--bucket-name=Bad.Name"]).contains("BUCKET_NAME"));
         assert!(refused(&["--bucket-expected-keys= , "]).contains("BUCKET_EXPECTED_KEYS"));
-        for bad in [
-            "a/b.csv.gz",
-            "a\\b",
-            ".hidden",
-            "*",
-            "x.csv.gz, **",
-            "a\u{7}b",
-        ] {
-            let flag = format!("--bucket-ignored-keys={bad}");
-            assert!(
-                refused(&[&flag]).contains("BUCKET_IGNORED_KEYS"),
-                "{bad:?} is refused"
-            );
-        }
         assert!(refused(&["--google-application-credentials=/x"]).contains("exactly one"));
         let keyless_without_config: Vec<&str> = BUCKET_ON
             .iter()
