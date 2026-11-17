@@ -1620,6 +1620,10 @@ struct GroupJourneyRow {
 /// no `notificationsEnabled`/exact `addedAt` -- a shared journey's group
 /// row must never widen past what `group_trains` already decided was safe
 /// to show a fellow member for the underlying tracked-train resource.
+#[expect(
+    clippy::struct_excessive_bools,
+    reason = "a wire response: each flag is an independent fact for the client"
+)]
 #[derive(Debug, Clone, Serialize, ts_rs::TS)]
 #[serde(rename_all = "camelCase")]
 pub struct GroupJourney {
@@ -2444,6 +2448,10 @@ struct SharedJourneyRow {
 /// exactly. Not consumed by any frontend page in this phase -- see this
 /// feature's plan, Judgment Call 4 -- but built now for parity with
 /// `group_trains`'s own route/function set, per spec §6.
+#[expect(
+    clippy::struct_excessive_bools,
+    reason = "a wire response: each flag is an independent fact for the client"
+)]
 #[derive(Debug, Clone, Serialize, ts_rs::TS)]
 #[serde(rename_all = "camelCase")]
 pub struct SharedJourney {
