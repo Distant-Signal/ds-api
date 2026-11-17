@@ -4379,13 +4379,12 @@
         "operationId": "getV1JourneysJourneyId",
         "parameters": [
           {
-            "description": "The journey's id, from /v1/Journeys/mine.",
+            "description": "The journey's publicId from /v1/Journeys/mine (the deprecated numeric id is accepted too).",
             "in": "path",
             "name": "journey_id",
             "required": true,
             "schema": {
-              "format": "int64",
-              "type": "integer"
+              "type": "string"
             }
           }
         ],
