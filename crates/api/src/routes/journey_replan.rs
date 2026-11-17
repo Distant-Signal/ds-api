@@ -1053,6 +1053,9 @@ async fn detail_extras_inner(
                     let mut conn = pool.acquire().await?;
                     journey_breaks::resolve(&mut conn, row.id, "recovered", None, None).await?;
                 }
+                // Healthy: a dismissed break the leg has recovered from no
+                // longer holds a repeat back.
+                journey_breaks::clear_dismissed(pool, journey_id).await?;
             }
         }
     }

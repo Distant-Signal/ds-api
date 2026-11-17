@@ -118,6 +118,21 @@ client-credentials JWT from the `distant-signal-test` provider whose
 
 Personal tokens and every other route are unchanged.
 
+## 2026-11-17: A repeat of a dismissed break opens once the leg has recovered
+
+Behaviour fix (DS-534, the J1 follow-up); no field or grant change, but a
+ds-core migration (`journey_breaks.cleared_at`, nullable) must be applied
+first.
+
+- A dismissed break held back the same cause on the same leg for as long as
+  it was the journey's latest, even after the leg recovered and then went
+  wrong the same way again. When `GET /Journeys/{id}` or the break sweep
+  finds the journey working again, the dismissed break is now marked
+  cleared (`cleared_at`), and a repeat of that cause on that leg opens a
+  new break (`openBreak` is set, and the notifier may push it). Until then,
+  and across live-time changes alone, it stays held back. A different
+  cause or leg opens a new break as before.
+
 ## 2026-11-17: Calendar feed, Delay Repay, custom line and token fixes
 
 Behaviour fixes (DS-534); no field, migration or grant change.

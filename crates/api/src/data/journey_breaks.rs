@@ -168,10 +168,12 @@ pub enum Upserted {
 /// (§11: two sweeps before a push, unless cancelled).
 ///
 /// `None` when no break is open and the journey's latest break was
-/// dismissed for the same cause on the same leg ([`dismissed_alike`]): the
+/// dismissed for the same cause on the same leg ([`dismissed_alike`]) and
+/// has not been cleared since ([`clear_dismissed`]: the leg recovered): the
 /// traveller already said no to it, so it is not opened again (and never
 /// pushed again) while the same thing stays wrong. A different cause or
-/// leg opens a new one.
+/// leg opens a new one, and so does the same one once the leg has
+/// recovered in between.
 pub async fn upsert_open(
     pool: &PgPool,
     journey_id: i64,
@@ -188,15 +190,21 @@ pub async fn upsert_open(
     .fetch_optional(&mut *tx)
     .await?;
     if existing.is_none() {
-        let latest: Option<(String, String, Option<i64>)> = sqlx::query_as(
-            "SELECT status, cause, trigger_leg_id FROM journey_breaks WHERE journey_id = $1 \
-             ORDER BY id DESC LIMIT 1",
+        let latest: Option<(String, String, Option<i64>, Option<DateTime<Utc>>)> = sqlx::query_as(
+            "SELECT status, cause, trigger_leg_id, cleared_at FROM journey_breaks \
+             WHERE journey_id = $1 ORDER BY id DESC LIMIT 1",
         )
         .bind(journey_id)
         .fetch_optional(&mut *tx)
         .await?;
-        if latest.is_some_and(|(status, cause, trigger_leg_id)| {
-            dismissed_alike(&status, &cause, trigger_leg_id, detected)
+        if latest.is_some_and(|(status, cause, trigger_leg_id, cleared_at)| {
+            dismissed_alike(
+                &status,
+                &cause,
+                trigger_leg_id,
+                cleared_at.is_some(),
+                detected,
+            )
         }) {
             return Ok(None);
         }
@@ -264,17 +272,38 @@ pub async fn upsert_open(
     Ok(Some((row, outcome)))
 }
 
-/// Whether a journey's latest break (`status`, `cause`, `trigger_leg_id`)
-/// is one the traveller dismissed for what `detected` found again: the
-/// same cause on the same leg. Its live times may have moved since (the
-/// fingerprint follows them), but it is still what they said no to.
+/// Marks a journey's latest break cleared when it is a dismissed one not
+/// yet marked: the caller has just judged the journey's plan working again
+/// (no break detected), so a repeat of that break is a new problem, not
+/// the one the traveller dismissed. Idempotent; a page read and the sweep
+/// may both call it. `true` when this call set the marker.
+pub async fn clear_dismissed(pool: &PgPool, journey_id: i64) -> anyhow::Result<bool> {
+    let result = sqlx::query(
+        "UPDATE journey_breaks SET cleared_at = now() \
+         WHERE id = (SELECT id FROM journey_breaks WHERE journey_id = $1 \
+                      ORDER BY id DESC LIMIT 1) \
+           AND status = 'dismissed' AND cleared_at IS NULL",
+    )
+    .bind(journey_id)
+    .execute(pool)
+    .await?;
+    Ok(result.rows_affected() == 1)
+}
+
+/// Whether a journey's latest break (`status`, `cause`, `trigger_leg_id`,
+/// `cleared`) is one the traveller dismissed for what `detected` found
+/// again: the same cause on the same leg, with the leg not seen recovered
+/// since (`cleared`). Its live times may have moved since (the fingerprint
+/// follows them), but it is still what they said no to.
 fn dismissed_alike(
     status: &str,
     cause: &str,
     trigger_leg_id: Option<i64>,
+    cleared: bool,
     detected: &Detected,
 ) -> bool {
     status == "dismissed"
+        && !cleared
         && cause == detected.cause.as_str()
         && trigger_leg_id == detected.trigger_leg_id
 }
@@ -782,7 +811,7 @@ mod tests {
     }
 
     #[test]
-    fn only_a_dismissal_of_the_same_cause_on_the_same_leg_holds_a_break_back() {
+    fn only_an_uncleared_dismissal_of_the_same_cause_on_the_same_leg_holds_a_break_back() {
         let detected = Detected {
             cause: Cause::Cancelled,
             fault: "operator",
@@ -792,36 +821,14 @@ mod tests {
             break_position: 1,
             fingerprint: "f".to_string(),
         };
-        assert!(dismissed_alike(
-            "dismissed",
-            "cancelled",
-            Some(7),
-            &detected
-        ));
-        assert!(!dismissed_alike(
-            "recovered",
-            "cancelled",
-            Some(7),
-            &detected
-        ));
-        assert!(!dismissed_alike(
-            "accepted",
-            "cancelled",
-            Some(7),
-            &detected
-        ));
-        assert!(!dismissed_alike(
-            "dismissed",
-            "connection_missed",
-            Some(7),
-            &detected
-        ));
-        assert!(!dismissed_alike(
-            "dismissed",
-            "cancelled",
-            Some(8),
-            &detected
-        ));
+        let held =
+            |status, cause, leg, cleared| dismissed_alike(status, cause, leg, cleared, &detected);
+        assert!(held("dismissed", "cancelled", Some(7), false));
+        assert!(!held("dismissed", "cancelled", Some(7), true));
+        assert!(!held("recovered", "cancelled", Some(7), false));
+        assert!(!held("accepted", "cancelled", Some(7), false));
+        assert!(!held("dismissed", "connection_missed", Some(7), false));
+        assert!(!held("dismissed", "cancelled", Some(8), false));
     }
 
     #[test]

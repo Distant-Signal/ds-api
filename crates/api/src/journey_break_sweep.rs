@@ -189,6 +189,9 @@ async fn sweep_journey(
             journey_breaks::resolve(&mut conn, row.id, "recovered", None, None).await?;
             swept.recovered += 1;
         }
+        // Healthy: a dismissed break the leg has recovered from no longer
+        // holds a repeat back.
+        journey_breaks::clear_dismissed(&app.database, journey_id).await?;
         return Ok(());
     };
     let detected = Detected {
