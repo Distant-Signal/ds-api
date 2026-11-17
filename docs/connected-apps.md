@@ -45,6 +45,12 @@ and every delegated bearer is refused.
 
 `issuerUrl` must equal the token's `iss` exactly, trailing slash included.
 
+A test-credentials token (ds-sso's `distant-signal-test` provider,
+[test-auth.md](test-auth.md)) is refused on this listener and the
+website's before the delegated gate sees it; it works only on the
+personal-token listener. While test credentials are on, the startup guard
+keeps their audience and issuer apart from every delegated client's.
+
 ## Turning it on
 
 1. Authentik: the `distant-signal-api` provider and application (spec §9.6,

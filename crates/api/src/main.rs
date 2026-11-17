@@ -163,6 +163,7 @@ fn config_defaults() -> ds_runtime::service_args::ConfigDefaults {
         .args(&api::rate_limit::RateLimitSettings::command())
         .args(&api::auth::delegated::DelegatedSettings::command())
         .args(&api::personal_tokens::PersonalTokenSettings::command())
+        .args(&api::auth::test_auth::TestAuthSettings::command())
         .args(&data::tfl_arrivals::TflArrivalsSettings::command())
         .postgres_pool(api::app::DB_POOL_SIZE)
         .db_role(ds_store::schema::DbRole::Api.key())
@@ -567,6 +568,13 @@ async fn server_main() -> anyhow::Result<()> {
         .layer(axum::middleware::from_fn(
             api::cache_control::default_private,
         ))
+        // Test credentials likewise: a bearer naming their issuer or
+        // audience is refused here, on the public and delegated listeners,
+        // whether or not the feature is on (docs/test-auth.md). Always on.
+        .layer(axum::middleware::from_fn_with_state(
+            app.personal_tokens.test_auth.clone(),
+            api::auth::test_auth::refuse_off_token_listener,
+        ))
         .layer(TraceLayer::new_for_http().make_span_with(request_span))
         .with_state(app.clone());
     // The token listener's router: its own allowlisted `/v1` routes, not a
@@ -601,6 +609,18 @@ async fn server_main() -> anyhow::Result<()> {
         }
     } else {
         tracing::info!("PERSONAL_TOKENS_ENABLED is false: personal API tokens are off");
+    }
+    if app.personal_tokens.test_auth.enabled() {
+        let settings = &app.personal_tokens.test_auth.settings;
+        tracing::warn!(
+            issuer = %settings.issuer,
+            audience = %settings.audience,
+            required_group = %settings.required_group,
+            "test credentials enabled: accepted only on the personal-token listener, \
+             reference routes only"
+        );
+    } else {
+        tracing::info!("TEST_AUTH_ENABLED is false: test credentials are off");
     }
     // The delegated listener's copy of the router: the same routes, with
     // every request marked as having arrived there. Only that mark lets

@@ -13,6 +13,7 @@ pub mod backchannel_logout;
 pub mod delegated;
 pub mod internal_oauth;
 pub mod oidc;
+pub mod test_auth;
 
 use axum::extract::{FromRequestParts, Request, State};
 use axum::http::{HeaderMap, StatusCode, request::Parts};

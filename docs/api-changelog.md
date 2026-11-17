@@ -86,6 +86,26 @@ stricter check; no migration or grant change.
   the token (distant-signal's `LegTicketDetails` does once it takes the
   api-types of this release).
 
+## 2026-11-17: Test credentials on the API hostname (off by default)
+
+Additive (DS-534); no migration, grant, schema or OpenAPI change. Off
+unless `TEST_AUTH_ENABLED` (chart `api.testAuth.enabled`). When on, the
+personal-token listener (the API hostname, `/v1`) also accepts a ds-sso
+client-credentials JWT from the `distant-signal-test` provider whose
+`groups` contains `ds-test` ([test-auth.md](test-auth.md)):
+
+- Only `GET` on the `lines:read` and `trains:read` routes (line status,
+  stop disruption, a train by uid, an Irish train, station departures),
+  wrapped as `{data, attribution}` like a personal token's response.
+- `/v1/me`, `/v1/Journeys/*` and `/v1/preferences*`: `403
+  insufficient_scope`. Another method: `405 method_not_allowed`.
+- With a session cookie or a second `Authorization` header: `400
+  ambiguous_credentials`.
+- On the website's API or the delegated listener: `401 invalid_token`,
+  whether or not the feature is on.
+
+Personal tokens and every other route are unchanged.
+
 ## 2026-11-17: Calendar feed, Delay Repay, custom line and token fixes
 
 Behaviour fixes (DS-534); no field, migration or grant change.

@@ -97,6 +97,36 @@ fn ensure_sso_and_internal_oauth_clients_differ(
     Ok(())
 }
 
+/// Personal API tokens (docs/specs/personal-api-tokens.md), off unless
+/// `PERSONAL_TOKENS_ENABLED`, with test credentials (docs/test-auth.md), off
+/// unless `TEST_AUTH_ENABLED`. When test credentials are on, the startup
+/// guard keeps their audience and issuer apart from every other trust
+/// root's.
+fn build_personal_tokens(
+    config: &ServiceArguments,
+    delegated: &crate::auth::delegated::DelegatedAuth,
+) -> Result<Arc<crate::personal_tokens::PersonalTokens>> {
+    let personal_token_settings = crate::personal_tokens::PersonalTokenSettings::from_env()?;
+    let test_auth_settings = crate::auth::test_auth::TestAuthSettings::from_env()?;
+    let delegated_clients: Vec<_> = delegated
+        .clients()
+        .map(|client| client.as_ref().clone())
+        .collect();
+    test_auth_settings.ensure_distinct(
+        &config.sso_client_id,
+        &config.sso_issuer_url,
+        &config.internal_oauth_client_id,
+        &config.internal_oauth_issuer_url,
+        &delegated_clients,
+        personal_token_settings.enabled,
+    )?;
+    let test_auth = crate::auth::test_auth::TestAuth::from_settings(test_auth_settings)?;
+    Ok(Arc::new(
+        crate::personal_tokens::PersonalTokens::new(personal_token_settings)
+            .with_test_auth(test_auth),
+    ))
+}
+
 /// Hand-rolled rather than `#[derive(Debug)]`. Two independent reasons:
 ///
 /// 1. `OidcClient` holds a `reqwest::Client` and a
@@ -326,9 +356,7 @@ impl AppState {
 
         // Personal API tokens (docs/specs/personal-api-tokens.md): off
         // unless PERSONAL_TOKENS_ENABLED.
-        let personal_tokens = Arc::new(crate::personal_tokens::PersonalTokens::new(
-            crate::personal_tokens::PersonalTokenSettings::from_env()?,
-        ));
+        let personal_tokens = build_personal_tokens(&config, &delegated)?;
 
         Ok(Arc::new(Self {
             config,
