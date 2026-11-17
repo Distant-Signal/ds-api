@@ -850,11 +850,7 @@ pub(crate) async fn enforce_journey_cap(
     if owned >= journeys::MAX_JOURNEYS_PER_USER {
         return Err((
             StatusCode::BAD_REQUEST,
-            format!(
-                "You already have {} journeys, which is the maximum. Delete some old ones to make \
-                 room for a new one.",
-                journeys::MAX_JOURNEYS_PER_USER
-            ),
+            crate::data::quota::Exceeded::Journeys.message(),
         ));
     }
     Ok(())
@@ -1444,6 +1440,9 @@ fn internal_error(operation: &'static str) -> impl Fn(anyhow::Error) -> (StatusC
     move |err| {
         if let Some(unavailable) = crate::unavailable::response_for(&err) {
             return unavailable;
+        }
+        if let Some(exceeded) = crate::data::quota::response_for(&err) {
+            return exceeded;
         }
         tracing::error!(error = ?err, operation, "journey request failed");
         (

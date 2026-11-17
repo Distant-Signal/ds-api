@@ -102,9 +102,23 @@ pub async fn count_memberships_for_user(pool: &PgPool, user_id: &str) -> Result<
     Ok(count)
 }
 
+/// Creates a group with `user_id` as its owner. Refuses with
+/// [`crate::data::quota::Exceeded::Groups`] (as the error's source) when
+/// they already belong to [`MAX_GROUPS_PER_USER`]: the count runs here,
+/// under the user's membership quota lock, so concurrent creates and joins
+/// cannot all pass it.
 pub async fn create_group(pool: &PgPool, name: &str, user_id: &str) -> Result<String> {
     let id = crate::auth::generate_session_token();
     let mut tx = pool.begin().await?;
+    crate::data::quota::lock(&mut tx, crate::data::quota::Kind::GroupMemberships, user_id).await?;
+    let memberships: i64 =
+        sqlx::query_scalar("SELECT COUNT(*) FROM group_members WHERE user_id = $1")
+            .bind(user_id)
+            .fetch_one(&mut *tx)
+            .await?;
+    if memberships >= MAX_GROUPS_PER_USER {
+        return Err(crate::data::quota::Exceeded::Groups.into());
+    }
     sqlx::query("INSERT INTO groups (id, name, created_by, created_at) VALUES ($1, $2, $3, NOW())")
         .bind(&id)
         .bind(name)
@@ -917,6 +931,12 @@ pub async fn consume_invite_link(pool: &PgPool, token: &str, user_id: &str) -> R
         return Ok(JoinOutcome::InvalidLink);
     };
 
+    // The joiner's membership quota lock first, before the group's row lock
+    // (the order `create_group`'s lock and this one keep): two joins of
+    // different groups by one user, or a join and a create, cannot both
+    // pass the groups-per-user count below.
+    crate::data::quota::lock(&mut tx, crate::data::quota::Kind::GroupMemberships, user_id).await?;
+
     // Lock the group first, THEN re-validate the link under that lock
     // (2026-10-01 review, L14 residual). The lookup above only finds which
     // group the token belongs to; it ran before the lock, so a kick
@@ -1025,6 +1045,36 @@ async fn lock_group_and_check_member(
     Ok(member.is_some())
 }
 
+/// Refuses with [`crate::data::quota::Exceeded::GroupShares`] when
+/// `group_id` already has [`crate::data::quota::MAX_SHARES_PER_GROUP`]
+/// journeys and trains shared into it, unless `already_shared`: sharing
+/// something that is already shared is a no-op and stays one at the cap.
+/// Takes the group's share quota lock, held to the end of `tx`, so two
+/// requests adding to a group one below the cap cannot both pass. Call
+/// after [`lock_group_and_check_member`] (the group row lock comes first),
+/// and write the share in the same transaction.
+async fn ensure_share_room(
+    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    group_id: &str,
+    already_shared: bool,
+) -> Result<()> {
+    crate::data::quota::lock(tx, crate::data::quota::Kind::GroupShares, group_id).await?;
+    if already_shared {
+        return Ok(());
+    }
+    let shares: i64 = sqlx::query_scalar(
+        "SELECT (SELECT COUNT(*) FROM group_journeys WHERE group_id = $1) \
+              + (SELECT COUNT(*) FROM group_trains WHERE group_id = $1)",
+    )
+    .bind(group_id)
+    .fetch_one(&mut **tx)
+    .await?;
+    if shares >= crate::data::quota::MAX_SHARES_PER_GROUP {
+        return Err(crate::data::quota::Exceeded::GroupShares.into());
+    }
+    Ok(())
+}
+
 /// Adds one of the caller's own tracked trains to a group. Ownership is
 /// enforced at the APPLICATION layer, not the DB (spec §2.2) -- the exact
 /// `WHERE id = $1 AND user_id = $2` shape `train_tracking.rs` already uses
@@ -1098,6 +1148,14 @@ pub async fn add_train_to_group(
     .fetch_optional(&mut *tx)
     .await?;
     if let Some(journey_id) = own_journey {
+        let already_shared: bool = sqlx::query_scalar(
+            "SELECT EXISTS (SELECT 1 FROM group_journeys WHERE group_id = $1 AND journey_id = $2)",
+        )
+        .bind(group_id)
+        .bind(journey_id)
+        .fetch_one(&mut *tx)
+        .await?;
+        ensure_share_room(&mut tx, group_id, already_shared).await?;
         sqlx::query(
             "INSERT INTO group_journeys (group_id, journey_id, added_by, added_at) \
              VALUES ($1, $2, $3, NOW()) \
@@ -1109,6 +1167,15 @@ pub async fn add_train_to_group(
         .execute(&mut *tx)
         .await?;
     } else {
+        let already_shared: bool = sqlx::query_scalar(
+            "SELECT EXISTS (SELECT 1 FROM group_trains \
+             WHERE group_id = $1 AND train_subscription_id = $2)",
+        )
+        .bind(group_id)
+        .bind(train_subscription_id)
+        .fetch_one(&mut *tx)
+        .await?;
+        ensure_share_room(&mut tx, group_id, already_shared).await?;
         sqlx::query(
             "INSERT INTO group_trains (group_id, train_subscription_id, added_by, added_at) \
              VALUES ($1, $2, $3, NOW()) \
@@ -1169,6 +1236,14 @@ pub async fn add_journey_to_group(
         return Ok(false);
     }
 
+    let already_shared: bool = sqlx::query_scalar(
+        "SELECT EXISTS (SELECT 1 FROM group_journeys WHERE group_id = $1 AND journey_id = $2)",
+    )
+    .bind(group_id)
+    .bind(journey_id)
+    .fetch_one(&mut *tx)
+    .await?;
+    ensure_share_room(&mut tx, group_id, already_shared).await?;
     sqlx::query(
         "INSERT INTO group_journeys (group_id, journey_id, added_by, added_at) \
          VALUES ($1, $2, $3, NOW()) \

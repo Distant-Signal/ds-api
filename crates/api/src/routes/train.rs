@@ -1761,6 +1761,9 @@ fn internal_error(operation: &'static str) -> impl Fn(anyhow::Error) -> (StatusC
         if let Some(unavailable) = crate::unavailable::response_for(&err) {
             return unavailable;
         }
+        if let Some(exceeded) = crate::data::quota::response_for(&err) {
+            return exceeded;
+        }
         tracing::error!(error = ?err, operation, "train tracking request failed");
         (
             StatusCode::INTERNAL_SERVER_ERROR,

@@ -986,28 +986,21 @@ async fn create_line(
     // unbounded recurring work for the whole system, not just this user's own
     // storage -- see `custom_lines::MAX_CUSTOM_LINES_PER_USER`.
     //
-    // A count-then-insert can in principle be raced by a user firing
-    // concurrent creates, letting them land a handful over the cap. That is a
-    // deliberate tradeoff: the cap exists to bound an order of magnitude
-    // (tens, not thousands), which this achieves, and enforcing it inside
-    // `insert_custom_line`'s transaction instead would mean plumbing a
-    // distinguishable "limit reached" error out through its `anyhow::Result`
-    // just to turn a 500 back into this 400.
+    // This count is the early refusal. The one that holds under concurrent
+    // creates is `insert_custom_line_capped`'s, in the insert's transaction
+    // under the user's quota lock; it answers the same 400 through
+    // `internal_error`.
     let owned = custom_lines::count_custom_lines_for_user(&app.database, &user.id)
         .await
         .map_err(internal_error)?;
     if owned >= custom_lines::MAX_CUSTOM_LINES_PER_USER {
         return Err((
             StatusCode::BAD_REQUEST,
-            format!(
-                "You already have {} custom lines, which is the maximum. Delete one to make \
-                 room for a new one.",
-                custom_lines::MAX_CUSTOM_LINES_PER_USER
-            ),
+            crate::data::quota::Exceeded::CustomLines.message(),
         ));
     }
 
-    let created = custom_lines::insert_custom_line(
+    let created = custom_lines::insert_custom_line_capped(
         &app.database,
         NewCustomLine {
             name: req.name,
@@ -1187,6 +1180,9 @@ async fn delete_line(
 fn internal_error(err: anyhow::Error) -> (StatusCode, String) {
     if let Some(unavailable) = crate::unavailable::response_for(&err) {
         return unavailable;
+    }
+    if let Some(exceeded) = crate::data::quota::response_for(&err) {
+        return exceeded;
     }
     tracing::error!(error = ?err, "custom line operation failed");
     (

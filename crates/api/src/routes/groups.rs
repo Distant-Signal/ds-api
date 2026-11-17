@@ -184,6 +184,9 @@ fn internal_error(operation: &'static str) -> impl Fn(anyhow::Error) -> (StatusC
         if let Some(unavailable) = crate::unavailable::response_for(&err) {
             return unavailable;
         }
+        if let Some(exceeded) = crate::data::quota::response_for(&err) {
+            return exceeded;
+        }
         tracing::error!(error = ?err, operation, "group request failed");
         (
             StatusCode::INTERNAL_SERVER_ERROR,
@@ -233,9 +236,10 @@ async fn create_group(
     Json(req): Json<CreateGroupRequest>,
 ) -> Result<Json<GroupIdentityResponse>, (StatusCode, String)> {
     let name = validate_group_name(&req.name).map_err(|msg| (StatusCode::BAD_REQUEST, msg))?;
-    // Per-user cap (2026-09-26 review, L10); same route-level
-    // count-then-insert shape (and accepted race) as `routes::lines`'s
-    // custom-line cap. See `groups::MAX_GROUPS_PER_USER`.
+    // Per-user cap (2026-09-26 review, L10). This count is the early
+    // refusal; `groups::create_group` counts again under the user's
+    // membership quota lock, which is the check that holds under
+    // concurrent requests. See `groups::MAX_GROUPS_PER_USER`.
     let memberships = groups::count_memberships_for_user(&app.database, &user.id)
         .await
         .map_err(internal_error("count group memberships"))?;
@@ -655,10 +659,7 @@ async fn join(
 }
 
 fn too_many_groups_message() -> String {
-    format!(
-        "You're already in {} groups, which is the maximum. Leave one to make room.",
-        groups::MAX_GROUPS_PER_USER
-    )
+    crate::data::quota::Exceeded::Groups.message()
 }
 
 /// `_route` suffix avoids shadowing `groups::list_group_trains` while

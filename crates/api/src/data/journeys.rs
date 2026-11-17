@@ -569,6 +569,11 @@ pub async fn create_journey_with_pin_leg(
     // (`journey_templates.rs`) already established this pattern for its own
     // multi-statement write -- same `pool.begin()`/`tx.commit()` shape here.
     let mut tx = pool.begin().await?;
+    // The journey and pin caps, counted under the user's quota locks so
+    // concurrent creates cannot all pass them (crate::data::quota).
+    crate::data::quota::lock_user(&mut tx, user_id, true, true).await?;
+    crate::data::quota::ensure_journey_room(&mut tx, user_id).await?;
+    crate::data::quota::ensure_future_pin_room(&mut tx, user_id).await?;
     let journey_id = insert_journey(&mut *tx, user_id, custom_name).await?;
     let tracking_id = crate::data::train_tracking::create_pin(&mut *tx, pin, user_id).await?;
     let leg_id = insert_leg(
@@ -646,6 +651,12 @@ pub async fn create_journey_with_known_train_leg(
     // via `/Train/{trackingId}`/`GET /Train/mine`, but never linked from
     // any journey). Wrapping the whole sequence rolls that back as well.
     let mut tx = pool.begin().await?;
+    // The journey and pin caps, counted under the user's quota locks so
+    // concurrent creates cannot all pass them (crate::data::quota); a train the user
+    // already tracks reuses its subscription and adds no pin.
+    crate::data::quota::lock_user(&mut tx, user_id, true, true).await?;
+    crate::data::quota::ensure_journey_room(&mut tx, user_id).await?;
+    crate::data::quota::ensure_pin_room_for_train(&mut tx, user_id, trains_id).await?;
     let created = insert_known_train_journey(
         &mut tx,
         user_id,
@@ -752,6 +763,9 @@ pub async fn track_known_train_on_its_own(
     service_date: NaiveDate,
 ) -> anyhow::Result<TrainTrackedOnItsOwn> {
     let mut tx = pool.begin().await?;
+    // The quota locks come before the per-train one, in the order every
+    // creating transaction takes them (crate::data::quota).
+    crate::data::quota::lock_user(&mut tx, user_id, true, true).await?;
     ds_runtime::pg::lock_user_train_subscription(&mut tx, user_id, trains_id).await?;
     let existing: Option<(i64, i64)> = sqlx::query_as(
         "SELECT ts.id, MIN(jl.journey_id) \
@@ -772,6 +786,14 @@ pub async fn track_known_train_on_its_own(
             tracking_id,
             created: false,
         });
+    }
+    // A new journey is made here, so the journey cap applies even when the
+    // user holds a legacy subscription to the train that no journey uses
+    // (the route's early check on the pool skips it for a train already
+    // tracked): stricter than that check, and only at the cap.
+    crate::data::quota::ensure_journey_room(&mut tx, user_id).await?;
+    if !crate::data::quota::tracks_train(&mut tx, user_id, trains_id).await? {
+        crate::data::quota::ensure_pin_room_for_date(&mut tx, user_id, service_date).await?;
     }
     let (journey_id, _, tracking_id) =
         insert_known_train_journey(&mut tx, user_id, None, trains_id, service_date, None, None)
@@ -823,6 +845,7 @@ pub async fn track_irish_train_on_its_own(
     train: &IrishTrainToTrack<'_>,
 ) -> anyhow::Result<TrainTrackedOnItsOwn> {
     let mut tx = pool.begin().await?;
+    crate::data::quota::lock_user(&mut tx, user_id, true, true).await?;
     let trains_id =
         ds_store::trains::find_or_create_train(&mut *tx, train.train_uid, train.service_date)
             .await?;
@@ -860,6 +883,8 @@ pub async fn track_irish_train_on_its_own(
             created: false,
         });
     }
+    crate::data::quota::ensure_journey_room(&mut tx, user_id).await?;
+    crate::data::quota::ensure_pin_room_for_train(&mut tx, user_id, trains_id).await?;
     // A subscription no journey uses (none is made that way any more, but
     // an older one may exist) is reused rather than doubled.
     let tracking_id: i64 = sqlx::query_scalar(
@@ -1050,6 +1075,9 @@ pub async fn add_known_train_leg_to_journey_at(
     before_leg_id: Option<i64>,
 ) -> anyhow::Result<AddLegOutcome<(i64, i64)>> {
     let mut tx = pool.begin().await?;
+    // The pin cap, counted under the user's quota lock, which comes before
+    // the journey's row lock (crate::data::quota).
+    crate::data::quota::lock_user(&mut tx, user_id, false, true).await?;
     let next_leg_order =
         match owned_leg_order_at(&mut tx, journey_id, user_id, before_leg_id).await? {
             AddLegOutcome::Added(next) => next,
@@ -1057,6 +1085,7 @@ pub async fn add_known_train_leg_to_journey_at(
             AddLegOutcome::AtCap => return Ok(AddLegOutcome::AtCap),
             AddLegOutcome::NoSuchLeg => return Ok(AddLegOutcome::NoSuchLeg),
         };
+    crate::data::quota::ensure_pin_room_for_train(&mut tx, user_id, trains_id).await?;
     // 2026-09 Signal Box Audit Low finding: `create_subscription_for_train`
     // used to run as its own bare statement against `pool`, committed
     // immediately, BEFORE the `insert_leg` call below that actually
@@ -1325,6 +1354,8 @@ pub async fn create_journey_with_window_leg(
     // the full reasoning (a mid-sequence failure used to leave a zero-leg
     // `journeys` row behind).
     let mut tx = pool.begin().await?;
+    crate::data::quota::lock_user(&mut tx, user_id, true, false).await?;
+    crate::data::quota::ensure_journey_room(&mut tx, user_id).await?;
     let journey_id = insert_journey(&mut *tx, user_id, custom_name).await?;
     let leg_id = insert_leg(
         &mut *tx,
@@ -2076,6 +2107,8 @@ pub async fn create_journey_with_untracked_leg(
     leg: &UntrackedLeg,
 ) -> anyhow::Result<(i64, i64)> {
     let mut tx = pool.begin().await?;
+    crate::data::quota::lock_user(&mut tx, user_id, true, false).await?;
+    crate::data::quota::ensure_journey_room(&mut tx, user_id).await?;
     let journey_id = insert_journey(&mut *tx, user_id, custom_name).await?;
     let leg_id = insert_untracked_leg(&mut *tx, journey_id, 1, leg).await?;
     crate::data::journey_revisions::record_plan_change(&mut tx, journey_id, Utc::now()).await?;
@@ -2533,6 +2566,8 @@ pub async fn create_subscription_and_bind_leg_with_search(
     search: Option<&LegSearch>,
 ) -> anyhow::Result<Option<i64>> {
     let mut tx = pool.begin().await?;
+    crate::data::quota::lock_user(&mut tx, user_id, false, true).await?;
+    crate::data::quota::ensure_pin_room_for_train(&mut tx, user_id, trains_id).await?;
     let tracking_id =
         crate::data::train_tracking::create_subscription_for_train(&mut *tx, trains_id, user_id)
             .await?;

@@ -51,6 +51,7 @@ pub mod platform_confirmation;
 pub mod preferences;
 pub mod pushport_platform;
 pub mod queries;
+pub mod quota;
 pub mod recently_cleared;
 pub mod recently_deleted;
 pub mod reconciliation;

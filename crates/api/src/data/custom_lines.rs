@@ -204,10 +204,44 @@ pub async fn insert_custom_line(
     new: NewCustomLine,
     user_id: &str,
 ) -> Result<CustomLine> {
+    insert_custom_line_inner(pool, new, user_id, false).await
+}
+
+/// [`insert_custom_line`] for a user's own request: refuses with
+/// [`crate::data::quota::Exceeded::CustomLines`] (as the error's source)
+/// when the user already owns [`MAX_CUSTOM_LINES_PER_USER`]. The count
+/// runs in the insert's transaction, under the user's custom-line quota
+/// lock, so concurrent creates cannot all pass it.
+pub async fn insert_custom_line_capped(
+    pool: &PgPool,
+    new: NewCustomLine,
+    user_id: &str,
+) -> Result<CustomLine> {
+    insert_custom_line_inner(pool, new, user_id, true).await
+}
+
+async fn insert_custom_line_inner(
+    pool: &PgPool,
+    new: NewCustomLine,
+    user_id: &str,
+    capped: bool,
+) -> Result<CustomLine> {
     let new = new.normalized();
     let mut id = line_id(&new.name);
     loop {
         let mut tx = pool.begin().await?;
+        if capped {
+            crate::data::quota::lock(&mut tx, crate::data::quota::Kind::CustomLines, user_id)
+                .await?;
+            let owned: i64 =
+                sqlx::query_scalar("SELECT COUNT(*) FROM custom_lines WHERE user_id = $1")
+                    .bind(user_id)
+                    .fetch_one(&mut *tx)
+                    .await?;
+            if owned >= MAX_CUSTOM_LINES_PER_USER {
+                return Err(crate::data::quota::Exceeded::CustomLines.into());
+            }
+        }
         let inserted: Option<String> = sqlx::query_scalar(
             r"
             INSERT INTO custom_lines (id, name, operators, stations, headcode_prefixes, destination_crs_filter, user_id, created_at)

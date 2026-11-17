@@ -533,6 +533,15 @@ fn idempotency_key(headers: &HeaderMap) -> Result<Option<String>, RouteError> {
     Ok(Some(key.to_string()))
 }
 
+/// Maps a quota refusal from a check made on the save's transaction to the
+/// `400` the early check on the pool gives, and anything else to a `500`.
+fn quota_error(operation: &'static str) -> impl Fn(anyhow::Error) -> RouteError {
+    move |err| match err.downcast_ref::<crate::data::quota::Exceeded>() {
+        Some(exceeded) => invalid(exceeded.message()),
+        None => internal(operation)(err),
+    }
+}
+
 /// The 409 for an `Idempotency-Key` already used with another itinerary.
 fn idempotency_conflict() -> RouteError {
     RouteError::coded(
@@ -785,6 +794,57 @@ async fn save_itinerary(
             IdempotencyClaim::Conflict => return Err(idempotency_conflict()),
         }
     }
+
+    // The caps again, counted on this transaction under the user's quota
+    // locks, so concurrent saves cannot all pass the reads on the pool
+    // above (review L10). Same answers as those.
+    let has_train_leg = legs.iter().any(|leg| matches!(leg, ValidLeg::Train { .. }));
+    crate::data::quota::lock_user(&mut tx, &user.user_id, true, has_train_leg)
+        .await
+        .map_err(internal("take the quota locks"))?;
+    crate::data::quota::ensure_journey_room(&mut tx, &user.user_id)
+        .await
+        .map_err(quota_error("count journeys"))?;
+    if has_train_leg {
+        let mut seen: Vec<(&str, NaiveDate)> = Vec::new();
+        let mut new_trains_now = 0_i64;
+        for leg in &legs {
+            let ValidLeg::Train {
+                train_uid,
+                service_date,
+                ..
+            } = leg
+            else {
+                continue;
+            };
+            let pair = (train_uid.as_str(), *service_date);
+            if seen.contains(&pair) {
+                continue;
+            }
+            seen.push(pair);
+            let tracked = train_tracking::user_tracks_train_uid(
+                &mut *tx,
+                &user.user_id,
+                train_uid,
+                *service_date,
+            )
+            .await
+            .map_err(internal("check existing subscription"))?;
+            if !tracked {
+                new_trains_now += 1;
+            }
+        }
+        if new_trains_now > 0 {
+            let upcoming =
+                train_tracking::count_future_subscriptions_for_user(&mut *tx, &user.user_id)
+                    .await
+                    .map_err(internal("count tracked trains"))?;
+            if upcoming.saturating_add(new_trains_now) > train_tracking::MAX_FUTURE_PINS_PER_USER {
+                return Err(invalid(train_tracking::pin_cap_message()));
+            }
+        }
+    }
+
     let created_via = client
         .as_ref()
         .map_or_else(|| "web".to_string(), |client| client.name.clone());
