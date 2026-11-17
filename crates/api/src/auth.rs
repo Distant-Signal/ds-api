@@ -169,18 +169,21 @@ pub fn is_same_origin(origin: Option<&str>, referer: Option<&str>, expected_orig
     false
 }
 
-/// Is this a session-cookie-bearing, state-changing request whose
-/// browser-supplied `Origin` (or, absent that, `Referer`) names some other
-/// origin than this app's own? See [`reject_cross_origin_cookie_mutation`].
+/// Is this a session-cookie-bearing, state-changing request that does not
+/// show it came from this app's own origin? See
+/// [`reject_cross_origin_cookie_mutation`].
 ///
-/// Deliberately LENIENT on absence, unlike the strict [`is_same_origin`]
-/// check `logout` uses: a request carrying neither header is let through,
-/// because the frontend's own server-side fetches (`lib/api.ts`) and
-/// non-browser clients never send one, while a browser always sends
-/// `Origin` on a cross-origin POST/PUT/PATCH/DELETE -- which is the only
-/// shape a CSRF attempt can take. Requests with no session cookie are not
-/// CSRF-relevant (nothing ambient to ride on) and are ignored, as is every
-/// safe method.
+/// STRICT on absence (DS-534, round-2 assessment): a cookie mutation is
+/// accepted only when its `Origin` matches, or, with no `Origin`, its
+/// `Referer` origin matches, or, with neither, `Sec-Fetch-Site` says
+/// `same-origin`. The site's only cookie client is the browser through the
+/// frontend proxy, which forwards the browser's `Origin` (a browser always
+/// sends one on a non-GET `fetch`) and `Referer` origin, so nothing
+/// legitimate sends none of the three. `Sec-Fetch-Site: cross-site` (or any
+/// other value) with no `Origin` is refused as before. Requests with no
+/// session cookie are not CSRF-relevant (nothing ambient to ride on; the
+/// bearer-token, delegated and service-token routes) and are ignored, as is
+/// every safe method.
 pub fn is_cross_origin_cookie_mutation(
     method: &axum::http::Method,
     headers: &HeaderMap,
@@ -199,23 +202,23 @@ pub fn is_cross_origin_cookie_mutation(
     let referer = headers
         .get(axum::http::header::REFERER)
         .and_then(|v| v.to_str().ok());
-    // No `Origin`: a browser that omits it (some same-origin and old-browser
-    // shapes) still says where the request came from in `Sec-Fetch-Site`,
-    // which a page cannot forge. `cross-site` is refused; `same-site` stays
-    // allowed (a sibling subdomain is not this app, but nothing here shows
-    // no first-party flow uses it, and `Origin` covers the real cases);
-    // neither header (a non-browser client) stays allowed.
-    if origin.is_none()
-        && headers
-            .get("sec-fetch-site")
-            .and_then(|v| v.to_str().ok())
-            .is_some_and(|v| v.trim().eq_ignore_ascii_case("cross-site"))
-    {
+    let fetch_site = headers
+        .get("sec-fetch-site")
+        .and_then(|v| v.to_str().ok())
+        .map(str::trim);
+    // No `Origin`: `Sec-Fetch-Site` (which a page cannot forge) says where
+    // the request came from. `cross-site` is refused outright, even with a
+    // matching-looking `Referer`.
+    if origin.is_none() && fetch_site.is_some_and(|v| v.eq_ignore_ascii_case("cross-site")) {
         return true;
     }
-    if origin.is_none() && referer.is_none() {
+    if origin.is_none()
+        && referer.is_none()
+        && fetch_site.is_some_and(|v| v.eq_ignore_ascii_case("same-origin"))
+    {
         return false;
     }
+    // `is_same_origin` is false when neither `Origin` nor `Referer` is there.
     !is_same_origin(origin, referer, expected_origin)
 }
 
@@ -936,8 +939,9 @@ mod cross_origin_mutation_tests {
             .status()
     }
 
-    /// With no `Origin`, `Sec-Fetch-Site: cross-site` is refused; the
-    /// other values, and a real `Origin`, are judged as before.
+    /// With no `Origin` (and no `Referer`), only `Sec-Fetch-Site:
+    /// same-origin` passes; every other value is refused. A real `Origin`
+    /// decides on its own.
     #[tokio::test]
     async fn a_missing_origin_is_refused_when_fetch_metadata_says_cross_site() {
         assert_eq!(
@@ -952,10 +956,18 @@ mod cross_origin_mutation_tests {
             status_with_fetch_site(None, Some("https://ds.example.test/x"), "cross-site").await,
             StatusCode::FORBIDDEN
         );
-        for site in ["same-origin", "same-site", "none"] {
+        assert_eq!(
+            status_with_fetch_site(None, None, "same-origin").await,
+            StatusCode::NO_CONTENT
+        );
+        assert_eq!(
+            status_with_fetch_site(None, Some("https://ds.example.test/x"), "same-origin").await,
+            StatusCode::NO_CONTENT
+        );
+        for site in ["same-site", "none", "", "bogus"] {
             assert_eq!(
                 status_with_fetch_site(None, None, site).await,
-                StatusCode::NO_CONTENT,
+                StatusCode::FORBIDDEN,
                 "{site}"
             );
         }
@@ -985,13 +997,37 @@ mod cross_origin_mutation_tests {
         assert_eq!(got, StatusCode::NO_CONTENT);
     }
 
-    /// Server-side fetches (frontend `lib/api.ts`) and non-browser clients
-    /// send no Origin/Referer at all; a request with no session cookie has
-    /// nothing ambient to abuse; safe methods are never state-changing.
+    /// A cookie mutation with no Origin, Referer or Fetch Metadata is
+    /// refused, on every unsafe method.
     #[tokio::test]
-    async fn headerless_cookieless_safe_and_unconfigured_requests_pass() {
+    async fn a_headerless_cookie_mutation_is_refused() {
+        for method in [Method::POST, Method::PUT, Method::PATCH, Method::DELETE] {
+            assert_eq!(
+                status(Some(SITE), method.clone(), true, None, None).await,
+                StatusCode::FORBIDDEN,
+                "{method}"
+            );
+        }
+    }
+
+    /// A request with no session cookie (a bearer-token, delegated or
+    /// service-token caller) has nothing ambient to abuse, whatever headers
+    /// it lacks; safe methods are never state-changing; an unconfigured
+    /// origin disables the guard.
+    #[tokio::test]
+    async fn cookieless_bearer_safe_and_unconfigured_requests_pass() {
+        let bearer = Request::builder()
+            .method(Method::POST)
+            .uri("/groups/join/tok")
+            .header(header::AUTHORIZATION, "Bearer dst_token")
+            .body(Body::empty())
+            .unwrap();
         assert_eq!(
-            status(Some(SITE), Method::POST, true, None, None).await,
+            router(Some(SITE)).oneshot(bearer).await.unwrap().status(),
+            StatusCode::NO_CONTENT
+        );
+        assert_eq!(
+            status(Some(SITE), Method::POST, false, None, None).await,
             StatusCode::NO_CONTENT
         );
         assert_eq!(
@@ -1025,6 +1061,10 @@ mod cross_origin_mutation_tests {
                 None
             )
             .await,
+            StatusCode::NO_CONTENT
+        );
+        assert_eq!(
+            status(None, Method::POST, true, None, None).await,
             StatusCode::NO_CONTENT
         );
     }

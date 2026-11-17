@@ -3,6 +3,28 @@
 Changes to the Distant Signal (DS) HTTP API that a client such as DS-MCP
 needs to know about. Newest first. Field names are as served (camelCase).
 
+## 2026-11-17: Cookie mutations need a same-origin signal; push endpoints with userinfo refused
+
+**Behaviour change** (DS-534, round-2 security assessment); no field, migration or grant change. Not part of the 2026-11-17 deploy 2.
+
+- Session-cookie mutations (POST, PUT, PATCH, DELETE) are now refused with
+  `403` ("cross-origin request rejected") unless they show they came from
+  this app's own origin: a matching `Origin`, or with no `Origin` a
+  matching `Referer` origin, or with neither `Sec-Fetch-Site: same-origin`.
+  Before, a request with none of the three was accepted ("judged as
+  before"), so `PUT /groups/{id}` with only the cookie returned `200`.
+  `Sec-Fetch-Site` `cross-site`, `same-site`, `none` or any other value
+  with no `Origin` is refused. The frontend proxy forwards the browser's
+  `Origin` and `Referer` origin, and a browser always sends `Origin` on a
+  non-GET `fetch`, so the site is unaffected; a non-browser client that
+  authenticated with the session cookie alone must send `Origin`. Requests
+  with no session cookie (personal tokens on `/v1`, delegated access, the
+  service token, public anonymous writes) are not judged by this check.
+- `POST /notifications/subscribe`: a push endpoint with a username or
+  password (`https://user:pw@host/path`) is refused with the same `400`
+  ("That push address can't be used. It must be a public https
+  address.") as every other bad endpoint. It was accepted with `204`.
+
 ## 2026-11-17: Webhook secrets are sealed for their row (secret box stage 1b)
 
 No change to any request or response (DS-534). The api now creates a
