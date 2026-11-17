@@ -1833,10 +1833,17 @@ async fn get_journey_inner(
             journey_follows::follow_of(&app.database, &user.user_id, journey_id)
                 .await
                 .map_err(internal_error("read journey follow"))?;
-        response.can_follow = response.followed_from.is_none()
-            && journey_follows::can_follow_through_group(&app.database, &user.user_id, journey_id)
+        let through_group =
+            journey_follows::can_follow_through_group(&app.database, &user.user_id, journey_id)
                 .await
                 .map_err(internal_error("read journey follow"))?;
+        response.can_follow = response.followed_from.is_none() && through_group;
+        // A follow through a share link conveys what the link shows, which
+        // is the trimmed view; a reader who is also in a group the journey
+        // is shared into keeps the group view.
+        if !through_group {
+            trim_for_share_link(&mut response);
+        }
     }
     Ok(response)
 }
@@ -2119,7 +2126,8 @@ async fn journey_by_share_token(
 ///   one.
 ///
 /// A fellow group member reads through `get_journey`, not this, and keeps
-/// all three, as does the owner.
+/// all three, as does the owner. A signed-in reader who follows the
+/// journey only through the link gets the same trim from `get_journey`.
 fn trim_for_share_link(detail: &mut JourneyDetailResponse) {
     for leg in &mut detail.legs {
         leg.search_filters = None;

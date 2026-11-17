@@ -72,7 +72,9 @@ no longer carries the owner's own metadata:
   served. The new `disrupted` says only that the journey has one.
 
 The field names and types are unchanged (all three were already nullable).
-`GET /Journeys/{id}` is unchanged for the owner and for a group member, and
+`GET /Journeys/{id}` for someone who follows the journey only through the
+share link (not through a group) gets the same trimmed view. It is unchanged
+for the owner and for a group member, and
 now also has `disrupted` (`true` exactly when `openBreak` is not `null`,
 else `false`).
 
