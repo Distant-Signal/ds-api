@@ -35,6 +35,24 @@ now have an opaque id and the numeric one is **deprecated**.
   requests that named an object by its numeric id (`kind` is `journey`,
   `leg`, `tracking` or `device`). It is the evidence for stage 3 below.
 
+## 2026-11-17: Undoing "I missed this train" lasts until the replacement leaves
+
+**Behaviour change** (DS-534, the missed-train redesign, part 3); no field, migration or grant change.
+
+- `canRevert` on `GET /Journeys/{id}/revisions` and `POST
+  /Journeys/{id}/revisions/{no}/revert` (the plan before a replacement the
+  traveller made with `cause: missed`, revision cause `user_missed`) now
+  hold until the replacement's first new train leaves, at most an hour
+  after the change. Before, it was 2 minutes for every cause, so a revert
+  was refused once a missed train had been noticed to be a mistake. Other
+  causes keep the 2 minutes, and an earlier plan can still be gone back to
+  while all its trains are still to leave. A revert is refused with `409
+  revision_gone` as before once it no longer applies, and with `409
+  leg_travelled` once the replacement has run.
+- A journey that had gone to Past because its last train arrived is
+  Upcoming again once a replacement for a train still to come is accepted
+  (the lists derive it from the current legs); no field changes.
+
 ## 2026-11-17: Alternatives can start from another station and say what the train did
 
 **Additive** (DS-534, the missed-train redesign, part 2); no migration or grant. The deployed frontend is unaffected: it sends neither new thing.

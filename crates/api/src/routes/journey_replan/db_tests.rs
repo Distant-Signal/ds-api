@@ -2531,3 +2531,190 @@ async fn the_alternatives_say_whether_the_train_has_left_and_arrived() {
         "{found}"
     );
 }
+
+/// Taking another train for a missed one replaces the legs after it too,
+/// and a later leg that has already run no longer refuses the whole
+/// replace (DS-534): it is `not_used` in the plan it leaves. A free choice
+/// over the same range is still refused.
+#[tokio::test]
+#[ignore = "requires a live database: DATABASE_URL"]
+async fn a_later_leg_that_already_ran_is_not_used_instead_of_refusing_the_replace() {
+    let _now = pin_now();
+    let pool = connect().await;
+    let _cleanup = cleanup(&pool).await;
+    seed_timetable(&pool).await;
+    seed_onward(&pool).await;
+    seed_late_train(&pool, "RP0006", "12:45", "13:45").await;
+    let token = seed_session(&pool, USER).await;
+    let router = router(pool.clone());
+    let (journey_id, legs) = create_started_two_leg_journey(&pool, &router, &token).await;
+
+    // 12:30: RP0001 reached ZRD at 11:00 and RP0004 reached ZRE at 12:00.
+    let _later = crate::routes::pin_london_now_for_tests(london_at(0, 12, 30));
+    let replace = format!("/Journeys/{journey_id}/legs/{}/replace", legs[0]);
+    let mut body = replace_body("choice", "RP0006");
+    body["throughLegId"] = serde_json::json!(legs[1]);
+    let (status, refused) = call(
+        &router,
+        "POST",
+        &replace,
+        Some(&token),
+        Some(body.clone()),
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::CONFLICT, "{refused}");
+    assert_eq!(refused, "This leg is already travelled.");
+
+    body["cause"] = serde_json::json!("missed");
+    let (status, replaced) = call(&router, "POST", &replace, Some(&token), Some(body), None).await;
+    assert_eq!(status, StatusCode::OK, "{replaced}");
+    let (_, history) = call(
+        &router,
+        "GET",
+        &format!("/Journeys/{journey_id}/revisions"),
+        Some(&token),
+        None,
+        None,
+    )
+    .await;
+    let earlier = &history["revisions"][1]["legs"];
+    assert_eq!(earlier[0]["trainUid"], "RP0001", "{history}");
+    assert_eq!(earlier[0]["fate"], "missed", "{history}");
+    assert_eq!(earlier[1]["trainUid"], "RP0004", "{history}");
+    assert_eq!(earlier[1]["fate"], "not_used", "{history}");
+    let (_, detail) = call(
+        &router,
+        "GET",
+        &format!("/Journeys/{journey_id}"),
+        Some(&token),
+        None,
+        None,
+    )
+    .await;
+    let uids: Vec<&str> = detail["legs"]
+        .as_array()
+        .expect("legs")
+        .iter()
+        .filter_map(|leg| leg["trackedTrainState"]["trainUid"].as_str())
+        .collect();
+    assert_eq!(uids, ["RP0006"], "{detail}");
+}
+
+/// Undoing "I missed this train" stays possible until the replacement's
+/// first new train leaves, at most an hour after the change (DS-534); a
+/// replacement that has been under way too long, and one made for another
+/// cause, keep the 2 minutes.
+#[tokio::test]
+#[ignore = "requires a live database: DATABASE_URL"]
+async fn a_missed_train_can_be_undone_until_the_replacement_leaves() {
+    let _now = pin_now();
+    let pool = connect().await;
+    let _cleanup = cleanup(&pool).await;
+    seed_timetable(&pool).await;
+    seed_late_train(&pool, "RP0006", "12:45", "13:45").await;
+    seed_late_train(&pool, "RP0007", "15:00", "16:00").await;
+    let token = seed_session(&pool, USER).await;
+    let router = router(pool.clone());
+    let (soon, soon_leg) = create_journey(&router, &token).await;
+    // Another journey, on RP0002 (a train can sit in one journey of yours
+    // only once, and a replacement releases it).
+    let (status, saved) = call(
+        &router,
+        "POST",
+        "/Journeys/itinerary",
+        Some(&token),
+        Some(serde_json::json!({
+            "legs": [{
+                "trainUid": "RP0002", "serviceDate": DATE,
+                "originCrs": "ZRC", "destinationCrs": "ZRD"
+            }]
+        })),
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{saved}");
+    let late = saved["journeyId"].as_i64().expect("journeyId");
+    let late_leg = saved["legId"].as_i64().expect("legId");
+
+    // 12:30: the traveller missed RP0001 (the first journey takes the 12:45,
+    // the second the 15:00). The change is dated to the pinned clock.
+    let _changed = crate::routes::pin_london_now_for_tests(london_at(0, 12, 30));
+    for (journey_id, leg_id, uid) in [(soon, soon_leg, "RP0006"), (late, late_leg, "RP0007")] {
+        let (status, replaced) = call(
+            &router,
+            "POST",
+            &format!("/Journeys/{journey_id}/legs/{leg_id}/replace"),
+            Some(&token),
+            Some(replace_body("missed", uid)),
+            None,
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{replaced}");
+        sqlx::query(
+            "UPDATE journey_revisions SET created_at = $2 WHERE journey_id = $1 AND revision_no = 2",
+        )
+        .bind(journey_id)
+        .bind(london_at(0, 12, 30))
+        .execute(&pool)
+        .await
+        .expect("date the change");
+    }
+    let can_revert = |journey_id: i64| {
+        let router = router.clone();
+        let token = token.clone();
+        async move {
+            let (_, history) = call(
+                &router,
+                "GET",
+                &format!("/Journeys/{journey_id}/revisions"),
+                Some(&token),
+                None,
+                None,
+            )
+            .await;
+            history["revisions"][1]["canRevert"]
+                .as_bool()
+                .expect("canRevert")
+        }
+    };
+
+    // 12:40: well past the 2 minutes, before either replacement leaves.
+    let _ten_minutes = crate::routes::pin_london_now_for_tests(london_at(0, 12, 40));
+    assert!(can_revert(soon).await);
+    assert!(can_revert(late).await);
+
+    // 12:50: the 12:45 has left; the 15:00 has not.
+    let _later = crate::routes::pin_london_now_for_tests(london_at(0, 12, 50));
+    assert!(!can_revert(soon).await);
+    assert!(can_revert(late).await);
+    let (status, body) = call(
+        &router,
+        "POST",
+        &format!("/Journeys/{soon}/revisions/1/revert"),
+        Some(&token),
+        None,
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::CONFLICT, "{body}");
+    assert_eq!(body, "That plan no longer works.");
+
+    // 13:35: the 15:00 is still to leave, but an hour has passed.
+    let _capped = crate::routes::pin_london_now_for_tests(london_at(0, 13, 35));
+    assert!(!can_revert(late).await);
+
+    // 13:25: inside the hour: Undo goes back to the booked train.
+    let _inside = crate::routes::pin_london_now_for_tests(london_at(0, 13, 25));
+    let (status, undone) = call(
+        &router,
+        "POST",
+        &format!("/Journeys/{late}/revisions/1/revert"),
+        Some(&token),
+        None,
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{undone}");
+    assert_eq!(undone["revisionNo"], 3, "{undone}");
+}

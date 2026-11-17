@@ -106,6 +106,23 @@ train). They are facts for a soft confirmation ("This train has already
 reached X. Only use this if you didn't get on it."), never a refusal. `leg`
 is `null` on a break's stored suggestions.
 
+**Undo.** The just-replaced plan can be gone back to for 2 minutes
+(`canRevert` on `GET /Journeys/{id}/revisions`, `POST .../revert`). After an
+"I missed this train" (revision cause `user_missed`) it stays possible until
+the replacement's first new train leaves, but at most an hour after the
+change: the mistake ("I didn't actually miss it") is noticed late. A revert
+still replaces the replacement under the arrival freeze, so it is refused
+once the replacement has run, and it writes a new revision (reason
+`revert`), never rewriting history. Any other revision's rule is unchanged:
+an earlier plan can be gone back to while its trains are all still to leave.
+
+**The journey afterwards.** Nothing is stored about the miss itself: a
+journey is Past or Upcoming from its current legs. So a Past journey whose
+last leg is replaced by a train still to come is Upcoming again, and goes
+Past once the replacement arrives. A journey whose legs are all dated before
+the window is still frozen. If the traveller takes no other train, nothing
+changes: the leg stays as booked (see below).
+
 **Integrity.** Nothing outside DS is touched: Delay Repay is advisory and DS
 submits no claim; the booked plan is revision 1, which is append-only apart
 from the fate stamp on the leg. The data, not the request, decides fault
