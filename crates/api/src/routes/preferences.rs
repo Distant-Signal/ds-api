@@ -1043,3 +1043,69 @@ mod db_tests {
         assert!(pinned_operator_codes.contains(&"ZZ-UNKNOWN".to_string()));
     }
 }
+
+/// Pins which time zone names the quiet-hours preference accepts: the IANA
+/// names (case-sensitive, surrounding whitespace trimmed) and nothing else.
+#[cfg(test)]
+mod quiet_hours_zone_pinning_tests {
+    use super::*;
+
+    const ACCEPTED: &[&str] = &[
+        "Europe/London",
+        "Europe/Dublin",
+        "GB",
+        "US/Eastern",
+        "Europe/Kyiv",
+        "Europe/Kiev",
+        "UTC",
+        "Etc/UTC",
+        "America/New_York",
+        "Asia/Kolkata",
+        "Australia/Lord_Howe",
+        " Europe/London ",
+        "Europe/London\t",
+    ];
+
+    const REFUSED: &[&str] = &[
+        "europe/london",
+        "EUROPE/LONDON",
+        "Europe/london",
+        "utc",
+        "Z",
+        "+01:00",
+        "Mars/Olympus",
+        "",
+        "   ",
+        "UTC+1",
+        "Europe/",
+        "London",
+    ];
+
+    fn check(zone: &str) -> Result<notification_settings::NotificationSettingsChange, String> {
+        let body: NotificationPreferencesUpdate = serde_json::from_value(serde_json::json!({
+            "quietHours": { "start": "22:00", "end": "07:00", "timezone": zone }
+        }))
+        .unwrap();
+        validate_notification_update(body, chrono::Utc::now())
+    }
+
+    #[test]
+    fn iana_names_are_accepted_and_stored_trimmed() {
+        for &zone in ACCEPTED {
+            let change = check(zone).unwrap_or_else(|err| panic!("{zone:?} refused: {err}"));
+            let stored = change.quiet_hours.unwrap().unwrap().timezone;
+            assert_eq!(stored, zone.trim(), "stored name for {zone:?}");
+        }
+    }
+
+    #[test]
+    fn other_names_are_refused_with_the_zone_sentence() {
+        for &zone in REFUSED {
+            assert_eq!(
+                check(zone).unwrap_err(),
+                "That time zone isn't one we know.",
+                "{zone:?}"
+            );
+        }
+    }
+}
