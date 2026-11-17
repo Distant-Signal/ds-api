@@ -29,7 +29,9 @@ to the website's API is refused either way.
 4. The gate parses the token (prefix, length, base62, CRC32 checksum),
    looks it up by SHA-256, compares the hash in constant time, and refuses
    it if it is revoked, expired or unused for 90 days (an idle token is
-   revoked on the spot). It then checks the route's scope.
+   revoked on the spot). It then checks the route's scope; a refusal for
+   scope is charged to the token's own bucket (a token past it gets
+   `429`), not to the failed-authentication one.
 5. The rate buckets: per token, per token on the train routes, per user,
    all tokens together, and failed authentications per client address
    (`CF-Connecting-IP` when `trustCfConnectingIp`).

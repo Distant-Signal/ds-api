@@ -466,6 +466,32 @@ async fn the_rate_buckets_and_the_failure_bucket_hold() {
         ]
     );
 
+    // Review 2026-11: a token looping on a route outside its scopes is
+    // charged to its own bucket too, so it cannot cost a lookup per request
+    // without limit.
+    let (_, body) = create(&h, &raw, &["lines:read"]).await;
+    let auth = bearer(body["token"].as_str().unwrap());
+    let mut statuses = Vec::new();
+    for _ in 0..3 {
+        let (status, _, _) = send(
+            &h.tokens,
+            "GET",
+            "/v1/preferences",
+            &[("authorization", &auth)],
+            None,
+        )
+        .await;
+        statuses.push(status);
+    }
+    assert_eq!(
+        statuses,
+        [
+            StatusCode::FORBIDDEN,
+            StatusCode::FORBIDDEN,
+            StatusCode::TOO_MANY_REQUESTS
+        ]
+    );
+
     // Failures from one address: after the burst, 429 before any lookup.
     let peer: SocketAddr = "198.51.100.9:5000".parse().unwrap();
     let mut statuses = Vec::new();

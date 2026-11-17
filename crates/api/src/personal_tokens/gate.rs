@@ -259,6 +259,20 @@ pub async fn token_gate(State(app): State<App>, mut request: Request, next: Next
                 .insert(header::WWW_AUTHENTICATE, value);
         }
         // Not a failed authentication: no charge to the failure bucket.
+        // It is charged to the token's own bucket, so a token looping on a
+        // route it lacks the scope for costs a lookup per request only
+        // within its rate (review 2026-11); once over, it is a 429.
+        if let Err(wait) = tokens.limiter.check_all(
+            &[(
+                BucketKey::Token(row.id),
+                settings.token_per_minute,
+                settings.token_burst,
+            )],
+            Instant::now(),
+        ) {
+            note_rate_limited("personal_token");
+            return rate_limited(wait);
+        }
         return reject(Rejection::InsufficientScope, Some(row.id), client, response);
     }
 
