@@ -762,6 +762,18 @@ fn parse_cidrs(list: &str) -> Result<Vec<Cidr>> {
                 .with_context(|| format!("`{entry}` has an invalid prefix length"))?,
             None => max,
         };
+        // An IPv4-mapped IPv6 range is matched as IPv4 (peers are canonical),
+        // so it is stored as IPv4 with the `::ffff:0:0/96` part of the prefix
+        // removed; a shorter prefix cannot be expressed and is refused.
+        let (addr, prefix) = match addr.to_canonical() {
+            IpAddr::V4(v4) if addr.is_ipv6() => {
+                let v4_prefix = prefix.checked_sub(96).with_context(|| {
+                    format!("`{entry}` is an IPv4-mapped range shorter than /96")
+                })?;
+                (IpAddr::V4(v4), v4_prefix)
+            }
+            _ => (addr, prefix),
+        };
         out.push(Cidr { addr, prefix });
     }
     Ok(out)
@@ -2066,6 +2078,13 @@ mod tests {
         assert!(!cidrs[2].contains("192.0.2.8".parse().unwrap()));
         assert!(parse_cidrs("10.0.0.0/33").is_err());
         assert!(parse_cidrs("nope").is_err());
+        // A mapped range matches as IPv4; one shorter than /96 is refused
+        // (it would otherwise wrap into a match-everything mask).
+        let mapped = parse_cidrs("::ffff:10.0.0.0/104").unwrap();
+        assert!(mapped[0].contains("10.9.9.9".parse().unwrap()));
+        assert!(mapped[0].contains("::ffff:10.9.9.9".parse().unwrap()));
+        assert!(!mapped[0].contains("11.0.0.1".parse().unwrap()));
+        assert!(parse_cidrs("::ffff:10.0.0.0/64").is_err());
 
         let mut headers = HeaderMap::new();
         headers.insert(REAL_IP_HEADER, HeaderValue::from_static("203.0.113.9"));
