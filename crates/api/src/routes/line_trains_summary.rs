@@ -91,8 +91,15 @@ pub(crate) fn parse_window(
     Ok(match (from, to) {
         (None, None) => None,
         (Some(from), None) => Some((from, MAX_MINUTE + 1)),
+        (None, Some(0)) => {
+            return Err("invalid window: to (00:00) must be after the day's start".to_string());
+        }
         (None, Some(to)) => Some((0, to)),
-        (Some(from), Some(to)) if to <= from && to < DAY => Some((from, to + DAY)),
+        // Only a window starting on the service date itself wraps: `from`
+        // the next morning (`26:00`) and `to` before it (`01:00`) would
+        // wrap to an end before its start, an empty window (review
+        // finding, 2026-11), so that is a 400 below.
+        (Some(from), Some(to)) if to <= from && to < DAY && from < DAY => Some((from, to + DAY)),
         (Some(from), Some(to)) if to <= from => {
             return Err(format!(
                 "invalid window: to ({}) must be after from ({})",
@@ -760,6 +767,20 @@ mod tests {
         assert_eq!(parse_window(None, Some("10:00")), Ok(Some((0, 600))));
         assert!(parse_window(Some("26:00"), Some("25:00")).is_err());
         assert!(parse_window(Some("10:00"), Some("bad")).is_err());
+        // A next-morning `from` with an earlier `to` cannot wrap: 400, not
+        // an empty 200.
+        assert!(parse_window(Some("26:00"), Some("01:00")).is_err());
+        assert!(parse_window(Some("24:00"), Some("00:00")).is_err());
+        assert!(parse_window(None, Some("00:00")).is_err());
+        assert_eq!(
+            parse_window(Some("00:00"), Some("00:00")),
+            Ok(Some((0, DAY))),
+            "equal bounds on the day itself still wrap to a whole day"
+        );
+        assert_eq!(
+            parse_window(Some("24:00"), Some("26:00")),
+            Ok(Some((1440, 1560)))
+        );
     }
 
     #[test]

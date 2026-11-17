@@ -357,6 +357,9 @@ pub(crate) async fn get_stop_point_disruption(
     State(app): State<App>,
     Path(crs): Path<String>,
 ) -> Result<Json<Vec<LineStatusReportJson>>, (StatusCode, String)> {
+    // The catalogue holds upper-case CRS codes; `/StopPoint/wat/Disruption`
+    // must answer as `WAT` does, as the station routes do.
+    let crs = queries::normalize_code(&crs);
     let matching_line_ids: Vec<String> = app
         .config
         .lines
@@ -2918,9 +2921,19 @@ mod db_tests {
             "Test Stop Point Good Service",
         );
         let router = test_router(test_app(pool.clone(), vec![catalogue_line]));
-        let (status, body) = request(router, "/StopPoint/WOK/Disruption".to_string(), None).await;
+        let (status, body) = request(
+            router.clone(),
+            "/StopPoint/WOK/Disruption".to_string(),
+            None,
+        )
+        .await;
 
         assert_eq!(status, StatusCode::OK);
+        assert_eq!(body, Value::Array(vec![]));
+
+        // A lower-case code is the same station, not "no coverage".
+        let (status, body) = request(router, "/StopPoint/wok/Disruption".to_string(), None).await;
+        assert_eq!(status, StatusCode::OK, "lower-case CRS: {body}");
         assert_eq!(body, Value::Array(vec![]));
 
         cleanup_line_status(&pool, "test-stop-point-good-service").await;

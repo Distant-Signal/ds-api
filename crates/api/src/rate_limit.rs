@@ -713,13 +713,28 @@ impl RateLimiter {
 
     /// `Ok` if a request by `client` in `class` is allowed at `now` (and
     /// records it), else `Err(retry_after)`.
+    fn check_at(&self, class: LimitClass, client: ClientKey, now: Instant) -> Result<(), Duration> {
+        self.check_all_at(class, &[client], now)
+            .map_err(|(_, retry_after)| retry_after)
+    }
+
+    /// Charges one request in `class` to every one of `clients`' buckets,
+    /// or to none: `Err((key, retry_after))`, the first bucket that refused
+    /// and the longest wait, and then nothing is recorded. A delegated
+    /// request is charged to its user's and its client's buckets, and one
+    /// the client's bucket refuses must not also spend the user's (review
+    /// finding, 2026-11: it did, so a busy client drained its users' own
+    /// budgets with requests that never ran).
     #[expect(
         clippy::expect_used,
-        clippy::unwrap_used,
         reason = "a poisoned lock means another thread already panicked"
     )]
-    fn check_at(&self, class: LimitClass, client: ClientKey, now: Instant) -> Result<(), Duration> {
-        let quota = self.settings.quota(class, client.caller());
+    fn check_all_at(
+        &self,
+        class: LimitClass,
+        clients: &[ClientKey],
+        now: Instant,
+    ) -> Result<(), (ClientKey, Duration)> {
         let mut state = self.state.lock().expect("rate limiter lock poisoned");
         state.checks += 1;
         if state.checks.is_multiple_of(PRUNE_EVERY) || state.tat.len() >= MAX_TRACKED_KEYS {
@@ -736,14 +751,28 @@ impl RateLimiter {
                 state.tat.clear();
             }
         }
-        let key = (class, client);
-        let tat = state.tat.get(&key).copied().unwrap_or(now).max(now);
-        let new_tat = tat + quota.interval;
-        let ahead = new_tat - now;
-        if ahead > quota.tolerance {
-            return Err(ahead.checked_sub(quota.tolerance).unwrap());
+        let mut updates = Vec::with_capacity(clients.len());
+        let mut refused: Option<(ClientKey, Duration)> = None;
+        for &client in clients {
+            let quota = self.settings.quota(class, client.caller());
+            let key = (class, client);
+            let tat = state.tat.get(&key).copied().unwrap_or(now).max(now);
+            let new_tat = tat + quota.interval;
+            let ahead = new_tat - now;
+            if ahead > quota.tolerance {
+                let wait = ahead.saturating_sub(quota.tolerance);
+                refused = Some(match refused {
+                    Some((first, longest)) => (first, longest.max(wait)),
+                    None => (client, wait),
+                });
+            } else {
+                updates.push((key, new_tat));
+            }
         }
-        state.tat.insert(key, new_tat);
+        if let Some(refused) = refused {
+            return Err(refused);
+        }
+        state.tat.extend(updates);
         Ok(())
     }
 
@@ -967,18 +996,17 @@ pub async fn enforce(
             user: sub_digest(&delegated.sub),
         };
         let client = ClientKey::DelegatedClient(delegated.client_index);
-        let now = Instant::now();
-        for key in [user, client] {
-            if let Err(retry_after) = limiter.check_at(class, key, now) {
-                metrics::counter!(
-                    ds_runtime::metrics::metric_name("api_rate_limited_total"),
-                    "class" => class.label(),
-                    "caller" => key.caller().label()
-                )
-                .increment(1);
-                tracing::debug!(%key, class = class.label(), "delegated caller rate limited");
-                return delegated_too_many_requests(retry_after);
-            }
+        if let Err((key, retry_after)) =
+            limiter.check_all_at(class, &[user, client], Instant::now())
+        {
+            metrics::counter!(
+                ds_runtime::metrics::metric_name("api_rate_limited_total"),
+                "class" => class.label(),
+                "caller" => key.caller().label()
+            )
+            .increment(1);
+            tracing::debug!(%key, class = class.label(), "delegated caller rate limited");
+            return delegated_too_many_requests(retry_after);
         }
         return next.run(request).await;
     }
@@ -1227,6 +1255,47 @@ mod tests {
             StatusCode::TOO_MANY_REQUESTS,
             "the per-client ceiling bounds every user together"
         );
+    }
+
+    /// A delegated request the client's bucket refuses spends nothing from
+    /// the user's own bucket: once the client has room again, the user's
+    /// full burst is still there.
+    #[test]
+    fn a_refused_delegated_request_charges_neither_bucket() {
+        let limiter = RateLimiter::new(RateLimitSettings {
+            delegated_write_per_minute: 1,
+            delegated_write_burst: 2,
+            delegated_client_multiplier: 1,
+            ..RateLimitSettings::default()
+        });
+        let class = LimitClass::DelegatedWrite;
+        let client = ClientKey::DelegatedClient(0);
+        let user = |name: &str| ClientKey::DelegatedUser {
+            client: 0,
+            user: sub_digest(name),
+        };
+        let now = Instant::now();
+        // Bob spends the client's whole burst (2 x 1).
+        for _ in 0..2 {
+            assert!(
+                limiter
+                    .check_all_at(class, &[user("bob"), client], now)
+                    .is_ok()
+            );
+        }
+        // Alice is refused by the client's bucket, many times over.
+        for _ in 0..5 {
+            let (key, _) = limiter
+                .check_all_at(class, &[user("alice"), client], now)
+                .expect_err("the client's bucket is empty");
+            assert_eq!(key, client, "the bucket that refused is reported");
+        }
+        // Her own bucket is untouched: a lone check of it has her whole
+        // burst left.
+        for _ in 0..2 {
+            assert!(limiter.check_at(class, user("alice"), now).is_ok());
+        }
+        assert!(limiter.check_at(class, user("alice"), now).is_err());
     }
 
     #[test]

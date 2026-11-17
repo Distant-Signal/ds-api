@@ -462,17 +462,69 @@ pub async fn load_station_index(
         .collect())
 }
 
+/// How long [`StationIndexCache`] waits after a failed load before trying
+/// again. Meanwhile it serves the last answer if it has one, else the
+/// failure itself.
+const STATION_INDEX_RETRY_AFTER: Duration = Duration::from_secs(10);
+
 /// One cached [`load_station_index`] answer, shared by every request for
-/// [`STATION_INDEX_TTL`]. One load at a time: the lock is held across the
-/// read, so a cold cache costs one query however many requests arrive.
+/// [`STATION_INDEX_TTL`]. The route is anonymous and not rate limited, and
+/// the load is ~2,600 index probes, so (review finding, 2026-11):
+///
+/// - one load at a time (`refresh`); once there is an answer, a request
+///   arriving while it is being refreshed gets the stale answer at once
+///   instead of queueing behind the refresh;
+/// - a failed load is remembered for [`STATION_INDEX_RETRY_AFTER`]: until
+///   then requests get the stale answer, or with none the same failure,
+///   without querying again. Before this a slow or failing database made
+///   every queued request re-run the whole load, one after another.
 pub(crate) struct StationIndexCache {
-    loaded: Mutex<Option<(Instant, Arc<Vec<StationIndexEntry>>)>>,
+    state: std::sync::Mutex<StationIndexState>,
+    refresh: Mutex<()>,
+}
+
+struct StationIndexState {
+    loaded: Option<(Instant, Arc<Vec<StationIndexEntry>>)>,
+    failed: Option<(Instant, Arc<anyhow::Error>)>,
+}
+
+/// What [`StationIndexCache`] can answer without loading.
+enum StationIndexCached {
+    Fresh(Arc<Vec<StationIndexEntry>>),
+    /// Expired, or a refresh failed lately: serve it unless a refresh is due.
+    Stale(Arc<Vec<StationIndexEntry>>, bool),
+    /// No answer yet, and the last load failed lately.
+    Failed(Arc<anyhow::Error>),
+    Empty,
+}
+
+/// A remembered load failure handed to a later request. Its `source` is
+/// the original error, so `unavailable::response_for` still finds a
+/// connection failure in the chain and answers 503, not 500.
+#[derive(Debug)]
+struct RecentStationIndexFailure(Arc<anyhow::Error>);
+
+impl std::fmt::Display for RecentStationIndexFailure {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("the station index failed to load moments ago")
+    }
+}
+
+impl std::error::Error for RecentStationIndexFailure {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        let inner: &(dyn std::error::Error + Send + Sync + 'static) = self.0.as_ref().as_ref();
+        Some(inner)
+    }
 }
 
 impl StationIndexCache {
     pub(crate) const fn new() -> Self {
         Self {
-            loaded: Mutex::const_new(None),
+            state: std::sync::Mutex::new(StationIndexState {
+                loaded: None,
+                failed: None,
+            }),
+            refresh: Mutex::const_new(()),
         }
     }
 
@@ -482,15 +534,210 @@ impl StationIndexCache {
         covered: &(dyn Fn(&str) -> bool + Sync),
         today: chrono::NaiveDate,
     ) -> Result<Arc<Vec<StationIndexEntry>>> {
-        let mut loaded = self.loaded.lock().await;
-        if let Some((at, entries)) = loaded.as_ref()
-            && at.elapsed() < STATION_INDEX_TTL
-        {
-            return Ok(Arc::clone(entries));
+        self.get_with(|| load_station_index(pool, covered, today))
+            .await
+    }
+
+    fn cached(&self) -> StationIndexCached {
+        let state = self
+            .state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let failed_lately = state
+            .failed
+            .as_ref()
+            .filter(|(at, _)| at.elapsed() < STATION_INDEX_RETRY_AFTER);
+        match (&state.loaded, failed_lately) {
+            (Some((at, entries)), _) if at.elapsed() < STATION_INDEX_TTL => {
+                StationIndexCached::Fresh(Arc::clone(entries))
+            }
+            (Some((_, entries)), failed) => {
+                StationIndexCached::Stale(Arc::clone(entries), failed.is_none())
+            }
+            (None, Some((_, err))) => StationIndexCached::Failed(Arc::clone(err)),
+            (None, None) => StationIndexCached::Empty,
         }
-        let entries = Arc::new(load_station_index(pool, covered, today).await?);
-        *loaded = Some((Instant::now(), Arc::clone(&entries)));
-        Ok(entries)
+    }
+
+    /// [`Self::get`] with the load passed in (tests count and fail it).
+    async fn get_with<F, Fut>(&self, load: F) -> Result<Arc<Vec<StationIndexEntry>>>
+    where
+        F: FnOnce() -> Fut,
+        Fut: Future<Output = Result<Vec<StationIndexEntry>>>,
+    {
+        let _refreshing = match self.cached() {
+            StationIndexCached::Fresh(entries) | StationIndexCached::Stale(entries, false) => {
+                return Ok(entries);
+            }
+            StationIndexCached::Failed(err) => {
+                return Err(RecentStationIndexFailure(err).into());
+            }
+            StationIndexCached::Stale(entries, true) => match self.refresh.try_lock() {
+                Ok(guard) => guard,
+                // Someone else is refreshing: don't wait for them.
+                Err(_) => return Ok(entries),
+            },
+            StationIndexCached::Empty => self.refresh.lock().await,
+        };
+        // Whoever held `refresh` before may have just loaded, or failed.
+        let stale = match self.cached() {
+            StationIndexCached::Fresh(entries) | StationIndexCached::Stale(entries, false) => {
+                return Ok(entries);
+            }
+            StationIndexCached::Failed(err) => {
+                return Err(RecentStationIndexFailure(err).into());
+            }
+            StationIndexCached::Stale(entries, true) => Some(entries),
+            StationIndexCached::Empty => None,
+        };
+        let loaded = load().await;
+        let mut cache = self
+            .state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        match loaded {
+            Ok(entries) => {
+                let entries = Arc::new(entries);
+                cache.loaded = Some((Instant::now(), Arc::clone(&entries)));
+                cache.failed = None;
+                Ok(entries)
+            }
+            Err(err) => {
+                let err = Arc::new(err);
+                cache.failed = Some((Instant::now(), Arc::clone(&err)));
+                match stale {
+                    Some(entries) => {
+                        tracing::warn!(
+                            error = ?err,
+                            "station index refresh failed; serving the last answer"
+                        );
+                        Ok(entries)
+                    }
+                    None => Err(RecentStationIndexFailure(err).into()),
+                }
+            }
+        }
+    }
+}
+
+#[cfg(test)]
+mod station_index_cache_tests {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    use super::*;
+
+    fn entries(crs: &str) -> Vec<StationIndexEntry> {
+        vec![StationIndexEntry {
+            crs: crs.to_string(),
+            name: crs.to_string(),
+            served: true,
+        }]
+    }
+
+    /// A cache holding `crs`'s answer, loaded longer ago than the TTL.
+    fn expired(crs: &str) -> StationIndexCache {
+        let cache = StationIndexCache::new();
+        let long_ago = Instant::now()
+            .checked_sub(STATION_INDEX_TTL + Duration::from_secs(1))
+            .expect("the monotonic clock is past the TTL");
+        cache.state.lock().expect("state").loaded = Some((long_ago, Arc::new(entries(crs))));
+        cache
+    }
+
+    #[tokio::test]
+    async fn a_cold_failure_is_loaded_once_and_remembered() {
+        let cache = Arc::new(StationIndexCache::new());
+        let loads = Arc::new(AtomicUsize::new(0));
+        let mut waiters = Vec::new();
+        for _ in 0..8 {
+            let (cache, loads) = (Arc::clone(&cache), Arc::clone(&loads));
+            waiters.push(tokio::spawn(async move {
+                cache
+                    .get_with(|| async {
+                        loads.fetch_add(1, Ordering::SeqCst);
+                        tokio::time::sleep(Duration::from_millis(50)).await;
+                        Err(sqlx::Error::PoolTimedOut.into())
+                    })
+                    .await
+            }));
+        }
+        for waiter in waiters {
+            let err = waiter.await.expect("task").expect_err("the load failed");
+            assert!(
+                crate::unavailable::is_dependency_unavailable(&err),
+                "a remembered failure keeps its cause, so the route still answers 503: {err:?}"
+            );
+        }
+        assert_eq!(
+            loads.load(Ordering::SeqCst),
+            1,
+            "queued requests reuse the failure"
+        );
+
+        let again = cache
+            .get_with(|| async {
+                loads.fetch_add(1, Ordering::SeqCst);
+                Ok(entries("NEW"))
+            })
+            .await;
+        assert!(
+            again.is_err(),
+            "inside the retry window the failure is served"
+        );
+        assert_eq!(loads.load(Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test]
+    async fn a_stale_answer_is_served_while_another_request_refreshes() {
+        let cache = Arc::new(expired("OLD"));
+        let (started_tx, started_rx) = tokio::sync::oneshot::channel();
+        let (release_tx, release_rx) = tokio::sync::oneshot::channel::<()>();
+        let refresher = {
+            let cache = Arc::clone(&cache);
+            tokio::spawn(async move {
+                cache
+                    .get_with(|| async move {
+                        started_tx.send(()).expect("signal");
+                        release_rx.await.expect("release");
+                        Ok(entries("NEW"))
+                    })
+                    .await
+            })
+        };
+        started_rx.await.expect("the refresh started");
+
+        let during = tokio::time::timeout(
+            Duration::from_secs(1),
+            cache.get_with(|| async { panic!("a second refresh must not start") }),
+        )
+        .await
+        .expect("a request during a refresh does not wait for it")
+        .expect("stale answer");
+        assert_eq!(during[0].crs, "OLD");
+
+        release_tx.send(()).expect("release");
+        let new_answer = refresher.await.expect("task").expect("refresh");
+        assert_eq!(new_answer[0].crs, "NEW");
+        let after = cache
+            .get_with(|| async { panic!("fresh: no load") })
+            .await
+            .expect("fresh answer");
+        assert_eq!(after[0].crs, "NEW");
+    }
+
+    #[tokio::test]
+    async fn a_failed_refresh_serves_the_stale_answer_without_retrying() {
+        let cache = expired("OLD");
+        let failed = cache
+            .get_with(|| async { Err(anyhow::anyhow!("slow database")) })
+            .await
+            .expect("the stale answer, not the error");
+        assert_eq!(failed[0].crs, "OLD");
+        let next = cache
+            .get_with(|| async { panic!("inside the retry window there is no new load") })
+            .await
+            .expect("stale answer");
+        assert_eq!(next[0].crs, "OLD");
     }
 }
 

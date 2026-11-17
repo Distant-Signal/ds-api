@@ -4939,13 +4939,17 @@ mod db_tests {
 
     #[tokio::test]
     #[ignore = "requires DATABASE_URL"]
+    #[expect(
+        clippy::too_many_lines,
+        reason = "one fixture and its cases; split, the seeding would be repeated"
+    )]
     async fn trains_by_headcode_finds_live_only_trains_by_their_trust_id() {
         let (pool, _guards) = connect().await;
         let date = seed_boards(&pool).await;
         let other = date + chrono::Duration::days(1);
         let ten = chrono::NaiveTime::from_hms_opt(10, 0, 0).unwrap();
         let uids = [
-            "LIVE01", "LIVE02", "LIVE03", "LIVE04", "LIVE05", "LIVE06", "BRDA01",
+            "LIVE01", "LIVE02", "LIVE03", "LIVE04", "LIVE05", "LIVE06", "LIVE07", "BRDA01",
         ];
         sqlx::query("DELETE FROM trains WHERE train_uid = ANY($1)")
             .bind(uids.map(str::to_string).to_vec())
@@ -4961,7 +4965,7 @@ mod db_tests {
             Some(("BRI", "PAD", ten)),
         )
         .await;
-        // Live-only holding nothing but its id: null fields, listed last.
+        // Live-only holding only its id and origin: null fields, listed last.
         seed_live_train(&pool, date, "LIVE02", "161z721T16", None).await;
         // Another headcode, another date, and ids that are not 10 characters
         // or whose characters 3 to 6 are not a headcode.
@@ -4972,6 +4976,18 @@ mod db_tests {
         seed_live_train(&pool, date, "LIVE06", "161Z721T16X", None).await;
         // A scheduled train's TRUST id never adds a second row for it.
         seed_live_train(&pool, date, "BRDA01", "991A10MF07", None).await;
+        // Every row above holds an origin, so only its id decides; LIVE07
+        // matches the headcode but holds no origin, so it has no row to be
+        // shown at (no `stationCrs`) and is left out.
+        sqlx::query(
+            "UPDATE trains SET origin_crs = 'EXD' \
+             WHERE train_uid = ANY($1) AND origin_crs IS NULL",
+        )
+        .bind(uids.map(str::to_string).to_vec())
+        .execute(&pool)
+        .await
+        .unwrap();
+        seed_live_train(&pool, date, "LIVE07", "171Z721T16", None).await;
 
         let (status, body) = get(
             &pool,
@@ -4989,8 +5005,16 @@ mod db_tests {
         assert_eq!(rows[0]["destinationCrs"], "PAD");
         assert_eq!(rows[0]["scheduled"], "10:00");
         assert_eq!(rows[1]["identity"], "1Z72");
-        assert!(rows[1]["originCrs"].is_null() && rows[1]["destinationCrs"].is_null());
+        assert_eq!(rows[1]["stationCrs"], "EXD", "{body}");
+        assert_eq!(rows[1]["originCrs"], "EXD", "{body}");
+        assert!(rows[1]["destinationCrs"].is_null(), "{body}");
         assert!(rows[1]["scheduled"].is_null(), "{body}");
+        assert!(
+            rows.iter().all(|row| row["stationCrs"]
+                .as_str()
+                .is_some_and(|crs| !crs.is_empty())),
+            "no row has an empty stationCrs: {body}"
+        );
 
         // Date filtering: the other date's row is its own.
         let (_, body) = get(

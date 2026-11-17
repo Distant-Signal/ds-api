@@ -901,6 +901,42 @@ pub async fn consume_invite_link(pool: &PgPool, token: &str, user_id: &str) -> R
     Ok(JoinOutcome::Joined(group_id))
 }
 
+/// Locks `group_id`'s `groups` row `FOR SHARE` and then re-reads the
+/// caller's membership, for the share paths ([`add_train_to_group`],
+/// [`add_journey_to_group`]). The routes check membership first, but that
+/// read runs outside the insert's transaction: a kick or leave
+/// ([`remove_member`], which takes the same row `FOR UPDATE` and deletes
+/// the departing member's shares) landing between the two would otherwise
+/// leave a share attributed to someone no longer in the group, which they
+/// could not remove (every group route 404s for a non-member). `FOR SHARE`
+/// conflicts with `remove_member`'s `FOR UPDATE`, and the membership read
+/// is a separate statement so that, under READ COMMITTED, it takes its
+/// snapshot after the lock is granted and sees a removal that committed
+/// while this waited. The `groups` row is locked before the train or
+/// journey row, the same order `remove_member` takes its locks in.
+///
+/// Returns `false` if the group is gone or `user_id` is not a member.
+async fn lock_group_and_check_member(
+    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    group_id: &str,
+    user_id: &str,
+) -> Result<bool> {
+    let group: Option<String> = sqlx::query_scalar("SELECT id FROM groups WHERE id = $1 FOR SHARE")
+        .bind(group_id)
+        .fetch_optional(&mut **tx)
+        .await?;
+    if group.is_none() {
+        return Ok(false);
+    }
+    let member: Option<i32> =
+        sqlx::query_scalar("SELECT 1 FROM group_members WHERE group_id = $1 AND user_id = $2")
+            .bind(group_id)
+            .bind(user_id)
+            .fetch_optional(&mut **tx)
+            .await?;
+    Ok(member.is_some())
+}
+
 /// Adds one of the caller's own tracked trains to a group. Ownership is
 /// enforced at the APPLICATION layer, not the DB (spec §2.2) -- the exact
 /// `WHERE id = $1 AND user_id = $2` shape `train_tracking.rs` already uses
@@ -909,7 +945,9 @@ pub async fn consume_invite_link(pool: &PgPool, token: &str, user_id: &str) -> R
 /// `insert_custom_line`'s own idempotent-insert precedent.
 ///
 /// Returns `false` if `train_subscription_id` doesn't exist or isn't
-/// owned by `user_id` -- the route maps this to `404`, never `403`.
+/// owned by `user_id`, or if `user_id` is no longer a member of the group
+/// ([`lock_group_and_check_member`]) -- the route maps this to `404`,
+/// never `403`.
 ///
 /// **The ownership check and the insert now share one transaction (Low
 /// finding, 2026-09-25 review) -- this function used to run them as two
@@ -944,6 +982,10 @@ pub async fn add_train_to_group(
     user_id: &str,
 ) -> Result<bool> {
     let mut tx = pool.begin().await?;
+    if !lock_group_and_check_member(&mut tx, group_id, user_id).await? {
+        tx.rollback().await?;
+        return Ok(false);
+    }
     let owned: Option<(i64,)> = sqlx::query_as(
         "SELECT id FROM train_subscriptions WHERE id = $1 AND user_id = $2 FOR KEY SHARE",
     )
@@ -1004,8 +1046,9 @@ pub async fn add_train_to_group(
 /// [`add_train_to_group`].
 ///
 /// Returns `false` if `journey_id` doesn't exist or isn't owned by
-/// `user_id` -- the route maps this to `404`, never `403`, same as every
-/// other ownership check in this file.
+/// `user_id`, or if `user_id` is no longer a member of the group
+/// ([`lock_group_and_check_member`]) -- the route maps this to `404`,
+/// never `403`, same as every other ownership check in this file.
 ///
 /// **The ownership check and the insert now share one transaction (Low
 /// finding, 2026-09-25 review) -- same fix, same reasoning, as
@@ -1023,6 +1066,10 @@ pub async fn add_journey_to_group(
     user_id: &str,
 ) -> Result<bool> {
     let mut tx = pool.begin().await?;
+    if !lock_group_and_check_member(&mut tx, group_id, user_id).await? {
+        tx.rollback().await?;
+        return Ok(false);
+    }
     let owned: Option<(i64,)> =
         sqlx::query_as("SELECT id FROM journeys WHERE id = $1 AND user_id = $2 FOR KEY SHARE")
             .bind(journey_id)
@@ -4431,6 +4478,16 @@ mod db_tests {
         let group_id = create_group(&pool, "DS-124", owner)
             .await
             .expect("create group");
+        // A plain member, so the refusals below are about whose train it
+        // is, not about membership.
+        sqlx::query(
+            "INSERT INTO group_members (group_id, user_id, role) VALUES ($1, $2, 'member')",
+        )
+        .bind(&group_id)
+        .bind(member)
+        .execute(&pool)
+        .await
+        .expect("add member");
         let tracking_id = seed_train_subscription(&pool, owner).await;
         let journey_id: i64 =
             sqlx::query_scalar("INSERT INTO journeys (user_id) VALUES ($1) RETURNING id")
@@ -4685,6 +4742,115 @@ mod db_tests {
             .expect("delete");
 
         cleanup(&pool, &["TEST-GROUPS-ADDJOURNEY-LOCK-OWNER"]).await;
+    }
+
+    /// A share racing a kick: the route's membership check passed, then
+    /// `remove_member` (holding the `groups` row `FOR UPDATE`) removes the
+    /// sharer. The share must wait for the removal and then refuse, rather
+    /// than insert a share attributed to a non-member that nobody but a
+    /// manager could remove. Covers both share paths, and a plain
+    /// non-member, who must be refused even with a journey of their own.
+    #[tokio::test]
+    #[ignore = "requires a live database; run with `DATABASE_URL=... cargo test -p api \
+                add_to_group_rechecks_membership_under_the_group_lock -- --ignored --test-threads=1`"]
+    async fn add_to_group_rechecks_membership_under_the_group_lock() {
+        let owner = "TEST-GROUPS-SHARE-KICK-OWNER";
+        let member = "TEST-GROUPS-SHARE-KICK-MEMBER";
+        let stranger = "TEST-GROUPS-SHARE-KICK-STRANGER";
+        let pool = connect().await;
+        for user in [owner, member, stranger] {
+            seed_user(&pool, user).await;
+        }
+        let group_id = create_group(&pool, "Share Kick Test", owner)
+            .await
+            .expect("create group");
+        sqlx::query(
+            "INSERT INTO group_members (group_id, user_id, role) VALUES ($1, $2, 'member')",
+        )
+        .bind(&group_id)
+        .bind(member)
+        .execute(&pool)
+        .await
+        .expect("add member");
+        let journey_id = seed_journey(&pool, member).await;
+        let train_id = seed_train_subscription(&pool, member).await;
+        let stranger_journey = seed_journey(&pool, stranger).await;
+
+        assert!(
+            !add_journey_to_group(&pool, &group_id, stranger_journey, stranger)
+                .await
+                .expect("stranger add"),
+            "a non-member must not share into the group, even their own journey"
+        );
+
+        let mut kick = pool.begin().await.expect("begin kick tx");
+        let outcome = remove_member_in_tx(&mut kick, &group_id, member, false)
+            .await
+            .expect("remove member");
+        assert!(matches!(outcome, RemoveMemberOutcome::Removed { .. }));
+
+        let (pool_j, pool_t, group_j, group_t) = (
+            pool.clone(),
+            pool.clone(),
+            group_id.clone(),
+            group_id.clone(),
+        );
+        let mut share_journey = tokio::spawn(async move {
+            add_journey_to_group(&pool_j, &group_j, journey_id, member).await
+        });
+        let mut share_train =
+            tokio::spawn(
+                async move { add_train_to_group(&pool_t, &group_t, train_id, member).await },
+            );
+        let wait = std::time::Duration::from_millis(300);
+        assert!(
+            tokio::time::timeout(wait, &mut share_journey)
+                .await
+                .is_err(),
+            "the journey share must wait for the in-flight removal"
+        );
+        assert!(
+            tokio::time::timeout(wait, &mut share_train).await.is_err(),
+            "the train share must wait for the in-flight removal"
+        );
+        kick.commit().await.expect("commit kick");
+
+        let done = std::time::Duration::from_secs(5);
+        let journey_added = tokio::time::timeout(done, share_journey)
+            .await
+            .expect("journey share completes")
+            .expect("task")
+            .expect("journey share");
+        let train_added = tokio::time::timeout(done, share_train)
+            .await
+            .expect("train share completes")
+            .expect("task")
+            .expect("train share");
+        assert!(
+            !journey_added && !train_added,
+            "a removed member's share is refused"
+        );
+        let shares: i64 = sqlx::query_scalar(
+            "SELECT (SELECT COUNT(*) FROM group_journeys WHERE group_id = $1) \
+                  + (SELECT COUNT(*) FROM group_trains WHERE group_id = $1)",
+        )
+        .bind(&group_id)
+        .fetch_one(&pool)
+        .await
+        .expect("count shares");
+        assert_eq!(shares, 0);
+
+        sqlx::query("DELETE FROM journeys WHERE user_id = ANY($1)")
+            .bind([member, stranger])
+            .execute(&pool)
+            .await
+            .ok();
+        sqlx::query("DELETE FROM groups WHERE id = $1")
+            .bind(&group_id)
+            .execute(&pool)
+            .await
+            .ok();
+        cleanup(&pool, &[owner, member, stranger]).await;
     }
 
     #[tokio::test]

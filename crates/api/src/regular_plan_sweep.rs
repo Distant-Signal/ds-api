@@ -30,7 +30,7 @@
 //!    with live data, so a train known to be cancelled is never picked;
 //! 3. chooses (`regular_plan::choose`): the usual trains, else the usual
 //!    operator within 5 minutes, else the target's best;
-//! 4. in remind mode stores the choice and up to two alternatives
+//! 4. in remind mode stores the choice and up to four alternatives
 //!    (`suggested`) and commits nothing; in auto mode commits the choice
 //!    over every leg with `journey_replace::replace` (`committed`; the
 //!    journey is still being planned, so revision 1, the booked plan, is
