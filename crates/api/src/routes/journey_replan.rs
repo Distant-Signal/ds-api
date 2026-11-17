@@ -1455,10 +1455,13 @@ pub(crate) struct AcceptBody {
     fingerprint: Option<String>,
 }
 
-/// The `Idempotency-Key` header and the request's hash.
+/// The `Idempotency-Key` header and the request's hash. Keys are the
+/// user's, across routes and journeys, so `request` names the route and its
+/// path ids as well as the body (review J5: the same key sent to another
+/// journey replayed the first journey's answer and changed nothing).
 fn idempotency(
     headers: &HeaderMap,
-    body: &impl Serialize,
+    request: &impl Serialize,
 ) -> Result<Option<(String, String)>, RouteError> {
     let Some(value) = headers.get("idempotency-key") else {
         return Ok(None);
@@ -1474,7 +1477,8 @@ fn idempotency(
             "Idempotency-Key must be 1 to 200 visible ASCII characters.",
         ));
     }
-    let canonical = serde_json::to_vec(body).map_err(|err| internal("hash request")(err.into()))?;
+    let canonical =
+        serde_json::to_vec(request).map_err(|err| internal("hash request")(err.into()))?;
     Ok(Some((
         key.to_string(),
         format!("{:x}", Sha256::digest(&canonical)),
@@ -1583,7 +1587,7 @@ async fn post_accept(
 ) -> Response {
     render(
         async {
-            let idempotency = idempotency(&headers, &body)?;
+            let idempotency = idempotency(&headers, &("accept", journey_id, &body))?;
             require_owner(&app, journey_id, &user.id).await?;
             let now = now_utc();
             let row = journey_breaks::get_break(&app.database, journey_id, body.break_id)
@@ -1749,7 +1753,7 @@ async fn post_replace(
 ) -> Response {
     render(
         async {
-            let idempotency = idempotency(&headers, &body)?;
+            let idempotency = idempotency(&headers, &("replace", journey_id, leg_id, &body))?;
             if body.legs.is_empty()
                 || i64::try_from(body.legs.len()).unwrap_or(i64::MAX)
                     > journeys::MAX_LEGS_PER_JOURNEY
@@ -1936,7 +1940,7 @@ async fn post_revert(
 ) -> Response {
     render(
         async {
-            let idempotency = idempotency(&headers, &revision_no)?;
+            let idempotency = idempotency(&headers, &("revert", journey_id, revision_no))?;
             require_owner(&app, journey_id, &user.id).await?;
             let now = now_utc();
             let revisions = journey_revisions::list_revisions(&app.database, journey_id)

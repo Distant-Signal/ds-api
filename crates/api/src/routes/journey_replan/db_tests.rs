@@ -1727,3 +1727,66 @@ async fn reverting_to_a_longer_plan_brings_its_later_legs_back() {
         .collect();
     assert_eq!(uids, ["RP0001", "RP0004"], "{detail}");
 }
+
+/// An `Idempotency-Key` names one request to one journey and leg (review
+/// J5): the same key on another journey's revert is a conflict, never the
+/// first journey's answer replayed with nothing done.
+#[tokio::test]
+#[ignore = "requires a live database: DATABASE_URL"]
+async fn an_idempotency_key_is_scoped_to_its_journey() {
+    let _now = pin_now();
+    let pool = connect().await;
+    let _cleanup = cleanup(&pool).await;
+    seed_timetable(&pool).await;
+    seed_onward(&pool).await;
+    let token = seed_session(&pool, USER).await;
+    let router = router(pool.clone());
+    let mut journeys = Vec::new();
+    for _ in 0..2 {
+        let (journey_id, legs) = create_started_two_leg_journey(&pool, &router, &token).await;
+        let (status, body) = call(
+            &router,
+            "DELETE",
+            &format!("/Journeys/{journey_id}/legs/{}", legs[1]),
+            Some(&token),
+            None,
+            None,
+        )
+        .await;
+        assert!(status.is_success(), "{status} {body}");
+        journeys.push(journey_id);
+    }
+    let revert = |journey_id: i64| format!("/Journeys/{journey_id}/revisions/1/revert");
+    let (status, first) = call(
+        &router,
+        "POST",
+        &revert(journeys[0]),
+        Some(&token),
+        None,
+        Some("revert-key"),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{first}");
+    // A retry of the same request replays it.
+    let (status, again) = call(
+        &router,
+        "POST",
+        &revert(journeys[0]),
+        Some(&token),
+        None,
+        Some("revert-key"),
+    )
+    .await;
+    assert_eq!((status, &again), (StatusCode::OK, &first));
+    let (status, body) = call(
+        &router,
+        "POST",
+        &revert(journeys[1]),
+        Some(&token),
+        None,
+        Some("revert-key"),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CONFLICT, "{body}");
+    assert_ne!(body, first);
+}
