@@ -1382,7 +1382,7 @@ mod tests {
             let router = crate::app::Router::new()
                 .route(
                     "/x",
-                    get(|_user: DelegatedOrSessionUser<ReadScope>| async { "reached" }),
+                    get(|_extracted: DelegatedOrSessionUser<ReadScope>| async { "reached" }),
                 )
                 .layer(axum::Extension(TestPrincipal {
                     sub: SUB.to_string(),

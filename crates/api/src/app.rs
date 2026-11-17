@@ -98,8 +98,8 @@ fn ensure_sso_and_internal_oauth_clients_differ(
 }
 
 /// Personal API tokens (docs/specs/personal-api-tokens.md), off unless
-/// PERSONAL_TOKENS_ENABLED, with test credentials (docs/test-auth.md), off
-/// unless TEST_AUTH_ENABLED. When test credentials are on, the startup
+/// `PERSONAL_TOKENS_ENABLED`, with test credentials (docs/test-auth.md), off
+/// unless `TEST_AUTH_ENABLED`. When test credentials are on, the startup
 /// guard keeps their audience and issuer apart from every other trust
 /// root's.
 fn build_personal_tokens(
