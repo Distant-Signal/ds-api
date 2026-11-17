@@ -206,6 +206,10 @@ impl AppState {
              make_interval(days => ...), which requires an i32",
         )?;
         crate::data::users::SessionLifetime::try_from_config(&config)?;
+        ensure!(
+            (1..=1440).contains(&config.session_recent_login_minutes),
+            "session_recent_login_minutes (SESSION_RECENT_LOGIN_MINUTES) must be between 1 and 1440"
+        );
 
         // Account continuity (docs/connected-apps.md): off unless a claim
         // name is set; a name the user could edit refuses to start.

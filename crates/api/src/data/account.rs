@@ -14,7 +14,7 @@
 //!    members is handed to the longest-standing admin (else member), and an
 //!    owned group with no other members is deleted. `groups.created_by` is
 //!    then set to NULL by its FK.
-//! 2. **Share links naming the user's journeys.** `unlisted_links` is
+//! 2. **Share links naming the user's journeys, and the calendar feed link.** `unlisted_links` is
 //!    polymorphic (`resource_type`/`resource_id`, no FK to `journeys`), so
 //!    links pointing at the user's journeys are deleted explicitly, in case
 //!    anyone other than the user ever created one.
@@ -144,6 +144,15 @@ pub async fn delete_account(pool: &PgPool, user_id: &str) -> Result<Option<Accou
     .bind(user_id)
     .execute(&mut *tx)
     .await?;
+
+    // The calendar feed link (docs/calendar-feed.md) names the user as its
+    // `resource_id`; its `created_by` FK would remove it with the user, but
+    // a live secret link to the user's journeys is worth deleting by name.
+    sqlx::query("DELETE FROM unlisted_links WHERE resource_type = $1 AND resource_id = $2")
+        .bind(crate::data::calendar_feed::RESOURCE_TYPE)
+        .bind(user_id)
+        .execute(&mut *tx)
+        .await?;
 
     // Cascades to every other table in `USER_KEYED_TABLES` (and on to
     // their children); `groups.created_by` is set to NULL.
@@ -761,6 +770,15 @@ pub(crate) mod db_tests {
         let (user, other) = ("acct-del-user", "acct-del-other");
         cleanup(&pool, "acct-del-").await;
         seed_every_feature(&pool, user, other).await;
+        // The calendar feed link, whose `resource_id` is the user's id.
+        sqlx::query(
+            "INSERT INTO unlisted_links (token_hash, resource_type, resource_id, created_by) \
+             VALUES ('cal-' || $1, 'calendar_feed', $1, $1)",
+        )
+        .bind(user)
+        .execute(&pool)
+        .await
+        .unwrap();
 
         // Sanity: the seed really did touch every users(id) FK column.
         let fk_columns = users_fk_columns(&pool).await;
@@ -806,6 +824,27 @@ pub(crate) mod db_tests {
             scalar_i64(&pool, "SELECT COUNT(*) FROM users WHERE id = $1", &[user]).await,
             0
         );
+        // Every credential went with the account: the sessions, personal
+        // tokens, delegated grants, push subscriptions, webhooks, group
+        // invite links and the calendar feed link.
+        for (table, column) in [
+            ("sessions", "user_id"),
+            ("personal_api_tokens", "user_id"),
+            ("delegated_grants", "user_id"),
+            ("push_subscriptions", "user_id"),
+            ("webhook_destinations", "user_id"),
+            ("group_invite_links", "created_by"),
+            ("unlisted_links", "created_by"),
+            ("unlisted_links", "resource_id"),
+        ] {
+            let n = scalar_i64(
+                &pool,
+                &format!("SELECT COUNT(*) FROM {table} WHERE {column} = $1"),
+                &[user],
+            )
+            .await;
+            assert_eq!(n, 0, "{table}.{column} survived the deletion");
+        }
         // Child tables with no users FK went with their parents.
         for (sql, what) in [
             (

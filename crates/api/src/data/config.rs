@@ -192,6 +192,17 @@ pub struct ServiceArguments {
     #[arg(long, env, default_value_t = 24)]
     pub session_extend_throttle_hours: i64,
 
+    /// How recently, in minutes, the user must have authenticated at the
+    /// identity provider for an account deletion to go through
+    /// (`DELETE /public/account` answers `403 recent_login_required`
+    /// otherwise). Measured from the session's creation, which a login
+    /// sets and nothing else moves (`data::users::invalidate_all_sessions_and_reissue`
+    /// carries it over). The frontend satisfies it with
+    /// `GET /public/auth/login?reauth=1`, which forces the provider to ask
+    /// again. Must be between 1 and 1440.
+    #[arg(long, env, default_value_t = 15)]
+    pub session_recent_login_minutes: i64,
+
     /// How many days of `line_status_history` rows the aggregator actually
     /// keeps before `queries::prune_history` (`crates/aggregator`) deletes
     /// them. This crate never reads or prunes that table itself -- the

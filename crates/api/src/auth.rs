@@ -295,6 +295,11 @@ pub struct AuthenticatedUser {
     /// the session, so `POST /public/events` and `GET /auth/session` need
     /// no second query.
     pub analytics_opt_in: bool,
+    /// When the session was created: the login that started it
+    /// (`sessions.created_at`), which nothing but a login sets and
+    /// "log out other sessions" carries over. `DELETE /public/account`
+    /// requires it to be recent.
+    pub login_at: chrono::DateTime<chrono::Utc>,
 }
 
 impl FromRequestParts<App> for AuthenticatedUser {
@@ -327,6 +332,7 @@ impl FromRequestParts<App> for AuthenticatedUser {
             username: session.username,
             groups: session.groups,
             analytics_opt_in: session.analytics_opt_in,
+            login_at: session.session_created_at,
         })
     }
 }

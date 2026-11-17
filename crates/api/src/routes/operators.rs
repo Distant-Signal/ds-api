@@ -194,6 +194,7 @@ mod db_tests {
             session_ttl_days: 14,
             session_max_age_days: 90,
             session_extend_throttle_hours: 24,
+            session_recent_login_minutes: 15,
             history_retention_days: 7,
             daily_stats_retention_days: 300,
             half_hourly_stats_retention_hours: 840,

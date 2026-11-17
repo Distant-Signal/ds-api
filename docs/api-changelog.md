@@ -130,6 +130,41 @@ for the owner and for a group member, and
 now also has `disrupted` (`true` exactly when `openBreak` is not `null`,
 else `false`).
 
+## 2026-11-17: Recent login for account deletion; revoke-others options
+
+No migration, grant or schema change (DS-534, security review L11).
+Response shapes are unchanged.
+
+- `DELETE /public/account` now needs a recent login. When the session's
+  login (`sessions.created_at`, set by a login and carried over by "log out
+  other sessions") is older than `SESSION_RECENT_LOGIN_MINUTES` (default
+  15, 1 to 1440), it answers `403` with `{"error":
+  "recent_login_required", "message": "..."}` and deletes nothing. The
+  check runs after the same-origin check and before the confirmation
+  phrase. A client satisfies it by sending the browser to
+  `GET /public/auth/login?reauth=1&return_to=<path>` and retrying
+  afterwards.
+- `GET /public/auth/login` accepts `reauth=1` (or `true`): the provider is
+  sent `prompt=login` and `max_age=0` (OIDC Core 3.1.2.1), so it asks the
+  user to authenticate again even with a live provider session. The
+  callback refuses (`403`) when the ID token's `auth_time` is older than
+  the recent-login window, or when the login is for a different account
+  than the session the browser carried. A token without `auth_time` is
+  accepted: the prompt is then the only control. `return_to` is validated
+  as for any login.
+- `POST /public/auth/sessions/revoke-others` takes an optional JSON body
+  `{"revokeCalendarFeed": false, "revokePersonalTokens": false}`; both
+  default to false (an empty body is as before: only the sessions end,
+  and delegated tokens issued before it are refused). `true` also revokes
+  the calendar feed link, and every personal API token, in the same
+  transaction. The reissued session keeps the caller's original login
+  time, so ending other sessions does not make the session count as a
+  recent login.
+- Account deletion already removed every credential by cascade (sessions,
+  personal API tokens, delegated grants, push subscriptions, webhooks,
+  group invite links, share links and the calendar feed link); the feed
+  link is now also deleted by name, and the tests cover each.
+
 ## 2026-11-17: Review fixes: boards, stop points, line trains, groups
 
 No migration, grant or schema change (DS-534). Response shapes are
