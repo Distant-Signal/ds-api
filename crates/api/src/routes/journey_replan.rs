@@ -98,6 +98,12 @@ pub fn router() -> Router {
 /// a slow network (§8.3, §14 Q12).
 const UNDO_WINDOW: Duration = Duration::minutes(2);
 
+/// The longest an "I missed this train" can be undone for: until the
+/// replacement's first new train leaves, but never past this. The mistake
+/// ("I didn't actually miss it") is noticed late, once the replacement is
+/// on its way to being needed (DS-534).
+const MISSED_UNDO_CAP: Duration = Duration::hours(1);
+
 /// Now, as every route here judges it: `london_now`, which a test can pin.
 pub(crate) fn now_utc() -> DateTime<Utc> {
     crate::routes::london_now().with_timezone(&Utc)
@@ -2146,14 +2152,22 @@ async fn get_revisions(
                 .await
                 .map_err(internal("list revisions"))?;
             let now = now_utc();
-            let latest_at = revisions.first().map(|r| r.created_at);
-            let latest_no = revisions.first().map(|r| r.revision_no);
+            let latest = revisions.first();
+            let can_revert: Vec<bool> = revisions
+                .iter()
+                .map(|revision| {
+                    latest.is_some_and(|latest| {
+                        latest.revision_no != revision.revision_no
+                            && revert_allowed(revision, latest, now)
+                    })
+                })
+                .collect();
             let revisions = revisions
                 .into_iter()
-                .map(|revision| RevisionResponse {
-                    can_revert: Some(revision.revision_no) != latest_no
-                        && revert_allowed(&revision, latest_no, latest_at, now),
+                .zip(can_revert)
+                .map(|(revision, can_revert)| RevisionResponse {
                     revision,
+                    can_revert,
                 })
                 .collect();
             Ok(Json(RevisionsResponse { revisions }).into_response())
@@ -2162,23 +2176,62 @@ async fn get_revisions(
     )
 }
 
-/// Whether the plan `revision` can be gone back to (§14 Q12): the one just
-/// replaced, within [`UNDO_WINDOW`] of the change; any earlier one while its
-/// trains are all still to leave.
+/// Whether the plan `revision` can be gone back to (§14 Q12), `latest`
+/// being the plan now:
+///
+/// - the one just replaced, within [`UNDO_WINDOW`] of the change;
+/// - the one a "this train was missed" replacement (`user_missed`) just
+///   replaced, until that replacement's first new train leaves, but at most
+///   [`MISSED_UNDO_CAP`] after the change (DS-534): the traveller notices
+///   they did not miss it later than 2 minutes on;
+/// - any earlier one while its trains are all still to leave.
 fn revert_allowed(
     revision: &journey_revisions::Revision,
-    latest_no: Option<i32>,
-    latest_at: Option<DateTime<Utc>>,
+    latest: &journey_revisions::Revision,
     now: DateTime<Utc>,
 ) -> bool {
-    if latest_no == Some(revision.revision_no + 1)
-        && latest_at.is_some_and(|at| now - at <= UNDO_WINDOW)
-    {
-        return true;
+    if latest.revision_no == revision.revision_no + 1 {
+        if now - latest.created_at <= UNDO_WINDOW {
+            return true;
+        }
+        if latest.cause.as_deref() == Some("user_missed")
+            && missed_undo_until(revision, latest).is_some_and(|until| now <= until)
+        {
+            return true;
+        }
     }
     revision.legs.iter().all(|leg| {
         leg.kind != journeys::LEG_KIND_TRAIN || leg.booked_departure.is_some_and(|d| d > now)
     })
+}
+
+/// Whether two revisions' legs are the same ride: the same train on the
+/// same date, or (untracked) the same times.
+fn same_ride(a: &journey_revisions::RevisionLeg, b: &journey_revisions::RevisionLeg) -> bool {
+    if a.kind == journeys::LEG_KIND_TRAIN && b.kind == journeys::LEG_KIND_TRAIN {
+        a.train_uid == b.train_uid && a.service_date == b.service_date
+    } else {
+        a.kind == b.kind
+            && a.planned_departure == b.planned_departure
+            && a.planned_arrival == b.planned_arrival
+    }
+}
+
+/// When the Undo of the `user_missed` revision `latest`, which replaced
+/// `previous`, ends: the first departure of a leg it brought in (one
+/// `previous` did not have), at most [`MISSED_UNDO_CAP`] after it was made.
+/// `None` when no new leg's departure is known (the 2 minutes stand).
+fn missed_undo_until(
+    previous: &journey_revisions::Revision,
+    latest: &journey_revisions::Revision,
+) -> Option<DateTime<Utc>> {
+    let first_departure = latest
+        .legs
+        .iter()
+        .filter(|leg| !previous.legs.iter().any(|old| same_ride(old, leg)))
+        .filter_map(|leg| leg.booked_departure.or(leg.planned_departure))
+        .min()?;
+    Some(first_departure.min(latest.created_at + MISSED_UNDO_CAP))
 }
 
 /// `POST /Journeys/{id}/revisions/{no}/revert` (optional
@@ -2210,12 +2263,7 @@ async fn post_revert(
                 .iter()
                 .find(|r| r.revision_no == revision_no && r.revision_no != latest.revision_no)
                 .ok_or_else(not_found)?;
-            if !revert_allowed(
-                target,
-                Some(latest.revision_no),
-                Some(latest.created_at),
-                now,
-            ) {
+            if !revert_allowed(target, latest, now) {
                 return Err(RouteError::coded(
                     StatusCode::CONFLICT,
                     "revision_gone",
