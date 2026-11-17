@@ -1633,12 +1633,21 @@ async fn post_accept(
             }) && chosen
                 .first_train_departure()
                 .is_none_or(|departure| departure >= now - Duration::minutes(1));
-            let (row, chosen, rank) = if fresh_enough {
+            // The leg the replacement starts from comes with the set the
+            // chosen suggestion came from: a re-plan follows the break's
+            // trigger as it is now (review J6: the stored set's could be
+            // an earlier leg's).
+            let (row, chosen, rank, from_leg_id) = if fresh_enough {
                 let rank = stored
                     .as_ref()
                     .and_then(|set| set.suggestions.iter().position(|s| s.id == chosen.id))
                     .unwrap_or(0);
-                (row, chosen, rank)
+                let from_leg_id = stored
+                    .as_ref()
+                    .map_or(row.trigger_leg_id.unwrap_or_default(), |set| {
+                        set.from_leg_id
+                    });
+                (row, chosen, rank, from_leg_id)
             } else {
                 let analysis = analyse(&app, journey_id, now)
                     .await
@@ -1653,10 +1662,10 @@ async fn post_accept(
                     set.suggestions
                         .iter()
                         .position(|s| s.train_key() == key)
-                        .map(|rank| (set.suggestions[rank].clone(), rank))
+                        .map(|rank| (set.suggestions[rank].clone(), rank, set.from_leg_id))
                 });
                 match found {
-                    Some((suggestion, rank)) => (row, suggestion, rank),
+                    Some((suggestion, rank, from_leg_id)) => (row, suggestion, rank, from_leg_id),
                     None => return Ok(stale_response(row, now)),
                 }
             };
@@ -1666,11 +1675,6 @@ async fn post_accept(
                     "a suggestion train was not resolved"
                 )));
             };
-            let from_leg_id = stored
-                .as_ref()
-                .map_or(row.trigger_leg_id.unwrap_or_default(), |set| {
-                    set.from_leg_id
-                });
             let cause = Cause::parse(&row.cause).unwrap_or(Cause::ConnectionMissed);
             let outcome = journey_replace::replace(
                 &app.database,

@@ -1790,3 +1790,75 @@ async fn an_idempotency_key_is_scoped_to_its_journey() {
     assert_eq!(status, StatusCode::CONFLICT, "{body}");
     assert_ne!(body, first);
 }
+
+/// Accepting from stale suggestions re-plans them, and the replacement
+/// starts from the leg the fresh set starts from (review J6), not the one
+/// the stored set named.
+#[tokio::test]
+#[ignore = "requires a live database: DATABASE_URL"]
+async fn an_accept_after_a_re_plan_starts_from_the_fresh_sets_leg() {
+    let _now = pin_now();
+    let pool = connect().await;
+    let _cleanup = cleanup(&pool).await;
+    seed_timetable(&pool).await;
+    seed_onward(&pool).await;
+    let token = seed_session(&pool, USER).await;
+    let router = router(pool.clone());
+    let (journey_id, legs) = create_started_two_leg_journey(&pool, &router, &token).await;
+    seed_live(&pool, "RP0004", "cancelled", 0, "2099-05-05T07:00:00Z").await;
+    let journey = format!("/Journeys/{journey_id}");
+
+    let (_, detail) = call(&router, "GET", &journey, Some(&token), None, None).await;
+    assert_eq!(detail["openBreak"]["cause"], "cancelled", "{detail}");
+    assert_eq!(detail["openBreak"]["triggerLegId"], legs[1], "{detail}");
+    let break_id = detail["openBreak"]["id"].as_i64().expect("break id");
+    let (status, preview) = call(
+        &router,
+        "POST",
+        &format!("/Journeys/{journey_id}/replan/preview"),
+        Some(&token),
+        Some(serde_json::json!({ "breakId": break_id })),
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{preview}");
+    let pick = preview["suggestions"]["suggestions"]
+        .as_array()
+        .expect("suggestions")
+        .iter()
+        .find(|s| s["legs"][0]["trainUid"] == "RP0005")
+        .expect("RP0005 offered")
+        .clone();
+    // The stored set goes stale and names the first leg, as a set planned
+    // before the break's trigger moved would.
+    sqlx::query(
+        "UPDATE journey_breaks SET suggestions = jsonb_set(jsonb_set(suggestions, \
+             '{fromLegId}', to_jsonb($2::bigint)), '{fingerprint}', '\"moved\"') \
+         WHERE id = $1",
+    )
+    .bind(break_id)
+    .bind(legs[0])
+    .execute(&pool)
+    .await
+    .expect("age the stored set");
+
+    let (status, body) = call(
+        &router,
+        "POST",
+        &format!("/Journeys/{journey_id}/replan/accept"),
+        Some(&token),
+        Some(serde_json::json!({ "breakId": break_id, "suggestionId": pick["id"] })),
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let (_, detail) = call(&router, "GET", &journey, Some(&token), None, None).await;
+    let uids: Vec<&str> = detail["legs"]
+        .as_array()
+        .expect("legs")
+        .iter()
+        .filter_map(|leg| leg["trackedTrainState"]["trainUid"].as_str())
+        .collect();
+    assert_eq!(uids, ["RP0001", "RP0005"], "{detail}");
+    assert_eq!(detail["legs"][0]["id"], legs[0], "{detail}");
+}
