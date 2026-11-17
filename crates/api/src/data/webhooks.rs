@@ -12,7 +12,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 
 use anyhow::Result;
 use chrono::{DateTime, Utc};
-use ds_runtime::secret_box::{KeyRing, Sealed};
+use ds_runtime::secret_box::{Context, KeyRing, OpenError, Sealed, WEBHOOK_DESTINATION_SECRET};
 use rand::Rng;
 use rand::rngs::OsRng;
 use serde::Serialize;
@@ -78,10 +78,24 @@ fn init_keys(value: Option<&str>) -> bool {
     }
 }
 
-/// Encrypts a destination's secret with the active key. `None` when there
-/// is no key ring (the routes are off then, so this is not reached).
-pub fn seal(secret: &str) -> Option<Sealed> {
-    KEYS.get()?.seal(secret).ok()
+/// What a destination's secret is bound to: its table, column and row id
+/// (ds-core's docs/secret-box-aad.md). The notifier opens with the same
+/// context.
+pub fn secret_context(id: i64) -> Context {
+    Context::new(WEBHOOK_DESTINATION_SECRET, id)
+}
+
+/// Whether there is a key ring to encrypt with (the routes are off without
+/// one, so a request that gets this far normally has it).
+pub fn can_seal() -> bool {
+    KEYS.get().is_some()
+}
+
+/// Encrypts a destination's secret with the active key for row `id`. The
+/// ring's write format decides the stored format (legacy until ds-core's
+/// stage 2), so this stays within the nonce column's CHECK (12 bytes).
+fn seal_for_row(ring: &KeyRing, secret: &str, id: i64) -> Result<Sealed, OpenError> {
+    ring.seal_in(secret, &secret_context(id))
 }
 
 /// Whether the webhook routes are on ([`init_from_env`]).
@@ -163,14 +177,26 @@ pub async fn list(pool: &PgPool, user_id: &str) -> Result<Vec<WebhookRow>> {
 }
 
 /// The columns of a new destination.
-#[derive(Debug)]
 pub struct NewWebhook<'a> {
     pub user_id: &'a str,
     pub kind: Kind,
     pub name: &'a str,
     pub url: &'a str,
-    /// The secret, already encrypted ([`seal`]).
-    pub secret: Option<&'a Sealed>,
+    /// The secret as given or generated; [`create`] encrypts it once the
+    /// row id is known, so it is bound to the row. Never logged.
+    pub secret: Option<&'a str>,
+}
+
+impl std::fmt::Debug for NewWebhook<'_> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("NewWebhook")
+            .field("user_id", &self.user_id)
+            .field("kind", &self.kind)
+            .field("name", &self.name)
+            .field("url", &self.url)
+            .field("secret", &self.secret.map(|_| "<redacted>"))
+            .finish()
+    }
 }
 
 /// What [`create`] did.
@@ -209,23 +235,41 @@ pub async fn create(pool: &PgPool, new: &NewWebhook<'_>) -> Result<CreateOutcome
     }
     let inserted = sqlx::query_as::<_, WebhookRow>(&format!(
         "INSERT INTO webhook_destinations \
-           (user_id, kind, name, url, secret_ciphertext, secret_nonce, secret_key_id) \
-         VALUES ($1, $2, $3, $4, $5, $6, $7) \
+           (user_id, kind, name, url) \
+         VALUES ($1, $2, $3, $4) \
          ON CONFLICT (user_id, url) DO NOTHING RETURNING {COLUMNS}"
     ))
     .bind(new.user_id)
     .bind(new.kind.as_str())
     .bind(new.name)
     .bind(new.url)
-    .bind(new.secret.map(|s| s.ciphertext.as_slice()))
-    .bind(new.secret.map(|s| s.nonce.as_slice()))
-    .bind(new.secret.map(|s| s.key_id.as_str()))
     .fetch_optional(&mut *tx)
     .await?;
-    let Some(row) = inserted else {
+    let Some(mut row) = inserted else {
         tx.rollback().await?;
         return Ok(CreateOutcome::Duplicate);
     };
+    // The secret is sealed for the row id the INSERT assigned, then written
+    // in the same transaction: no reader sees the row without it.
+    if let Some(secret) = new.secret {
+        let ring = KEYS
+            .get()
+            .ok_or_else(|| anyhow::anyhow!("no webhook secret key ring"))?;
+        let sealed = seal_for_row(ring, secret, row.id)
+            .map_err(|_| anyhow::anyhow!("could not encrypt the webhook secret"))?;
+        row = sqlx::query_as::<_, WebhookRow>(&format!(
+            "UPDATE webhook_destinations \
+             SET secret_ciphertext = $1, secret_nonce = $2, secret_key_id = $3 \
+             WHERE id = $4 AND user_id = $5 RETURNING {COLUMNS}"
+        ))
+        .bind(sealed.ciphertext.as_slice())
+        .bind(sealed.nonce.as_slice())
+        .bind(sealed.key_id.as_str())
+        .bind(row.id)
+        .bind(new.user_id)
+        .fetch_one(&mut *tx)
+        .await?;
+    }
     tx.commit().await?;
     Ok(CreateOutcome::Created(row))
 }
@@ -280,6 +324,75 @@ mod tests {
         assert!(!init_keys(Some("")));
     }
 
+    fn test_ring() -> KeyRing {
+        KeyRing::parse(&format!("k1:{}=", "A".repeat(43))).unwrap()
+    }
+
+    #[test]
+    fn a_secret_sealed_for_a_row_opens_with_that_row_and_is_still_legacy() {
+        let ring = test_ring();
+        let sealed = seal_for_row(&ring, "whsec_x", 7).unwrap();
+        // Stage 1b still writes v1: the nonce column's CHECK wants 12 bytes.
+        assert_eq!(sealed.nonce.len(), 12);
+        assert_eq!(
+            ring.open_in(&sealed, &secret_context(7)).unwrap(),
+            "whsec_x"
+        );
+    }
+
+    #[test]
+    fn a_v2_secret_does_not_open_for_another_row() {
+        let ring = test_ring();
+        let v2 = ring
+            .seal_as(
+                "whsec_x",
+                &secret_context(7),
+                ds_runtime::secret_box::Format::V2,
+            )
+            .unwrap();
+        assert_eq!(v2.nonce.len(), 13);
+        assert_eq!(ring.open_in(&v2, &secret_context(7)).unwrap(), "whsec_x");
+        assert!(ring.open_in(&v2, &secret_context(8)).is_err());
+    }
+
+    #[test]
+    fn a_legacy_secret_opens_under_any_row_and_is_counted() {
+        let recorder = metrics_exporter_prometheus::PrometheusBuilder::new().build_recorder();
+        let handle = recorder.handle();
+        metrics::with_local_recorder(&recorder, || {
+            let ring = test_ring();
+            let legacy = ring.seal("whsec_x").unwrap();
+            assert_eq!(
+                ring.open_in(&legacy, &secret_context(7)).unwrap(),
+                "whsec_x"
+            );
+            assert_eq!(
+                ring.open_in(&legacy, &secret_context(8)).unwrap(),
+                "whsec_x"
+            );
+        });
+        let rendered = handle.render();
+        assert!(
+            rendered.contains(
+                r#"distant_signal_secret_box_legacy_opens_total{purpose="webhook_destinations.secret_ciphertext"} 2"#
+            ),
+            "{rendered}"
+        );
+    }
+
+    #[test]
+    fn the_new_destination_debug_hides_the_secret() {
+        let new = NewWebhook {
+            user_id: "u",
+            kind: Kind::Generic,
+            name: "n",
+            url: "https://h.example",
+            secret: Some("whsec_visible"),
+        };
+        let shown = format!("{new:?}");
+        assert!(!shown.contains("whsec_visible"), "{shown}");
+    }
+
     #[test]
     fn kinds_round_trip() {
         for kind in [Kind::Generic, Kind::Ntfy, Kind::Gotify] {
@@ -309,14 +422,15 @@ mod tests {
                 .await
                 .unwrap();
         }
-        let ring = KeyRing::parse(&format!("k1:{}=", "A".repeat(43))).unwrap();
-        let sealed = Box::leak(Box::new(ring.seal("whsec_x").unwrap()));
+        let ring_spec = format!("k1:{}=", "A".repeat(43));
+        assert!(init_keys(Some(&ring_spec)));
+        let ring = KeyRing::parse(&ring_spec).unwrap();
         let new = |user_id: &'static str, url: &'static str| NewWebhook {
             user_id,
             kind: Kind::Generic,
             name: "n",
             url,
-            secret: Some(sealed),
+            secret: Some("whsec_x"),
         };
         let mut first = None;
         for n in 0..MAX_PER_USER {
@@ -324,6 +438,25 @@ mod tests {
             match create(&pool, &new(a, url)).await.unwrap() {
                 CreateOutcome::Created(row) => {
                     assert!(row.has_secret && row.enabled);
+                    // Bound to the row id, still in the legacy format (12-byte nonce).
+                    let (ciphertext, nonce, key_id): (Vec<u8>, Vec<u8>, String) = sqlx::query_as(
+                        "SELECT secret_ciphertext, secret_nonce, secret_key_id \
+                         FROM webhook_destinations WHERE id = $1",
+                    )
+                    .bind(row.id)
+                    .fetch_one(&pool)
+                    .await
+                    .unwrap();
+                    assert_eq!(nonce.len(), 12);
+                    let stored = Sealed {
+                        ciphertext,
+                        nonce,
+                        key_id,
+                    };
+                    assert_eq!(
+                        ring.open_in(&stored, &secret_context(row.id)).unwrap(),
+                        "whsec_x"
+                    );
                     first.get_or_insert(row.id);
                 }
                 other => panic!("{other:?}"),
