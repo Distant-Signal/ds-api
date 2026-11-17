@@ -35,6 +35,27 @@ now have an opaque id and the numeric one is **deprecated**.
   requests that named an object by its numeric id (`kind` is `journey`,
   `leg`, `tracking` or `device`). It is the evidence for stage 3 below.
 
+## 2026-11-17: The sole owner can't leave a group; they delete it
+
+**Behaviour change** (DS-534, round-2 security assessment); no field, migration or grant change. An older frontend shows its generic failure message for the new `409` until the frontend change ships, so deploy this api first.
+
+- `DELETE /groups/{id}/members/{member}` (`{member}` the opaque member id or
+  the caller's own account id) by the group's owner when they are its only
+  member is refused with `409` and nothing is written:
+  `{"error":"owner_must_delete","message":"You are the only member and the owner of this group, so leaving would delete it. Delete the group instead.","memberCount":1}`
+  (`application/json`; every other error from this route stays plain text).
+  Before, it answered `204` and deleted the group, with its shared trains,
+  journeys and links, with no confirmation. `DELETE /groups/{id}` (owner
+  only, `204`) is unchanged and is how a sole owner deletes the group.
+  `memberCount` is the group's member count, always `1` here; `GET
+  /groups/{id}` already gives `role` and `memberCount` for a client that
+  wants to ask first.
+- Unchanged: an owner who leaves a group with other members still hands
+  ownership over (to the longest-standing admin, else the
+  longest-standing member) and gets `204`; members and admins leave as
+  before; deleting an account still deletes the groups it solely owns.
+- Not changed: there is no route to hand ownership over without leaving.
+
 ## 2026-11-17: "I missed this train" no longer waits for the train to arrive
 
 **Behaviour change** (DS-534, the missed-train redesign, part 1); no new field, migration or grant. Additive for every client; nothing a client calls changes shape.

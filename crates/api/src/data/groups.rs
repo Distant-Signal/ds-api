@@ -581,6 +581,11 @@ pub enum RemoveMemberOutcome {
     /// instead of only by the route before calling in (finding #3 of the
     /// 2026-09-25 Low-severity pass).
     OwnerCannotBeRemoved,
+    /// The target is the `owner` and the only member, and the caller asked
+    /// for the group not to be deleted as a side effect
+    /// ([`remove_member_keeping_sole_owner_group`]). Nothing was written; the
+    /// route maps this to `409` `owner_must_delete`.
+    SoleOwnerMustDelete,
 }
 
 /// Removes `target_user_id` from `group_id`, handling every decided edge
@@ -632,7 +637,9 @@ pub async fn remove_member(
     match outcome {
         // Nothing was written on either path; roll back rather than commit
         // an empty transaction, as this function always has.
-        RemoveMemberOutcome::NotAMember | RemoveMemberOutcome::OwnerCannotBeRemoved => {
+        RemoveMemberOutcome::NotAMember
+        | RemoveMemberOutcome::OwnerCannotBeRemoved
+        | RemoveMemberOutcome::SoleOwnerMustDelete => {
             tx.rollback().await?;
         }
         RemoveMemberOutcome::Removed { .. } | RemoveMemberOutcome::GroupDeleted => {
@@ -640,6 +647,51 @@ pub async fn remove_member(
         }
     }
     Ok(outcome)
+}
+
+/// [`remove_member`] for a member leaving or being removed through the
+/// route (DS-534): identical, except that the sole owner leaving is refused
+/// ([`RemoveMemberOutcome::SoleOwnerMustDelete`], nothing written) instead
+/// of deleting the group. Leaving a group never deletes it silently; the
+/// owner deletes it explicitly (`delete_group`). An owner who leaves a group
+/// with other members still hands ownership over, as in [`remove_member`].
+/// Account deletion keeps the empty-group deletion
+/// ([`remove_member_in_tx`]).
+pub async fn remove_member_keeping_sole_owner_group(
+    pool: &PgPool,
+    group_id: &str,
+    target_user_id: &str,
+    remover_is_target: bool,
+) -> Result<RemoveMemberOutcome> {
+    let mut tx = pool.begin().await?;
+    let outcome = remove_member_inner(
+        &mut tx,
+        group_id,
+        target_user_id,
+        remover_is_target,
+        SoleOwner::Refuse,
+    )
+    .await?;
+    match outcome {
+        RemoveMemberOutcome::NotAMember
+        | RemoveMemberOutcome::OwnerCannotBeRemoved
+        | RemoveMemberOutcome::SoleOwnerMustDelete => {
+            tx.rollback().await?;
+        }
+        RemoveMemberOutcome::Removed { .. } | RemoveMemberOutcome::GroupDeleted => {
+            tx.commit().await?;
+        }
+    }
+    Ok(outcome)
+}
+
+/// What [`remove_member_inner`] does when the owner is the only member.
+#[derive(Clone, Copy)]
+enum SoleOwner {
+    /// Delete the group (spec §2.1; account deletion).
+    DeleteGroup,
+    /// Refuse, writing nothing.
+    Refuse,
 }
 
 /// [`remove_member`]'s body, run inside a caller-owned transaction and
@@ -652,6 +704,23 @@ pub(crate) async fn remove_member_in_tx(
     group_id: &str,
     target_user_id: &str,
     remover_is_target: bool,
+) -> Result<RemoveMemberOutcome> {
+    remove_member_inner(
+        tx,
+        group_id,
+        target_user_id,
+        remover_is_target,
+        SoleOwner::DeleteGroup,
+    )
+    .await
+}
+
+async fn remove_member_inner(
+    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    group_id: &str,
+    target_user_id: &str,
+    remover_is_target: bool,
+    sole_owner: SoleOwner,
 ) -> Result<RemoveMemberOutcome> {
     // Finding #3 (2026-09-25 review): serializes concurrent `remove_member`
     // calls on the SAME group. Without this, two concurrent departures
@@ -702,6 +771,9 @@ pub(crate) async fn remove_member_in_tx(
     .await?;
 
     if target_role == "owner" && remaining == 0 {
+        if matches!(sole_owner, SoleOwner::Refuse) {
+            return Ok(RemoveMemberOutcome::SoleOwnerMustDelete);
+        }
         sqlx::query("DELETE FROM groups WHERE id = $1")
             .bind(group_id)
             .execute(&mut **tx)
@@ -4092,6 +4164,31 @@ mod db_tests {
         assert!(detail.is_none(), "the group itself should be gone");
 
         cleanup(&pool, &["TEST-GROUPS-SOLO-OWNER"]).await;
+    }
+
+    #[tokio::test]
+    #[ignore = "requires a live database; see the plan's Global Constraints for the \
+                DATABASE_URL incantation, then run with `cargo test -p api \
+                remove_member_keeping_sole_owner_group_refuses_the_sole_owner -- --ignored --test-threads=1`"]
+    async fn remove_member_keeping_sole_owner_group_refuses_the_sole_owner() {
+        let pool = connect().await;
+        seed_user(&pool, "TEST-GROUPS-KEEP-SOLO").await;
+        let group_id = create_group(&pool, "Keep Solo Test", "TEST-GROUPS-KEEP-SOLO")
+            .await
+            .expect("create group");
+
+        let outcome =
+            remove_member_keeping_sole_owner_group(&pool, &group_id, "TEST-GROUPS-KEEP-SOLO", true)
+                .await
+                .expect("owner leaves alone");
+        assert_eq!(outcome, RemoveMemberOutcome::SoleOwnerMustDelete);
+
+        let detail = get_group_detail(&pool, &group_id, "TEST-GROUPS-KEEP-SOLO")
+            .await
+            .expect("query");
+        assert!(detail.is_some(), "the group must survive the refusal");
+
+        cleanup(&pool, &["TEST-GROUPS-KEEP-SOLO"]).await;
     }
 
     /// Finding #3's own regression test (2026-09-25 review): proves

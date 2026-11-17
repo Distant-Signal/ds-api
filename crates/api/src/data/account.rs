@@ -129,8 +129,10 @@ pub async fn delete_account(pool: &PgPool, user_id: &str) -> Result<Option<Accou
             RemoveMemberOutcome::GroupDeleted => outcome.groups_deleted += 1,
             // Raced with a concurrent leave: nothing left to do.
             RemoveMemberOutcome::NotAMember => {}
-            // Unreachable with `remover_is_target = true`.
-            RemoveMemberOutcome::OwnerCannotBeRemoved => {
+            // Unreachable with `remover_is_target = true`, and
+            // `remove_member_in_tx` deletes a sole owner's group.
+            RemoveMemberOutcome::OwnerCannotBeRemoved
+            | RemoveMemberOutcome::SoleOwnerMustDelete => {
                 anyhow::bail!("remove_member refused a self-removal from group {group_id}")
             }
         }

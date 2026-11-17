@@ -19,6 +19,7 @@
 use axum::Json;
 use axum::extract::{Path, State};
 use axum::http::StatusCode;
+use axum::response::IntoResponse;
 use serde::{Deserialize, Serialize};
 
 use crate::app::{App, Router};
@@ -417,11 +418,17 @@ async fn resolve_target(
 /// removal of the brand-new owner straight through. `groups::remove_member`
 /// now re-checks the target's role itself, inside the same row-locked
 /// transaction as the removal, so that check can no longer go stale.
+///
+/// The sole owner leaving (DS-534) is refused: `409` `owner_must_delete`,
+/// nothing written, the group kept. The owner deletes the group with
+/// `DELETE /groups/{id}` instead (`delete_group`, owner only). An owner who
+/// leaves a group with other members is not refused: ownership passes to
+/// the longest-standing admin, else member (`groups::remove_member`).
 async fn remove_member(
     State(app): State<App>,
     user: AuthenticatedUser,
     Path((group_id, member)): Path<(String, String)>,
-) -> Result<StatusCode, (StatusCode, String)> {
+) -> Result<StatusCode, LeaveError> {
     let caller_role = require_member(&app, &group_id, &user.id).await?;
     let target_user_id = resolve_target(&app, &group_id, &user.id, &member)
         .await?
@@ -432,22 +439,68 @@ async fn remove_member(
         return Err((
             StatusCode::FORBIDDEN,
             "you don't have permission to remove members from this group".to_string(),
-        ));
+        )
+            .into());
     }
 
-    match groups::remove_member(&app.database, &group_id, &target_user_id, is_self)
-        .await
-        .map_err(internal_error("remove member"))?
+    match groups::remove_member_keeping_sole_owner_group(
+        &app.database,
+        &group_id,
+        &target_user_id,
+        is_self,
+    )
+    .await
+    .map_err(internal_error("remove member"))?
     {
         groups::RemoveMemberOutcome::NotAMember => {
-            Err((StatusCode::NOT_FOUND, "no member with that id".to_string()))
+            Err((StatusCode::NOT_FOUND, "no member with that id".to_string()).into())
         }
         groups::RemoveMemberOutcome::OwnerCannotBeRemoved => Err((
             StatusCode::FORBIDDEN,
             "the group owner can't be removed".to_string(),
-        )),
+        )
+            .into()),
+        groups::RemoveMemberOutcome::SoleOwnerMustDelete => Err(LeaveError::OwnerMustDelete),
+        // `GroupDeleted` is unreachable here: the call above refuses it.
         groups::RemoveMemberOutcome::Removed { .. } | groups::RemoveMemberOutcome::GroupDeleted => {
             Ok(StatusCode::NO_CONTENT)
+        }
+    }
+}
+
+/// The error code of the `409` the sole owner's leave gets. Stable: clients
+/// match on `error`, never on `message`.
+const OWNER_MUST_DELETE: &str = "owner_must_delete";
+
+/// [`remove_member`]'s error: the usual plain-text `(status, message)`, or
+/// the one JSON body this file has, for the sole owner's leave.
+enum LeaveError {
+    Plain(StatusCode, String),
+    OwnerMustDelete,
+}
+
+impl From<(StatusCode, String)> for LeaveError {
+    fn from((status, message): (StatusCode, String)) -> Self {
+        LeaveError::Plain(status, message)
+    }
+}
+
+impl IntoResponse for LeaveError {
+    fn into_response(self) -> axum::response::Response {
+        match self {
+            LeaveError::Plain(status, message) => (status, message).into_response(),
+            // The sole owner is the group's only member, so `memberCount` is
+            // always 1; it is there so a client can say who a deletion
+            // affects without a second request.
+            LeaveError::OwnerMustDelete => (
+                StatusCode::CONFLICT,
+                Json(serde_json::json!({
+                    "error": OWNER_MUST_DELETE,
+                    "message": "You are the only member and the owner of this group, so leaving would delete it. Delete the group instead.",
+                    "memberCount": 1,
+                })),
+            )
+                .into_response(),
         }
     }
 }
@@ -1648,6 +1701,200 @@ mod db_tests {
             &pool,
             &group_id,
             &["TEST-ROUTE-GROUPS-RM-OWNER", "TEST-ROUTE-GROUPS-RM-ADMIN"],
+        )
+        .await;
+    }
+
+    #[tokio::test]
+    #[ignore = "requires a live database; see the plan's Global Constraints for the \
+                DATABASE_URL incantation, then run with `cargo test -p api \
+                leave_group_the_sole_owner_is_refused_with_owner_must_delete -- --ignored --test-threads=1`"]
+    async fn leave_group_the_sole_owner_is_refused_with_owner_must_delete() {
+        let pool = connect().await;
+        let owner_token = seed_session(&pool, "TEST-ROUTE-GROUPS-LEAVE-SOLE").await;
+        let group_id = crate::data::groups::create_group(
+            &pool,
+            "Route Test Leave Sole",
+            "TEST-ROUTE-GROUPS-LEAVE-SOLE",
+        )
+        .await
+        .expect("create fixture group");
+        let own_member_id = member_ref(&pool, &group_id, "TEST-ROUTE-GROUPS-LEAVE-SOLE").await;
+
+        // By the opaque member id, and by the caller's own account id (the
+        // two forms `{member}` takes): both refused, nothing written.
+        for member in [own_member_id, "TEST-ROUTE-GROUPS-LEAVE-SOLE".to_string()] {
+            let router = test_router(test_app(pool.clone()));
+            let (status, body) = delete_request(
+                router,
+                format!("/groups/{group_id}/members/{member}"),
+                Some(&owner_token),
+            )
+            .await;
+            assert_eq!(status, StatusCode::CONFLICT);
+            assert_eq!(body["error"], "owner_must_delete");
+            assert_eq!(body["memberCount"], 1);
+            assert!(body["message"].as_str().is_some_and(|m| !m.is_empty()));
+
+            // The group and the owner's membership are still there.
+            let role = crate::data::groups::get_member_role(
+                &pool,
+                &group_id,
+                "TEST-ROUTE-GROUPS-LEAVE-SOLE",
+            )
+            .await
+            .expect("read owner role");
+            assert_eq!(role, Some(crate::data::groups::GroupRole::Owner));
+        }
+
+        // The refusal repeats identically for a retried request.
+        let router = test_router(test_app(pool.clone()));
+        let own_member_id = member_ref(&pool, &group_id, "TEST-ROUTE-GROUPS-LEAVE-SOLE").await;
+        let (status, body) = delete_request(
+            router,
+            format!("/groups/{group_id}/members/{own_member_id}"),
+            Some(&owner_token),
+        )
+        .await;
+        assert_eq!(status, StatusCode::CONFLICT);
+        assert_eq!(body["error"], "owner_must_delete");
+
+        // Deleting the group is still the way out.
+        let router = test_router(test_app(pool.clone()));
+        let (status, _) =
+            delete_request(router, format!("/groups/{group_id}"), Some(&owner_token)).await;
+        assert_eq!(status, StatusCode::NO_CONTENT);
+        let role =
+            crate::data::groups::get_member_role(&pool, &group_id, "TEST-ROUTE-GROUPS-LEAVE-SOLE")
+                .await
+                .expect("read owner role");
+        assert_eq!(role, None);
+
+        cleanup(&pool, &group_id, &["TEST-ROUTE-GROUPS-LEAVE-SOLE"]).await;
+    }
+
+    #[tokio::test]
+    #[ignore = "requires a live database; see the plan's Global Constraints for the \
+                DATABASE_URL incantation, then run with `cargo test -p api \
+                leave_group_an_owner_with_other_members_hands_ownership_over -- --ignored --test-threads=1`"]
+    async fn leave_group_an_owner_with_other_members_hands_ownership_over() {
+        let pool = connect().await;
+        let owner_token = seed_session(&pool, "TEST-ROUTE-GROUPS-LEAVE-OWN").await;
+        seed_session(&pool, "TEST-ROUTE-GROUPS-LEAVE-OWN-MEMBER").await;
+        let group_id = crate::data::groups::create_group(
+            &pool,
+            "Route Test Leave Owner",
+            "TEST-ROUTE-GROUPS-LEAVE-OWN",
+        )
+        .await
+        .expect("create fixture group");
+        seed_membership(
+            &pool,
+            &group_id,
+            "TEST-ROUTE-GROUPS-LEAVE-OWN-MEMBER",
+            "member",
+        )
+        .await;
+
+        let router = test_router(test_app(pool.clone()));
+        let own_member_id = member_ref(&pool, &group_id, "TEST-ROUTE-GROUPS-LEAVE-OWN").await;
+        let (status, _) = delete_request(
+            router,
+            format!("/groups/{group_id}/members/{own_member_id}"),
+            Some(&owner_token),
+        )
+        .await;
+        assert_eq!(status, StatusCode::NO_CONTENT);
+
+        // The group lives on and the other member owns it.
+        let role = crate::data::groups::get_member_role(
+            &pool,
+            &group_id,
+            "TEST-ROUTE-GROUPS-LEAVE-OWN-MEMBER",
+        )
+        .await
+        .expect("read successor role");
+        assert_eq!(role, Some(crate::data::groups::GroupRole::Owner));
+
+        cleanup(
+            &pool,
+            &group_id,
+            &[
+                "TEST-ROUTE-GROUPS-LEAVE-OWN",
+                "TEST-ROUTE-GROUPS-LEAVE-OWN-MEMBER",
+            ],
+        )
+        .await;
+    }
+
+    #[tokio::test]
+    #[ignore = "requires a live database; see the plan's Global Constraints for the \
+                DATABASE_URL incantation, then run with `cargo test -p api \
+                leave_group_a_member_and_a_non_sole_admin_leave_as_before -- --ignored --test-threads=1`"]
+    async fn leave_group_a_member_and_a_non_sole_admin_leave_as_before() {
+        let pool = connect().await;
+        seed_session(&pool, "TEST-ROUTE-GROUPS-LEAVE-NS-OWNER").await;
+        let admin_token = seed_session(&pool, "TEST-ROUTE-GROUPS-LEAVE-NS-ADMIN").await;
+        let member_token = seed_session(&pool, "TEST-ROUTE-GROUPS-LEAVE-NS-MEMBER").await;
+        let group_id = crate::data::groups::create_group(
+            &pool,
+            "Route Test Leave Others",
+            "TEST-ROUTE-GROUPS-LEAVE-NS-OWNER",
+        )
+        .await
+        .expect("create fixture group");
+        seed_membership(
+            &pool,
+            &group_id,
+            "TEST-ROUTE-GROUPS-LEAVE-NS-ADMIN",
+            "admin",
+        )
+        .await;
+        seed_membership(
+            &pool,
+            &group_id,
+            "TEST-ROUTE-GROUPS-LEAVE-NS-MEMBER",
+            "member",
+        )
+        .await;
+
+        for (user, token) in [
+            ("TEST-ROUTE-GROUPS-LEAVE-NS-MEMBER", &member_token),
+            ("TEST-ROUTE-GROUPS-LEAVE-NS-ADMIN", &admin_token),
+        ] {
+            let router = test_router(test_app(pool.clone()));
+            let member = member_ref(&pool, &group_id, user).await;
+            let (status, _) = delete_request(
+                router,
+                format!("/groups/{group_id}/members/{member}"),
+                Some(token),
+            )
+            .await;
+            assert_eq!(status, StatusCode::NO_CONTENT);
+            let role = crate::data::groups::get_member_role(&pool, &group_id, user)
+                .await
+                .expect("read role");
+            assert_eq!(role, None);
+        }
+
+        // The owner and the group are untouched.
+        let role = crate::data::groups::get_member_role(
+            &pool,
+            &group_id,
+            "TEST-ROUTE-GROUPS-LEAVE-NS-OWNER",
+        )
+        .await
+        .expect("read owner role");
+        assert_eq!(role, Some(crate::data::groups::GroupRole::Owner));
+
+        cleanup(
+            &pool,
+            &group_id,
+            &[
+                "TEST-ROUTE-GROUPS-LEAVE-NS-OWNER",
+                "TEST-ROUTE-GROUPS-LEAVE-NS-ADMIN",
+                "TEST-ROUTE-GROUPS-LEAVE-NS-MEMBER",
+            ],
         )
         .await;
     }
