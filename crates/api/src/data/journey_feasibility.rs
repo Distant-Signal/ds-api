@@ -194,7 +194,7 @@ fn required_change(
         None => msn(interchange, &next.board_tiploc),
         Some(_) if same_station => msn(interchange, &next.board_tiploc),
         Some(from_crs) => {
-            let local = ready.at.with_timezone(&chrono_tz::Europe::London);
+            let local = common::zone::london_local(ready.at);
             // Both codes are upper case (`train_leg_timing`).
             let link = schedule_query::fixed_link_between(
                 interchange,

@@ -168,9 +168,7 @@ pub fn expected_end(
         return same_rail_day.then_some(ExpectedEnd::EndOfDay);
     };
     let time = NaiveTime::from_hms_opt(hour, minute, 0)?;
-    let local_date = published_at
-        .with_timezone(&chrono_tz::Europe::London)
-        .date_naive();
+    let local_date = common::zone::london_date(published_at);
     let mut at = common::rail_day::london_to_utc(local_date, time);
     if at - published_at > Duration::hours(12) {
         at = common::rail_day::london_to_utc(local_date - Duration::days(1), time);

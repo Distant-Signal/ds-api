@@ -802,7 +802,7 @@ fn overlay_movement_events(stops: &mut [JourneyStop], events: &[queries::Movemen
         // `stop.timetable.working_minute_*` or the
         // `timetable.public_*` instants, which come from a completely
         // different pipeline: the CIF timetable, correctly BST-converted via
-        // `chrono_tz`/`london_to_utc`. The real TRUST `TRAIN_MVT_ALL_TOC`
+        // `london_to_utc`. The real TRUST `TRAIN_MVT_ALL_TOC`
         // feed has been observed delivering its timestamps all skewed by the
         // same amount vs true UTC (an upstream feed issue, outside this
         // codebase; see `common::trust_timestamp`). Diffing TRUST's own
@@ -4628,18 +4628,22 @@ mod db_tests {
         use chrono::Timelike;
         let pool = connect().await;
         let polled_at = Utc::now();
-        let london = |at: DateTime<Utc>| {
-            let local = at.with_timezone(&chrono_tz::Europe::London);
-            local.with_second(0).unwrap().with_nanosecond(0).unwrap()
-        };
-        let origin_at = london(polled_at + Duration::minutes(20));
+        // The sums are on instants, read in London afterwards, so a clock
+        // change inside the half hour moves the local times with it.
+        let minute = |at: DateTime<Utc>| at.with_second(0).unwrap().with_nanosecond(0).unwrap();
+        let origin_at = minute(polled_at + Duration::minutes(20));
         let intermediate_at = origin_at + Duration::minutes(10);
         let cancelled_at = origin_at + Duration::minutes(20);
         let terminus_at = origin_at + Duration::minutes(30);
-        let service_date = origin_at.date_naive();
-        let hhmm = |at: &DateTime<chrono_tz::Tz>| at.format("%H:%M").to_string();
-        let hhmmss = |at: &DateTime<chrono_tz::Tz>| at.format("%H:%M:%S").to_string();
-        let day_offset = |at: &DateTime<chrono_tz::Tz>| (at.date_naive() - service_date).num_days();
+        let service_date = common::zone::london_date(origin_at);
+        let hhmm = |at: &DateTime<Utc>| common::zone::london_local(*at).format("%H:%M").to_string();
+        let hhmmss = |at: &DateTime<Utc>| {
+            common::zone::london_local(*at)
+                .format("%H:%M:%S")
+                .to_string()
+        };
+        let day_offset =
+            |at: &DateTime<Utc>| (common::zone::london_date(*at) - service_date).num_days();
         let intermediate_arrival = intermediate_at - Duration::minutes(1);
         let cancelled_arrival = cancelled_at - Duration::minutes(1);
 
@@ -4667,7 +4671,7 @@ mod db_tests {
              VALUES ($1, 'ZPC', $2, 'TSTJPLT', 'ZPA', 'SW', 'SW123400') ON CONFLICT DO NOTHING",
         )
         .bind(service_date)
-        .bind(origin_at.time())
+        .bind(common::zone::london_time(origin_at))
         .execute(&pool)
         .await
         .expect("seed schedule_destination_departures");

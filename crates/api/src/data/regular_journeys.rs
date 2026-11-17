@@ -940,7 +940,7 @@ pub async fn unpair(pool: &PgPool, template_id: i64, user_id: &str) -> anyhow::R
 
 /// The London date of `now`.
 pub fn london_date(now: DateTime<Utc>) -> NaiveDate {
-    now.with_timezone(&chrono_tz::Europe::London).date_naive()
+    common::zone::london_date(now)
 }
 
 /// How many dates `upcomingDates` lists.

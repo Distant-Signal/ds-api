@@ -11,7 +11,7 @@
 //! being gone meant the NEXT service to the same destination silently became
 //! the match (see [`find_darwin_eta`]'s own doc comment).
 
-use chrono::{DateTime, Duration, NaiveTime, TimeZone, Utc};
+use chrono::{DateTime, Duration, NaiveTime, Utc};
 use common::StationDeparture;
 
 /// How far a departure-board row's own scheduled time may sit from the pin's
@@ -181,9 +181,7 @@ fn resolve_near(
     time: NaiveTime,
     pick: AmbiguousPick,
 ) -> Option<DateTime<Utc>> {
-    let anchor_local_date = anchor
-        .with_timezone(&chrono_tz::Europe::London)
-        .date_naive();
+    let anchor_local_date = common::zone::london_date(anchor);
     let nearest = |earliest_utc: DateTime<Utc>, latest_utc: DateTime<Utc>| {
         if (earliest_utc - anchor).abs() <= (latest_utc - anchor).abs() {
             earliest_utc
@@ -195,19 +193,18 @@ fn resolve_near(
         .into_iter()
         .filter_map(|day_offset| {
             let naive = (anchor_local_date + Duration::days(day_offset)).and_time(time);
-            match chrono_tz::Europe::London.from_local_datetime(&naive) {
-                chrono::LocalResult::Single(dt) => Some(dt.with_timezone(&Utc)),
-                chrono::LocalResult::Ambiguous(earliest, latest) => {
-                    let earliest_utc = earliest.with_timezone(&Utc);
-                    let latest_utc = latest.with_timezone(&Utc);
-                    Some(match pick {
-                        AmbiguousPick::Nearest => nearest(earliest_utc, latest_utc),
-                        AmbiguousPick::AtOrAfterAnchor if earliest_utc >= anchor => earliest_utc,
-                        AmbiguousPick::AtOrAfterAnchor if latest_utc >= anchor => latest_utc,
-                        AmbiguousPick::AtOrAfterAnchor => nearest(earliest_utc, latest_utc),
-                    })
-                }
-                chrono::LocalResult::None => None,
+            match common::zone::london_resolve(naive) {
+                common::zone::LocalTime::Single(at) => Some(at),
+                common::zone::LocalTime::Ambiguous {
+                    earliest: earliest_utc,
+                    latest: latest_utc,
+                } => Some(match pick {
+                    AmbiguousPick::Nearest => nearest(earliest_utc, latest_utc),
+                    AmbiguousPick::AtOrAfterAnchor if earliest_utc >= anchor => earliest_utc,
+                    AmbiguousPick::AtOrAfterAnchor if latest_utc >= anchor => latest_utc,
+                    AmbiguousPick::AtOrAfterAnchor => nearest(earliest_utc, latest_utc),
+                }),
+                common::zone::LocalTime::Gap => None,
             }
         })
         .filter(|candidate| (*candidate - anchor).abs() <= MAX_ANCHOR_DISTANCE)
@@ -286,7 +283,7 @@ mod tests {
     }
 
     /// August is inside British Summer Time, so Darwin's `18:41` is
-    /// 17:41 UTC. The offset is not hardcoded anywhere: `chrono_tz` derives
+    /// 17:41 UTC. The offset is not hardcoded anywhere: `common::zone` derives
     /// it from the date, which `a_winter_estimate_is_utc_because_gmt_is_utc`
     /// below pins down from the other side.
     #[test]

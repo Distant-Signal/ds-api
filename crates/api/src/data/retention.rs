@@ -87,7 +87,7 @@ const MAX_ACCOUNTS_PER_RUN: i64 = 100;
 
 /// The London service date `days` before `now`'s own London date.
 fn cutoff_date(now: DateTime<Utc>, days: i64) -> NaiveDate {
-    now.with_timezone(&chrono_tz::Europe::London).date_naive() - Duration::days(days)
+    common::zone::london_date(now) - Duration::days(days)
 }
 
 /// Applies `policy` as of `now`. Each part runs as its own statement(s);

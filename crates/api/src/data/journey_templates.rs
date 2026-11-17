@@ -780,9 +780,7 @@ pub async fn booked_departures_for_journey(
         .await?;
     Ok(rows
         .into_iter()
-        .filter_map(|(leg_id, departs)| {
-            departs.map(|at| (leg_id, at.with_timezone(&chrono_tz::Europe::London).time()))
-        })
+        .filter_map(|(leg_id, departs)| departs.map(|at| (leg_id, common::zone::london_time(at))))
         .collect())
 }
 

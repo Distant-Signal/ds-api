@@ -504,12 +504,8 @@ pub(crate) fn suggestion_legs(
                 ..
             } => {
                 let clock = |time: chrono::NaiveTime, offset: u8| {
-                    use chrono::TimeZone;
                     let local = (*service_date + Duration::days(i64::from(offset))).and_time(time);
-                    chrono_tz::Europe::London
-                        .from_local_datetime(&local)
-                        .earliest()
-                        .map(|at| at.with_timezone(&Utc))
+                    common::zone::london_to_utc_earliest(local)
                 };
                 let scheduled_dep = match public_departure {
                     Some(time) => clock(*time, public_departure_day_offset.unwrap_or(0)),

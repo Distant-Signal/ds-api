@@ -1545,9 +1545,7 @@ impl UntrackedLeg {
 }
 
 fn london_date(instant: DateTime<Utc>) -> NaiveDate {
-    instant
-        .with_timezone(&chrono_tz::Europe::London)
-        .date_naive()
+    common::zone::london_date(instant)
 }
 
 /// An untracked leg as the wire sends it, before [`validate_untracked_leg`].

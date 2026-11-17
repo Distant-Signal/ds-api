@@ -47,7 +47,7 @@
 
 use std::time::{Duration as StdDuration, Instant};
 
-use chrono::{DateTime, Duration, NaiveDate, NaiveTime, TimeZone, Timelike, Utc};
+use chrono::{DateTime, Duration, NaiveDate, NaiveTime, Timelike, Utc};
 use sqlx::types::Json;
 
 use crate::app::App;
@@ -300,10 +300,7 @@ pub async fn run_sweep(
 /// change (that day's target is skipped, as the notifier's stage 2 does).
 fn target_instant(date: NaiveDate, time: NaiveTime, day_offset: i16) -> Option<DateTime<Utc>> {
     let day = date + Duration::days(i64::from(day_offset));
-    chrono_tz::Europe::London
-        .from_local_datetime(&day.and_time(time))
-        .earliest()
-        .map(|at| at.with_timezone(&Utc))
+    common::zone::london_to_utc_earliest(day.and_time(time))
 }
 
 /// Records `pending` (with the marker, so the occurrence waits for the next
