@@ -3,6 +3,32 @@
 Changes to the Distant Signal (DS) HTTP API that a client such as DS-MCP
 needs to know about. Newest first. Field names are as served (camelCase).
 
+## 2026-11-17: Overnight walks, replayed movements and whole-word incident keywords
+
+Behaviour fixes that arrive with ds-core v0.15.0 (DS-534); no field,
+route, migration or grant change in the API.
+
+- `POST /Trips/plan` (and the journey replan): a walk, tube link or
+  transfer that runs only on some days of the week is judged on the day
+  the minute falls on, not the service date. A Saturday service's 00:20
+  arrival can take a link that runs on Sundays, and no longer takes one
+  that runs only on Saturdays.
+- A train's live position and next stop: a replayed or older TRUST
+  movement no longer rewrites them. A newer movement, a completed one, or
+  one that carries more of the next calling point and its forecast
+  replaces the stored state; a completed train stays completed.
+- A train's stops (`GET /Train/by-uid` and the journey legs built from
+  them): a Darwin stop that a newer schedule message dropped no longer
+  shows platform or forecast data.
+- Line status `reason` and the incidents that feed it: an incident's
+  keywords match whole words, so "LNER" no longer matches "vulnerable".
+  Shared track and the junctions at listed stations (Thameslink core,
+  Great Northern and Thameslink Cambridge, and the BCU, LLJ, SKI, LAN, CNF
+  and DAR junctions) now count as shared segments: the lines an incident
+  matches are unchanged, but its `reason` gains `Also affects other lines
+  on this route.` there. Line-status history already stored keeps the old
+  wording.
+
 ## 2026-11-17: Calendar feed, Delay Repay, custom line and token fixes
 
 Behaviour fixes (DS-534); no field, migration or grant change.
