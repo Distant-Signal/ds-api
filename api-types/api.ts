@@ -1361,6 +1361,13 @@ createdVia?: string,
  */
 isOwner: boolean, 
 /**
+ * Whether the journey has an open break (`openBreak` is not `null`),
+ * for a reader who is not given the break itself: the share-link view
+ * serves `openBreak: null` and `disrupted: true`. Additive
+ * (2026-11-17).
+ */
+disrupted: boolean, 
+/**
  * The journey's currently-active unlisted share link, if any --
  * `Some` only when `is_owner` is `true` (see `build_journey_detail_response`).
  * A non-owner (a fellow group member, or a visitor who reached this

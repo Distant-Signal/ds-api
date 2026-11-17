@@ -718,6 +718,10 @@
               "null"
             ]
           },
+          "disrupted": {
+            "description": "Whether the journey has an open break (`openBreak` is not `null`),\nfor a reader who is not given the break itself: the share-link view\nserves `openBreak: null` and `disrupted: true`. Additive\n(2026-11-17).",
+            "type": "boolean"
+          },
           "followedFrom": {
             "anyOf": [
               {
@@ -835,6 +839,7 @@
           "legs",
           "isOwner",
           "revisionCount",
+          "disrupted",
           "canFollow"
         ],
         "type": "object"

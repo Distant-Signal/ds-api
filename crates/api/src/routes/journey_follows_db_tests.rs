@@ -352,6 +352,32 @@ async fn a_share_link_visitor_follows_with_the_token_until_it_is_revoked() {
     // A link shows nothing about its owner.
     assert_eq!(follow["via"], "link");
     assert_eq!(follow["ownerName"], Value::Null);
+    // DS-534: a follow through a link conveys the link's trimmed view, so
+    // give the journey an owner-private filter and a break to check.
+    let leg_id: i64 =
+        sqlx::query_scalar("SELECT id FROM journey_legs WHERE journey_id = $1 LIMIT 1")
+            .bind(journey)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    sqlx::query(
+        "UPDATE journey_legs SET search_filters = '{\"operator\":\"GR\"}'::jsonb WHERE id = $1",
+    )
+    .bind(leg_id)
+    .execute(&pool)
+    .await
+    .unwrap();
+    sqlx::query(
+        "INSERT INTO journey_breaks (journey_id, user_id, cause, fault, severity, \
+             trigger_leg_id, break_position, fingerprint) \
+         VALUES ($1, $2, 'user_missed', 'user', 1, $3, 1, '')",
+    )
+    .bind(journey)
+    .bind(&owner)
+    .bind(leg_id)
+    .execute(&pool)
+    .await
+    .unwrap();
     let (status, detail) = send(
         &router,
         "GET",
@@ -362,6 +388,9 @@ async fn a_share_link_visitor_follows_with_the_token_until_it_is_revoked() {
     .await;
     assert_eq!(status, StatusCode::OK);
     assert_eq!(detail["followedFrom"]["via"], "link");
+    assert!(detail["legs"][0]["searchFilters"].is_null(), "{detail}");
+    assert!(detail["openBreak"].is_null(), "{detail}");
+    assert_eq!(detail["disrupted"], true);
     let (_, all) = send(
         &router,
         "GET",

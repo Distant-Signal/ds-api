@@ -85,6 +85,25 @@ Behaviour fixes (DS-534); no field, migration or grant change.
 - `PUT /Journeys/{id}/operator-filter` answers `404` for a journey that isn't
   the caller's before checking the filter (it could answer `400` first).
 
+## 2026-11-17: Share-link journey view trimmed
+
+Additive for the website (DS-534); no migration, grant or schema change.
+`GET /Journeys/shared/{token}`, the link anyone holding the token can open,
+no longer carries the owner's own metadata:
+
+- `legs[].trackedTrainState.customName` is `null` (the label the owner typed
+  for the train).
+- `legs[].searchFilters` is `null` (the owner's saved search picks).
+- `openBreak` is `null`: its cause, fault, severity and suggestions are not
+  served. The new `disrupted` says only that the journey has one.
+
+The field names and types are unchanged (all three were already nullable).
+`GET /Journeys/{id}` for someone who follows the journey only through the
+share link (not through a group) gets the same trimmed view. It is unchanged
+for the owner and for a group member, and
+now also has `disrupted` (`true` exactly when `openBreak` is not `null`,
+else `false`).
+
 ## 2026-11-17: Review fixes: boards, stop points, line trains, groups
 
 No migration, grant or schema change (DS-534). Response shapes are
