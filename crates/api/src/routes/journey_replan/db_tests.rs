@@ -1921,3 +1921,44 @@ async fn an_itinerary_saves_on_a_pool_of_one_connection() {
     .await;
     assert_eq!(status, StatusCode::CONFLICT, "{other}");
 }
+
+/// Someone else's journey and no journey at all answer an operator filter
+/// alike (review J9): 404, whatever the filter, never the 400 that told
+/// them the journey exists.
+#[tokio::test]
+#[ignore = "requires a live database: DATABASE_URL"]
+async fn an_operator_filter_on_someone_elses_journey_is_a_404_whatever_its_codes() {
+    let _now = pin_now();
+    let pool = connect().await;
+    let _cleanup = cleanup(&pool).await;
+    seed_timetable(&pool).await;
+    let token = seed_session(&pool, USER).await;
+    let other = seed_session(&pool, OTHER).await;
+    let router = router(pool.clone());
+    let (journey_id, _) = create_journey(&router, &token).await;
+    let filter = serde_json::json!({
+        "operatorFilter": { "mode": "only", "entries": ["Q9"] }
+    });
+    let (status, body) = call(
+        &router,
+        "PUT",
+        &format!("/Journeys/{journey_id}/operator-filter"),
+        Some(&token),
+        Some(filter.clone()),
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "the owner's: {body}");
+    for id in [journey_id, i64::MAX] {
+        let (status, body) = call(
+            &router,
+            "PUT",
+            &format!("/Journeys/{id}/operator-filter"),
+            Some(&other),
+            Some(filter.clone()),
+            None,
+        )
+        .await;
+        assert_eq!(status, StatusCode::NOT_FOUND, "{id}: {body}");
+    }
+}

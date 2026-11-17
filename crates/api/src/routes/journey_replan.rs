@@ -2156,6 +2156,10 @@ async fn put_operator_filter(
 ) -> Response {
     render(
         async {
+            // Ownership first: the filter's codes are checked against the
+            // journey's dates, so a 400 before the 404 told anyone whether
+            // a journey id exists (review J9).
+            require_owner(&app, journey_id, &user.id).await?;
             let filter = match &body.operator_filter {
                 None => None,
                 Some(request) => {
