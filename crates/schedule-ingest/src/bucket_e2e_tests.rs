@@ -344,6 +344,7 @@ impl Fixture {
             max_bytes_per_hour: 1 << 22,
             max_bytes_per_day: 1 << 23,
             max_backoff: Duration::from_secs(3600),
+            ignored: None,
         }
     }
 

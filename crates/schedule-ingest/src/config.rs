@@ -3,6 +3,8 @@ use std::path::PathBuf;
 use clap::Parser;
 use ds_runtime::secret::Secret;
 
+use crate::pattern::FilePattern;
+
 /// Default for [`Config::cif_file_pattern`]: exactly the name DTD delivers
 /// the full CIF timetable under. Locked to that name by the repo owner
 /// (2026-09-28), since the same SFTP account now also receives other feeds;
@@ -351,6 +353,19 @@ pub(crate) struct BucketArgs {
     #[arg(long, env)]
     pub bucket_expected_keys: Option<String>,
 
+    /// Comma-separated, case-insensitive `*` globs of known benign object
+    /// names the publisher drops beside the feed (the same matcher as
+    /// `BUCKET_EXPECTED_KEYS`), e.g. `CORPUSExtract.csv.gz`. A match that is
+    /// not expected is never downloaded and is deleted unread once
+    /// `BUCKET_DELETE_MIN_AGE_SECS` old, like an unexpected object, but is
+    /// counted in `schedule_feed_source_ignored_objects_total` (logged at
+    /// info) instead of `..._unexpected_objects_total`. Expected wins over
+    /// ignored. Each glob is a plain root-level name: no `/` or `\`, no
+    /// leading `.`, no control characters, and at least one character
+    /// besides `*`. Empty (the default): nothing is ignored.
+    #[arg(long, env)]
+    pub bucket_ignored_keys: Option<String>,
+
     /// Seconds between bucket listings.
     #[arg(long, env, default_value_t = 300)]
     pub bucket_poll_interval_secs: u64,
@@ -493,6 +508,7 @@ impl BucketArgs {
         {
             anyhow::bail!("BUCKET_EXPECTED_KEYS must list at least one object name (glob)");
         }
+        self.ignored_keys()?;
         if let Some(url) = self.bucket_base_url.as_deref().filter(|u| !u.is_empty())
             && !(url.starts_with("https://") || url.starts_with("http://"))
         {
@@ -539,6 +555,40 @@ impl BucketArgs {
             );
         }
         Ok(())
+    }
+
+    /// `BUCKET_IGNORED_KEYS` parsed, `None` when unset or blank. Refuses a
+    /// glob that could only match a name the reader always treats as
+    /// unexpected (a path, a hidden or control-character name) or that
+    /// would ignore every name (`*` alone).
+    pub(crate) fn ignored_keys(&self) -> anyhow::Result<Option<FilePattern>> {
+        let raw = self.bucket_ignored_keys.as_deref().unwrap_or_default();
+        let globs: Vec<&str> = raw
+            .split(',')
+            .map(str::trim)
+            .filter(|glob| !glob.is_empty())
+            .collect();
+        if globs.is_empty() {
+            return Ok(None);
+        }
+        for glob in &globs {
+            if glob.contains(['/', '\\'])
+                || glob.starts_with('.')
+                || glob.chars().any(char::is_control)
+            {
+                anyhow::bail!(
+                    "BUCKET_IGNORED_KEYS glob {glob:?} must be a plain root-level object name: no path separators, no leading '.', no control characters"
+                );
+            }
+            if glob.chars().all(|c| c == '*') {
+                anyhow::bail!(
+                    "BUCKET_IGNORED_KEYS glob {glob:?} would ignore every unexpected object; name the files"
+                );
+            }
+        }
+        FilePattern::parse(raw)
+            .map(Some)
+            .map_err(|err| anyhow::anyhow!("BUCKET_IGNORED_KEYS: {err}"))
     }
 
     /// The Pub/Sub subscription, when set (and not empty).
@@ -596,6 +646,7 @@ mod env_contract_tests {
             "GOOGLE_SERVICE_ACCOUNT_PATH",
             "GOOGLE_APPLICATION_CREDENTIALS",
             "BUCKET_EXPECTED_KEYS",
+            "BUCKET_IGNORED_KEYS",
             "BUCKET_MAX_BACKOFF_SECS",
         ] {
             assert!(declared.contains(&env), "{env} is declared");
@@ -662,6 +713,7 @@ mod source_args_tests {
         assert_eq!(b.bucket_max_download_bytes_per_day, 1_073_741_824);
         assert_eq!(b.bucket_max_backoff_secs, 3600);
         assert!(!b.bucket_audit_logs_ship);
+        assert!(b.bucket_ignored_keys.is_none());
         // Off, nothing else is checked: a stray GOOGLE_* var is harmless.
         args.validate().unwrap();
     }
@@ -669,6 +721,23 @@ mod source_args_tests {
     #[test]
     fn a_bucket_configuration_is_validated_at_start() {
         parse(&BUCKET_ON).validate().unwrap();
+        assert!(parse(&BUCKET_ON).bucket.ignored_keys().unwrap().is_none());
+        for blank in ["", " , "] {
+            let flag = format!("--bucket-ignored-keys={blank}");
+            let mut args = BUCKET_ON.to_vec();
+            args.push(&flag);
+            let args = parse(&args);
+            args.validate().unwrap();
+            assert!(args.bucket.ignored_keys().unwrap().is_none(), "{blank:?}");
+        }
+        let mut ignoring = BUCKET_ON.to_vec();
+        ignoring.push("--bucket-ignored-keys=CORPUSExtract.csv.gz, *.md5");
+        let ignoring = parse(&ignoring);
+        ignoring.validate().unwrap();
+        let ignored = ignoring.bucket.ignored_keys().unwrap().unwrap();
+        assert!(ignored.matches("corpusextract.CSV.GZ"));
+        assert!(ignored.matches("timetable_full.zip.md5"));
+        assert!(!ignored.matches("CORPUSExtract.json.gz"));
         let keyless = parse(&[
             "--bucket-source-enabled=true",
             "--sftp-source-enabled=false",
@@ -697,6 +766,20 @@ mod source_args_tests {
         };
         assert!(refused(&["--bucket-name=Bad.Name"]).contains("BUCKET_NAME"));
         assert!(refused(&["--bucket-expected-keys= , "]).contains("BUCKET_EXPECTED_KEYS"));
+        for bad in [
+            "a/b.csv.gz",
+            "a\\b",
+            ".hidden",
+            "*",
+            "x.csv.gz, **",
+            "a\u{7}b",
+        ] {
+            let flag = format!("--bucket-ignored-keys={bad}");
+            assert!(
+                refused(&[&flag]).contains("BUCKET_IGNORED_KEYS"),
+                "{bad:?} is refused"
+            );
+        }
         assert!(refused(&["--google-application-credentials=/x"]).contains("exactly one"));
         let keyless_without_config: Vec<&str> = BUCKET_ON
             .iter()

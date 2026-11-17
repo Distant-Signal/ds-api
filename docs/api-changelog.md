@@ -240,6 +240,29 @@ clients is unchanged. New limits are generous and aimed at abuse.
   connection (counted in `api_handler_panics_total`); `POST
   /Journeys/irish-train`'s date check no longer panics on the largest date.
 
+## 2026-11-17: Ignored bucket object names
+
+Additive, configuration and metrics only (DS-534); no HTTP change,
+migration or grant. schedule-ingest's bucket source gains
+`BUCKET_IGNORED_KEYS`: comma-separated, case-insensitive `*` globs of known
+benign root-level object names the publisher drops beside the feed (the
+same matcher as `BUCKET_EXPECTED_KEYS`), such as the SMART
+`CORPUSExtract.csv.gz`. Unset or blank (the default) ignores nothing, so
+behaviour is unchanged.
+
+- An object whose name matches an ignored glob, and not an expected one, is
+  handled as an unexpected object (never downloaded, deleted unread with
+  `ifGenerationMatch` once `BUCKET_DELETE_MIN_AGE_SECS` old) but is not
+  counted in `distant_signal_schedule_feed_source_unexpected_objects_total`
+  and is logged once per generation at info, not warn.
+- Expected wins: a name both lists match is expected (and, if it does not
+  route or is too big, still unexpected). An unsafe name (a path, a hidden
+  name, control characters, too long) is unexpected whatever the list says.
+- `distant_signal_schedule_feed_source_ignored_objects_total{source}`: a
+  counter, one per ignored generation, registered at 0.
+- Startup refuses a glob containing `/` or `\`, starting with `.`, holding a
+  control character, or made only of `*`.
+
 ## 2026-11-16: Stops for live-only trains
 
 Additive (DS-534), behind two api settings that default off; no migration,

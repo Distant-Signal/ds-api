@@ -246,6 +246,7 @@ async fn a_bucket_object_goes_through_the_existing_cif_pipeline() {
         max_bytes_per_hour: 1 << 21,
         max_bytes_per_day: 1 << 22,
         max_backoff: Duration::from_secs(3600),
+        ignored: None,
     };
     let mut source = BucketSource::new(client, settings, BucketDirs::new(setup.storage.path()));
     source.poll_once().await;
@@ -491,6 +492,7 @@ fn every_source_metric_is_registered_at_zero() {
         "distant_signal_schedule_feed_source_download_capped{source=\"bucket\"} 0".into(),
         "distant_signal_schedule_feed_source_last_new_object_seconds{source=\"bucket\"} 0".into(),
         "distant_signal_schedule_feed_source_downloaded_bytes_total{source=\"bucket\"} 0".into(),
+        "distant_signal_schedule_feed_source_ignored_objects_total{source=\"bucket\"} 0".into(),
     ];
     for kind in crate::bucket::OBJECT_KINDS {
         for name in ["last_new_object_seconds", "last_object_bytes"] {

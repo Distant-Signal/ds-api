@@ -423,6 +423,7 @@ fn spawn_bucket_source(config: &Config, routing: &Routing) -> anyhow::Result<Pat
         max_bytes_per_hour: args.bucket_max_download_bytes_per_hour,
         max_bytes_per_day: args.bucket_max_download_bytes_per_day,
         max_backoff: Duration::from_secs(args.bucket_max_backoff_secs),
+        ignored: args.ignored_keys()?,
     };
     let dirs = bucket::BucketDirs::new(&config.storage_dir);
     let incoming = dirs.incoming.clone();
