@@ -2781,6 +2781,11 @@ pub(crate) fn leg_inputs<'a>(
 struct CandidatesParams {
     limit: Option<String>,
     after: Option<String>,
+    /// Optional, default `0` (none): how many trains just BEFORE the
+    /// search's earliest departure to add as `earlier` (at most
+    /// [`MAX_EARLIER_CANDIDATES`]; more is clamped). See
+    /// [`earlier_departure_bounds`]. First page only (no `after`).
+    earlier: Option<String>,
     /// Optional. Comma-separated ATOC codes, e.g. `operator=SW,VT` -- same
     /// multi-value parsing convention as
     /// `routes::incidents::IncidentSearchParams::operator`; see its own
@@ -3002,26 +3007,30 @@ async fn get_leg_candidates(
     .await?;
     let operators = operator_param.or(resolved.operators);
 
-    let Some(page) = crate::data::queries::search_journey_leg_candidates_filtered(
-        &app.database,
-        &crate::data::queries::LegCandidateSearch {
-            origin_crs: &search.origin_crs,
-            destination_crs: &search.destination_crs,
-            service_date: search.service_date,
-            depart_after: search.depart_window.after,
-            depart_before: search.depart_window.before,
-            arrive_after: search.arrive_window.after,
-            arrive_before: search.arrive_window.before,
-            operators: operators.as_deref(),
-            starts_at: resolved.starts_at.as_deref(),
-            terminates_at: resolved.terminates_at.as_deref(),
-            stop_filter: resolved.stop_filter.as_ref(),
-            after: after.as_ref(),
-            limit,
-        },
-    )
-    .await
-    .map_err(internal_error("search journey leg candidates"))?
+    let earlier_wanted = parse_earlier(params.earlier.as_deref())?;
+    // The window's own read, and (below) the trains before it, search the
+    // same stations, filters and operators.
+    let window = crate::data::queries::LegCandidateSearch {
+        origin_crs: &search.origin_crs,
+        destination_crs: &search.destination_crs,
+        service_date: search.service_date,
+        depart_after: search.depart_window.after,
+        depart_before: search.depart_window.before,
+        arrive_after: search.arrive_window.after,
+        arrive_before: search.arrive_window.before,
+        operators: operators.as_deref(),
+        starts_at: resolved.starts_at.as_deref(),
+        terminates_at: resolved.terminates_at.as_deref(),
+        stop_filter: resolved.stop_filter.as_ref(),
+        after: after.as_ref(),
+        newest_first: false,
+        limit,
+    };
+
+    let Some(page) =
+        crate::data::queries::search_journey_leg_candidates_filtered(&app.database, &window)
+            .await
+            .map_err(internal_error("search journey leg candidates"))?
     else {
         return Err((
             StatusCode::NOT_FOUND,
@@ -3029,10 +3038,166 @@ async fn get_leg_candidates(
                 .to_string(),
         ));
     };
+    let results = candidate_rows(&app, &search, &page).await?;
 
+    // The trains before the window, on the first page only.
+    let earlier = if earlier_wanted > 0 && after.is_none() {
+        earlier_candidates(&app, &leg, &search, &window, earlier_wanted).await?
+    } else {
+        Vec::new()
+    };
+    Ok(Json(LegCandidatesResponse {
+        results,
+        next_cursor: page
+            .next_cursor
+            .as_ref()
+            .map(crate::routes::trains::encode_cursor),
+        earlier: (!earlier.is_empty()).then_some(earlier),
+    }))
+}
+
+/// Up to `count` trains leaving just before `window`'s earliest departure
+/// that the traveller can still catch ([`earlier_departure_bounds`]), in
+/// departure order, nearest the window last. Same stations, filters and
+/// operators as the window.
+async fn earlier_candidates(
+    app: &App,
+    leg: &journeys::JourneyLegRow,
+    search: &journeys::LegSearch,
+    window: &crate::data::queries::LegCandidateSearch<'_>,
+    count: i64,
+) -> Result<Vec<LegCandidateRow>, (StatusCode, String)> {
+    let Some((from, before)) = earlier_departure_bounds(app, leg, search).await else {
+        return Ok(Vec::new());
+    };
+    let page = crate::data::queries::search_journey_leg_candidates_filtered(
+        &app.database,
+        &crate::data::queries::LegCandidateSearch {
+            depart_after: from,
+            depart_before: Some(before),
+            arrive_after: None,
+            arrive_before: None,
+            after: None,
+            newest_first: true,
+            limit: count,
+            ..*window
+        },
+    )
+    .await
+    .map_err(internal_error("search earlier journey leg candidates"))?;
+    match page {
+        Some(page) => candidate_rows(app, search, &page).await,
+        None => Ok(Vec::new()),
+    }
+}
+
+/// The most trains `?earlier=` adds.
+const MAX_EARLIER_CANDIDATES: i64 = 5;
+
+/// `?earlier=`: a whole number, `0` (the default) to
+/// [`MAX_EARLIER_CANDIDATES`]; more is clamped.
+fn parse_earlier(raw: Option<&str>) -> Result<i64, (StatusCode, String)> {
+    let Some(raw) = raw.map(str::trim).filter(|s| !s.is_empty()) else {
+        return Ok(0);
+    };
+    let parsed: u32 = raw.parse().map_err(|_| {
+        (
+            StatusCode::BAD_REQUEST,
+            "earlier must be a whole number".to_string(),
+        )
+    })?;
+    Ok(i64::from(parsed).min(MAX_EARLIER_CANDIDATES))
+}
+
+/// Where the trains before a search start, as `(departing at or after,
+/// departing at or before)` on the search's service date, or `None` when
+/// there is nothing to offer: a train the traveller cannot still catch is
+/// never "earlier", it is gone.
+///
+/// The trains before are those leaving before the search's earliest
+/// departure (`departAfter`); with none set the window already starts
+/// with the day's first train and nothing precedes it. The earliest they
+/// may leave is the latest of
+///
+/// - now, on today's date (a train already gone is useless; a past date
+///   has none at all; a future date has no such bound, the traveller is
+///   planning ahead), and
+/// - for a leg after the first, when the traveller is ready for it: the
+///   previous leg's arrival (live where it is running) plus the change
+///   time ([`super::journey_replan::Analysis::ready_for`], the one the "Choose
+///   another train" flow uses), so a train that leaves before they can
+///   get to it is not offered. A journey that cannot be read offers none
+///   rather than guess.
+///
+/// Times are London wall clock, as the schedule's are.
+async fn earlier_departure_bounds(
+    app: &App,
+    leg: &journeys::JourneyLegRow,
+    search: &journeys::LegSearch,
+) -> Option<(Option<NaiveTime>, NaiveTime)> {
+    let anchor = search.depart_window.after?;
+    // Departures read `<=` their upper bound: one second before the window.
+    let (before, wrapped) = anchor.overflowing_sub_signed(chrono::Duration::seconds(1));
+    if wrapped != 0 {
+        return None;
+    }
+    let now = crate::routes::london_now();
+    let today = now.date_naive();
+    let mut from: Option<NaiveTime> = None;
+    let mut raise = |time: NaiveTime| from = Some(from.map_or(time, |f| f.max(time)));
+    match search.service_date.cmp(&today) {
+        std::cmp::Ordering::Less => return None,
+        std::cmp::Ordering::Equal => raise(now.time()),
+        std::cmp::Ordering::Greater => {}
+    }
+    let legs = match journeys::list_legs_for_journey(&app.database, leg.journey_id).await {
+        Ok(legs) => legs,
+        Err(err) => {
+            tracing::warn!(error = ?err, "could not read the journey's legs for earlier candidates");
+            return None;
+        }
+    };
+    let index = legs.iter().position(|l| l.id == leg.id)?;
+    if index > 0 {
+        let analysis = match super::journey_replan::analyse(
+            app,
+            leg.journey_id,
+            now.with_timezone(&Utc),
+        )
+        .await
+        {
+            Ok(analysis) => analysis,
+            Err(err) => {
+                tracing::warn!(error = ?err, "could not read the journey for earlier candidates");
+                return None;
+            }
+        };
+        if let Some(ready) = analysis.ready_for(index) {
+            let ready = common::zone::london_local(ready);
+            match ready.date_naive().cmp(&search.service_date) {
+                // Not ready until after the service date: nothing earlier.
+                std::cmp::Ordering::Greater => return None,
+                std::cmp::Ordering::Equal => raise(ready.time()),
+                std::cmp::Ordering::Less => {}
+            }
+        }
+    }
+    match from {
+        Some(from) if from > before => None,
+        _ => Some((from, before)),
+    }
+}
+
+/// A read page as the route serves it: each row's leg-scoped fields, the
+/// destination names and the service mode.
+async fn candidate_rows(
+    app: &App,
+    search: &journeys::LegSearch,
+    page: &crate::data::queries::CallingPointDeparturePage,
+) -> Result<Vec<LegCandidateRow>, (StatusCode, String)> {
     // Same batched destination-name enrichment `routes::trains::get_trains_search`
     // now applies -- `leg_candidate_json` reuses `render::calling_point_departure_json`
-    // verbatim (this function's own doc comment), so it needs the same
+    // verbatim (see `leg_candidate_json`), so it needs the same
     // `destination_names` map that renderer's `destinationName` field reads.
     let destination_crs_codes: Vec<String> = page
         .departures
@@ -3057,14 +3222,8 @@ async fn get_leg_candidates(
             )
         })
         .collect();
-    annotate_candidate_modes(&app, search.service_date, &mut results).await;
-    Ok(Json(LegCandidatesResponse {
-        results,
-        next_cursor: page
-            .next_cursor
-            .as_ref()
-            .map(crate::routes::trains::encode_cursor),
-    }))
+    annotate_candidate_modes(app, search.service_date, &mut results).await;
+    Ok(results)
 }
 
 /// `GET .../candidates`'s `operator`: comma-split, trimmed, upper-cased,
@@ -3220,6 +3379,14 @@ pub(crate) struct LegCandidateRow {
 pub(crate) struct LegCandidatesResponse {
     results: Vec<LegCandidateRow>,
     next_cursor: Option<String>,
+    /// With `?earlier=N` on the first page (additive, 2026-11-18): up to N
+    /// trains leaving just before the search's earliest departure, in
+    /// departure order, that the traveller can still catch (not already
+    /// gone today, and after they are ready from the previous leg). Absent
+    /// when none are asked for or found.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    earlier: Option<Vec<LegCandidateRow>>,
 }
 
 /// 400 for an untracked leg on the two routes that only make sense for a
@@ -5183,6 +5350,279 @@ mod db_tests {
         assert_eq!(results[0]["operator"], "SW");
 
         cleanup_user(&pool, "TEST-ROUTE-CANDIDATES-OPERATOR").await;
+    }
+
+    /// `?earlier=N` (2026-11-18): the trains just before the search's
+    /// earliest departure, as `earlier`, in departure order. Planning
+    /// ahead (a future day) offers all of them; today, only those not yet
+    /// gone; after another leg, only those leaving once the traveller is
+    /// ready for them. Absent without the parameter, and never on a
+    /// later page.
+    #[tokio::test]
+    #[ignore = "requires a live database; run with `cargo test -p api \
+                get_leg_candidates_earlier -- --ignored --test-threads=1`"]
+    async fn get_leg_candidates_earlier_offers_the_trains_just_before_the_window() {
+        let pool = connect().await;
+        let _trains = crate::test_support::fixture_trains_cleanup(&pool).await;
+        let token = seed_session(&pool, "TEST-ROUTE-CANDIDATES-EARLIER").await;
+        let router = test_router(test_app(pool.clone()));
+        let service_date =
+            chrono::NaiveDate::from_ymd_opt(2099, 5, 22).expect("valid fixture date");
+        let _day = fixture_day_cleanup(&pool, service_date).await;
+        // The day before: the traveller is planning ahead.
+        let _now = crate::routes::pin_london_now_for_tests(
+            (service_date - chrono::Duration::days(1))
+                .and_hms_opt(12, 0, 0)
+                .expect("valid time")
+                .and_utc(),
+        );
+
+        let hm = |h, m| chrono::NaiveTime::from_hms_opt(h, m, 0).expect("valid time");
+        // (uid, operator, departs WAT, arrives RDG): three before 08:00,
+        // one at it, one after.
+        let trains = [
+            ("LGE0700", "SW", hm(7, 0), hm(7, 30)),
+            ("LGE0720", "SW", hm(7, 20), hm(7, 50)),
+            ("LGE0740", "VT", hm(7, 40), hm(8, 10)),
+            ("LGE0800", "SW", hm(8, 0), hm(8, 30)),
+            ("LGE0900", "SW", hm(9, 0), hm(9, 30)),
+        ];
+        let mut rows = Vec::new();
+        for (uid, operator, departs, arrives) in trains {
+            for (origin, scheduled) in [("WAT", departs), ("RDG", arrives)] {
+                rows.push(crate::data::queries::ScheduleDestinationDeparturesRow {
+                    service_date,
+                    destination_crs: "RDG".to_string(),
+                    scheduled,
+                    day_offset: 0,
+                    train_uid: uid.to_string(),
+                    origin_crs: origin.to_string(),
+                    true_origin_crs: Some("WAT".to_string()),
+                    calling_point_arrival: None,
+                    destination_arrival: Some(arrives),
+                    destination_arrival_day_offset: 0,
+                    operator_atoc: Some(operator.to_string()),
+                    headcode: None,
+                    rsid: None,
+                    ..Default::default()
+                });
+            }
+        }
+        crate::data::queries::upsert_schedule_destination_departures(&pool, &rows)
+            .await
+            .expect("seed fixture schedule_destination_departures rows");
+
+        let (status, created) = post_json(
+            router.clone(),
+            "/Journeys".to_string(),
+            Some(&token),
+            serde_json::json!({
+                "leg": {
+                    "mode": "window",
+                    "originCrs": "WAT",
+                    "destinationCrs": "RDG",
+                    "serviceDate": service_date.to_string(),
+                    "departWindow": { "after": "08:00:00", "before": "09:30:00" }
+                }
+            }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "create: {created:?}");
+        let journey_id = created["journeyId"].as_i64().expect("journeyId present");
+        let leg_id = created["legId"].as_i64().expect("legId present");
+
+        let uids = |rows: &Value| -> Vec<String> {
+            rows.as_array()
+                .expect("an array of candidates")
+                .iter()
+                .map(|r| r["uid"].as_str().expect("uid present").to_string())
+                .collect()
+        };
+        let candidates = |query: &str| {
+            let router = router.clone();
+            let uri = format!("/Journeys/{journey_id}/legs/{leg_id}/candidates{query}");
+            let token = token.clone();
+            async move { request(router, uri, Some(&token)).await }
+        };
+
+        // Without the parameter: the window alone, no `earlier` key.
+        let (status, body) = candidates("").await;
+        assert_eq!(status, StatusCode::OK, "plain: {body:?}");
+        assert_eq!(uids(&body["results"]), ["LGE0800", "LGE0900"]);
+        assert!(
+            body.get("earlier").is_none(),
+            "an old caller's response is unchanged: {body:?}"
+        );
+
+        // Planning ahead: the two nearest the window, earliest first.
+        let (status, body) = candidates("?earlier=2").await;
+        assert_eq!(status, StatusCode::OK, "earlier=2: {body:?}");
+        assert_eq!(uids(&body["results"]), ["LGE0800", "LGE0900"]);
+        assert_eq!(uids(&body["earlier"]), ["LGE0720", "LGE0740"]);
+        assert_eq!(body["earlier"][0]["scheduled"], "07:20");
+
+        // More than exist is every one there is; the same filters apply.
+        let (_, body) = candidates("?earlier=9").await;
+        assert_eq!(uids(&body["earlier"]), ["LGE0700", "LGE0720", "LGE0740"]);
+        let (_, body) = candidates("?earlier=9&operator=SW").await;
+        assert_eq!(uids(&body["earlier"]), ["LGE0700", "LGE0720"]);
+
+        // Not a number is a 400; `0` is none.
+        let (status, _) = candidates("?earlier=lots").await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        let (_, body) = candidates("?earlier=0").await;
+        assert!(body.get("earlier").is_none(), "earlier=0: {body:?}");
+
+        // A later page never repeats them.
+        let (_, first) = candidates("?limit=1&earlier=2").await;
+        let cursor = first["nextCursor"].as_str().expect("a second page");
+        let (_, second) = candidates(&format!("?limit=1&earlier=2&after={cursor}")).await;
+        assert!(second.get("earlier").is_none(), "page 2: {second:?}");
+
+        // Today, 07:30 in London (BST is UTC+1): 07:00 and 07:20 are gone.
+        let _today = crate::routes::pin_london_now_for_tests(
+            service_date
+                .and_hms_opt(6, 30, 0)
+                .expect("valid time")
+                .and_utc(),
+        );
+        let (_, body) = candidates("?earlier=9").await;
+        assert_eq!(
+            uids(&body["earlier"]),
+            ["LGE0740"],
+            "only what has not left"
+        );
+
+        // After 07:40, nothing before 08:00 can still be caught.
+        let _later = crate::routes::pin_london_now_for_tests(
+            service_date
+                .and_hms_opt(6, 45, 0)
+                .expect("valid time")
+                .and_utc(),
+        );
+        let (_, body) = candidates("?earlier=9").await;
+        assert!(body.get("earlier").is_none(), "all gone: {body:?}");
+
+        // A past day has none.
+        let _next_day = crate::routes::pin_london_now_for_tests(
+            (service_date + chrono::Duration::days(1))
+                .and_hms_opt(12, 0, 0)
+                .expect("valid time")
+                .and_utc(),
+        );
+        let (_, body) = candidates("?earlier=9").await;
+        assert!(body.get("earlier").is_none(), "a past day: {body:?}");
+
+        cleanup_user(&pool, "TEST-ROUTE-CANDIDATES-EARLIER").await;
+    }
+
+    /// `?earlier=N` after another leg: only trains that leave once the
+    /// traveller is ready for them (the previous leg's arrival and the
+    /// change time), not ones they cannot get to.
+    #[tokio::test]
+    #[ignore = "requires a live database; run with `cargo test -p api \
+                get_leg_candidates_earlier -- --ignored --test-threads=1`"]
+    async fn get_leg_candidates_earlier_waits_for_the_previous_leg() {
+        let pool = connect().await;
+        let _trains = crate::test_support::fixture_trains_cleanup(&pool).await;
+        let token = seed_session(&pool, "TEST-ROUTE-CANDIDATES-EARLIER-READY").await;
+        let router = test_router(test_app(pool.clone()));
+        let service_date =
+            chrono::NaiveDate::from_ymd_opt(2099, 5, 23).expect("valid fixture date");
+        let _day = fixture_day_cleanup(&pool, service_date).await;
+        let _now = crate::routes::pin_london_now_for_tests(
+            (service_date - chrono::Duration::days(1))
+                .and_hms_opt(12, 0, 0)
+                .expect("valid time")
+                .and_utc(),
+        );
+
+        let hm = |h, m| chrono::NaiveTime::from_hms_opt(h, m, 0).expect("valid time");
+        let mut rows = Vec::new();
+        for (uid, departs, arrives) in [
+            ("LGR0700", hm(7, 0), hm(7, 30)),
+            ("LGR0720", hm(7, 20), hm(7, 50)),
+            ("LGR0740", hm(7, 40), hm(8, 10)),
+        ] {
+            for (origin, scheduled) in [("WAT", departs), ("RDG", arrives)] {
+                rows.push(crate::data::queries::ScheduleDestinationDeparturesRow {
+                    service_date,
+                    destination_crs: "RDG".to_string(),
+                    scheduled,
+                    day_offset: 0,
+                    train_uid: uid.to_string(),
+                    origin_crs: origin.to_string(),
+                    true_origin_crs: Some("WAT".to_string()),
+                    calling_point_arrival: None,
+                    destination_arrival: Some(arrives),
+                    destination_arrival_day_offset: 0,
+                    operator_atoc: Some("SW".to_string()),
+                    headcode: None,
+                    rsid: None,
+                    ..Default::default()
+                });
+            }
+        }
+        crate::data::queries::upsert_schedule_destination_departures(&pool, &rows)
+            .await
+            .expect("seed fixture schedule_destination_departures rows");
+
+        // A walk that ends at 07:30 London (06:30 UTC), then the train leg:
+        // ready at 07:30 plus the change time, so 07:00 and 07:20 are out.
+        let (status, created) = post_json(
+            router.clone(),
+            "/Journeys".to_string(),
+            Some(&token),
+            serde_json::json!({
+                "leg": {
+                    "mode": "untracked",
+                    "transitMode": "walk",
+                    "originName": "Home",
+                    "destinationName": "Waterloo",
+                    "plannedDeparture": format!("{service_date}T06:00:00Z"),
+                    "plannedArrival": format!("{service_date}T06:30:00Z"),
+                }
+            }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "create: {created:?}");
+        let journey_id = created["journeyId"].as_i64().expect("journeyId present");
+        let (status, added) = post_json(
+            router.clone(),
+            format!("/Journeys/{journey_id}/legs"),
+            Some(&token),
+            serde_json::json!({
+                "mode": "window",
+                "originCrs": "WAT",
+                "destinationCrs": "RDG",
+                "serviceDate": service_date.to_string(),
+                "departWindow": { "after": "08:00:00" }
+            }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "add window leg: {added:?}");
+        let leg_id = added["legId"].as_i64().expect("legId present");
+
+        let (status, body) = request(
+            router.clone(),
+            format!("/Journeys/{journey_id}/legs/{leg_id}/candidates?earlier=5"),
+            Some(&token),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "earlier: {body:?}");
+        let earlier: Vec<&str> = body["earlier"]
+            .as_array()
+            .expect("the train after the walk is offered")
+            .iter()
+            .map(|r| r["uid"].as_str().expect("uid present"))
+            .collect();
+        assert_eq!(
+            earlier,
+            ["LGR0740"],
+            "07:00 and 07:20 leave before they are ready"
+        );
+
+        cleanup_user(&pool, "TEST-ROUTE-CANDIDATES-EARLIER-READY").await;
     }
 
     /// DS-215: "Add a leg"'s window search saves the Between stations

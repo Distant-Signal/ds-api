@@ -5281,6 +5281,7 @@ mod db_tests {
                 terminates_at: resolved.terminates_at.as_deref(),
                 stop_filter: resolved.stop_filter.as_ref(),
                 after: None,
+                newest_first: false,
                 limit: 50,
             },
         )

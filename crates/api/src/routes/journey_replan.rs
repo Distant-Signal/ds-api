@@ -215,7 +215,7 @@ impl Analysis {
 
     /// When the traveller can board leg `index`'s train, from the leg
     /// before it: its live arrival plus the change time.
-    fn ready_for(&self, index: usize) -> Option<DateTime<Utc>> {
+    pub(crate) fn ready_for(&self, index: usize) -> Option<DateTime<Utc>> {
         let previous = index.checked_sub(1)?;
         let timings = self.timings.as_ref()?;
         let next = self.timing(index);

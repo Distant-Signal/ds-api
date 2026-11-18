@@ -3,6 +3,31 @@
 Changes to the Distant Signal (DS) HTTP API that a client such as DS-MCP
 needs to know about. Newest first. Field names are as served (camelCase).
 
+## 2026-11-18: `GET /Journeys/{id}/legs/{legId}/candidates?earlier=N` adds the trains just before the search
+
+Additive (DS-589); no migration or grant change. Without `earlier` the
+response is exactly what it was, so the order of deploys does not matter.
+
+- `earlier=N` (a whole number, default `0`, at most `5`; more is clamped;
+  anything else is a `400`) adds `earlier`: up to N trains leaving
+  just before the search's earliest departure (`departAfter`, the leg's or
+  an edited search's), in departure order, with the same row shape as
+  `results`. They search the same stations, filters and operator as the
+  window. `earlier` is absent when none were asked for or found, and on any
+  page after the first (`after` set). With no `departAfter` the window
+  already starts with the day's first train, so there is none.
+- Only trains the traveller can still catch are offered. On today's
+  (London) date, a train that has already left (its timetabled departure is
+  before now) is not; a past date has none; a future date has no such
+  bound (planning ahead). For a leg after the first, a train that leaves
+  before the traveller is ready for it is not either: the previous leg's
+  arrival (live where it is running, else timetabled) plus the change time,
+  the time the "Choose another train" flow uses. When the journey's legs
+  cannot be read, none are offered.
+- The window's own rows are unchanged: they still list every train in the
+  search, including ones already gone today. The currently picked train is
+  not marked in either list; compare its `uid`.
+
 ## 2026-11-18: the anonymous share view serves no numeric ids (stage 2a of the opaque ids)
 
 Behaviour change for `GET /Journeys/shared/{token}` only (DS-534); no
