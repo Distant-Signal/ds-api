@@ -2424,6 +2424,13 @@ delayMinutes: number | null,
  */
 arrivalDelayMinutes: number | null, 
 /**
+ * The alighting stop's arrival is an actual: the train has reached
+ * (or passed) it and `arrivalDelayMinutes` is how late it was. Absent
+ * when the arrival is an estimate, a forecast or a delay carried from
+ * an earlier call (additive, DS-534).
+ */
+arrivalIsActual?: boolean, 
+/**
  * Darwin's cancel/delay text, else TRUST's cancellation reason.
  */
 reason: string | null, 

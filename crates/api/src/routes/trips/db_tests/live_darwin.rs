@@ -233,6 +233,8 @@ async fn a_late_first_train_trust_has_no_state_for_is_planned_on_darwins_forecas
         );
         let first = &after["segments"][0]["itineraries"][0]["legs"][0];
         assert_eq!(first["live"]["arrivalDelayMinutes"], 15, "{first:?}");
+        // A forecast is an estimate.
+        assert!(first["live"].get("arrivalIsActual").is_none(), "{first:?}");
     }
     cleanup_darwin(&pool, &uids, "TDWL").await;
 }
@@ -271,6 +273,8 @@ async fn a_fresh_trust_delay_is_not_altered_by_a_different_darwin_forecast() {
     assert_live_feasible(&body);
     let first = &body["segments"][0]["itineraries"][0]["legs"][0];
     assert_eq!(first["live"]["arrivalDelayMinutes"], 5, "{first:?}");
+    // TRUST's carried delay is an estimate.
+    assert!(first["live"].get("arrivalIsActual").is_none(), "{first:?}");
 
     cleanup_darwin(&pool, &uids, "TDWF").await;
 }
@@ -336,6 +340,7 @@ async fn a_darwin_actual_at_a_call_trust_never_reported_beats_the_carried_estima
     assert_live_feasible(&after);
     let first = &after["segments"][0]["itineraries"][0]["legs"][0];
     assert_eq!(first["live"]["arrivalDelayMinutes"], 10, "{first:?}");
+    assert_eq!(first["live"]["arrivalIsActual"], true, "{first:?}");
 
     cleanup_darwin(&pool, &uids, "TDWA").await;
 }

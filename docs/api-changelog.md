@@ -3,6 +3,20 @@
 Changes to the Distant Signal (DS) HTTP API that a client such as DS-MCP
 needs to know about. Newest first. Field names are as served (camelCase).
 
+## 2026-11-18: `GET /Trips/plan` train legs add `live.arrivalIsActual`
+
+Additive (DS-534); no schema, migration or grant change, and the OpenAPI
+document is untouched (the planner is not in the personal-token surface).
+
+- `legs[].live.arrivalIsActual` is `true` when the arrival at the alighting
+  stop is an actual: TRUST reported the train arriving at (or passing) it, or
+  the Push Port has an actual arrival there. Then `live.arrivalDelayMinutes`
+  is how late the train arrived (`0` for on time). It is absent, never
+  `false`, when the arrival is still an estimate: a delay carried forward
+  from an earlier call, a Push Port forecast or the board's estimate.
+- A client that does not read it is unchanged; one that does should treat
+  absent as "expected".
+
 ## 2026-11-18: member ids take an `m_` prefix; the members routes accept both forms
 
 Additive for the api (DS-534); no schema change in this release. It works

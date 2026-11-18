@@ -211,6 +211,10 @@ fn delay_between(scheduled: DateTime<Utc>, observed: DateTime<Utc>) -> i32 {
 // ---------------------------------------------------------------------------
 
 /// What is known about one call of a train.
+#[expect(
+    clippy::struct_excessive_bools,
+    reason = "independent per-call facts, each read on its own"
+)]
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct StopFact {
     /// `false` when Darwin or TRUST says the train no longer calls here
@@ -225,6 +229,9 @@ pub struct StopFact {
     /// else the TRUST estimate, else (no fresh TRUST state) the Push Port's
     /// forecast.
     pub arr_delay: Option<i32>,
+    /// `arr_delay` is the train's actual arrival (a TRUST report of the
+    /// arrival or a pass, or a Push Port actual), not an estimate.
+    pub arr_actual: bool,
     pub departed: bool,
     /// Darwin reports the service as `Delayed` here, with no time.
     pub delayed_unknown: bool,
@@ -330,6 +337,7 @@ pub fn train_live(input: TrainLiveInput<'_>) -> TrainLive {
             served: stop.stop_status != StopStatus::Skipped && !board_cancelled,
             dep_delay: delays.departure,
             arr_delay: delays.arrival,
+            arr_actual: delays.arrival_actual,
             departed: stop.actual_departure.is_some() || delays.darwin_departed,
             delayed_unknown: board
                 .is_some_and(|b| !b.is_cancelled && b.estimated.eq_ignore_ascii_case("Delayed")),
@@ -357,6 +365,9 @@ pub fn train_live(input: TrainLiveInput<'_>) -> TrainLive {
 /// One call's delays, from [`stop_delays`].
 struct StopDelays {
     arrival: Option<i32>,
+    /// The arrival delay is an actual: TRUST's report of the arrival (or a
+    /// pass), or a Push Port actual; never an estimate or a forecast.
+    arrival_actual: bool,
     departure: Option<i32>,
     /// The departure is a Darwin Push Port actual.
     darwin_departed: bool,
@@ -420,10 +431,14 @@ fn stop_delays(stop: &JourneyStop, darwin: Option<StopDarwin>) -> StopDelays {
             forecast
         })
     };
+    let mut arrival_actual = false;
     let arrival = if stop.actual_arrival.is_some() {
-        reported("ARRIVAL")
+        let reported = reported("ARRIVAL");
+        arrival_actual = reported.is_some();
+        reported
     } else if let Some(delay) = darwin_delay(darwin.arrival_actual, public_arrival) {
         fill.actuals = true;
+        arrival_actual = true;
         Some(delay)
     } else {
         public_arrival
@@ -437,6 +452,7 @@ fn stop_delays(stop: &JourneyStop, darwin: Option<StopDarwin>) -> StopDelays {
     };
     StopDelays {
         arrival,
+        arrival_actual,
         departure,
         darwin_departed,
         fill,
@@ -568,6 +584,10 @@ impl TrainLive {
 // ---------------------------------------------------------------------------
 
 /// One call of a train's connection chain, timetabled and live.
+#[expect(
+    clippy::struct_excessive_bools,
+    reason = "independent per-call facts, each read on its own"
+)]
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ChainPoint {
     /// As in the connections array (possibly padded).
@@ -585,6 +605,9 @@ pub struct ChainPoint {
     pub live_dep: Option<u32>,
     pub dep_delay: Option<i32>,
     pub arr_delay: Option<i32>,
+    /// `arr_delay` is a reported actual for this very call, not a forecast
+    /// or a delay carried forward from an earlier one.
+    pub arr_actual: bool,
     pub served: bool,
     /// The call's direction flags, carried from the connections (see
     /// `schedule_query::Connection::can_board`/`can_alight`), so a
@@ -670,6 +693,7 @@ pub fn evaluate_chain(chain: &[&Connection], live: &TrainLive) -> Vec<ChainPoint
             } = call;
             let fact = live.fact(&tiploc, [work_arr, work_dep]);
             let known_arr = fact.and_then(|f| f.arr_delay);
+            let arr_actual = known_arr.is_some() && fact.is_some_and(|f| f.arr_actual);
             let arr_delay = known_arr.or(carry);
             if known_arr.is_some() {
                 carry = known_arr;
@@ -700,6 +724,7 @@ pub fn evaluate_chain(chain: &[&Connection], live: &TrainLive) -> Vec<ChainPoint
                 live_dep,
                 dep_delay: sched_dep.and(dep_delay),
                 arr_delay: sched_arr.and(arr_delay),
+                arr_actual: sched_arr.is_some() && arr_actual,
                 can_board,
                 can_alight,
             }
@@ -1083,6 +1108,13 @@ pub struct LegLive {
     pub delay_minutes: Option<i32>,
     /// Minutes late arriving at the alighting stop, when known or propagated.
     pub arrival_delay_minutes: Option<i32>,
+    /// The alighting stop's arrival is an actual: the train has reached
+    /// (or passed) it and `arrivalDelayMinutes` is how late it was. Absent
+    /// when the arrival is an estimate, a forecast or a delay carried from
+    /// an earlier call (additive, DS-534).
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    #[ts(optional = nullable)]
+    pub arrival_is_actual: bool,
     /// Darwin's cancel/delay text, else TRUST's cancellation reason.
     pub reason: Option<String>,
     /// `darwin` or `trust`, when `reason` is set.
@@ -1516,6 +1548,7 @@ pub fn annotate(segments: &mut [SegmentResult], ctx: &LiveContext<'_>) {
                                 cancelled,
                                 delay_minutes: board.dep_delay,
                                 arrival_delay_minutes: alight.arr_delay,
+                                arrival_is_actual: alight.arr_actual,
                                 reason,
                                 reason_source,
                                 platform: fact.and_then(|f| f.platform.clone()),
@@ -3070,6 +3103,78 @@ mod tests {
                 .expect("fact")
                 .departed
         );
+    }
+
+    fn arr_actuals(live: &TrainLive) -> Vec<bool> {
+        evaluate(live).iter().map(|p| p.arr_actual).collect()
+    }
+
+    #[test]
+    fn a_trust_reported_arrival_is_an_actual_and_the_calls_ahead_are_not() {
+        let mut stops = stops();
+        stops[1].actual_arrival = Some(utc(496));
+        stops[1].last_event_type = Some("ARRIVAL".to_string());
+        stops[1].delay_minutes = Some(6);
+        crate::data::journey::apply_delay_estimates(&mut stops, Some(6));
+        let live = profile(&stops, None, &[]);
+        assert_eq!(evaluate(&live)[1].arr_delay, Some(6));
+        assert_eq!(arr_actuals(&live), [false, true, false, false]);
+    }
+
+    #[test]
+    fn a_trust_departure_report_alone_is_not_an_actual_arrival() {
+        // TRUST reported only the departure from B: the arrival there is
+        // not a reported time, so it stays an estimate.
+        let mut stops = stops();
+        stops[1].actual_departure = Some(utc(497));
+        stops[1].last_event_type = Some("DEPARTURE".to_string());
+        stops[1].delay_minutes = Some(6);
+        let live = profile(&stops, None, &[]);
+        assert_eq!(arr_actuals(&live), [false; 4]);
+    }
+
+    #[test]
+    fn a_darwin_actual_arrival_is_an_actual() {
+        let darwin = vec![
+            None,
+            Some(StopDarwin {
+                arrival_actual: Some(utc(497)),
+                ..darwin_stop()
+            }),
+            None,
+            None,
+        ];
+        let live = profile_with_darwin(&stops(), &darwin);
+        assert_eq!(evaluate(&live)[1].arr_delay, Some(7));
+        assert_eq!(arr_actuals(&live), [false, true, false, false]);
+    }
+
+    #[test]
+    fn a_carried_trust_estimate_is_not_an_actual() {
+        let mut stops = stops();
+        stops[0].actual_departure = Some(utc(485));
+        stops[0].last_event_type = Some("DEPARTURE".to_string());
+        stops[0].delay_minutes = Some(5);
+        crate::data::journey::apply_delay_estimates(&mut stops, Some(5));
+        let live = profile(&stops, None, &[]);
+        assert_eq!(evaluate(&live)[3].arr_delay, Some(5));
+        assert_eq!(arr_actuals(&live), [false; 4]);
+    }
+
+    #[test]
+    fn a_darwin_forecast_is_not_an_actual() {
+        let darwin = vec![
+            None,
+            Some(StopDarwin {
+                arrival_forecast: Some(utc(497)),
+                ..darwin_stop()
+            }),
+            None,
+            None,
+        ];
+        let live = profile_with_darwin(&stops(), &darwin);
+        assert_eq!(evaluate(&live)[1].arr_delay, Some(7));
+        assert_eq!(arr_actuals(&live), [false; 4]);
     }
 
     #[test]
