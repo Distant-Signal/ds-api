@@ -2075,6 +2075,7 @@ pub async fn search_journey_leg_candidates(
             terminates_at: None,
             stop_filter: None,
             after,
+            newest_first: false,
             limit,
         },
     )
@@ -2084,6 +2085,7 @@ pub async fn search_journey_leg_candidates(
 /// One window search for [`search_journey_leg_candidates_filtered`]: the
 /// leg's stations, date and four optional bounds, and its filters
 /// (DS-215; `routes::trains::leg_filters`).
+#[derive(Clone, Copy)]
 pub struct LegCandidateSearch<'a> {
     pub origin_crs: &'a str,
     pub destination_crs: &'a str,
@@ -2104,6 +2106,11 @@ pub struct LegCandidateSearch<'a> {
     /// ones), as `/public/trains/search` applies them with `stops_at`.
     pub stop_filter: Option<&'a crate::data::stop_filters::SearchStopFilter>,
     pub after: Option<&'a CallingPointDepartureCursor>,
+    /// Read the rows latest departure first (the keyset `after` then runs
+    /// backwards, to earlier departures). The returned page is still in
+    /// departure order, and its cursor is never set: this is how the
+    /// trains just before a window are read (`earlier_leg_candidates`).
+    pub newest_first: bool,
     pub limit: i64,
 }
 
@@ -2173,6 +2180,7 @@ pub async fn search_journey_leg_candidates_filtered(
             .bind(batch)
             .bind(search.starts_at)
             .bind(search.terminates_at)
+            .bind(search.newest_first)
             .fetch_all(pool)
             .await?;
         let Some(filter) = search.stop_filter else {
@@ -2213,8 +2221,13 @@ pub async fn search_journey_leg_candidates_filtered(
 
     let has_more = rows.len() as i64 > limit;
     rows.truncate(limit as usize);
+    if search.newest_first {
+        // Read latest first so the cut keeps the trains nearest the
+        // window; served in departure order like every other page.
+        rows.reverse();
+    }
 
-    let next_cursor = if has_more {
+    let next_cursor = if has_more && !search.newest_first {
         rows.last().map(|row| CallingPointDepartureCursor {
             day_offset: 0,
             scheduled: row.scheduled,
@@ -2270,7 +2283,7 @@ pub async fn search_journey_leg_candidates_filtered(
 /// [`search_journey_leg_candidates_filtered`]'s query. `$1` date, `$2`
 /// origin, `$3`/`$4` departure bounds, `$5` destination, `$6`/`$7`
 /// arrival bounds, `$8` operators, `$9`/`$10` keyset, `$11` limit, `$12`
-/// starts at, `$13` terminates at.
+/// starts at, `$13` terminates at, `$14` latest departure first.
 const LEG_CANDIDATES_SQL: &str = r"
             SELECT main.train_uid, main.destination_crs, main.true_origin_crs, main.scheduled, main.destination_arrival, main.destination_arrival_day_offset, main.operator_atoc,
                    -- The arrival at the LEG's own destination, which is
@@ -2406,8 +2419,10 @@ const LEG_CANDIDATES_SQL: &str = r"
               AND ($12::text IS NULL OR main.true_origin_crs = $12)
               AND ($13::text IS NULL OR main.destination_crs = $13)
               AND ($9::time IS NULL
-                   OR (main.scheduled, main.train_uid) > ($9, $10))
-            ORDER BY main.scheduled, main.train_uid
+                   OR (NOT $14::bool AND (main.scheduled, main.train_uid) > ($9, $10))
+                   OR ($14::bool AND (main.scheduled, main.train_uid) < ($9, $10)))
+            ORDER BY (CASE WHEN $14::bool THEN main.scheduled END) DESC NULLS LAST,
+                     main.scheduled, main.train_uid
             LIMIT $11
             ";
 

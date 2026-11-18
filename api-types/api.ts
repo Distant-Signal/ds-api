@@ -2285,7 +2285,15 @@ identity: string | null, serviceMode: ServiceMode, liveTracking: boolean, };
 /**
  * `GET .../legs/{legId}/candidates`'s body.
  */
-export type LegCandidatesResponse = { results: Array<LegCandidate>, nextCursor: string | null, };
+export type LegCandidatesResponse = { results: Array<LegCandidate>, nextCursor: string | null, 
+/**
+ * With `?earlier=N` on the first page (additive, 2026-11-18): up to N
+ * trains leaving just before the search's earliest departure, in
+ * departure order, that the traveller can still catch (not already
+ * gone today, and after they are ready from the previous leg). Absent
+ * when none are asked for or found.
+ */
+earlier?: Array<LegCandidate>, };
 
 /**
  * The change onto a leg from the one before it (`connection` on every
