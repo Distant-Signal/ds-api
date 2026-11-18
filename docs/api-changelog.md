@@ -3,6 +3,63 @@
 Changes to the Distant Signal (DS) HTTP API that a client such as DS-MCP
 needs to know about. Newest first. Field names are as served (camelCase).
 
+## 2026-11-18: `API_SERVE_NUMERIC_IDS` withholds the numeric ids beside opaque ones (stage 2b of the opaque ids, off by default)
+
+No change in behaviour until the switch is turned (DS-534). The chart's
+`api.extraEnv` sets `API_SERVE_NUMERIC_IDS=false` to start stage 2b with no
+new image; unset, empty or `true` (the default) serves the numeric ids as
+before, and anything else is a startup error. The OpenAPI document and
+`api-types/api.ts` are unchanged: every numeric field stays in its schema,
+required where it was required, so the `/v1` breaking-change check does not
+see this.
+
+- **What changes when it is `false`.** In every JSON response on the public,
+  delegated and personal-token listeners, a numeric id that has an opaque id
+  beside it is served as `0` (each number of an id array as `0`, so an array
+  keeps its length and its order against its `...PublicIds` array). A
+  `null` stays `null` (a non-owner's `openBreakId`, a journey with no
+  source regular journey). The opaque ids are untouched. The pairs are found
+  by name: `publicId` beside `id`, `<x>PublicId` beside `<x>Id`,
+  `<x>PublicIds` beside `<x>Ids`. That is every family with opaque ids:
+  journeys (`id`, `legId`, `trainSubscriptionId`, `openBreakId`,
+  `sourceTemplateId`, `journeyId` in the group, reliability, replace,
+  restore, itinerary, tracking and Irish-train responses), legs (`legId`,
+  `legIds`, `newLegIds`, `replacesLegIds`, `triggerLegId`, `throughLegId`,
+  `rejoinsLegId`, `fromLegId`, `sourceLegId`), tracked trains (`id`,
+  `trackingId`, `trainSubscriptionId`, `journeyIds`,
+  `singleLegJourneyIds`), push devices (`id`), breaks (`id`, `breakId`,
+  `openBreak.id`) and regular journeys (`id`, `templateId`, `templateIds`,
+  `returnTemplateId`, `pairedTemplateId`, `sourceTemplateId`). Group member
+  ids were never numeric.
+- **Not changed, because they have no opaque id yet:** time away period ids,
+  webhook and personal token ids, connected-app deletion ids,
+  `RecentlyDeletedJourney.id` and `.journeyId`, a template leg's `id`,
+  `RevisionLeg.ticketIds`, `deletedJourneyIds` (and `trainsId`, already
+  `0`). The account export keeps its numeric ids: it is the owner's own data
+  and its rows join on them.
+- **A new response type is covered when it names its ids the same way.** A
+  test reads the generated `api-types/api.ts` and fails for a numeric id in a
+  type that has opaque ids but no opaque partner of its own.
+- **Requests are not changed.** A numeric id is still accepted in a path or a
+  body (stage 3), and still counted in
+  `distant_signal_legacy_id_requests_total{kind}`.
+- **Metrics.** `distant_signal_api_serve_numeric_ids{mode}` is `1` on the
+  current mode (`served` or `withheld`) and `0` on the other;
+  `distant_signal_api_numeric_ids_withheld_responses_total` counts rewritten
+  responses; `distant_signal_api_numeric_ids_unprocessed_total{reason}`
+  counts a JSON response too large (over 16 MiB) or of unknown size, sent
+  unchanged.
+- **The gate for turning it on.** Seven days after both the website and DS-MCP
+  are on a build that reads the opaque ids only, and
+  `distant_signal_legacy_id_requests_total` shows no numeric id sent by
+  either (the request side; reads are what this changes). The website's
+  remaining reads of a numeric id (React keys, set membership and ordering
+  that compare ids) must be fixed first: see the pull request. Stage 3, the
+  api refusing numeric ids in requests, follows once the counter has been at
+  zero for 30 days.
+- **Rollback.** Remove the env var (or set it to `true`) and restart: the
+  numeric ids are served again. Nothing is stored differently.
+
 ## 2026-11-18: `stanox_crs` gains five stations the CIF leaves ambiguous (DS-534)
 
 No schema or route change. `GET /public/stanox-crs` (and the TRUST movement

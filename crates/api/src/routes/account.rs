@@ -151,6 +151,11 @@ async fn export_account(State(app): State<App>, user: AuthenticatedUser) -> Resp
         export.exported_at.format("%Y-%m-%d")
     );
     let mut response = Json(export).into_response();
+    // The owner's own data: its rows join on the numeric ids, so the export
+    // keeps them when the other responses withhold them (`numeric_ids`).
+    response
+        .extensions_mut()
+        .insert(crate::numeric_ids::KeepNumericIds);
     let headers = response.headers_mut();
     headers.insert(
         header::CONTENT_DISPOSITION,

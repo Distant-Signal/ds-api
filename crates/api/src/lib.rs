@@ -43,6 +43,7 @@ pub mod data;
 pub mod edge;
 pub mod ics;
 pub mod journey_break_sweep;
+pub mod numeric_ids;
 pub mod personal_tokens;
 pub use ds_store::migrate;
 pub mod rate_limit;
