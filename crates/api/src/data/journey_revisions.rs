@@ -513,7 +513,10 @@ pub struct Revision {
     pub cause: Option<String>,
     #[ts(as = "Option<crate::ts_values::RevisionFault>")]
     pub fault: Option<String>,
+    // Deprecated (DS-534): use `break_public_id`.
     pub break_id: Option<i64>,
+    // The break's opaque id; `null` with `break_id`.
+    pub break_public_id: Option<String>,
     #[ts(as = "crate::ts_values::RevisionActor")]
     pub actor: String,
     pub is_compensation_baseline: bool,
@@ -524,8 +527,10 @@ pub struct Revision {
 /// Every revision of a journey with its legs, newest first.
 pub async fn list_revisions(pool: &PgPool, journey_id: i64) -> anyhow::Result<Vec<Revision>> {
     let mut revisions: Vec<Revision> = sqlx::query_as(
-        "SELECT id, revision_no, created_at, reason, cause, fault, break_id, actor, \
-                is_compensation_baseline \
+        "SELECT id, revision_no, created_at, reason, cause, fault, break_id, \
+                (SELECT b.public_id FROM journey_breaks b WHERE b.id = break_id) \
+                    AS break_public_id, \
+                actor, is_compensation_baseline \
          FROM journey_revisions WHERE journey_id = $1 ORDER BY revision_no DESC",
     )
     .bind(journey_id)

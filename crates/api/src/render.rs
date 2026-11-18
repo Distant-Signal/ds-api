@@ -878,7 +878,8 @@ pub(crate) fn line_train_json(
         schedule_destination_crs: schedule_route.destination_crs.clone(),
         schedule_destination_name: schedule_route.destination_name.clone(),
         live_status: live.map(|s| LineTrainLiveStatusJson {
-            trains_id: s.trains_id,
+            // Deprecated (DS-534): always `0`; see `PublicTrainState::trains_id`.
+            trains_id: 0,
             train_id: s.train_id.clone(),
             origin_crs: s.origin_crs.clone(),
             origin_name: s.origin_name.clone(),
@@ -1310,7 +1311,7 @@ pub(crate) mod legacy {
 
     pub(crate) fn live_status(s: &crate::data::trains::PublicTrainState) -> Value {
         json!({
-            "trainsId": s.trains_id,
+            "trainsId": 0,
             "trainId": s.train_id,
             "originCrs": s.origin_crs,
             "originName": s.origin_name,
@@ -2891,6 +2892,20 @@ mod tests {
         }
     }
 
+    /// DS-534: the shared train catalogue's row number is a sequence, so a
+    /// public train is never serialized with it: `trainsId` is `0` for the
+    /// public train response (which flattens this state) whatever the row's
+    /// id, while the state keeps the real value for the handlers that read
+    /// it.
+    #[test]
+    fn a_public_train_state_never_serializes_its_catalogue_number() {
+        let live = sample_live_state();
+        assert_eq!(live.trains_id, 42);
+        let json = serde_json::to_value(&live).unwrap();
+        assert_eq!(json["trainsId"], 0, "{json}");
+        assert!(json.get("trainUid").is_some(), "the rest is served: {json}");
+    }
+
     #[test]
     fn line_train_json_with_a_live_row_attaches_live_status_in_camel_case() {
         let entry = serde_json::json!({"uid": "C10002", "calling_points": []});
@@ -2898,7 +2913,8 @@ mod tests {
 
         let json = render_line_train(&entry, Some(&live), &ScheduleRouteEndpoints::default());
         assert_eq!(json["uid"], "C10002");
-        assert_eq!(json["liveStatus"]["trainsId"], 42);
+        // The catalogue number is never served (DS-534), whatever the row's.
+        assert_eq!(json["liveStatus"]["trainsId"], 0);
         assert_eq!(json["liveStatus"]["trainId"], "1A11");
         assert_eq!(json["liveStatus"]["originCrs"], "EUS");
         assert_eq!(

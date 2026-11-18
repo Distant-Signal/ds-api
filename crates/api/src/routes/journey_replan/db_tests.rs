@@ -3441,3 +3441,420 @@ async fn a_miss_after_midnight_with_no_timetable_for_the_next_day_gets_the_days_
         );
     }
 }
+
+// ---------------------------------------------------------------------------
+// Opaque break ids (DS-534, wave 2)
+// ---------------------------------------------------------------------------
+
+/// A traveller-marked miss left open on `leg_id`, for tests that need a
+/// break without a cancelled train: its numeric id and its `b_` id (the
+/// column's default fills it).
+async fn seed_open_break(pool: &PgPool, journey_id: i64, leg_id: i64) -> (i64, String) {
+    sqlx::query_as(
+        "INSERT INTO journey_breaks (journey_id, user_id, cause, fault, severity, \
+             trigger_leg_id, break_position, fingerprint) \
+         VALUES ($1, $2, 'user_missed', 'user', 1, $3, 1, '') RETURNING id, public_id",
+    )
+    .bind(journey_id)
+    .bind(USER)
+    .bind(leg_id)
+    .fetch_one(pool)
+    .await
+    .expect("seed a break")
+}
+
+const UNKNOWN_BREAK: &str = "b_ffffffffffffffffffffffffffffffff";
+const A_LEG_ID: &str = "l_0123456789abcdef0123456789abcdef";
+
+/// A break is served with its opaque id beside the numeric one, and named
+/// by either form in `replan/preview`'s body and the dismiss path; an
+/// unknown id behaves as an unknown number, another kind's id is refused.
+#[tokio::test]
+#[ignore = "requires a live database: DATABASE_URL"]
+#[expect(
+    clippy::too_many_lines,
+    reason = "test code: one scenario, read top to bottom"
+)]
+async fn a_break_is_served_and_named_by_its_number_or_its_opaque_id() {
+    let _now = pin_now();
+    let pool = connect().await;
+    let _cleanup = cleanup(&pool).await;
+    seed_timetable(&pool).await;
+    let token = seed_session(&pool, USER).await;
+    let other = seed_session(&pool, OTHER).await;
+    let router = router(pool.clone());
+    let (journey_id, leg_id) = create_journey(&router, &token).await;
+    let (break_id, public_id) = seed_open_break(&pool, journey_id, leg_id).await;
+    assert!(public_id.starts_with("b_"), "{public_id}");
+    assert_eq!(public_id.len(), 34);
+
+    // The owner is served both, on the journey, its list row and the break
+    // itself.
+    let (_, detail) = call(
+        &router,
+        "GET",
+        &format!("/Journeys/{journey_id}"),
+        Some(&token),
+        None,
+        None,
+    )
+    .await;
+    assert_eq!(detail["openBreak"]["id"], break_id, "{detail}");
+    assert_eq!(detail["openBreak"]["publicId"], public_id.as_str());
+    let (_, mine) = call(&router, "GET", "/Journeys/mine", Some(&token), None, None).await;
+    let row = mine
+        .as_array()
+        .and_then(|rows| rows.iter().find(|row| row["id"] == journey_id))
+        .expect("journey listed");
+    assert_eq!(row["openBreakId"], break_id, "{row}");
+    assert_eq!(row["openBreakPublicId"], public_id.as_str(), "{row}");
+    let (status, current) = call(
+        &router,
+        "GET",
+        &format!("/Journeys/{journey_id}/breaks/current"),
+        Some(&token),
+        None,
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{current}");
+    assert_eq!(current["id"], break_id);
+    assert_eq!(current["publicId"], public_id.as_str());
+
+    // The preview names the break by either form.
+    let preview = |breaks: Value, token: String| {
+        let router = router.clone();
+        let uri = format!("/Journeys/{journey_id}/replan/preview");
+        async move {
+            call(
+                &router,
+                "POST",
+                &uri,
+                Some(&token),
+                Some(serde_json::json!({ "breakId": breaks })),
+                None,
+            )
+            .await
+        }
+    };
+    for named in [serde_json::json!(break_id), serde_json::json!(public_id)] {
+        let (status, body) = preview(named.clone(), token.clone()).await;
+        assert_eq!(status, StatusCode::OK, "{named}: {body}");
+        assert_eq!(body["id"], break_id, "{named}");
+        assert_eq!(body["publicId"], public_id.as_str(), "{named}");
+    }
+    // An unknown id is the unknown number's answer, whatever its form, and
+    // so is someone else's break; the wrong shape is refused.
+    let (unknown_status, unknown_body) =
+        preview(serde_json::json!(UNKNOWN_BREAK), token.clone()).await;
+    assert_eq!(unknown_status, StatusCode::CONFLICT, "{unknown_body}");
+    assert_eq!(
+        preview(serde_json::json!(999_999_999), token.clone()).await,
+        (unknown_status, unknown_body.clone()),
+        "an unknown opaque id and an unknown number answer alike"
+    );
+    for stranger in [serde_json::json!(public_id), serde_json::json!(break_id)] {
+        let (status, body) = preview(stranger, other.clone()).await;
+        assert_eq!(status, StatusCode::NOT_FOUND, "{body}");
+    }
+    for wrong in [
+        serde_json::json!("nope"),
+        serde_json::json!(A_LEG_ID),
+        serde_json::json!(1.5),
+    ] {
+        let (status, body) = preview(wrong.clone(), token.clone()).await;
+        assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY, "{wrong}: {body}");
+    }
+
+    // The dismiss path: a wrong shape is a 400, an unknown id (either form)
+    // and someone else's journey a 404, and the real id (either form)
+    // dismisses. Two journeys, as a journey has one open break.
+    let dismiss = |journey: i64, id: String, token: String| {
+        let router = router.clone();
+        async move {
+            call(
+                &router,
+                "POST",
+                &format!("/Journeys/{journey}/breaks/{id}/dismiss"),
+                Some(&token),
+                Some(serde_json::json!({ "reason": "willMakeIt" })),
+                None,
+            )
+            .await
+        }
+    };
+    for wrong in ["nope", A_LEG_ID, "b_not-an-id"] {
+        let (status, _) = dismiss(journey_id, wrong.to_string(), token.clone()).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{wrong}");
+    }
+    let mut denied = Vec::new();
+    for (token, id) in [
+        (&token, UNKNOWN_BREAK.to_string()),
+        (&token, "999999999".to_string()),
+        (&other, public_id.clone()),
+        (&other, break_id.to_string()),
+    ] {
+        denied.push(dismiss(journey_id, id, token.clone()).await);
+    }
+    for answer in &denied {
+        assert_eq!(answer.0, StatusCode::NOT_FOUND, "{denied:?}");
+        assert_eq!(answer, &denied[0], "the 404s differ: {denied:?}");
+    }
+    let (status, body) = dismiss(journey_id, public_id.clone(), token.clone()).await;
+    assert_eq!(status, StatusCode::NO_CONTENT, "{body}");
+    let (state,): (String,) = sqlx::query_as("SELECT status FROM journey_breaks WHERE id = $1")
+        .bind(break_id)
+        .fetch_one(&pool)
+        .await
+        .expect("break");
+    assert_eq!(state, "dismissed");
+
+    let (second_journey, second_leg) = create_journey(&router, &token).await;
+    let (second_break, _) = seed_open_break(&pool, second_journey, second_leg).await;
+    let (status, body) = dismiss(second_journey, second_break.to_string(), token.clone()).await;
+    assert_eq!(status, StatusCode::NO_CONTENT, "{body}");
+    let (state,): (String,) = sqlx::query_as("SELECT status FROM journey_breaks WHERE id = $1")
+        .bind(second_break)
+        .fetch_one(&pool)
+        .await
+        .expect("break");
+    assert_eq!(state, "dismissed");
+}
+
+/// `replan/accept` under an `Idempotency-Key`, retried naming the break in
+/// the other form: the same request, so the first answer is replayed and
+/// nothing changes twice; a different suggestion under the key is not.
+async fn accept_retried_in_the_other_id_form(public_first: bool) {
+    let _now = pin_now();
+    let pool = connect().await;
+    let _cleanup = cleanup(&pool).await;
+    seed_timetable(&pool).await;
+    let token = seed_session(&pool, USER).await;
+    let router = router(pool.clone());
+    let (journey_id, leg_id) = create_journey(&router, &token).await;
+    let (break_id, public_id) = seed_open_break(&pool, journey_id, leg_id).await;
+    let (status, preview) = call(
+        &router,
+        "POST",
+        &format!("/Journeys/{journey_id}/replan/preview"),
+        Some(&token),
+        Some(serde_json::json!({ "breakId": break_id })),
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{preview}");
+    let suggestions = preview["suggestions"]["suggestions"]
+        .as_array()
+        .expect("suggestions");
+    let pick = |uid: &str| {
+        suggestions
+            .iter()
+            .find(|s| s["legs"][0]["trainUid"] == uid)
+            .unwrap_or_else(|| panic!("{uid} offered: {preview}"))["id"]
+            .clone()
+    };
+    let (chosen, different) = (pick("RP0002"), pick("RP0003"));
+    let numeric = serde_json::json!(break_id);
+    let opaque = serde_json::json!(public_id);
+    let (first, other) = if public_first {
+        (opaque, numeric)
+    } else {
+        (numeric, opaque)
+    };
+    let accept = |form: &Value, suggestion: &Value| {
+        let router = router.clone();
+        let token = token.clone();
+        let body = serde_json::json!({ "breakId": form, "suggestionId": suggestion });
+        let uri = format!("/Journeys/{journey_id}/replan/accept");
+        async move {
+            call(
+                &router,
+                "POST",
+                &uri,
+                Some(&token),
+                Some(body),
+                Some("accept-either-form"),
+            )
+            .await
+        }
+    };
+
+    let (status, answer) = accept(&first, &chosen).await;
+    assert_eq!(status, StatusCode::OK, "{answer}");
+    let legs_after = leg_ids_of(&pool, journey_id).await;
+    let revisions_after = revision_count_of(&pool, journey_id).await;
+    let (state,): (String,) = sqlx::query_as("SELECT status FROM journey_breaks WHERE id = $1")
+        .bind(break_id)
+        .fetch_one(&pool)
+        .await
+        .expect("break");
+    assert_eq!(state, "accepted");
+
+    for (label, form) in [("other form", &other), ("same form", &first)] {
+        let (status, again) = accept(form, &chosen).await;
+        assert_eq!(
+            (status, &again),
+            (StatusCode::OK, &answer),
+            "{label}: the first response, replayed"
+        );
+        assert_eq!(leg_ids_of(&pool, journey_id).await, legs_after, "{label}");
+        assert_eq!(
+            revision_count_of(&pool, journey_id).await,
+            revisions_after,
+            "{label}"
+        );
+    }
+    // Another suggestion under the key is another request, in either form.
+    for (label, form) in [("other form", &other), ("first form", &first)] {
+        let (status, body) = accept(form, &different).await;
+        assert_eq!(status, StatusCode::CONFLICT, "{label}: {body}");
+        assert_eq!(leg_ids_of(&pool, journey_id).await, legs_after, "{label}");
+    }
+}
+
+#[tokio::test]
+#[ignore = "requires a live database: DATABASE_URL"]
+async fn an_idempotent_accept_by_number_is_replayed_for_the_opaque_id() {
+    accept_retried_in_the_other_id_form(false).await;
+}
+
+#[tokio::test]
+#[ignore = "requires a live database: DATABASE_URL"]
+async fn an_idempotent_accept_by_opaque_id_is_replayed_for_the_number() {
+    accept_retried_in_the_other_id_form(true).await;
+}
+
+/// A reader who does not own the journey (a group member) gets the open
+/// break's `publicId` and `0` for its number, on the journey and in the
+/// list, where the owner has the real number (stage 2a of the opaque ids).
+#[tokio::test]
+#[ignore = "requires a live database: DATABASE_URL"]
+async fn a_group_member_reads_the_open_break_without_its_number() {
+    const GROUP: &str = "TEST-REPLAN-GROUP";
+    let _now = pin_now();
+    let pool = connect().await;
+    let _cleanup = cleanup(&pool).await;
+    let _group =
+        FixtureCleanup::new(&pool, [format!("DELETE FROM groups WHERE id = '{GROUP}'")]).await;
+    seed_timetable(&pool).await;
+    let token = seed_session(&pool, USER).await;
+    let member = seed_session(&pool, OTHER).await;
+    let router = router(pool.clone());
+    let (journey_id, leg_id) = create_journey(&router, &token).await;
+    let (break_id, public_id) = seed_open_break(&pool, journey_id, leg_id).await;
+    exec(
+        &pool,
+        &format!(
+            "INSERT INTO groups (id, name, created_by) VALUES ('{GROUP}', 'Replan', '{USER}')"
+        ),
+    )
+    .await;
+    exec(
+        &pool,
+        &format!(
+            "INSERT INTO group_members (group_id, user_id, role) VALUES \
+             ('{GROUP}', '{USER}', 'owner'), ('{GROUP}', '{OTHER}', 'member')"
+        ),
+    )
+    .await;
+    exec(
+        &pool,
+        &format!(
+            "INSERT INTO group_journeys (group_id, journey_id, added_by) \
+             VALUES ('{GROUP}', {journey_id}, '{USER}')"
+        ),
+    )
+    .await;
+    let uri = format!("/Journeys/{journey_id}");
+
+    let (status, owner) = call(&router, "GET", &uri, Some(&token), None, None).await;
+    assert_eq!(status, StatusCode::OK, "{owner}");
+    assert_eq!(owner["openBreak"]["id"], break_id, "{owner}");
+    assert_eq!(owner["openBreak"]["publicId"], public_id.as_str());
+
+    let (status, viewed) = call(&router, "GET", &uri, Some(&member), None, None).await;
+    assert_eq!(status, StatusCode::OK, "{viewed}");
+    assert_eq!(viewed["isOwner"], false);
+    assert_eq!(viewed["openBreak"]["id"], 0, "{viewed}");
+    assert_eq!(viewed["openBreak"]["publicId"], public_id.as_str());
+    assert_eq!(viewed["openBreak"]["cause"], owner["openBreak"]["cause"]);
+
+    let (_, mine) = call(
+        &router,
+        "GET",
+        "/Journeys/mine?include=shared",
+        Some(&member),
+        None,
+        None,
+    )
+    .await;
+    let row = mine
+        .as_array()
+        .and_then(|rows| rows.iter().find(|row| row["id"] == journey_id))
+        .unwrap_or_else(|| panic!("the shared journey is listed: {mine}"));
+    assert!(row["openBreakId"].is_null(), "{row}");
+    assert_eq!(row["openBreakPublicId"], public_id.as_str(), "{row}");
+    let (_, own) = call(&router, "GET", "/Journeys/mine", Some(&token), None, None).await;
+    let own_row = own
+        .as_array()
+        .and_then(|rows| rows.iter().find(|row| row["id"] == journey_id))
+        .expect("journey listed");
+    assert_eq!(own_row["openBreakId"], break_id, "{own_row}");
+    assert_eq!(own_row["openBreakPublicId"], public_id.as_str());
+}
+
+/// The revisions name the break an accepted change answered by both forms.
+#[tokio::test]
+#[ignore = "requires a live database: DATABASE_URL"]
+async fn a_revision_names_its_break_by_both_ids() {
+    let _now = pin_now();
+    let pool = connect().await;
+    let _cleanup = cleanup(&pool).await;
+    seed_timetable(&pool).await;
+    let token = seed_session(&pool, USER).await;
+    let router = router(pool.clone());
+    let (journey_id, leg_id) = create_journey(&router, &token).await;
+    let (break_id, public_id) = seed_open_break(&pool, journey_id, leg_id).await;
+    let (_, preview) = call(
+        &router,
+        "POST",
+        &format!("/Journeys/{journey_id}/replan/preview"),
+        Some(&token),
+        Some(serde_json::json!({ "breakId": public_id })),
+        None,
+    )
+    .await;
+    let chosen = preview["suggestions"]["suggestions"]
+        .as_array()
+        .and_then(|s| s.iter().find(|s| s["legs"][0]["trainUid"] == "RP0002"))
+        .unwrap_or_else(|| panic!("RP0002 offered: {preview}"))["id"]
+        .clone();
+    let (status, body) = call(
+        &router,
+        "POST",
+        &format!("/Journeys/{journey_id}/replan/accept"),
+        Some(&token),
+        Some(serde_json::json!({ "breakId": public_id, "suggestionId": chosen })),
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let (_, history) = call(
+        &router,
+        "GET",
+        &format!("/Journeys/{journey_id}/revisions"),
+        Some(&token),
+        None,
+        None,
+    )
+    .await;
+    let revisions = history["revisions"].as_array().expect("revisions");
+    assert_eq!(revisions[0]["breakId"], break_id, "{history}");
+    assert_eq!(
+        revisions[0]["breakPublicId"],
+        public_id.as_str(),
+        "{history}"
+    );
+    assert!(revisions[1]["breakId"].is_null(), "{history}");
+    assert!(revisions[1]["breakPublicId"].is_null(), "{history}");
+}

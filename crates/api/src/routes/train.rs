@@ -3130,10 +3130,10 @@ mod db_tests {
         // id -- which is exactly what the frontend page for this route was
         // doing. The absence of a bare `id` key is asserted explicitly
         // below, so a future rename back to `id` fails here loudly.
-        assert_eq!(
-            body.get("trainsId").and_then(Value::as_i64),
-            Some(trains_id)
-        );
+        // The real catalogue number is never served (DS-534): `0`, as for
+        // a schedule-only train, so a caller learns nothing from it.
+        assert!(trains_id > 0, "the seeded row has a real id");
+        assert_eq!(body.get("trainsId").and_then(Value::as_i64), Some(0));
         assert!(
             body.get("id").is_none(),
             "the public response must not carry a bare `id` that could be read as a \

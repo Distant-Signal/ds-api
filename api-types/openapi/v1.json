@@ -818,6 +818,12 @@
               "null"
             ]
           },
+          "sourceTemplatePublicId": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
           "stationBufferMinutes": {
             "description": "Minutes to get to the station, for the leave-by. Owner only; `null`\nfor anyone else or with none set. Additive (2026-11-06).",
             "format": "int16",
@@ -1354,6 +1360,12 @@
               "null"
             ]
           },
+          "openBreakPublicId": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
           "originCrs": {
             "type": [
               "string",
@@ -1411,6 +1423,12 @@
             "format": "int64",
             "type": [
               "integer",
+              "null"
+            ]
+          },
+          "sourceTemplatePublicId": {
+            "type": [
+              "string",
               "null"
             ]
           },
@@ -2679,6 +2697,9 @@
             "format": "int64",
             "type": "integer"
           },
+          "publicId": {
+            "type": "string"
+          },
           "severity": {
             "format": "int16",
             "maximum": 32767,
@@ -2719,6 +2740,7 @@
         },
         "required": [
           "id",
+          "publicId",
           "cause",
           "fault",
           "severity",
@@ -3354,6 +3376,7 @@
             "type": "string"
           },
           "trainsId": {
+            "deprecated": true,
             "description": "The SHARED `trains` row's own surrogate key, serialized as\n`trainsId`. Deliberately NOT named `id`, which is what this struct\nused to call it: every `/Train/{trackingId}` route in this app\ninterprets its path id as a `train_subscriptions.id`, a completely\ndifferent `BIGSERIAL` space that also starts at 1 -- and the\nfrontend page for this route was feeding this field straight into\n`RenameTrainButton`/`DeleteTrainButton`/`TicketPanel` as a\n`trackingId`, so a logged-in visitor could rename or delete an\nunrelated subscription of their OWN that happened to share the\nnumber. Ownership scoping made cross-user damage impossible, but not\nsame-user damage. The name is the fix on this side; the frontend no\nlonger renders those controls on this page at all (see\n`frontend/app/train/[uid]/[date]/page.tsx`).",
             "format": "int64",
             "type": "integer"

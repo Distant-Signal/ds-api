@@ -30,6 +30,8 @@ use sqlx::PgPool;
 #[derive(Debug, Clone, sqlx::FromRow)]
 pub struct JourneyTemplateRow {
     pub id: i64,
+    /// `journey_templates.public_id` (DS-534).
+    pub public_id: String,
     pub user_id: String,
     pub custom_name: Option<String>,
     pub days_of_week: Option<i16>,
@@ -53,6 +55,9 @@ pub struct JourneyTemplateRow {
     pub plan_options: Option<sqlx::types::Json<serde_json::Value>>,
     pub usual_itinerary: Option<sqlx::types::Json<serde_json::Value>>,
     pub paired_template_id: Option<i64>,
+    /// `public_id` of `paired_template_id` (DS-534), read in the same
+    /// statement.
+    pub paired_template_public_id: Option<String>,
     /// Minutes to get to the station, for the leave-by (phase 2).
     pub station_buffer_minutes: Option<i16>,
     /// Whether it skips its owner's bank holidays (phase 5).
@@ -101,7 +106,10 @@ pub struct JourneyTemplateLegWithNamesRow {
 #[derive(Debug, Clone, sqlx::FromRow, Serialize, ts_rs::TS)]
 #[serde(rename_all = "camelCase")]
 pub struct JourneyTemplateListItem {
+    // Deprecated (DS-534): use `public_id`.
     pub id: i64,
+    // The regular journey's opaque id (`r_...`).
+    pub public_id: String,
     pub custom_name: Option<String>,
     pub created_at: DateTime<Utc>,
     pub leg_count: i64,
@@ -131,7 +139,10 @@ pub struct JourneyTemplateListItem {
     pub destination_crs: Option<String>,
     pub destination_name: Option<String>,
     pub target: Option<crate::data::regular_journeys::TemplateTarget>,
+    // Deprecated (DS-534): use `paired_template_public_id`.
     pub paired_template_id: Option<i64>,
+    // The pair's opaque id; `null` with `paired_template_id`.
+    pub paired_template_public_id: Option<String>,
     pub starts_on: Option<NaiveDate>,
     pub ends_on: Option<NaiveDate>,
     /// The next due date on or after London's today that isn't skipped,
@@ -175,6 +186,7 @@ pub struct JourneyTemplateListItem {
 #[derive(Debug, sqlx::FromRow)]
 struct JourneyTemplateListRow {
     id: i64,
+    public_id: String,
     custom_name: Option<String>,
     created_at: DateTime<Utc>,
     leg_count: i64,
@@ -204,6 +216,7 @@ struct JourneyTemplateListRow {
     target_time: Option<NaiveTime>,
     target_day_offset: i16,
     paired_template_id: Option<i64>,
+    paired_template_public_id: Option<String>,
 }
 
 /// How far either side of a train's booked departure the departure window
@@ -550,11 +563,14 @@ where
     E: sqlx::PgExecutor<'c>,
 {
     let row = sqlx::query_as::<_, JourneyTemplateRow>(
-        "SELECT jt.id, jt.user_id, jt.custom_name, jt.days_of_week, jt.active, jt.starts_on, \
+        "SELECT jt.id, jt.public_id, jt.user_id, jt.custom_name, jt.days_of_week, jt.active, \
+                jt.starts_on, \
                 jt.ends_on, jt.default_match_mode, jt.auto_commit_rule, jt.created_at, \
                 jt.updated_at, jt.origin_crs, so.name AS origin_name, jt.destination_crs, \
                 sd.name AS destination_name, jt.target_kind, jt.target_time, \
                 jt.target_day_offset, jt.plan_options, jt.usual_itinerary, jt.paired_template_id, \
+                (SELECT p.public_id FROM journey_templates p WHERE p.id = jt.paired_template_id) \
+                    AS paired_template_public_id, \
                 jt.station_buffer_minutes, jt.skip_bank_holidays, jt.paused_until \
          FROM journey_templates jt \
          LEFT JOIN stations so ON so.crs = UPPER(jt.origin_crs)::bpchar \
@@ -651,11 +667,14 @@ pub async fn list_templates_for_user(
 ) -> anyhow::Result<Vec<JourneyTemplateListItem>> {
     let today = crate::data::regular_journeys::london_date(now);
     let rows = sqlx::query_as::<_, JourneyTemplateListRow>(&format!(
-        "SELECT jt.id, jt.custom_name, jt.created_at, jt.active, jt.days_of_week, \
+        "SELECT jt.id, jt.public_id, jt.custom_name, jt.created_at, jt.active, \
+                jt.days_of_week, \
                 jt.default_match_mode, jt.starts_on, jt.ends_on, \
                 jt.origin_crs, sto.name AS origin_name, jt.destination_crs, \
                 std.name AS destination_name, jt.target_kind, jt.target_time, \
                 jt.target_day_offset, jt.paired_template_id, \
+                (SELECT p.public_id FROM journey_templates p WHERE p.id = jt.paired_template_id) \
+                    AS paired_template_public_id, \
                 COALESCE(leg_counts.leg_count, 0) AS leg_count, \
                 COALESCE(leg_counts.open_legs, 0) > 0 AS has_open_legs, \
                 first_leg.origin_crs AS first_origin_crs, so.name AS first_origin_name, \
@@ -738,6 +757,7 @@ pub async fn list_templates_for_user(
                     ),
                 next_run_on: dates.next_run_on,
                 id: row.id,
+                public_id: row.public_id,
                 custom_name: row.custom_name,
                 created_at: row.created_at,
                 leg_count: row.leg_count,
@@ -754,6 +774,7 @@ pub async fn list_templates_for_user(
                 destination_crs: row.destination_crs,
                 destination_name: row.destination_name,
                 paired_template_id: row.paired_template_id,
+                paired_template_public_id: row.paired_template_public_id,
                 starts_on: row.starts_on,
                 ends_on: row.ends_on,
                 skipped_dates: row.skipped_dates,

@@ -1651,7 +1651,11 @@ pub(crate) struct JourneyDetailResponse {
     /// from: the page links to it and offers "Skip". Owner only; `null`
     /// for anyone else, when it wasn't made from one, or when that was
     /// deleted. Additive (2026-11-06).
+    // Deprecated (DS-534): use `source_template_public_id`.
     source_template_id: Option<i64>,
+    // That regular journey's opaque id (`r_...`); `null` with
+    // `source_template_id`.
+    source_template_public_id: Option<String>,
     /// The day's train the regular journeys plan sweep chose for this
     /// occurrence: the choice, up to four alternatives and where it stands.
     /// Owner only; `null` for anyone else and when it was never planned.
@@ -2234,8 +2238,8 @@ fn trim_for_share_link(detail: &mut JourneyDetailResponse) {
 /// - each train's `id` is `0` and its `publicId` is `""`, and its optional
 ///   `journeyIds`, `journeyPublicIds`, `singleLegJourneyIds` and
 ///   `singleLegJourneyPublicIds` are absent;
-/// - `sourceTemplateId` is `null` and each leg's `replacesLegIds` and
-///   `replacesLegPublicIds` are empty.
+/// - `sourceTemplateId` and `sourceTemplatePublicId` are `null` and each
+///   leg's `replacesLegIds` and `replacesLegPublicIds` are empty.
 ///
 /// Only the anonymous route calls this: a signed-in reader who follows the
 /// journey through the link keeps the numeric ids until they stop being
@@ -2243,6 +2247,12 @@ fn trim_for_share_link(detail: &mut JourneyDetailResponse) {
 fn drop_numeric_ids(detail: &mut JourneyDetailResponse) {
     detail.id = 0;
     detail.source_template_id = None;
+    detail.source_template_public_id = None;
+    // The link view has no open break (`trim_for_share_link` took it); were
+    // one served, it would carry no numeric id either.
+    if let Some(open) = &mut detail.replan.open_break {
+        open.id = 0;
+    }
     for leg in &mut detail.legs {
         leg.id = 0;
         leg.replaces_leg_ids.clear();
@@ -2698,6 +2708,7 @@ async fn build_journey_detail_response(
         followed_from: None,
         can_follow: false,
         source_template_id: summary.source_template_id.filter(|_| is_owner),
+        source_template_public_id: summary.source_template_public_id.filter(|_| is_owner),
         regular_plan,
         station_buffer_minutes: own_leave_by.station_buffer_minutes,
         leave_by: own_leave_by.leave_by,
