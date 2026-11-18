@@ -16,6 +16,8 @@
 
 use std::collections::HashMap;
 
+use crate::stanox_tiebreak::{self, Tiebreak};
+
 /// Guards every fixed-byte-offset `&str` slice in this module against the
 /// only two ways such a slice can panic: a line shorter than the offset
 /// (`byte index N is out of bounds`) and a line where the offset falls
@@ -292,16 +294,33 @@ pub(crate) struct ParsedRow {
 /// STANOX with more than one distinct CRS applies the exact policy
 /// `crates/trust-consumer/reference-data/stanox-crs.md:104-113` documents by hand for the
 /// checked-in CSV -- prefer the sole non-`X`-prefixed candidate; otherwise
-/// (2+ non-X, or 2+ X-prefixed, with no principled tiebreaker) exclude the
-/// STANOX entirely. See this design's Decision 2.
-#[expect(
-    clippy::expect_used,
-    reason = "the invariant is established just above; the expect message names it"
-)]
+/// (2+ non-X, or 2+ X-prefixed, with no principled tiebreaker) look for a
+/// reviewed decision in [`stanox_tiebreak::TIEBREAKS`] and otherwise exclude
+/// the STANOX entirely. The curated table only ever applies to a STANOX that
+/// would have been excluded. See this design's Decision 2.
 pub(crate) fn resolve(
     ti: &[TiRecord],
     msn_crs_by_tiploc: &HashMap<String, String>,
     msn_change_time_by_tiploc: &HashMap<String, i32>,
+) -> Vec<ParsedRow> {
+    resolve_with_tiebreaks(
+        ti,
+        msn_crs_by_tiploc,
+        msn_change_time_by_tiploc,
+        stanox_tiebreak::TIEBREAKS,
+    )
+}
+
+/// [`resolve`] with an explicit tie-break table (empty: the bare policy).
+#[expect(
+    clippy::expect_used,
+    reason = "the invariant is established just above; the expect message names it"
+)]
+fn resolve_with_tiebreaks(
+    ti: &[TiRecord],
+    msn_crs_by_tiploc: &HashMap<String, String>,
+    msn_change_time_by_tiploc: &HashMap<String, i32>,
+    tiebreaks: &[Tiebreak],
 ) -> Vec<ParsedRow> {
     let mut by_stanox: HashMap<String, Vec<(&TiRecord, String)>> = HashMap::new();
 
@@ -337,7 +356,7 @@ pub(crate) fn resolve(
             if non_x.len() == 1 {
                 Some(non_x[0])
             } else {
-                None
+                curated_winner(&stanox, &distinct, tiebreaks)
             }
         };
 
@@ -361,6 +380,35 @@ pub(crate) fn resolve(
 
     rows.sort_by(|a, b| a.stanox.cmp(&b.stanox));
     rows
+}
+
+/// The reviewed CRS for an otherwise irresolvable STANOX, when one is
+/// recorded and is still one of the STANOX's candidates. A recorded CRS that
+/// is not a candidate means the feed changed under the decision: warn and
+/// leave the STANOX excluded rather than apply a stale answer.
+fn curated_winner<'a>(
+    stanox: &str,
+    distinct: &[&'a str],
+    tiebreaks: &[Tiebreak],
+) -> Option<&'a str> {
+    let entry = stanox_tiebreak::find(tiebreaks, stanox)?;
+    let candidate = distinct.iter().copied().find(|c| *c == entry.crs);
+    if candidate.is_none() {
+        tracing::warn!(
+            stanox,
+            curated_crs = entry.crs,
+            candidates = ?distinct,
+            "curated STANOX tie-break no longer matches the feed's candidates; STANOX left excluded"
+        );
+    } else {
+        tracing::info!(
+            stanox,
+            crs = entry.crs,
+            rationale = entry.rationale,
+            "applied curated STANOX tie-break"
+        );
+    }
+    candidate
 }
 
 /// One directly-resolved TIPLOC->CRS row -- the TIPLOC-primary output
@@ -681,11 +729,13 @@ mod resolve_tests {
     fn ambiguous_stanox_with_two_non_x_candidates_is_excluded_entirely() {
         // The real, genuinely irresolvable 89428 case: ASI and AFK are both
         // real, non-X-prefixed CRS codes -- no principled tiebreaker.
+        // The bare policy: an empty tie-break table. The curated table
+        // resolves 89428 (see curated_tiebreak_tests).
         let ti_records = vec![
             ti("ASHFKI", "ASHFORD INT (PLATS 3-4)", "89428", "ASI"),
             ti("ASHFKY", "ASHFORD INTERNATIONAL", "89428", "AFK"),
         ];
-        let rows = resolve(&ti_records, &HashMap::new(), &HashMap::new());
+        let rows = resolve_with_tiebreaks(&ti_records, &HashMap::new(), &HashMap::new(), &[]);
         assert!(rows.is_empty(), "89428 must be excluded, not guessed at");
     }
 
@@ -726,7 +776,9 @@ mod resolve_tests {
             ti("N1", "n", "89530", "EBD"),
             ti("N2", "n", "89530", "EBF"),
         ];
-        let rows = resolve(&ti_records, &HashMap::new(), &HashMap::new());
+        // The bare policy (empty tie-break table), so this stays a test of
+        // the rule itself; curated_tiebreak_tests covers the table.
+        let rows = resolve_with_tiebreaks(&ti_records, &HashMap::new(), &HashMap::new(), &[]);
         let resolved: HashMap<&str, &str> = rows
             .iter()
             .map(|r| (r.stanox.as_str(), r.crs.as_str()))
@@ -756,6 +808,193 @@ mod resolve_tests {
             );
         }
         assert_eq!(rows.len(), 9);
+    }
+}
+
+/// The curated tie-breaks (`stanox_tiebreak::TIEBREAKS`) against a fixture of
+/// every STANOX the production `tiploc_crs` table maps to two or more CRS
+/// (15 of them, read 2026-11-18): the TIPLOC, CRS and name are as published.
+#[cfg(test)]
+mod curated_tiebreak_tests {
+    use super::*;
+    use crate::stanox_tiebreak::TIEBREAKS;
+
+    /// `(stanox, tiploc, crs, name)`.
+    const AMBIGUOUS_FEED: &[(&str, &str, &str, &str)] = &[
+        ("30120", "PRST", "PRE", "PRESTON"),
+        ("30120", "PRSTN4B", "PRE", "PRESTON"),
+        ("30120", "PRSTUGL", "XPU", "PRESTON UGL"),
+        ("31510", "MNCRVHS", "XVS", "MANCHESTER VICTORIA HS"),
+        ("31510", "MNCRVIC", "MCV", "MANCHESTER VICTORIA"),
+        ("40320", "CHST", "CTR", "CHESTER"),
+        ("40320", "CHSTYD", "XCZ", "CHESTER YARD"),
+        ("52215", "STFODOM", "SFA", "STRATFORD INTL (DOMESTIC)"),
+        ("52215", "STFORDI", "SDI", "STRATFORD INTERNATIONAL"),
+        ("63631", "STPADOM", "STP", "ST PANCRAS INTL (DOMESTIC)"),
+        ("63631", "STPANCI", "SPX", "ST PANCRAS INTERNATIONAL"),
+        ("86441", "BOGNCHS", "XBN", "BOGNOR CHS"),
+        ("86441", "BOGNORR", "BOG", "BOGNOR REGIS"),
+        ("86935", "POLEFT", "PFT", "POOLE FERRY TERMINAL"),
+        ("86935", "POOLE", "POO", "POOLE"),
+        ("86981", "WEYMOCS", "XWJ", "WEYMOUTH CS"),
+        ("86981", "WEYMTH", "WEY", "WEYMOUTH"),
+        ("87201", "VICTRCR", "XVR", "VICTORIA CARRIAGE ROAD"),
+        ("87201", "VICTRIA", "VIC", "LONDON VICTORIA"),
+        ("87201", "VICTRIC", "VIC", "LONDON VICTORIA"),
+        ("87201", "VICTRIE", "VIC", "LONDON VICTORIA"),
+        ("87219", "CLPHJCS", "XCP", "CLAPHAM JUNCTION CS"),
+        ("87219", "CLPHMJ1", "CLJ", "CLAPHAM JUNCTION"),
+        ("87219", "CLPHMJC", "CLJ", "CLAPHAM JUNCTION"),
+        ("87219", "CLPHMJM", "CLJ", "CLAPHAM JUNCTION"),
+        ("87219", "CLPHMJN", "CLJ", "CLAPHAM JUNCTION"),
+        ("87219", "CLPHMJW", "CLJ", "CLAPHAM JUNCTION"),
+        ("87261", "WDON", "WIM", "WIMBLEDON"),
+        ("87261", "WDONCHS", "XWD", "WIMBLEDON CHS"),
+        ("87261", "WIMBLDN", "WIM", "WIMBLEDON"),
+        ("87981", "BRGHMHS", "XMP", "BRIGHTON MONTPELIER C.H.S."),
+        ("87981", "BRGHTTY", "XBP", "BRIGHTON DOWN SIDING"),
+        ("88486", "SWLY", "SAY", "SWANLEY"),
+        ("88486", "SWNLYCS", "XSQ", "SWANLEY CS"),
+        ("89428", "ASHFKI", "ASI", "ASHFORD INT (PLATS 3-4)"),
+        ("89428", "ASHFKY", "AFK", "ASHFORD INTERNATIONAL"),
+        ("89530", "EBSFDOM", "EBD", "EBBSFLEET INTL (DOMESTIC)"),
+        ("89530", "EBSFLTI", "EBF", "EBBSFLEET INTERNATIONAL"),
+    ];
+
+    fn feed() -> Vec<TiRecord> {
+        AMBIGUOUS_FEED
+            .iter()
+            .map(|(stanox, tiploc, crs, name)| TiRecord {
+                tiploc: (*tiploc).to_string(),
+                station_name: (*name).to_string(),
+                stanox: Some((*stanox).to_string()),
+                crs: Some((*crs).to_string()),
+            })
+            .collect()
+    }
+
+    fn candidates(stanox: &str) -> Vec<&'static str> {
+        let mut crs: Vec<&str> = AMBIGUOUS_FEED
+            .iter()
+            .filter(|row| row.0 == stanox)
+            .map(|row| row.2)
+            .collect();
+        crs.sort_unstable();
+        crs.dedup();
+        crs
+    }
+
+    fn resolved(tiebreaks: &[Tiebreak]) -> HashMap<String, String> {
+        resolve_with_tiebreaks(&feed(), &HashMap::new(), &HashMap::new(), tiebreaks)
+            .into_iter()
+            .map(|r| (r.stanox, r.crs))
+            .collect()
+    }
+
+    #[test]
+    fn every_entry_is_still_ambiguous_and_names_one_of_its_candidates() {
+        assert!(!TIEBREAKS.is_empty());
+        for entry in TIEBREAKS {
+            let all = candidates(entry.stanox);
+            let non_x: Vec<&str> = all
+                .iter()
+                .copied()
+                .filter(|c| !c.starts_with('X'))
+                .collect();
+            assert!(
+                non_x.len() >= 2,
+                "{}: not ambiguous any more (candidates {all:?}); delete the entry",
+                entry.stanox
+            );
+            assert!(
+                all.contains(&entry.crs),
+                "{}: {} is not among {all:?}; fix or delete the entry",
+                entry.stanox,
+                entry.crs
+            );
+            assert!(
+                entry.rationale.len() > 40,
+                "{}: a rationale is required",
+                entry.stanox
+            );
+        }
+    }
+
+    #[test]
+    fn entries_are_sorted_and_unique_by_stanox() {
+        let stanoxes: Vec<&str> = TIEBREAKS.iter().map(|t| t.stanox).collect();
+        let mut sorted = stanoxes.clone();
+        sorted.sort_unstable();
+        sorted.dedup();
+        assert_eq!(stanoxes, sorted);
+    }
+
+    #[test]
+    fn the_table_resolves_exactly_the_five_reviewed_stanoxes_and_changes_nothing_else() {
+        let without = resolved(&[]);
+        let with = resolved(TIEBREAKS);
+
+        // Everything the bare policy resolved is untouched.
+        for (stanox, crs) in &without {
+            assert_eq!(with.get(stanox), Some(crs), "{stanox} changed");
+        }
+        // The only additions are the table's own rows.
+        let mut added: Vec<(&str, &str)> = with
+            .iter()
+            .filter(|(s, _)| !without.contains_key(*s))
+            .map(|(s, c)| (s.as_str(), c.as_str()))
+            .collect();
+        added.sort_unstable();
+        assert_eq!(
+            added,
+            vec![
+                ("52215", "SDI"),
+                ("63631", "SPX"),
+                ("86935", "POO"),
+                ("89428", "AFK"),
+                ("89530", "EBF"),
+            ]
+        );
+        // 87981 (two Brighton sidings, X codes only) stays excluded.
+        assert!(!with.contains_key("87981"));
+        assert_eq!(without.len(), 9);
+        assert_eq!(with.len(), 14);
+    }
+
+    #[test]
+    fn the_resolved_row_carries_the_chosen_candidates_tiploc_and_name() {
+        let rows = resolve_with_tiebreaks(&feed(), &HashMap::new(), &HashMap::new(), TIEBREAKS);
+        let row = rows.iter().find(|r| r.stanox == "63631");
+        assert_eq!(row.map(|r| r.tiploc.as_str()), Some("STPANCI"));
+        assert_eq!(
+            row.map(|r| r.station_name.as_str()),
+            Some("ST PANCRAS INTERNATIONAL")
+        );
+    }
+
+    #[test]
+    fn a_stale_entry_is_ignored_not_applied() {
+        let stale = [Tiebreak {
+            stanox: "89428",
+            crs: "ZZZ",
+            rationale: "a CRS that is not a candidate of this STANOX any more",
+        }];
+        assert!(!resolved(&stale).contains_key("89428"));
+    }
+
+    #[test]
+    fn an_entry_never_overrides_the_non_x_preference() {
+        // 87201 resolves to VIC by the rule; an entry naming the X code
+        // must not displace it.
+        let entry = [Tiebreak {
+            stanox: "87201",
+            crs: "XVR",
+            rationale: "should never be consulted for a STANOX the rule resolves",
+        }];
+        assert_eq!(
+            resolved(&entry).get("87201").map(String::as_str),
+            Some("VIC")
+        );
     }
 }
 
@@ -903,9 +1142,9 @@ mod resolve_tiploc_crs_tests {
         assert_eq!(rows[1].crs, "AFK");
 
         assert_eq!(
-            resolve(&ti_records, &HashMap::new(), &HashMap::new()).len(),
+            resolve_with_tiebreaks(&ti_records, &HashMap::new(), &HashMap::new(), &[]).len(),
             0,
-            "resolve itself is unchanged: 89428 stays excluded there"
+            "the bare policy is unchanged: 89428 stays excluded there (the curated table now resolves it)"
         );
     }
 
