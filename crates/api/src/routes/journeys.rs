@@ -2191,6 +2191,7 @@ async fn journey_by_share_token(
 
     let mut detail = build_journey_detail_response(app, journey_id, false).await?;
     trim_for_share_link(&mut detail);
+    drop_numeric_ids(&mut detail);
     Ok(Json(detail))
 }
 
@@ -2219,6 +2220,42 @@ fn trim_for_share_link(detail: &mut JourneyDetailResponse) {
         }
     }
     detail.disrupted = detail.replan.open_break.take().is_some();
+}
+
+/// What the anonymous share-link view carries instead of numeric ids (stage
+/// 2a of DS-534's opaque ids). The schema is unchanged, so each numeric id
+/// field is still there and is served as `0` (a train's `publicId` as `""`),
+/// meaning "not available: use `publicId`". The journey's and each leg's
+/// `publicId` stay (the signed-in follow and the page's keys need them, and
+/// they open nothing without access). A visitor with no account so learns
+/// nothing about how many journeys, legs or tracked trains exist:
+///
+/// - the journey's `id` and each leg's `id` are `0`;
+/// - each train's `id` is `0` and its `publicId` is `""`, and its optional
+///   `journeyIds`, `journeyPublicIds`, `singleLegJourneyIds` and
+///   `singleLegJourneyPublicIds` are absent;
+/// - `sourceTemplateId` is `null` and each leg's `replacesLegIds` and
+///   `replacesLegPublicIds` are empty.
+///
+/// Only the anonymous route calls this: a signed-in reader who follows the
+/// journey through the link keeps the numeric ids until they stop being
+/// served (stage 2b), like every other authenticated view.
+fn drop_numeric_ids(detail: &mut JourneyDetailResponse) {
+    detail.id = 0;
+    detail.source_template_id = None;
+    for leg in &mut detail.legs {
+        leg.id = 0;
+        leg.replaces_leg_ids.clear();
+        leg.replaces_leg_public_ids.clear();
+        if let Some(state) = &mut leg.tracked_train_state {
+            state.id = 0;
+            state.public_id = String::new();
+            state.journey_ids = None;
+            state.journey_public_ids = None;
+            state.single_leg_journey_ids = None;
+            state.single_leg_journey_public_ids = None;
+        }
+    }
 }
 
 /// Each of the owner's train legs' ticket details and Delay Repay estimate
@@ -7380,6 +7417,102 @@ mod db_tests {
         let text = public.to_string();
         assert!(!text.contains("Mum train"), "{text}");
         assert!(!text.contains("user_missed"), "{text}");
+
+        cleanup_user(&pool, owner_id).await;
+    }
+
+    /// Stage 2a of the opaque ids (DS-534): the anonymous share view serves `0`
+    /// for every numeric id and `""` for the tracked train's `publicId`, and
+    /// keeps the
+    /// journey's and each leg's `publicId`; the owner's own read of the same
+    /// journey still has both forms.
+    #[tokio::test]
+    #[ignore = "requires a live database; run with `cargo test -p api \
+                get_journey_by_share_token_serves_no_numeric_ids -- --ignored \
+                --test-threads=1`"]
+    async fn get_journey_by_share_token_serves_no_numeric_ids() {
+        let pool = connect().await;
+        let _trains = crate::test_support::fixture_trains_cleanup(&pool).await;
+        let owner_id = "TEST-ROUTE-SHARE-NO-IDS-OWNER";
+        let owner_token = seed_session(&pool, owner_id).await;
+        let router = test_router(test_app(pool.clone()));
+
+        let (_, created) = post_json(
+            router.clone(),
+            "/Journeys".to_string(),
+            Some(&owner_token),
+            serde_json::json!({
+                "leg": { "mode": "knownTrain", "trainUid": "NOID01", "serviceDate": "2026-09-22" }
+            }),
+        )
+        .await;
+        let journey_id = created["journeyId"].as_i64().expect("journeyId present");
+
+        let (status, body) = post_json(
+            router.clone(),
+            format!("/Journeys/{journey_id}/share-link"),
+            Some(&owner_token),
+            serde_json::json!({}),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "create share link: {body:?}");
+        let token = body["token"].as_str().expect("token present").to_string();
+
+        // The owner has the numeric ids and the opaque ones.
+        let (status, owner) = request(
+            router.clone(),
+            format!("/Journeys/{journey_id}"),
+            Some(&owner_token),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(owner["id"], journey_id);
+        assert!(owner["publicId"].as_str().unwrap().starts_with("j_"));
+        let owner_leg = &owner["legs"][0];
+        assert!(owner_leg["id"].is_i64(), "{owner_leg:?}");
+        assert!(owner_leg["publicId"].as_str().unwrap().starts_with("l_"));
+        let owner_state = &owner_leg["trackedTrainState"];
+        assert!(owner_state["id"].is_i64(), "{owner_state:?}");
+        assert!(owner_state["publicId"].as_str().unwrap().starts_with("t_"));
+
+        // A link holder has the opaque journey and leg ids and nothing else
+        // of the kind.
+        let (status, public) =
+            request(router.clone(), format!("/Journeys/shared/{token}"), None).await;
+        assert_eq!(status, StatusCode::OK, "resolve share token: {public:?}");
+        assert_eq!(public["id"], 0, "{public:?}");
+        assert_eq!(public["publicId"], owner["publicId"]);
+        assert!(public["sourceTemplateId"].is_null());
+        let leg = public["legs"][0].as_object().expect("a leg object");
+        assert_eq!(leg["id"], 0, "{leg:?}");
+        assert_eq!(leg["publicId"], owner_leg["publicId"]);
+        assert_eq!(leg["replacesLegIds"], serde_json::json!([]));
+        assert_eq!(leg["replacesLegPublicIds"], serde_json::json!([]));
+        let state = leg["trackedTrainState"]
+            .as_object()
+            .expect("a tracked train state");
+        assert_eq!(state["trainUid"], "NOID01");
+        assert_eq!(state["id"], 0, "{state:?}");
+        assert_eq!(state["publicId"], "", "{state:?}");
+        for key in [
+            "journeyIds",
+            "journeyPublicIds",
+            "singleLegJourneyIds",
+            "singleLegJourneyPublicIds",
+        ] {
+            assert!(!state.contains_key(key), "{key} in {state:?}");
+        }
+        let text = public.to_string();
+        let owner_tracking_public_id = owner_state["publicId"].as_str().unwrap();
+        assert!(!text.contains(owner_tracking_public_id), "{text}");
+        // The owner's own ids are real ones, so the zeros above are a choice.
+        for (what, id) in [
+            ("journey", &owner["id"]),
+            ("leg", &owner_leg["id"]),
+            ("tracked train", &owner_state["id"]),
+        ] {
+            assert!(id.as_i64().unwrap() > 0, "{what} id is a real one");
+        }
 
         cleanup_user(&pool, owner_id).await;
     }

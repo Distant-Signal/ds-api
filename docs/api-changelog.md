@@ -3,6 +3,33 @@
 Changes to the Distant Signal (DS) HTTP API that a client such as DS-MCP
 needs to know about. Newest first. Field names are as served (camelCase).
 
+## 2026-11-18: the anonymous share view serves no numeric ids (stage 2a of the opaque ids)
+
+Behaviour change for `GET /Journeys/shared/{token}` only (DS-534); no
+migration, grant or schema change (the generated types and the OpenAPI
+document are untouched).
+
+- `GET /Journeys/shared/{token}` (no session) now returns `0` in every
+  numeric id field, where it returned the real row id. `0` means "not
+  available: use `publicId`". The fields stay in the schema as required
+  integers and strings.
+  - `id` (the journey's) and each `legs[].id` are `0`.
+  - Each `legs[].trackedTrainState.id` is `0` and its `publicId` is `""`.
+    Its `journeyIds`, `journeyPublicIds`, `singleLegJourneyIds` and
+    `singleLegJourneyPublicIds` are absent, as in every read but the owner's
+    `GET /Train/{trackingId}`.
+  - `sourceTemplateId` is `null` and each leg's `replacesLegIds` and
+    `replacesLegPublicIds` are `[]`.
+- The journey's `publicId` (`j_...`) and each leg's `publicId` (`l_...`) are
+  still served: they are what a signed-in visitor follows the journey by and
+  what keys a leg. Everything else the view shows is unchanged.
+- Every authenticated read serves the real ids exactly as before: the owner's
+  `GET /Journeys/{id}` and `GET /Train/{trackingId}`, a group member's view,
+  and a signed-in visitor who follows through the link (the trimmed view,
+  with its numeric ids), until stage 2b.
+- The website's share page, preview and card never read the numeric ids (they
+  use `publicId`), so it needs no change.
+
 ## 2026-11-18: after midnight, a journey's alternatives include the next service date's trains
 
 Additive behaviour (DS-534); no field, migration or grant change, and the
