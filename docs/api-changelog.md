@@ -3,6 +3,28 @@
 Changes to the Distant Signal (DS) HTTP API that a client such as DS-MCP
 needs to know about. Newest first. Field names are as served (camelCase).
 
+## 2026-11-18: member ids take an `m_` prefix; the members routes accept both forms
+
+Additive for the api (DS-534); no schema change in this release. It works
+against the current schema and the one after the ds-core migration that
+follows, so it can deploy first.
+
+- `memberId`, `ownerMemberId` and `addedByMemberId`/`grantedByMemberId` are
+  opaque strings. Today they are 32 lowercase hex digits; once ds-core's
+  `20261118130000` has run they are `m_` and the same 32 hex digits (34
+  characters, the member's existing id with the prefix, so every id stays
+  stable). Clients must not parse them, check their length or compare them
+  across the change: store and send back whatever the api returned.
+- The `{member}` segment of the members routes (`DELETE`, `.../promote`,
+  `.../demote`) accepts the `m_` form and the bare 32 hex form, before and
+  after the migration, and both name the same member. An id that names no
+  member of that group (another group's included) is the same `404` as
+  before. The caller's own account id is still accepted there for leaving.
+  A segment that is not an id is a `404` too, not a `400`, because an
+  account id is an arbitrary string.
+- The bare form is deprecated and will be dropped once
+  `distant_signal_legacy_member_id_requests_total` stays at zero.
+
 ## 2026-11-18: `GET /Journeys/{id}/legs/{legId}/candidates?earlier=N` adds the trains just before the search
 
 Additive (DS-589); no migration or grant change. Without `earlier` the

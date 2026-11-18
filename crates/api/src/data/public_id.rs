@@ -119,9 +119,63 @@ impl Kind for Device {
 /// The `kind` labels of the legacy-id counter.
 pub const LEGACY_KINDS: [&str; 4] = [Journey::LABEL, Leg::LABEL, Tracking::LABEL, Device::LABEL];
 
-/// Keys the legacy-id counter at 0 for every kind, so the first numeric id
-/// after a restart is visible to `increase()`/`rate()`.
+/// The counter of members-route requests that named a member by the bare
+/// 32 hex digits `group_members.public_id` held before it got its `m_`
+/// prefix (ds-core 20261118130000).
+const LEGACY_MEMBER_METRIC: &str = "legacy_member_id_requests_total";
+
+/// Prefix of `group_members.public_id` (member ids are not a [`Kind`]: they
+/// have no numeric legacy id to resolve).
+pub const MEMBER_PREFIX: &str = "m_";
+
+/// A members route's `{member}` segment, by shape.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MemberSegment<'a> {
+    /// `m_` and 32 lowercase hex digits.
+    Prefixed(&'a str),
+    /// 32 lowercase hex digits: a member id from before the prefix, still
+    /// in an open tab or an in-flight request.
+    BareHex(&'a str),
+    /// Anything else: matched exactly against `public_id` (it finds nothing
+    /// unless a row holds it) or taken as the caller's own account id,
+    /// which is an arbitrary string, so it cannot be rejected as malformed.
+    Other(&'a str),
+}
+
+/// Classifies a member route segment.
+#[must_use]
+pub fn classify_member_segment(segment: &str) -> MemberSegment<'_> {
+    let is_hex =
+        |s: &str| s.len() == 32 && s.bytes().all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f'));
+    match segment.strip_prefix(MEMBER_PREFIX) {
+        Some(rest) if is_hex(rest) => MemberSegment::Prefixed(segment),
+        _ if is_hex(segment) => MemberSegment::BareHex(segment),
+        _ => MemberSegment::Other(segment),
+    }
+}
+
+/// The `group_members.public_id` values a segment can name: a bare id also
+/// names its prefixed form and the reverse, so the same member resolves before and after
+/// the ds-core migration that prefixes the column. A bare-hex segment is
+/// counted in `distant_signal_legacy_member_id_requests_total`.
+#[must_use]
+pub fn member_candidates(segment: &str) -> Vec<String> {
+    match classify_member_segment(segment) {
+        MemberSegment::BareHex(bare) => {
+            metrics::counter!(ds_runtime::metrics::metric_name(LEGACY_MEMBER_METRIC)).increment(1);
+            vec![bare.to_owned(), format!("{MEMBER_PREFIX}{bare}")]
+        }
+        MemberSegment::Prefixed(s) => {
+            vec![s.to_owned(), s[MEMBER_PREFIX.len()..].to_owned()]
+        }
+        MemberSegment::Other(s) => vec![s.to_owned()],
+    }
+}
+
+/// Keys the legacy-id counters at 0, so the first legacy id after a restart
+/// is visible to `increase()`/`rate()`.
 pub fn register_metrics() {
+    metrics::counter!(ds_runtime::metrics::metric_name(LEGACY_MEMBER_METRIC)).increment(0);
     for kind in LEGACY_KINDS {
         metrics::counter!(
             ds_runtime::metrics::metric_name(LEGACY_METRIC),
@@ -290,6 +344,42 @@ mod tests {
     const TRACKING: &str = "t_0123456789abcdef0123456789abcdef";
     const DEVICE: &str = "d_0123456789abcdef0123456789abcdef";
     const JOURNEY: &str = "j_0123456789abcdef0123456789abcdef";
+
+    #[test]
+    fn member_segments_are_classified_by_shape() {
+        let hex = "0123456789abcdef0123456789abcdef";
+        let prefixed = format!("m_{hex}");
+        assert_eq!(
+            classify_member_segment(&prefixed),
+            MemberSegment::Prefixed(&prefixed)
+        );
+        assert_eq!(classify_member_segment(hex), MemberSegment::BareHex(hex));
+        for other in [
+            "",
+            "m_",
+            "u-regular",
+            "12345",
+            "m_0123456789ABCDEF0123456789abcdef",
+            "0123456789abcdef0123456789abcde",
+            "j_0123456789abcdef0123456789abcdef",
+        ] {
+            assert_eq!(classify_member_segment(other), MemberSegment::Other(other));
+        }
+    }
+
+    #[test]
+    fn a_bare_member_id_also_names_its_prefixed_form() {
+        let hex = "0123456789abcdef0123456789abcdef";
+        assert_eq!(
+            member_candidates(hex),
+            vec![hex.to_owned(), format!("m_{hex}")]
+        );
+        assert_eq!(
+            member_candidates(&format!("m_{hex}")),
+            vec![format!("m_{hex}"), hex.to_owned()]
+        );
+        assert_eq!(member_candidates("u-1"), vec!["u-1".to_owned()]);
+    }
 
     #[test]
     fn public_ids_are_recognised_by_shape() {

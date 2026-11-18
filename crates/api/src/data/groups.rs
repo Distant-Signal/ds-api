@@ -535,7 +535,10 @@ pub struct ResolvedMember {
 }
 
 /// Resolves a members route's `{member}` segment to a membership of
-/// `group_id`: the opaque `memberId` the member list shows, or -- for one
+/// `group_id`: the opaque `memberId` the member list shows (`m_` and 32 hex
+/// digits once ds-core's 20261118130000 has run, bare 32 hex digits before
+/// it; either form names the member in either state, see
+/// `public_id::member_candidates`), or -- for one
 /// release, because the pinned frontend still sends it -- the caller's OWN
 /// account id (never anyone else's, so a route cannot be used to test
 /// whether an account id belongs to a member). `None` when the segment
@@ -548,9 +551,11 @@ pub async fn resolve_member(
 ) -> Result<Option<ResolvedMember>> {
     let row: Option<(String, String)> = sqlx::query_as(
         "SELECT user_id, public_id FROM group_members \
-         WHERE group_id = $1 AND (public_id = $2 OR (user_id = $2 AND user_id = $3))",
+         WHERE group_id = $1 \
+           AND (public_id = ANY($2) OR (user_id = $3 AND user_id = $4))",
     )
     .bind(group_id)
+    .bind(crate::data::public_id::member_candidates(segment))
     .bind(segment)
     .bind(caller_user_id)
     .fetch_optional(pool)
@@ -3543,6 +3548,94 @@ mod db_tests {
         .await
         .expect("seed a tracked train");
         row.0
+    }
+
+    /// A members route's `{member}` segment (DS-534): the member id in
+    /// either form (bare 32 hex digits, before ds-core's 20261118130000, or
+    /// `m_` and the same digits, after it) names the same member whichever
+    /// the column holds, another group's member id and an unknown one name
+    /// nobody, and the caller's own account id still works for leaving.
+    #[tokio::test]
+    #[ignore = "requires a live database; see the plan's Global Constraints for the \
+                DATABASE_URL incantation, then run with `cargo test -p api \
+                resolve_member_takes_the_bare_and_the_prefixed_member_id -- --ignored --test-threads=1`"]
+    async fn resolve_member_takes_the_bare_and_the_prefixed_member_id() {
+        let pool = connect().await;
+        seed_user(&pool, "TEST-GROUPS-RESOLVE-A").await;
+        seed_user(&pool, "TEST-GROUPS-RESOLVE-B").await;
+        let group_a = create_group(&pool, "Resolve A", "TEST-GROUPS-RESOLVE-A")
+            .await
+            .expect("create group A");
+        let group_b = create_group(&pool, "Resolve B", "TEST-GROUPS-RESOLVE-B")
+            .await
+            .expect("create group B");
+
+        let stored: String = sqlx::query_scalar(
+            "SELECT public_id FROM group_members WHERE group_id = $1 AND user_id = $2",
+        )
+        .bind(&group_a)
+        .bind("TEST-GROUPS-RESOLVE-A")
+        .fetch_one(&pool)
+        .await
+        .expect("read the stored member id");
+        let hex = stored.strip_prefix("m_").unwrap_or(&stored).to_owned();
+        assert_eq!(hex.len(), 32, "{stored}");
+        let other_stored: String = sqlx::query_scalar(
+            "SELECT public_id FROM group_members WHERE group_id = $1 AND user_id = $2",
+        )
+        .bind(&group_b)
+        .bind("TEST-GROUPS-RESOLVE-B")
+        .fetch_one(&pool)
+        .await
+        .expect("read the other group's member id");
+
+        let caller = "TEST-GROUPS-RESOLVE-A";
+        for segment in [hex.clone(), format!("m_{hex}")] {
+            let found = resolve_member(&pool, &group_a, caller, &segment)
+                .await
+                .expect("resolve")
+                .unwrap_or_else(|| panic!("{segment} names the member"));
+            assert_eq!(found.user_id, caller);
+            // Responses keep returning whatever the column holds.
+            assert_eq!(found.member_id, stored);
+        }
+        // The caller's own account id (the leaving case).
+        let own = resolve_member(&pool, &group_a, caller, caller)
+            .await
+            .expect("resolve")
+            .expect("own account id");
+        assert_eq!(own.member_id, stored);
+        // Nobody else's account id, another group's member id (either
+        // form), and unknown or malformed segments all find nothing.
+        let other_hex = other_stored.strip_prefix("m_").unwrap_or(&other_stored);
+        let other_prefixed = format!("m_{other_hex}");
+        let unknown = format!("m_{}", "0".repeat(32));
+        for segment in [
+            "TEST-GROUPS-RESOLVE-B",
+            other_hex,
+            other_prefixed.as_str(),
+            unknown.as_str(),
+            &"0".repeat(32),
+            "m_zz",
+            "",
+        ] {
+            assert!(
+                resolve_member(&pool, &group_a, caller, segment)
+                    .await
+                    .expect("resolve")
+                    .is_none(),
+                "{segment:?}"
+            );
+        }
+
+        for group in [&group_a, &group_b] {
+            sqlx::query("DELETE FROM groups WHERE id = $1")
+                .bind(group)
+                .execute(&pool)
+                .await
+                .ok();
+        }
+        cleanup(&pool, &["TEST-GROUPS-RESOLVE-A", "TEST-GROUPS-RESOLVE-B"]).await;
     }
 
     #[tokio::test]
