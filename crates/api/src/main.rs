@@ -490,6 +490,19 @@ async fn server_main() -> anyhow::Result<()> {
             api::text_guard::reject_nul_input,
         ))
         .layer(edge_settings.public_timeout_layer());
+    // Stage 2b of the opaque ids (DS-534): with API_SERVE_NUMERIC_IDS=false
+    // every JSON response serves `0` for a numeric id that has an opaque one.
+    // Innermost on purpose: the delegated listener's copy of this router
+    // (below) carries it too, and nothing outside it sees a numeric id.
+    let numeric_ids = api::numeric_ids::NumericIds::from_env()?;
+    tracing::info!(mode = numeric_ids.mode(), "api numeric ids in responses");
+    numeric_ids.register_metrics();
+    if !numeric_ids.serves() {
+        router = router.layer(axum::middleware::from_fn_with_state(
+            numeric_ids,
+            api::numeric_ids::withhold_numeric_ids,
+        ));
+    }
 
     // Unlike the other seven binaries, api's own PUBLIC listener stays up
     // either way -- metrics_enabled only decides whether requests are
@@ -588,9 +601,16 @@ async fn server_main() -> anyhow::Result<()> {
     // The token listener's router: its own allowlisted `/v1` routes, not a
     // copy of the router above. Built only while the feature is on.
     let token_listener = app.personal_tokens.listen_addr().map(|addr| {
+        let mut token_router = api::personal_tokens::router(&app, &edge_settings);
+        if !numeric_ids.serves() {
+            token_router = token_router.layer(axum::middleware::from_fn_with_state(
+                numeric_ids,
+                api::numeric_ids::withhold_numeric_ids,
+            ));
+        }
         (
             addr.to_string(),
-            api::personal_tokens::router(&app, &edge_settings)
+            token_router
                 .layer(api::edge::catch_panic_layer())
                 .layer(axum::middleware::from_fn(
                     api::cache_control::default_private,
