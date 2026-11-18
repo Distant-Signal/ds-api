@@ -46,7 +46,7 @@ use crate::data::journey_replace::{self, Freeze, Replaced, Replacement};
 use crate::data::journey_revisions::{self, Reason, RevisionMeta};
 use crate::data::{journeys, train_tracking};
 use crate::routes::journey_itinerary::RouteError;
-use crate::routes::journey_ref::{BreakParam, JourneyId, LegId, LegParam, RevisionParam};
+use crate::routes::journey_ref::{BreakId, JourneyId, LegId, LegParam, RevisionParam};
 use crate::routes::trips::{ReplanQuery, ReplanSlot};
 
 pub fn router() -> Router {
@@ -955,7 +955,11 @@ pub(crate) async fn plan_suggestions(
 #[derive(Debug, Clone, Serialize, ts_rs::TS, schemars::JsonSchema)]
 #[serde(rename_all = "camelCase")]
 pub(crate) struct OpenBreakSummary {
+    // Deprecated (DS-534): use `public_id`. `0` for a reader who is not the
+    // journey's owner (a group member or follower), which has no use for it.
     pub id: i64,
+    // The break's opaque id.
+    pub public_id: String,
     #[ts(as = "crate::ts_values::BreakCause")]
     #[schemars(with = "crate::ts_values::BreakCause")]
     pub cause: String,
@@ -979,13 +983,17 @@ pub(crate) struct OpenBreakSummary {
 }
 
 impl OpenBreakSummary {
-    fn from_row(row: &BreakRow, now: DateTime<Utc>) -> Self {
+    /// `is_owner`: whether the reader owns the journey. Only the owner is
+    /// given the numeric `id`; every other reader gets `0` and the
+    /// `public_id` (stage 2a of DS-534's opaque ids).
+    fn from_row(row: &BreakRow, now: DateTime<Utc>, is_owner: bool) -> Self {
         let set: Option<SuggestionSet> = row
             .suggestions
             .clone()
             .and_then(|value| serde_json::from_value(value).ok());
         Self {
-            id: row.id,
+            id: if is_owner { row.id } else { 0 },
+            public_id: row.public_id.clone(),
             cause: row.cause.clone(),
             fault: row.fault.clone(),
             severity: row.severity,
@@ -1139,7 +1147,7 @@ async fn detail_extras_inner(
     Ok(DetailExtras {
         open_break: open
             .as_ref()
-            .map(|row| OpenBreakSummary::from_row(row, now)),
+            .map(|row| OpenBreakSummary::from_row(row, now, owner_user_id.is_some())),
         revision_count: summary.revision_count,
         suggestions_muted,
         operator_filter,
@@ -1362,7 +1370,10 @@ fn leg_travelled() -> RouteError {
 #[derive(Debug, Serialize, ts_rs::TS)]
 #[serde(rename_all = "camelCase")]
 pub(crate) struct BreakResponse {
+    // Deprecated (DS-534): use `public_id`.
     id: i64,
+    // The break's opaque id.
+    public_id: String,
     // Deprecated (DS-534): use `journey_public_id`.
     journey_id: i64,
     // The journey's opaque id.
@@ -1406,6 +1417,7 @@ impl BreakResponse {
             fault_note: (row.cause == "user_missed" && row.fault == "operator")
                 .then_some("Your earlier train was late, so this counts as a missed connection."),
             id: row.id,
+            public_id: row.public_id,
             journey_id: row.journey_id,
             journey_public_id: row.journey_public_id,
             cause: row.cause,
@@ -1547,7 +1559,7 @@ async fn post_dismiss(
     State(app): State<App>,
     user: AuthenticatedUser,
     JourneyId(journey_id): JourneyId,
-    Path(BreakParam { break_id }): Path<BreakParam>,
+    BreakId(break_id): BreakId,
     Json(body): Json<DismissBody>,
 ) -> Response {
     render(
@@ -1588,7 +1600,8 @@ async fn post_dismiss(
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 struct PreviewBody {
-    break_id: Option<i64>,
+    /// The break's `publicId`, or its deprecated numeric `id` (DS-534).
+    break_id: Option<crate::data::public_id::BreakRef>,
     /// The leg's `publicId`, or its deprecated numeric `id` (DS-534).
     from_leg_id: Option<crate::data::public_id::LegRef>,
 }
@@ -1621,7 +1634,16 @@ async fn post_preview(
                 ),
                 None => None,
             };
-            match (open, body.break_id, from_leg_id) {
+            let break_id = match &body.break_id {
+                Some(named) => Some(
+                    named
+                        .resolve(&app.database)
+                        .await
+                        .map_err(|err| internal("resolve the break")(err.into()))?,
+                ),
+                None => None,
+            };
+            match (open, break_id, from_leg_id) {
                 (Some(row), Some(id), _) if row.id == id => {
                     let row = replan_break(&app, &row, &analysis, ReplanSlot::Request).await?;
                     Ok(Json(
@@ -1678,15 +1700,31 @@ async fn post_preview(
 }
 
 /// `POST /Journeys/{id}/replan/accept`'s body.
-#[derive(Debug, Deserialize, Serialize, ts_rs::TS)]
+#[derive(Debug, Deserialize, ts_rs::TS)]
 #[ts(rename = "AcceptSuggestionRequest", optional_fields = nullable)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub(crate) struct AcceptBody {
-    break_id: i64,
+    // The break's `publicId`, or its deprecated numeric `id` (DS-534).
+    #[ts(type = "number | string")]
+    break_id: crate::data::public_id::BreakRef,
     suggestion_id: String,
     /// The suggestions' fingerprint the page showed.
     #[serde(default)]
     fingerprint: Option<String>,
+}
+
+/// What an `Idempotency-Key` on an accept hashes: the request with
+/// `breakId` as the internal id it resolved to, so a retry that names the
+/// break in the other form hashes the same, and a numeric request hashes
+/// exactly as it did before public ids (same fields, same order). A break
+/// row is never deleted, so a retried `b_` id still resolves after the
+/// accept went through.
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct AcceptHashBody<'a> {
+    break_id: i64,
+    suggestion_id: &'a str,
+    fingerprint: Option<&'a str>,
 }
 
 /// The `Idempotency-Key` header and the request's hash. Keys are the
@@ -1820,10 +1858,26 @@ async fn post_accept(
 ) -> Response {
     render(
         async {
-            let idempotency = idempotency(&headers, &("accept", journey_id, &body))?;
+            let break_id = body
+                .break_id
+                .resolve(&app.database)
+                .await
+                .map_err(|err| internal("resolve the break")(err.into()))?;
+            let idempotency = idempotency(
+                &headers,
+                &(
+                    "accept",
+                    journey_id,
+                    AcceptHashBody {
+                        break_id,
+                        suggestion_id: &body.suggestion_id,
+                        fingerprint: body.fingerprint.as_deref(),
+                    },
+                ),
+            )?;
             require_owner(&app, journey_id, &user.id).await?;
             let now = now_utc();
-            let row = journey_breaks::get_break(&app.database, journey_id, body.break_id)
+            let row = journey_breaks::get_break(&app.database, journey_id, break_id)
                 .await
                 .map_err(internal("read break"))?
                 .ok_or_else(not_found)?;
@@ -2664,6 +2718,7 @@ mod wire_tests {
             cause: Some("user_missed".to_string()),
             fault: Some("user".to_string()),
             break_id: Some(5),
+            break_public_id: Some("b_00000000000000000000000000000005".to_string()),
             actor: "owner".to_string(),
             is_compensation_baseline: false,
             legs: vec![journey_revisions::RevisionLeg {
@@ -2726,6 +2781,7 @@ mod wire_tests {
         let now = at("2026-09-17T09:00:00Z");
         let row = BreakRow {
             id: 5,
+            public_id: "b_00000000000000000000000000000005".to_string(),
             journey_id: 4,
             journey_public_id: "j_00000000000000000000000000000004".to_string(),
             user_id: "user-1".to_string(),

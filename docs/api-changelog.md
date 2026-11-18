@@ -3,6 +3,80 @@
 Changes to the Distant Signal (DS) HTTP API that a client such as DS-MCP
 needs to know about. Newest first. Field names are as served (camelCase).
 
+## 2026-11-18: Opaque break and regular-journey ids; `trainsId` is always `0` (wave 2 of the opaque ids, stage 1)
+
+Additive, plus two behaviour changes below (DS-534). Needs ds-core v0.17.3's
+`journey_breaks.public_id` and `journey_templates.public_id` migrations
+applied first (`20261118140000` to `20261118150200`). The `/v1` OpenAPI
+document only gains optional `...PublicId` properties and a `deprecated`
+flag, so the breaking-change check passes: no field is removed, made
+optional or retyped.
+
+- **Formats.** `b_` a break and `r_` a regular journey (a `journey_templates`
+  row), each followed by 32 lowercase hex digits (34 characters, 122 random
+  bits, not derived from the numeric id). Opaque strings; never all digits.
+- **Routes take either form.** The break in `POST
+  /Journeys/{journeyId}/breaks/{breakId}/dismiss`; the regular journey in
+  `{templateId}` of `GET`, `PUT` and `DELETE /JourneyTemplates/{templateId}`
+  and of its `materialize`, `active`, `extra-dates`, `extra-dates/{date}`,
+  `paused-until`, `skip`, `skip/{date}` and `pair` routes. Request bodies
+  take either, as a number or a string: `breakId` of `POST
+  /Journeys/{id}/replan/preview` and `POST /Journeys/{id}/replan/accept`. A
+  segment that parses as an integer is a numeric id; anything else must have
+  the kind's shape, else `400` (another kind's id is a `400`). An id nobody
+  has, someone else's, and a numeric id nobody owns answer the same `404`
+  (`409 break_gone` on `replan/preview`, as an unknown numeric `breakId`
+  always did).
+- **Idempotency.** `POST /Journeys/{id}/replan/accept` hashes the break it
+  resolved to, so a retry with the same `Idempotency-Key` that names the
+  break in the other form is the same request, not a `409
+  idempotency_conflict`.
+- **Responses add the opaque id next to the numeric one**, named as for
+  journeys. Breaks: `publicId` beside `id` on the break (`BreakResponse`:
+  `GET .../breaks/current`, the `replan/preview` answer, the `409
+  suggestion_stale` body's `break`) and on `openBreak` of `GET
+  /Journeys/{id}` (and `/v1`); `openBreakPublicId` beside `openBreakId` on
+  the journeys list (`GET /Journeys/mine`, `/v1/Journeys/mine`);
+  `breakPublicId` beside `breakId` on `GET /Journeys/{id}/revisions`
+  (`null` with it). Regular journeys: `publicId` beside `id` on `GET
+  /JourneyTemplates/mine` and `GET /JourneyTemplates/{id}`;
+  `pairedTemplatePublicId` beside `pairedTemplateId` on both;
+  `sourceTemplatePublicId` beside `sourceTemplateId` on `GET
+  /Journeys/{id}` and the journeys list (owner only, as the numeric one);
+  `templatePublicId` and `returnTemplatePublicId` beside `templateId` and
+  `returnTemplateId` on `POST /JourneyTemplates`; `templatePublicIds` beside
+  `templateIds` (same order) on `PUT .../active`, `PUT .../paused-until` and
+  `POST .../skip`. The data export's `journeyBreaks` and `journeyTemplates`
+  rows carry a `public_id` column.
+- **Behaviour change: a non-owner reader does not get the break's number.**
+  For a reader who does not own the journey (a group member, or a follower),
+  `GET /Journeys/{id}` serves `openBreak.id` as `0` (still a required
+  integer) and `openBreak.publicId`; the journeys list serves `openBreakId`
+  as `null` and `openBreakPublicId` for a followed or group-shared journey.
+  The owner keeps the real `id` until stage 2b. The anonymous share view
+  still serves no `openBreak` (`disrupted` says there is one), as before.
+- **Behaviour change: `trainsId` is always `0`.** `GET
+  /Train/by-uid/{uid}/{date}` (and `/v1/Train/by-uid/...`) and the
+  `liveStatus` of the line trains (`GET /public/lines/{id}/trains`) used to
+  carry the shared train catalogue's row number, `0` only for a
+  schedule-only train. It is now `0` always: nothing a client can do with
+  it (no route takes it) and it grew when anyone looked a train up. The
+  field stays a required integer, so a client that validates it as a number
+  keeps working, and it is marked `deprecated` in the OpenAPI document.
+- **Counter.** `distant_signal_legacy_id_requests_total{kind}` also has
+  `kind="break"` and `kind="template"` (registered at 0): a request that
+  named a break or a regular journey by its numeric id.
+- **Not changed yet:** the numeric ids stay in the owner's responses, a
+  template leg's `id`, `RevisionLeg.ticketIds`, `deletedJourneyIds`, and the
+  webhook, personal token, time away and deleted-journey ids are a later
+  stage or not planned.
+- **Plan.** Stage 2b: the owner's responses stop returning the real
+  `id`, `openBreakId`, `breakId`, `sourceTemplateId` and the template
+  ids (`0` or `null` in `/v1`, which only grows), 7 days after the website
+  and DS-MCP use the opaque ids. Stage 3: numeric ids are refused once the
+  legacy counter for the kind has been at zero for 30 days. The break
+  notification's link (`?break=<n>`) moves to the `b_` id in the notifier.
+
 ## 2026-11-18: `GET /Trips/plan` train legs add `live.arrivalIsActual`
 
 Additive (DS-534); no schema, migration or grant change, and the OpenAPI

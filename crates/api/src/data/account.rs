@@ -1005,6 +1005,19 @@ pub(crate) mod db_tests {
             1
         );
 
+        // A break and a regular journey carry the opaque id the api serves
+        // them by (DS-534), beside their numeric ids.
+        for (key, prefix) in [("journeyBreaks", "b_"), ("journeyTemplates", "r_")] {
+            let rows = json[key].as_array().unwrap();
+            assert!(!rows.is_empty(), "{key} has a row");
+            for row in rows {
+                let public_id = row["public_id"].as_str().unwrap();
+                assert!(public_id.starts_with(prefix), "{key}: {public_id}");
+                assert_eq!(public_id.len(), 34, "{key}: {public_id}");
+                assert!(row["id"].is_i64(), "{key}: the numeric id stays");
+            }
+        }
+
         // Credentials are left out; other users' data is not included.
         let text = json.to_string();
         for secret in [

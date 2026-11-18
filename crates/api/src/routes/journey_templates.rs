@@ -21,6 +21,7 @@ use crate::data::journey_templates::{self, TemplateLegInput};
 use crate::data::journeys;
 use crate::data::regular_journeys::{self, PlanOptions, TemplateTarget, UsualItinerary};
 use crate::data::train_tracking;
+use crate::routes::journey_ref::{ServiceDateParam, TemplateId};
 
 pub fn router() -> Router {
     Router::new()
@@ -320,11 +321,62 @@ pub(crate) struct MaterializeTemplateRequest {
 
 #[derive(Debug, Serialize, ts_rs::TS)]
 #[serde(rename_all = "camelCase")]
+#[expect(
+    clippy::struct_field_names,
+    reason = "the wire names are the ids' names, numeric and opaque"
+)]
 pub(crate) struct CreateJourneyTemplateResponse {
+    // Deprecated (DS-534): use `template_public_id`.
     template_id: i64,
+    // The new regular journey's opaque id (`r_...`).
+    template_public_id: String,
     /// The return journey's template, for a `plan` create with `return`;
     /// `null` otherwise.
+    // Deprecated (DS-534): use `return_template_public_id`.
     return_template_id: Option<i64>,
+    // The return journey's opaque id; `null` with `return_template_id`.
+    return_template_public_id: Option<String>,
+}
+
+impl CreateJourneyTemplateResponse {
+    /// The answer for a created template and, when there is one, its
+    /// return journey's.
+    async fn read(
+        app: &App,
+        template_id: i64,
+        return_template_id: Option<i64>,
+    ) -> Result<Self, (StatusCode, String)> {
+        let ids: Vec<i64> = std::iter::once(template_id)
+            .chain(return_template_id)
+            .collect();
+        let public = crate::data::public_id::public_ids::<crate::data::public_id::Template, _>(
+            &app.database,
+            &ids,
+        )
+        .await
+        .map_err(internal_error("read the templates' public ids"))?;
+        Ok(Self {
+            template_id,
+            template_public_id: crate::data::public_id::lookup(&public, template_id),
+            return_template_id,
+            return_template_public_id: crate::data::public_id::lookup_opt(
+                &public,
+                return_template_id,
+            ),
+        })
+    }
+}
+
+/// The opaque ids of `ids` in the same order, for a response's
+/// `templatePublicIds`.
+async fn template_public_ids(app: &App, ids: &[i64]) -> Result<Vec<String>, (StatusCode, String)> {
+    let public = crate::data::public_id::public_ids::<crate::data::public_id::Template, _>(
+        &app.database,
+        ids,
+    )
+    .await
+    .map_err(internal_error("read the templates' public ids"))?;
+    Ok(crate::data::public_id::lookup_all(&public, ids))
 }
 
 #[derive(Debug, Deserialize, ts_rs::TS)]
@@ -336,9 +388,16 @@ pub(crate) struct SetTemplateActiveRequest {
 /// `PUT /JourneyTemplates/{id}/active`'s response.
 #[derive(Debug, Serialize, ts_rs::TS)]
 #[serde(rename_all = "camelCase")]
+#[expect(
+    clippy::struct_field_names,
+    reason = "the wire names are the ids' names, numeric and opaque"
+)]
 pub(crate) struct SetTemplateActiveResponse {
     /// The template and, if it has one, its pair.
+    // Deprecated (DS-534): use `template_public_ids`.
     template_ids: Vec<i64>,
+    // `template_ids`' opaque ids, in the same order.
+    template_public_ids: Vec<String>,
     /// Untouched journeys a pause deleted.
     deleted_journey_ids: Vec<i64>,
 }
@@ -368,7 +427,10 @@ pub(crate) struct SkipTemplateDateResponse {
     service_date: NaiveDate,
     /// Every date skipped, ascending (additive).
     service_dates: Vec<NaiveDate>,
+    // Deprecated (DS-534): use `template_public_ids`.
     template_ids: Vec<i64>,
+    // `template_ids`' opaque ids, in the same order.
+    template_public_ids: Vec<String>,
     /// Journeys already added for that date, now deleted.
     deleted_journey_ids: Vec<i64>,
 }
@@ -408,7 +470,10 @@ pub(crate) struct JourneyTemplateLegDetailResponse {
 #[derive(Debug, Serialize, ts_rs::TS)]
 #[serde(rename_all = "camelCase")]
 pub(crate) struct JourneyTemplateDetailResponse {
+    // Deprecated (DS-534): use `public_id`.
     id: i64,
+    // The regular journey's opaque id (`r_...`).
+    public_id: String,
     custom_name: Option<String>,
     created_at: DateTime<Utc>,
     updated_at: DateTime<Utc>,
@@ -431,7 +496,10 @@ pub(crate) struct JourneyTemplateDetailResponse {
     target: Option<TemplateTarget>,
     plan_options: Option<PlanOptions>,
     usual_itinerary: Option<UsualItinerary>,
+    // Deprecated (DS-534): use `paired_template_public_id`.
     paired_template_id: Option<i64>,
+    // The pair's opaque id; `null` with `paired_template_id`.
+    paired_template_public_id: Option<String>,
     next_date: Option<NaiveDate>,
     skipped_dates: Vec<NaiveDate>,
     /// Minutes to get to the station, for the leave-by (additive); `null`
@@ -587,10 +655,9 @@ async fn post_journey_template(
             )
             .await
             .map_err(internal_error("create journey template"))?;
-            Ok(Json(CreateJourneyTemplateResponse {
-                template_id,
-                return_template_id: None,
-            }))
+            Ok(Json(
+                CreateJourneyTemplateResponse::read(&app, template_id, None).await?,
+            ))
         }
         CreateJourneyTemplateRequest::FromJourney {
             custom_name,
@@ -663,10 +730,9 @@ async fn post_journey_template(
             )
             .await
             .map_err(internal_error("create journey template from journey"))?;
-            Ok(Json(CreateJourneyTemplateResponse {
-                template_id,
-                return_template_id: None,
-            }))
+            Ok(Json(
+                CreateJourneyTemplateResponse::read(&app, template_id, None).await?,
+            ))
         }
         CreateJourneyTemplateRequest::Plan {
             custom_name,
@@ -757,12 +823,9 @@ async fn post_journey_template(
             .await
             .map_err(internal_error("create regular journey"))?;
             match outcome {
-                regular_journeys::CreatePlanOutcome::Created { id, return_id } => {
-                    Ok(Json(CreateJourneyTemplateResponse {
-                        template_id: id,
-                        return_template_id: return_id,
-                    }))
-                }
+                regular_journeys::CreatePlanOutcome::Created { id, return_id } => Ok(Json(
+                    CreateJourneyTemplateResponse::read(&app, id, return_id).await?,
+                )),
                 regular_journeys::CreatePlanOutcome::OverCap => Err((
                     StatusCode::BAD_REQUEST,
                     format!(
@@ -1025,7 +1088,7 @@ async fn get_my_journey_templates(
 async fn get_journey_template(
     State(app): State<App>,
     user: AuthenticatedUser,
-    Path(template_id): Path<i64>,
+    TemplateId(template_id): TemplateId,
 ) -> Result<Json<JourneyTemplateDetailResponse>, (StatusCode, String)> {
     let template = journey_templates::get_owned_template(&app.database, template_id, &user.id)
         .await
@@ -1079,6 +1142,7 @@ async fn get_journey_template(
         plan_options: regular_journeys::decode_stored(template.plan_options),
         usual_itinerary: regular_journeys::decode_stored(template.usual_itinerary),
         paired_template_id: template.paired_template_id,
+        paired_template_public_id: template.paired_template_public_id,
         next_date: dates.next_date,
         skipped_dates,
         skip_bank_holidays: template.skip_bank_holidays,
@@ -1092,6 +1156,7 @@ async fn get_journey_template(
         day_overrides,
         station_buffer_minutes: template.station_buffer_minutes,
         id: template.id,
+        public_id: template.public_id,
         custom_name: template.custom_name,
         created_at: template.created_at,
         updated_at: template.updated_at,
@@ -1121,7 +1186,7 @@ async fn get_journey_template(
 async fn put_journey_template(
     State(app): State<App>,
     user: AuthenticatedUser,
-    Path(template_id): Path<i64>,
+    TemplateId(template_id): TemplateId,
     Json(body): Json<PutJourneyTemplateRequest>,
 ) -> Result<StatusCode, (StatusCode, String)> {
     if body.legs.is_empty() {
@@ -1334,7 +1399,7 @@ async fn put_target_update(
 async fn delete_journey_template(
     State(app): State<App>,
     user: AuthenticatedUser,
-    Path(template_id): Path<i64>,
+    TemplateId(template_id): TemplateId,
 ) -> Result<StatusCode, (StatusCode, String)> {
     let deleted = journey_templates::delete_template(&app.database, template_id, &user.id)
         .await
@@ -1356,7 +1421,7 @@ async fn delete_journey_template(
 async fn post_materialize_journey_template(
     State(app): State<App>,
     user: AuthenticatedUser,
-    Path(template_id): Path<i64>,
+    TemplateId(template_id): TemplateId,
     Json(body): Json<MaterializeTemplateRequest>,
 ) -> Result<Json<MaterializeTemplateResponse>, (StatusCode, String)> {
     // The pin's 28-day horizon and per-user cap, as for a `window` leg
@@ -1401,7 +1466,7 @@ async fn post_materialize_journey_template(
 async fn put_journey_template_active(
     State(app): State<App>,
     user: AuthenticatedUser,
-    Path(template_id): Path<i64>,
+    TemplateId(template_id): TemplateId,
     Json(body): Json<SetTemplateActiveRequest>,
 ) -> Result<Json<SetTemplateActiveResponse>, (StatusCode, String)> {
     let outcome = regular_journeys::set_active(
@@ -1418,6 +1483,7 @@ async fn put_journey_template_active(
         "no journey template with that id".to_string(),
     ))?;
     Ok(Json(SetTemplateActiveResponse {
+        template_public_ids: template_public_ids(&app, &outcome.template_ids).await?,
         template_ids: outcome.template_ids,
         deleted_journey_ids: outcome.deleted_journey_ids,
     }))
@@ -1440,7 +1506,7 @@ pub(crate) struct AddTemplateExtraDateRequest {
 async fn post_journey_template_extra_date(
     State(app): State<App>,
     user: AuthenticatedUser,
-    Path(template_id): Path<i64>,
+    TemplateId(template_id): TemplateId,
     Json(body): Json<AddTemplateExtraDateRequest>,
 ) -> Result<StatusCode, (StatusCode, String)> {
     use crate::data::recurrence_pattern::{self as pattern, PatternRequest};
@@ -1489,7 +1555,8 @@ async fn post_journey_template_extra_date(
 async fn delete_journey_template_extra_date(
     State(app): State<App>,
     user: AuthenticatedUser,
-    Path((template_id, service_date)): Path<(i64, NaiveDate)>,
+    TemplateId(template_id): TemplateId,
+    Path(ServiceDateParam { service_date }): Path<ServiceDateParam>,
 ) -> Result<StatusCode, (StatusCode, String)> {
     let deleted = sqlx::query(
         "DELETE FROM journey_template_extra_dates e USING journey_templates t \
@@ -1532,7 +1599,7 @@ pub(crate) struct SetTemplatePausedUntilRequest {
 async fn put_journey_template_paused_until(
     State(app): State<App>,
     user: AuthenticatedUser,
-    Path(template_id): Path<i64>,
+    TemplateId(template_id): TemplateId,
     Json(body): Json<SetTemplatePausedUntilRequest>,
 ) -> Result<Json<SetTemplateActiveResponse>, (StatusCode, String)> {
     let now = super::london_now().to_utc();
@@ -1563,6 +1630,7 @@ async fn put_journey_template_paused_until(
         "no journey template with that id".to_string(),
     ))?;
     Ok(Json(SetTemplateActiveResponse {
+        template_public_ids: template_public_ids(&app, &outcome.template_ids).await?,
         template_ids: outcome.template_ids,
         deleted_journey_ids: outcome.deleted_journey_ids,
     }))
@@ -1581,7 +1649,7 @@ const MAX_SKIP_DATES: usize = 60;
 async fn post_journey_template_skip(
     State(app): State<App>,
     user: AuthenticatedUser,
-    Path(template_id): Path<i64>,
+    TemplateId(template_id): TemplateId,
     body: Option<Json<SkipTemplateDateRequest>>,
 ) -> Result<Json<SkipTemplateDateResponse>, (StatusCode, String)> {
     let body = body.map(|Json(body)| body).unwrap_or_default();
@@ -1620,6 +1688,7 @@ async fn post_journey_template_skip(
         } => Ok(Json(SkipTemplateDateResponse {
             service_date: dates[0],
             service_dates: dates,
+            template_public_ids: template_public_ids(&app, &template_ids).await?,
             template_ids,
             deleted_journey_ids,
         })),
@@ -1646,7 +1715,8 @@ async fn post_journey_template_skip(
 async fn delete_journey_template_skip(
     State(app): State<App>,
     user: AuthenticatedUser,
-    Path((template_id, service_date)): Path<(i64, NaiveDate)>,
+    TemplateId(template_id): TemplateId,
+    Path(ServiceDateParam { service_date }): Path<ServiceDateParam>,
 ) -> Result<StatusCode, (StatusCode, String)> {
     let owned = regular_journeys::unskip(&app.database, template_id, &user.id, service_date)
         .await
@@ -1665,7 +1735,7 @@ async fn delete_journey_template_skip(
 async fn delete_journey_template_pair(
     State(app): State<App>,
     user: AuthenticatedUser,
-    Path(template_id): Path<i64>,
+    TemplateId(template_id): TemplateId,
 ) -> Result<StatusCode, (StatusCode, String)> {
     let owned = regular_journeys::unpair(&app.database, template_id, &user.id)
         .await
@@ -4971,9 +5041,314 @@ mod db_tests {
         .await;
         assert_eq!(status, StatusCode::OK, "{detail}");
         assert_eq!(detail["sourceTemplateId"], id);
+        let public: String =
+            sqlx::query_scalar("SELECT public_id FROM journey_templates WHERE id = $1")
+                .bind(id)
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        assert_eq!(
+            detail["sourceTemplatePublicId"],
+            public.as_str(),
+            "{detail}"
+        );
         let (status, mine) = request(router, "/Journeys/mine".to_string(), Some(&token)).await;
         assert_eq!(status, StatusCode::OK);
         assert_eq!(mine_row(&mine, journey_id)["sourceTemplateId"], id);
+        assert_eq!(
+            mine_row(&mine, journey_id)["sourceTemplatePublicId"],
+            public.as_str()
+        );
         cleanup_user(&pool, user_id).await;
+    }
+
+    /// DS-534 (wave 2): a regular journey is served with an `r_` id beside
+    /// the numeric one and named by either form on every template route;
+    /// an unknown id, someone else's and a number nobody owns answer the
+    /// same 404, another kind's id is a 400.
+    #[tokio::test]
+    #[ignore = "requires a live database; run with `cargo test -p api \
+                a_regular_journey_is_served_and_named_by_its_number_or_its_opaque_id \
+                -- --ignored --test-threads=1`"]
+    #[expect(
+        clippy::too_many_lines,
+        reason = "test code: one scenario, read top to bottom"
+    )]
+    async fn a_regular_journey_is_served_and_named_by_its_number_or_its_opaque_id() {
+        let pool = connect().await;
+        let user_id = "test-regular-opaque";
+        let other = "test-regular-opaque-other";
+        cleanup_user(&pool, user_id).await;
+        cleanup_user(&pool, other).await;
+        let token = seed_session(&pool, user_id).await;
+        let other_token = seed_session(&pool, other).await;
+        let router = test_router(test_app(pool.clone()));
+        let _pin = crate::routes::pin_london_now_for_tests(tuesday_morning());
+
+        // The create answer carries both forms, for the template and its
+        // return journey.
+        let (status, created) = post_json(
+            router.clone(),
+            "/JourneyTemplates".to_string(),
+            Some(&token),
+            plan_body(true),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{created}");
+        let id = created["templateId"].as_i64().unwrap();
+        let return_id = created["returnTemplateId"].as_i64().unwrap();
+        let public_of = |id: i64| {
+            let pool = pool.clone();
+            async move {
+                sqlx::query_scalar::<_, String>(
+                    "SELECT public_id FROM journey_templates WHERE id = $1",
+                )
+                .bind(id)
+                .fetch_one(&pool)
+                .await
+                .unwrap()
+            }
+        };
+        let (public, return_public) = (public_of(id).await, public_of(return_id).await);
+        assert!(public.starts_with("r_"), "{public}");
+        assert_eq!(public.len(), 34);
+        assert_ne!(public, return_public);
+        assert_eq!(created["templatePublicId"], public.as_str(), "{created}");
+        assert_eq!(
+            created["returnTemplatePublicId"],
+            return_public.as_str(),
+            "{created}"
+        );
+        // A create with no return has none.
+        let (status, single) = post_json(
+            router.clone(),
+            "/JourneyTemplates".to_string(),
+            Some(&token),
+            plan_body(false),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{single}");
+        assert!(single["returnTemplatePublicId"].is_null(), "{single}");
+        assert!(single["templatePublicId"].is_string(), "{single}");
+
+        // Detail and list serve both, and the pair by both.
+        let (status, by_number) = request(
+            router.clone(),
+            format!("/JourneyTemplates/{id}"),
+            Some(&token),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{by_number}");
+        assert_eq!(by_number["id"], id);
+        assert_eq!(by_number["publicId"], public.as_str());
+        assert_eq!(by_number["pairedTemplateId"], return_id);
+        assert_eq!(by_number["pairedTemplatePublicId"], return_public.as_str());
+        let (status, by_public) = request(
+            router.clone(),
+            format!("/JourneyTemplates/{public}"),
+            Some(&token),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{by_public}");
+        assert_eq!(by_public, by_number, "either form reads one template");
+        let (_, mine) = request(
+            router.clone(),
+            "/JourneyTemplates/mine".to_string(),
+            Some(&token),
+        )
+        .await;
+        let row = mine_row(&mine, id);
+        assert_eq!(row["publicId"], public.as_str(), "{row}");
+        assert_eq!(row["pairedTemplateId"], return_id);
+        assert_eq!(row["pairedTemplatePublicId"], return_public.as_str());
+
+        // Every route takes either form.
+        let ids = serde_json::json!([id, return_id]);
+        let publics = serde_json::json!([public, return_public]);
+        for (form, active) in [(public.clone(), false), (id.to_string(), true)] {
+            let (status, body) = put_json(
+                router.clone(),
+                format!("/JourneyTemplates/{form}/active"),
+                Some(&token),
+                serde_json::json!({ "active": active }),
+            )
+            .await;
+            assert_eq!(status, StatusCode::OK, "{form}: {body}");
+            assert_eq!(body["templateIds"], ids, "{form}");
+            assert_eq!(body["templatePublicIds"], publics, "{form}");
+        }
+        let (status, body) = put_json(
+            router.clone(),
+            format!("/JourneyTemplates/{public}/paused-until"),
+            Some(&token),
+            serde_json::json!({ "pausedUntil": "2026-11-12" }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        assert_eq!(body["templatePublicIds"], publics);
+        let (status, body) = put_json(
+            router.clone(),
+            format!("/JourneyTemplates/{id}/paused-until"),
+            Some(&token),
+            serde_json::json!({ "pausedUntil": null }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        let (status, body) = post_json(
+            router.clone(),
+            format!("/JourneyTemplates/{public}/skip"),
+            Some(&token),
+            serde_json::json!({ "pair": true }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        assert_eq!(body["templateIds"], ids);
+        assert_eq!(body["templatePublicIds"], publics);
+        let skipped = body["serviceDate"]
+            .as_str()
+            .expect("serviceDate")
+            .to_string();
+        let (status, _) = delete_request(
+            router.clone(),
+            format!("/JourneyTemplates/{public}/skip/{skipped}"),
+            Some(&token),
+        )
+        .await;
+        assert_eq!(status, StatusCode::NO_CONTENT);
+        {
+            let _on = crate::data::recurrence_pattern::set_enabled_for_tests(true);
+            let (status, _) = post_json(
+                router.clone(),
+                format!("/JourneyTemplates/{public}/extra-dates"),
+                Some(&token),
+                serde_json::json!({ "serviceDate": "2026-11-21" }),
+            )
+            .await;
+            assert_eq!(status, StatusCode::NO_CONTENT);
+            let (status, _) = delete_request(
+                router.clone(),
+                format!("/JourneyTemplates/{public}/extra-dates/2026-11-21"),
+                Some(&token),
+            )
+            .await;
+            assert_eq!(status, StatusCode::NO_CONTENT);
+        }
+        let (status, body) = post_json(
+            router.clone(),
+            format!("/JourneyTemplates/{public}/materialize"),
+            Some(&token),
+            serde_json::json!({ "serviceDate": "2026-11-11" }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        assert!(body["journeyPublicId"].is_string(), "{body}");
+        let (status, _) = delete_request(
+            router.clone(),
+            format!("/JourneyTemplates/{public}/pair"),
+            Some(&token),
+        )
+        .await;
+        assert_eq!(status, StatusCode::NO_CONTENT);
+        let (_, unpaired) = request(
+            router.clone(),
+            format!("/JourneyTemplates/{id}"),
+            Some(&token),
+        )
+        .await;
+        assert!(unpaired["pairedTemplateId"].is_null(), "{unpaired}");
+        assert!(unpaired["pairedTemplatePublicId"].is_null(), "{unpaired}");
+
+        // PUT takes either form too (the legs, replaced).
+        let put_body = serde_json::json!({
+            "customName": "Commute",
+            "legs": [{"originCrs": "WOK", "destinationCrs": "WAT",
+                      "departWindow": {"after": "07:40:00", "before": "07:55:00"}}],
+            "daysOfWeek": 31, "active": true, "startsOn": null, "endsOn": null,
+            "defaultMatchMode": "manual", "autoCommitRule": null
+        });
+        for form in [public.clone(), id.to_string()] {
+            let (status, body) = put_json(
+                router.clone(),
+                format!("/JourneyTemplates/{form}"),
+                Some(&token),
+                put_body.clone(),
+            )
+            .await;
+            assert_eq!(status, StatusCode::NO_CONTENT, "{form}: {body}");
+        }
+
+        // An unknown id, someone else's and a number nobody owns answer
+        // alike; another kind's id and garbage are a 400.
+        let mut denied = Vec::new();
+        for (token, form) in [
+            (&token, "r_ffffffffffffffffffffffffffffffff".to_string()),
+            (&token, "999999999".to_string()),
+            (&other_token, public.clone()),
+            (&other_token, id.to_string()),
+        ] {
+            denied.push(
+                request(
+                    router.clone(),
+                    format!("/JourneyTemplates/{form}"),
+                    Some(token),
+                )
+                .await,
+            );
+            denied.push(
+                put_json(
+                    router.clone(),
+                    format!("/JourneyTemplates/{form}/active"),
+                    Some(token),
+                    serde_json::json!({ "active": true }),
+                )
+                .await,
+            );
+        }
+        for pair in denied.chunks(2) {
+            assert_eq!(pair[0].0, StatusCode::NOT_FOUND, "{denied:?}");
+            assert_eq!(pair[1].0, StatusCode::NOT_FOUND, "{denied:?}");
+        }
+        for answer in denied.iter().step_by(2) {
+            assert_eq!(answer, &denied[0], "the 404s differ: {denied:?}");
+        }
+        for form in [
+            "b_0123456789abcdef0123456789abcdef",
+            "t_0123456789abcdef0123456789abcdef",
+            "r_not-an-id",
+            "nope",
+        ] {
+            let (status, _) = request(
+                router.clone(),
+                format!("/JourneyTemplates/{form}"),
+                Some(&token),
+            )
+            .await;
+            assert_eq!(status, StatusCode::BAD_REQUEST, "{form}");
+        }
+        // No session: the 401 comes first, whatever the id.
+        let (status, _) =
+            request(router.clone(), format!("/JourneyTemplates/{public}"), None).await;
+        assert_eq!(status, StatusCode::UNAUTHORIZED);
+
+        // Delete by the opaque id.
+        let (status, _) = delete_request(
+            router.clone(),
+            format!("/JourneyTemplates/{public}"),
+            Some(&other_token),
+        )
+        .await;
+        assert_eq!(status, StatusCode::NOT_FOUND, "a bystander cannot delete");
+        let (status, _) = delete_request(
+            router.clone(),
+            format!("/JourneyTemplates/{public}"),
+            Some(&token),
+        )
+        .await;
+        assert_eq!(status, StatusCode::NO_CONTENT);
+        let (status, _) = request(router, format!("/JourneyTemplates/{id}"), Some(&token)).await;
+        assert_eq!(status, StatusCode::NOT_FOUND);
+
+        cleanup_user(&pool, user_id).await;
+        cleanup_user(&pool, other).await;
     }
 }

@@ -85,6 +85,8 @@ pub fn severity(cause: Cause, best_delay_minutes: Option<Option<i64>>) -> i16 {
 #[derive(Debug, Clone, PartialEq, sqlx::FromRow)]
 pub struct BreakRow {
     pub id: i64,
+    /// `journey_breaks.public_id` (DS-534).
+    pub public_id: String,
     pub journey_id: i64,
     /// `journeys.public_id` of `journey_id` (DS-534), read in the same
     /// statement (see `BREAK_COLUMNS`).
@@ -113,7 +115,7 @@ pub struct BreakRow {
     pub accepted_revision_id: Option<i64>,
 }
 
-const BREAK_COLUMNS: &str = "id, journey_id, user_id, detected_at, cause, fault, severity, \
+const BREAK_COLUMNS: &str = "id, public_id, journey_id, user_id, detected_at, cause, fault, severity, \
      trigger_leg_id, trigger_trains_id, break_position, fingerprint, status, suggestions, \
      suggestions_at, confirmations, notified_at, notified_severity, opened_at, opened_via, \
      resolved_at, accepted_revision_id, \

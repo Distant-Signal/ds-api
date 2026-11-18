@@ -3,7 +3,8 @@
 //! A numeric `id` is a global sequence: exposed, it shows how many rows the
 //! platform holds and lets a caller probe neighbouring ids. Each object
 //! kind has a `public_id` column (ds-core migrations `20261117100000`,
-//! `20261118100000`, `20261118110000` and `20261118120000`): a one-letter
+//! `20261118100000`, `20261118110000`, `20261118120000`, `20261118140000`
+//! and `20261118150000`): a one-letter
 //! prefix, an underscore and 32 lowercase hex digits, 122 random bits, not
 //! derived from `id`.
 //!
@@ -13,6 +14,8 @@
 //! | [`Leg`] | `journey_legs` | `l_` |
 //! | [`Tracking`] | `train_subscriptions` | `t_` |
 //! | [`Device`] | `push_subscriptions` | `d_` |
+//! | [`Break`] | `journey_breaks` | `b_` |
+//! | [`Template`] | `journey_templates` | `r_` (a regular journey) |
 //!
 //! During the deprecation window every route takes either form in the path
 //! or in a request body: a segment that parses as an integer is a legacy
@@ -80,6 +83,14 @@ pub struct Tracking;
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Device;
 
+/// `journey_breaks.public_id`: a mid-journey break.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Break;
+
+/// `journey_templates.public_id`: a regular journey (`t_` is tracking's).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Template;
+
 impl Kind for Journey {
     const PREFIX: &'static str = "j_";
     const NOUN: &'static str = "journey";
@@ -116,8 +127,33 @@ impl Kind for Device {
     const ONE: &'static str = "SELECT public_id FROM push_subscriptions WHERE id = $1";
 }
 
+impl Kind for Break {
+    const PREFIX: &'static str = "b_";
+    const NOUN: &'static str = "break";
+    const LABEL: &'static str = "break";
+    const RESOLVE: &'static str = "SELECT id FROM journey_breaks WHERE public_id = $1";
+    const BATCH: &'static str = "SELECT id, public_id FROM journey_breaks WHERE id = ANY($1)";
+    const ONE: &'static str = "SELECT public_id FROM journey_breaks WHERE id = $1";
+}
+
+impl Kind for Template {
+    const PREFIX: &'static str = "r_";
+    const NOUN: &'static str = "template";
+    const LABEL: &'static str = "template";
+    const RESOLVE: &'static str = "SELECT id FROM journey_templates WHERE public_id = $1";
+    const BATCH: &'static str = "SELECT id, public_id FROM journey_templates WHERE id = ANY($1)";
+    const ONE: &'static str = "SELECT public_id FROM journey_templates WHERE id = $1";
+}
+
 /// The `kind` labels of the legacy-id counter.
-pub const LEGACY_KINDS: [&str; 4] = [Journey::LABEL, Leg::LABEL, Tracking::LABEL, Device::LABEL];
+pub const LEGACY_KINDS: [&str; 6] = [
+    Journey::LABEL,
+    Leg::LABEL,
+    Tracking::LABEL,
+    Device::LABEL,
+    Break::LABEL,
+    Template::LABEL,
+];
 
 /// The counter of members-route requests that named a member by the bare
 /// 32 hex digits `group_members.public_id` held before it got its `m_`
@@ -202,6 +238,10 @@ pub type LegRef = PublicRef<Leg>;
 pub type TrackingRef = PublicRef<Tracking>;
 /// A push device as the caller named it.
 pub type DeviceRef = PublicRef<Device>;
+/// A journey break as the caller named it.
+pub type BreakRef = PublicRef<Break>;
+/// A regular journey (`journey_templates` row) as the caller named it.
+pub type TemplateRef = PublicRef<Template>;
 
 /// Whether `s` has the shape of a public id with this `prefix` (which says
 /// nothing about whether a row has it).
@@ -344,6 +384,8 @@ mod tests {
     const TRACKING: &str = "t_0123456789abcdef0123456789abcdef";
     const DEVICE: &str = "d_0123456789abcdef0123456789abcdef";
     const JOURNEY: &str = "j_0123456789abcdef0123456789abcdef";
+    const BREAK: &str = "b_0123456789abcdef0123456789abcdef";
+    const TEMPLATE: &str = "r_0123456789abcdef0123456789abcdef";
 
     #[test]
     fn member_segments_are_classified_by_shape() {
@@ -405,14 +447,18 @@ mod tests {
         assert!(TrackingRef::parse(TRACKING).is_some());
         assert!(DeviceRef::parse(DEVICE).is_some());
         assert!(JourneyRef::parse(JOURNEY).is_some());
-        let all = [JOURNEY, LEG, TRACKING, DEVICE];
+        assert!(BreakRef::parse(BREAK).is_some());
+        assert!(TemplateRef::parse(TEMPLATE).is_some());
+        let all = [JOURNEY, LEG, TRACKING, DEVICE, BREAK, TEMPLATE];
         for (kind, own) in all.iter().enumerate() {
             for (other, id) in all.iter().enumerate() {
                 let accepted = match kind {
                     0 => JourneyRef::parse(id).is_some(),
                     1 => LegRef::parse(id).is_some(),
                     2 => TrackingRef::parse(id).is_some(),
-                    _ => DeviceRef::parse(id).is_some(),
+                    3 => DeviceRef::parse(id).is_some(),
+                    4 => BreakRef::parse(id).is_some(),
+                    _ => TemplateRef::parse(id).is_some(),
                 };
                 assert_eq!(accepted, kind == other, "{own} against {id}");
             }
@@ -453,6 +499,11 @@ mod tests {
     fn the_rejection_names_the_kind() {
         assert_eq!(LegRef::expected(), "a leg id is a number or a l_ id");
         assert_eq!(DeviceRef::expected(), "a device id is a number or a d_ id");
+        assert_eq!(BreakRef::expected(), "a break id is a number or a b_ id");
+        assert_eq!(
+            TemplateRef::expected(),
+            "a template id is a number or a r_ id"
+        );
     }
 
     #[test]
@@ -471,7 +522,10 @@ mod tests {
 
     #[test]
     fn every_kind_is_registered_in_the_counter() {
-        assert_eq!(LEGACY_KINDS, ["journey", "leg", "tracking", "device"]);
+        assert_eq!(
+            LEGACY_KINDS,
+            ["journey", "leg", "tracking", "device", "break", "template"]
+        );
         let recorder = metrics_exporter_prometheus::PrometheusBuilder::new().build_recorder();
         let handle = recorder.handle();
         metrics::with_local_recorder(&recorder, register_metrics);
@@ -503,6 +557,18 @@ mod tests {
                     DeviceRef::parse("9").unwrap().resolve(&pool).await.unwrap(),
                     9
                 );
+                assert_eq!(
+                    BreakRef::parse("10").unwrap().resolve(&pool).await.unwrap(),
+                    10
+                );
+                assert_eq!(
+                    TemplateRef::parse("11")
+                        .unwrap()
+                        .resolve(&pool)
+                        .await
+                        .unwrap(),
+                    11
+                );
             });
         });
         let rendered = handle.render();
@@ -512,6 +578,14 @@ mod tests {
         );
         assert!(
             rendered.contains(r#"distant_signal_legacy_id_requests_total{kind="device"} 1"#),
+            "{rendered}"
+        );
+        assert!(
+            rendered.contains(r#"distant_signal_legacy_id_requests_total{kind="break"} 1"#),
+            "{rendered}"
+        );
+        assert!(
+            rendered.contains(r#"distant_signal_legacy_id_requests_total{kind="template"} 1"#),
             "{rendered}"
         );
         assert!(!rendered.contains(r#"kind="tracking""#), "{rendered}");

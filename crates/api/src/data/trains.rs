@@ -38,6 +38,15 @@ pub async fn shared_train_enrichment_state(
     Ok(row)
 }
 
+/// Serializes any id as `0` (the deprecated `trainsId`).
+#[allow(
+    clippy::trivially_copy_pass_by_ref,
+    reason = "serde's serialize_with signature"
+)]
+fn serialize_zero<S: serde::Serializer>(_: &i64, serializer: S) -> Result<S::Ok, S::Error> {
+    serializer.serialize_i64(0)
+}
+
 /// The public, unscoped read-model for `GET /Train/by-uid/{uid}/{date}`
 /// (docs/superpowers/specs/2026-09-06-shared-train-identity-design.md §4).
 /// Unlike `train_tracking::TrackedTrainState` (which this route used to
@@ -64,6 +73,11 @@ pub struct PublicTrainState {
     /// same-user damage. The name is the fix on this side; the frontend no
     /// longer renders those controls on this page at all (see
     /// `frontend/app/train/[uid]/[date]/page.tsx`).
+    // Deprecated (DS-534): always serialized as `0` (a catalogue sequence
+    // number is no use to a client and shows how many trains the platform
+    // has seen). The real value stays here for the handlers that read it.
+    #[serde(serialize_with = "serialize_zero")]
+    #[schemars(extend("deprecated" = true))]
     pub trains_id: i64,
     pub train_uid: String,
     pub service_date: NaiveDate,

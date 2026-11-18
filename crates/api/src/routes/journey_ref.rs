@@ -6,9 +6,10 @@
 //! id. `LegId` (`{leg_id}`, `l_`), `TrackingId` (`{tracking_id}`, and
 //! `{train_subscription_id}` on the group route, `t_`) and `DeviceId`
 //! (`{id}` on the device route, `d_`) do the same for the other kinds
-//! (`data::public_id`). The other captures of a route (a break, a
-//! revision) are read with a `Path` of one of the small structs below,
-//! which ignore the captures they do not name.
+//! (`data::public_id`), as do `BreakId` (`{break_id}`, `b_`) and
+//! `TemplateId` (`{template_id}`, `r_`, a regular journey). The other
+//! captures of a route (a revision, a date) are read with a `Path` of one
+//! of the small structs below, which ignore the captures they do not name.
 //!
 //! An unknown public id yields `NO_SUCH_ROW`, not a rejection: the
 //! handler's own ownership predicate then finds nothing and answers its
@@ -24,7 +25,7 @@ use axum::http::request::Parts;
 use serde::Deserialize;
 
 use crate::app::App;
-use crate::data::public_id::{Device, Journey, Kind, Leg, PublicRef, Tracking};
+use crate::data::public_id::{Break, Device, Journey, Kind, Leg, PublicRef, Template, Tracking};
 
 /// The internal id of the object of kind `K` that the first capture of
 /// `names` the route has holds.
@@ -120,10 +121,38 @@ impl FromRequestParts<App> for DeviceId {
     }
 }
 
-/// `{break_id}` next to a `{journey_id}`.
+/// The internal id of the journey break a route's `{break_id}` capture
+/// names.
+#[derive(Debug, Clone, Copy)]
+pub struct BreakId(pub i64);
+
+impl FromRequestParts<App> for BreakId {
+    type Rejection = (StatusCode, String);
+
+    async fn from_request_parts(parts: &mut Parts, app: &App) -> Result<Self, Self::Rejection> {
+        resolve::<Break>(parts, app, &["break_id"]).await.map(Self)
+    }
+}
+
+/// The internal id of the regular journey (`journey_templates` row) a
+/// route's `{template_id}` capture names.
+#[derive(Debug, Clone, Copy)]
+pub struct TemplateId(pub i64);
+
+impl FromRequestParts<App> for TemplateId {
+    type Rejection = (StatusCode, String);
+
+    async fn from_request_parts(parts: &mut Parts, app: &App) -> Result<Self, Self::Rejection> {
+        resolve::<Template>(parts, app, &["template_id"])
+            .await
+            .map(Self)
+    }
+}
+
+/// `{service_date}` next to a `{template_id}`.
 #[derive(Debug, Deserialize)]
-pub struct BreakParam {
-    pub break_id: i64,
+pub struct ServiceDateParam {
+    pub service_date: chrono::NaiveDate,
 }
 
 /// `{revision_no}` next to a `{journey_id}`.

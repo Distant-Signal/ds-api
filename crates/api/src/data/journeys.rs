@@ -3107,8 +3107,14 @@ pub struct JourneyListItem {
     pub final_status: Option<String>,
     /// The journey's open break (mid-journey changes spec 2026-10-22 §7),
     /// `None` when it works. Additive, 2026-10-23.
+    // Deprecated (DS-534): use `open_break_public_id`. `None` on a journey
+    // the caller does not own (a followed or group-shared one), whose open
+    // break `open_break_public_id` still names.
     #[sqlx(skip)]
     pub open_break_id: Option<i64>,
+    // The open break's opaque id; `null` with no open break.
+    #[sqlx(skip)]
+    pub open_break_public_id: Option<String>,
     /// The current leg's train's compact cancellation
     /// (`data::cancellation`'s list form): full or partial, where it now
     /// starts or terminates, and why. `null` when no part of its run is
@@ -3128,6 +3134,9 @@ pub struct JourneyListItem {
     /// it wasn't made from one or that was deleted. Additive (2026-11-06).
     #[sqlx(skip)]
     pub source_template_id: Option<i64>,
+    // That regular journey's opaque id; `null` with `source_template_id`.
+    #[sqlx(skip)]
+    pub source_template_public_id: Option<String>,
     /// Minutes to get to the station (regular journeys' leave-by). Only on
     /// the caller's own journeys; `null` otherwise. Additive (2026-11-06).
     #[sqlx(skip)]
@@ -3601,6 +3610,10 @@ pub async fn list_journeys_for_user(
 
 /// [`list_journeys_for_user`] with its cap as a parameter, so a test can
 /// reach the cap without seeding a hundred journeys.
+#[expect(
+    clippy::too_many_lines,
+    reason = "one query per column family, then one pass to fill each row"
+)]
 pub(crate) async fn list_journeys_for_user_capped(
     pool: &PgPool,
     user_id: &str,
@@ -3645,22 +3658,30 @@ pub(crate) async fn list_journeys_for_user_capped(
     )
     .await;
     let ids: Vec<i64> = rows.iter().map(|row| row.id).collect();
-    let open: Vec<(i64, i64)> = sqlx::query_as(
-        "SELECT journey_id, id FROM journey_breaks WHERE journey_id = ANY($1) AND status = 'open'",
+    let open: Vec<(i64, i64, String)> = sqlx::query_as(
+        "SELECT journey_id, id, public_id FROM journey_breaks \
+         WHERE journey_id = ANY($1) AND status = 'open'",
     )
     .bind(&ids)
     .fetch_all(pool)
     .await?;
-    let open: std::collections::HashMap<i64, i64> = open.into_iter().collect();
-    let templates: Vec<(i64, i64)> = sqlx::query_as(
-        "SELECT id, source_template_id FROM journeys \
-         WHERE id = ANY($1) AND user_id = $2 AND source_template_id IS NOT NULL",
+    let open: std::collections::HashMap<i64, (i64, String)> = open
+        .into_iter()
+        .map(|(journey_id, id, public_id)| (journey_id, (id, public_id)))
+        .collect();
+    let templates: Vec<(i64, i64, String)> = sqlx::query_as(
+        "SELECT j.id, j.source_template_id, t.public_id FROM journeys j \
+         JOIN journey_templates t ON t.id = j.source_template_id \
+         WHERE j.id = ANY($1) AND j.user_id = $2",
     )
     .bind(&ids)
     .bind(user_id)
     .fetch_all(pool)
     .await?;
-    let templates: std::collections::HashMap<i64, i64> = templates.into_iter().collect();
+    let templates: std::collections::HashMap<i64, (i64, String)> = templates
+        .into_iter()
+        .map(|(journey_id, id, public_id)| (journey_id, (id, public_id)))
+        .collect();
     let mut leave_by = crate::data::leave_by::for_journeys(pool, &ids, user_id).await?;
     let mut public_ids = crate::data::journey_public_id::public_ids(pool, &ids).await?;
     let leg_ids: Vec<i64> = rows.iter().map(|row| row.leg_id).collect();
@@ -3681,8 +3702,14 @@ pub(crate) async fn list_journeys_for_user_capped(
         row.leg_public_id = crate::data::public_id::lookup(&leg_public_ids, row.leg_id);
         row.train_subscription_public_id =
             crate::data::public_id::lookup_opt(&tracking_public_ids, row.train_subscription_id);
-        row.open_break_id = open.get(&row.id).copied();
-        row.source_template_id = templates.get(&row.id).copied();
+        if let Some((id, public_id)) = open.get(&row.id) {
+            row.open_break_id = Some(*id);
+            row.open_break_public_id = Some(public_id.clone());
+        }
+        if let Some((id, public_id)) = templates.get(&row.id) {
+            row.source_template_id = Some(*id);
+            row.source_template_public_id = Some(public_id.clone());
+        }
         let own = leave_by.remove(&row.id).unwrap_or_default();
         row.station_buffer_minutes = own.station_buffer_minutes;
         row.leave_by = own.leave_by;
@@ -3693,6 +3720,10 @@ pub(crate) async fn list_journeys_for_user_capped(
             row.shared_via = shared_via;
             row.created_via.clear();
             row.train_subscription_id = None;
+            // The numeric break id is the owner's (stage 2a of DS-534's
+            // opaque ids); a reader of someone else's journey has the
+            // `openBreakPublicId`.
+            row.open_break_id = None;
         }
     }
     Ok(rows)
@@ -3711,6 +3742,8 @@ pub struct JourneySummaryRow {
     pub created_via: String,
     /// The template (regular journey) it was made from, if any.
     pub source_template_id: Option<i64>,
+    /// `journey_templates.public_id` of `source_template_id` (DS-534).
+    pub source_template_public_id: Option<String>,
 }
 
 /// Unscoped journey summary fetch -- `journey_id` alone, no `user_id`
@@ -3728,7 +3761,9 @@ pub async fn get_journey_summary(
     journey_id: i64,
 ) -> anyhow::Result<Option<JourneySummaryRow>> {
     let row = sqlx::query_as::<_, JourneySummaryRow>(
-        "SELECT id, public_id, custom_name, created_at, user_id, created_via, source_template_id \
+        "SELECT id, public_id, custom_name, created_at, user_id, created_via, source_template_id, \
+                (SELECT t.public_id FROM journey_templates t \
+                 WHERE t.id = journeys.source_template_id) AS source_template_public_id \
          FROM journeys WHERE id = $1",
     )
     .bind(journey_id)

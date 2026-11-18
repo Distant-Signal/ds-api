@@ -4,7 +4,7 @@
 /**
  * `POST /Journeys/{id}/replan/accept`'s body.
  */
-export type AcceptSuggestionRequest = { breakId: number, suggestionId: string, 
+export type AcceptSuggestionRequest = { breakId: number | string, suggestionId: string, 
 /**
  * The suggestions' fingerprint the page showed.
  */
@@ -176,7 +176,7 @@ export type BreakOpenedVia = "push" | "in_app";
 /**
  * A break with its suggestions, as the break routes answer.
  */
-export type BreakResponse = { id: number, journeyId: number, journeyPublicId: string, cause: BreakCause, fault: BreakFault, severity: number, status: BreakStatus, triggerLegId: number | null, triggerLegPublicId: string | null, detectedAt: string, openedVia: BreakOpenedVia | null, 
+export type BreakResponse = { id: number, publicId: string, journeyId: number, journeyPublicId: string, cause: BreakCause, fault: BreakFault, severity: number, status: BreakStatus, triggerLegId: number | null, triggerLegPublicId: string | null, detectedAt: string, openedVia: BreakOpenedVia | null, 
 /**
  * Why the fault is what it is, when the data overrode the traveller
  * (§14 Q5): "Your earlier train was late, so this counts as a missed
@@ -474,12 +474,12 @@ extraDates?: Array<string> | null,
  */
 dayOverrides?: Array<DayOverrideRequest> | null, };
 
-export type CreateJourneyTemplateResponse = { templateId: number, 
+export type CreateJourneyTemplateResponse = { templateId: number, templatePublicId: string, 
 /**
  * The return journey's template, for a `plan` create with `return`;
  * `null` otherwise.
  */
-returnTemplateId: number | null, };
+returnTemplateId: number | null, returnTemplatePublicId: string | null, };
 
 export type CreatePersonalTokenRequest = { name: string, scopes: Array<string>, lifetimeDays: number, };
 
@@ -1487,7 +1487,7 @@ canFollow?: boolean,
  * for anyone else, when it wasn't made from one, or when that was
  * deleted. Additive (2026-11-06).
  */
-sourceTemplateId: number | null, 
+sourceTemplateId: number | null, sourceTemplatePublicId: string | null, 
 /**
  * The day's train the regular journeys plan sweep chose for this
  * occurrence: the choice, up to four alternatives and where it stands.
@@ -1756,7 +1756,7 @@ finalArrivalDelayMinutes: number | null, finalArrivalDelayProvisional: boolean,
  * The journey's open break (mid-journey changes spec 2026-10-22 §7),
  * `None` when it works. Additive, 2026-10-23.
  */
-openBreakId: number | null, 
+openBreakId: number | null, openBreakPublicId: string | null, 
 /**
  * The current leg's train's compact cancellation
  * (`data::cancellation`'s list form): full or partial, where it now
@@ -1776,7 +1776,7 @@ followedFrom?: FollowedFrom,
  * caller's own journeys: `null` on a followed or shared one, and when
  * it wasn't made from one or that was deleted. Additive (2026-11-06).
  */
-sourceTemplateId: number | null, 
+sourceTemplateId: number | null, sourceTemplatePublicId: string | null, 
 /**
  * Minutes to get to the station (regular journeys' leave-by). Only on
  * the caller's own journeys; `null` otherwise. Additive (2026-11-06).
@@ -2078,13 +2078,13 @@ board: StopBoard | null, scheduledArrival: string | null, scheduledDeparture: st
  * read/write) -- this plan's own frontend (Task 8) renders NONE of them
  * as editable controls; see that task's own scope note.
  */
-export type JourneyTemplateDetailResponse = { id: number, customName: string | null, createdAt: string, updatedAt: string, daysOfWeek: number | null, active: boolean, startsOn: string | null, endsOn: string | null, defaultMatchMode: TemplateMatchMode, autoCommitRule: AutoCommitRule | null, legs: Array<JourneyTemplateLegDetailResponse>, 
+export type JourneyTemplateDetailResponse = { id: number, publicId: string, customName: string | null, createdAt: string, updatedAt: string, daysOfWeek: number | null, active: boolean, startsOn: string | null, endsOn: string | null, defaultMatchMode: TemplateMatchMode, autoCommitRule: AutoCommitRule | null, legs: Array<JourneyTemplateLegDetailResponse>, 
 /**
  * Regular journeys (additive): `null` for a template without a
  * target. See `JourneyTemplateListItem` for `nextDate` and
  * `skippedDates`.
  */
-originCrs: string | null, originName: string | null, destinationCrs: string | null, destinationName: string | null, target: TemplateTarget | null, planOptions: PlanOptions | null, usualItinerary: UsualItinerary | null, pairedTemplateId: number | null, nextDate: string | null, skippedDates: Array<string>, 
+originCrs: string | null, originName: string | null, destinationCrs: string | null, destinationName: string | null, target: TemplateTarget | null, planOptions: PlanOptions | null, usualItinerary: UsualItinerary | null, pairedTemplateId: number | null, pairedTemplatePublicId: string | null, nextDate: string | null, skippedDates: Array<string>, 
 /**
  * Minutes to get to the station, for the leave-by (additive); `null`
  * for none.
@@ -2125,7 +2125,7 @@ export type JourneyTemplateLegDetailResponse = { id: number, originCrs: string |
  * for a journey with no `customName` -- computed server-side here instead
  * since a list row has no per-leg detail to compute it from client-side.
  */
-export type JourneyTemplateListItem = { id: number, customName: string | null, createdAt: string, legCount: number, firstOriginCrs: string | null, firstOriginName: string | null, lastDestinationCrs: string | null, lastDestinationName: string | null, active: boolean, daysOfWeek: number | null, 
+export type JourneyTemplateListItem = { id: number, publicId: string, customName: string | null, createdAt: string, legCount: number, firstOriginCrs: string | null, firstOriginName: string | null, lastDestinationCrs: string | null, lastDestinationName: string | null, active: boolean, daysOfWeek: number | null, 
 /**
  * `"manual"` or `"auto"`, as `GET /JourneyTemplates/{id}` serves it.
  */
@@ -2148,7 +2148,7 @@ hasOpenLegs: boolean,
  * window, the next date and the skipped dates. The target fields are
  * `null` for a template without a target.
  */
-originCrs: string | null, originName: string | null, destinationCrs: string | null, destinationName: string | null, target: TemplateTarget | null, pairedTemplateId: number | null, startsOn: string | null, endsOn: string | null, 
+originCrs: string | null, originName: string | null, destinationCrs: string | null, destinationName: string | null, target: TemplateTarget | null, pairedTemplateId: number | null, pairedTemplatePublicId: string | null, startsOn: string | null, endsOn: string | null, 
 /**
  * The next due date on or after London's today that isn't skipped,
  * and isn't today once today's journey has started: the date "Skip
@@ -2995,7 +2995,7 @@ export type NotificationPreferencesUpdate = { journeySuggestions?: boolean, line
 /**
  * The open break as `GET /Journeys/{id}` serves it.
  */
-export type OpenBreakSummary = { id: number, cause: BreakCause, fault: BreakFault, severity: number, triggerLegId: number | null, triggerLegPublicId: string | null, detectedAt: string, suggestionsReady: boolean, stale: boolean, 
+export type OpenBreakSummary = { id: number, publicId: string, cause: BreakCause, fault: BreakFault, severity: number, triggerLegId: number | null, triggerLegPublicId: string | null, detectedAt: string, suggestionsReady: boolean, stale: boolean, 
 /**
  * The sheet's headline facts, when suggestions are stored: where, to
  * where, and the best option's arrival.
@@ -4117,7 +4117,7 @@ export type RevisionResponse = {
  * Whether the plan can be gone back to ([`revert_allowed`]); never
  * the current one.
  */
-canRevert: boolean, revisionNo: number, createdAt: string, reason: RevisionReason, cause: RevisionCause | null, fault: RevisionFault | null, breakId: number | null, actor: RevisionActor, isCompensationBaseline: boolean, legs: Array<RevisionLeg>, };
+canRevert: boolean, revisionNo: number, createdAt: string, reason: RevisionReason, cause: RevisionCause | null, fault: RevisionFault | null, breakId: number | null, breakPublicId: string | null, actor: RevisionActor, isCompensationBaseline: boolean, legs: Array<RevisionLeg>, };
 
 /**
  * `GET /Journeys/{id}/revisions`'s body: every plan, newest first.
@@ -4255,7 +4255,7 @@ export type SetTemplateActiveResponse = {
 /**
  * The template and, if it has one, its pair.
  */
-templateIds: Array<number>, 
+templateIds: Array<number>, templatePublicIds: Array<string>, 
 /**
  * Untouched journeys a pause deleted.
  */
@@ -4537,7 +4537,7 @@ serviceDate: string,
 /**
  * Every date skipped, ascending (additive).
  */
-serviceDates: Array<string>, templateIds: Array<number>, 
+serviceDates: Array<string>, templateIds: Array<number>, templatePublicIds: Array<string>, 
 /**
  * Journeys already added for that date, now deleted.
  */
