@@ -155,7 +155,7 @@ pub fn classify_member_segment(segment: &str) -> MemberSegment<'_> {
 }
 
 /// The `group_members.public_id` values a segment can name: a bare id also
-/// names its prefixed form, so the same member resolves before and after
+/// names its prefixed form and the reverse, so the same member resolves before and after
 /// the ds-core migration that prefixes the column. A bare-hex segment is
 /// counted in `distant_signal_legacy_member_id_requests_total`.
 #[must_use]
@@ -165,7 +165,10 @@ pub fn member_candidates(segment: &str) -> Vec<String> {
             metrics::counter!(ds_runtime::metrics::metric_name(LEGACY_MEMBER_METRIC)).increment(1);
             vec![bare.to_owned(), format!("{MEMBER_PREFIX}{bare}")]
         }
-        MemberSegment::Prefixed(s) | MemberSegment::Other(s) => vec![s.to_owned()],
+        MemberSegment::Prefixed(s) => {
+            vec![s.to_owned(), s[MEMBER_PREFIX.len()..].to_owned()]
+        }
+        MemberSegment::Other(s) => vec![s.to_owned()],
     }
 }
 
@@ -373,7 +376,7 @@ mod tests {
         );
         assert_eq!(
             member_candidates(&format!("m_{hex}")),
-            vec![format!("m_{hex}")]
+            vec![format!("m_{hex}"), hex.to_owned()]
         );
         assert_eq!(member_candidates("u-1"), vec!["u-1".to_owned()]);
     }
