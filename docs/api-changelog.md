@@ -3,6 +3,34 @@
 Changes to the Distant Signal (DS) HTTP API that a client such as DS-MCP
 needs to know about. Newest first. Field names are as served (camelCase).
 
+## 2026-11-18: `stanox_crs` gains five stations the CIF leaves ambiguous (DS-534)
+
+No schema or route change. `GET /public/stanox-crs` (and the TRUST movement
+consumers, which read the same table) gain five rows, from a reviewed
+tie-break table in `crates/schedule-reference/src/stanox_tiebreak.rs`.
+A STANOX that the CIF `TI` records map to two real CRS (the international
+and domestic sides of one station) used to be left out of `stanox_crs`
+entirely, so TRUST movements at it were dropped. Now:
+
+| STANOX | CRS | TIPLOC | Other CRS under it (still in `tiploc_crs`) |
+| --- | --- | --- | --- |
+| `52215` | `SDI` | `STFORDI` | `SFA` |
+| `63631` | `SPX` | `STPANCI` | `STP` (served by STANOX `63630`) |
+| `86935` | `POO` | `POOLE` | `PFT` |
+| `89428` | `AFK` | `ASHFKY` | `ASI` |
+| `89530` | `EBF` | `EBSFLTI` | `EBD` |
+
+`87981` (two Brighton sidings, `X` pseudo-codes only) stays excluded, as does
+any STANOX not in the table. No STANOX that already resolved changes.
+`stanox_crs` stays one CRS per STANOX, so the other CRS of each pair still
+has no `stanox_crs` row; `tiploc_crs` is unchanged.
+
+Rollout: the rows appear on the next `schedule-reference` publish after the
+new image runs (that service only; `schedule-ingest` is not rebuilt by this
+change). The TRUST consumers reload the table every `STANOX_CRS_RELOAD_SECS`
+(3600), so movements at these stations start resolving within an hour of the
+publish.
+
 ## 2026-11-18: Opaque break and regular-journey ids; `trainsId` is always `0` (wave 2 of the opaque ids, stage 1)
 
 Additive, plus two behaviour changes below (DS-534). Needs ds-core v0.17.3's

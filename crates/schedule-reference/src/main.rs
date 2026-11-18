@@ -33,6 +33,7 @@ mod locations;
 mod parser;
 mod shutdown;
 mod sink;
+mod stanox_tiebreak;
 
 use std::time::Duration;
 
@@ -2162,7 +2163,9 @@ fn line_population_dates(today: chrono::NaiveDate) -> [chrono::NaiveDate; 2] {
 /// -- see crates/trust-consumer/reference-data/stanox-crs.md) that each cover two TIPLOCs with
 /// two genuinely different, non-`X`-prefixed real CRS: an ambiguity that is
 /// unresolvable at the STANOX level, so `stanox_crs` drops both rows rather
-/// than guess. That silently meant `crs_to_tiploc_map` had ZERO entries for
+/// than guess (since DS-534 a reviewed table, `stanox_tiebreak.rs`,
+/// resolves four of the five to one CRS each; `87981` stays out). That
+/// silently meant `crs_to_tiploc_map` had ZERO entries for
 /// `AFK`/`ASI` (Ashford (Kent)/Ashford International), `EBD`/`EBF`
 /// (Ebbsfleet International domestic/international), `SDI`/`SFA` (Stratford
 /// International/its domestic platforms) and `POO`/`PFT` (Poole/Poole Ferry
