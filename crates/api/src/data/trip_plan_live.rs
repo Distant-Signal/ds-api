@@ -32,6 +32,7 @@ use sqlx::PgPool;
 use trip_planner::ConnectionOverlay;
 
 use crate::data::journey::{JourneyStop, JourneyStopsRequest, StopStatus};
+use crate::data::trip_plan_darwin::{DarwinFill, StopDarwin};
 use crate::data::trip_planning_itinerary::{PlannedLeg, SegmentResult};
 
 // ---------------------------------------------------------------------------
@@ -73,6 +74,11 @@ pub struct LiveConfig {
     /// written as movements arrive; 30 s keeps a plan within a minute of the
     /// feed while the read and build run at most twice a minute per date.
     pub snapshot_ttl_seconds: u64,
+    /// Fill a train TRUST has no data for from the Darwin Push Port in the
+    /// per-train reads, `TRIP_PLAN_LIVE_DARWIN_ENABLED` (default `true`);
+    /// see [`crate::data::trip_plan_darwin`]. `false` is TRUST and boards
+    /// only.
+    pub darwin_fill: bool,
 }
 
 impl Default for LiveConfig {
@@ -87,6 +93,7 @@ impl Default for LiveConfig {
             max_trains: 60,
             in_search: true,
             snapshot_ttl_seconds: 30,
+            darwin_fill: true,
         }
     }
 }
@@ -128,6 +135,7 @@ impl LiveConfig {
                 "TRIP_PLAN_LIVE_SNAPSHOT_TTL_SECONDS",
                 default.snapshot_ttl_seconds,
             ),
+            darwin_fill: env_bool("TRIP_PLAN_LIVE_DARWIN_ENABLED", default.darwin_fill),
         }
     }
 }
@@ -209,10 +217,13 @@ pub struct StopFact {
     /// (`StopStatus::Skipped`) or the fresh board row says it is cancelled
     /// at this station.
     pub served: bool,
-    /// Minutes late departing (>= 0): TRUST actual, else Darwin `etd`, else
-    /// the TRUST-propagated estimate.
+    /// Minutes late departing (>= 0): TRUST actual, else a Darwin Push Port
+    /// actual, else Darwin's board `etd`, else the TRUST-propagated
+    /// estimate, else (no fresh TRUST state) the Push Port's forecast.
     pub dep_delay: Option<i32>,
-    /// Minutes late arriving (>= 0): TRUST actual, else the TRUST estimate.
+    /// Minutes late arriving (>= 0): TRUST actual, else a Push Port actual,
+    /// else the TRUST estimate, else (no fresh TRUST state) the Push Port's
+    /// forecast.
     pub arr_delay: Option<i32>,
     pub departed: bool,
     /// Darwin reports the service as `Delayed` here, with no time.
@@ -244,6 +255,8 @@ pub struct TrainLive {
     trust_cancel_reason: Option<String>,
     /// When TRUST last updated this train's state.
     trust_observed_at: Option<DateTime<Utc>>,
+    /// What the Darwin Push Port filled into this profile.
+    darwin_fill: DarwinFill,
 }
 
 /// A `train_reasons` row, with its location resolved to a TIPLOC.
@@ -266,6 +279,10 @@ pub struct TrainLiveInput<'a> {
     pub status: Option<&'a str>,
     pub state_updated_at: Option<DateTime<Utc>>,
     pub reasons: &'a [ReasonRow],
+    /// The Push Port's times for each of `stops`, index for index
+    /// ([`crate::data::trip_plan_darwin::resolve`]); empty for none (the
+    /// in-search snapshot, journey feasibility, or Darwin off).
+    pub darwin: &'a [Option<StopDarwin>],
 }
 
 /// Builds a [`TrainLive`]. Rules (design doc §4.2):
@@ -275,7 +292,11 @@ pub struct TrainLiveInput<'a> {
 ///   train's calls cuts the train after that call instead, unless TRUST
 ///   reported it at a later call (it ran on);
 /// - a `0006` change of origin at one of the calls removes the calls before
-///   it, unless TRUST reported the train before it.
+///   it, unless TRUST reported the train before it;
+/// - Push Port times (`input.darwin`) fill a call's arrival or departure
+///   only where TRUST reported neither side of the call, by the rules in
+///   [`crate::data::trip_plan_darwin`]: an actual over any estimate, TRUST's
+///   carried estimate over a Darwin forecast.
 pub fn train_live(input: TrainLiveInput<'_>) -> TrainLive {
     let date = input.date;
     let mut live = TrainLive {
@@ -286,7 +307,7 @@ pub fn train_live(input: TrainLiveInput<'_>) -> TrainLive {
     // departure), for the ordering rules.
     let mut call_minutes: Vec<(String, Option<u32>, Option<u32>)> = Vec::new();
 
-    for stop in input.stops {
+    for (position, stop) in input.stops.iter().enumerate() {
         let sched_arr = stop
             .timetable
             .working_minute_arrival
@@ -303,50 +324,13 @@ pub fn train_live(input: TrainLiveInput<'_>) -> TrainLive {
         let board = stop.board.as_ref();
         let board_cancelled =
             board.is_some_and(|b| b.is_cancelled) && stop.actual_departure.is_none();
-        // Every delay here is against the PUBLIC time, the time the
-        // connections are planned on (`schedule_query::Connection`), and each
-        // pairs like with like:
-        // - a reported call: the stop's own `delay_minutes`, which the
-        //   journey overlay measured from that TRUST report's own fields
-        //   (actual against its gbtt/planned, see `journey`), never TRUST's
-        //   actual against a CIF time;
-        // - Darwin's board: `etd - std`, both public;
-        // - an estimate: the working time plus TRUST's running delay, against
-        //   the public time, both CIF-derived.
-        let public_departure = stop.timetable.scheduled_departure();
-        let public_arrival = stop.timetable.scheduled_arrival();
-        let reported = |side: &str| {
-            (stop.last_event_type.as_deref() == Some(side)
-                || stop.last_event_type.as_deref() == Some("PASS"))
-            .then_some(stop.delay_minutes)
-            .flatten()
-            .map(|d| d.max(0))
-        };
-        let dep_delay = if stop.actual_departure.is_some() {
-            reported("DEPARTURE")
-        } else {
-            board
-                .filter(|b| !b.is_cancelled)
-                .and_then(|b| b.delay_minutes)
-                .map(|d| d.max(0))
-                .or_else(|| {
-                    public_departure
-                        .zip(stop.estimated_departure)
-                        .map(|(s, e)| delay_between(s, e))
-                })
-        };
-        let arr_delay = if stop.actual_arrival.is_some() {
-            reported("ARRIVAL")
-        } else {
-            public_arrival
-                .zip(stop.estimated_arrival)
-                .map(|(s, e)| delay_between(s, e))
-        };
+        let delays = stop_delays(stop, input.darwin.get(position).copied().flatten());
+        live.darwin_fill.merge(delays.fill);
         let fact = StopFact {
             served: stop.stop_status != StopStatus::Skipped && !board_cancelled,
-            dep_delay,
-            arr_delay,
-            departed: stop.actual_departure.is_some(),
+            dep_delay: delays.departure,
+            arr_delay: delays.arrival,
+            departed: stop.actual_departure.is_some() || delays.darwin_departed,
             delayed_unknown: board
                 .is_some_and(|b| !b.is_cancelled && b.estimated.eq_ignore_ascii_case("Delayed")),
             platform: board.and(stop.platform.clone()),
@@ -368,6 +352,95 @@ pub fn train_live(input: TrainLiveInput<'_>) -> TrainLive {
 
     apply_reasons(&mut live, &call_minutes, input.status, input.reasons);
     live
+}
+
+/// One call's delays, from [`stop_delays`].
+struct StopDelays {
+    arrival: Option<i32>,
+    departure: Option<i32>,
+    /// The departure is a Darwin Push Port actual.
+    darwin_departed: bool,
+    fill: DarwinFill,
+}
+
+/// A call's arrival and departure delays (>= 0), TRUST first and the Push
+/// Port's `darwin` times where TRUST has nothing (see
+/// [`crate::data::trip_plan_darwin`]).
+fn stop_delays(stop: &JourneyStop, darwin: Option<StopDarwin>) -> StopDelays {
+    let board = stop.board.as_ref();
+    // Every delay here is against the PUBLIC time, the time the
+    // connections are planned on (`schedule_query::Connection`), and each
+    // pairs like with like:
+    // - a reported call: the stop's own `delay_minutes`, which the
+    //   journey overlay measured from that TRUST report's own fields
+    //   (actual against its gbtt/planned, see `journey`), never TRUST's
+    //   actual against a CIF time;
+    // - Darwin's board: `etd - std`, both public;
+    // - an estimate: the working time plus TRUST's running delay, against
+    //   the public time, both CIF-derived;
+    // - the Push Port: its actual or forecast against the public time.
+    let public_departure = stop.timetable.scheduled_departure();
+    let public_arrival = stop.timetable.scheduled_arrival();
+    let reported = |side: &str| {
+        (stop.last_event_type.as_deref() == Some(side)
+            || stop.last_event_type.as_deref() == Some("PASS"))
+        .then_some(stop.delay_minutes)
+        .flatten()
+        .map(|d| d.max(0))
+    };
+    // Darwin's times count only for a call TRUST has reported neither side
+    // of (so they can never lower a reported delay).
+    let darwin = darwin
+        .filter(|_| stop.actual_arrival.is_none() && stop.actual_departure.is_none())
+        .unwrap_or_default();
+    let darwin_delay = |at: Option<DateTime<Utc>>, scheduled: Option<DateTime<Utc>>| {
+        scheduled.zip(at).map(|(s, a)| delay_between(s, a))
+    };
+    let mut fill = DarwinFill::default();
+    let mut darwin_departed = false;
+    let departure = if stop.actual_departure.is_some() {
+        reported("DEPARTURE")
+    } else if let Some(delay) = darwin_delay(darwin.departure_actual, public_departure) {
+        fill.actuals = true;
+        darwin_departed = true;
+        Some(delay)
+    } else {
+        let trust = board
+            .filter(|b| !b.is_cancelled)
+            .and_then(|b| b.delay_minutes)
+            .map(|d| d.max(0))
+            .or_else(|| {
+                public_departure
+                    .zip(stop.estimated_departure)
+                    .map(|(s, e)| delay_between(s, e))
+            });
+        trust.or_else(|| {
+            let forecast = darwin_delay(darwin.departure_forecast, public_departure);
+            fill.forecasts |= forecast.is_some();
+            forecast
+        })
+    };
+    let arrival = if stop.actual_arrival.is_some() {
+        reported("ARRIVAL")
+    } else if let Some(delay) = darwin_delay(darwin.arrival_actual, public_arrival) {
+        fill.actuals = true;
+        Some(delay)
+    } else {
+        public_arrival
+            .zip(stop.estimated_arrival)
+            .map(|(s, e)| delay_between(s, e))
+            .or_else(|| {
+                let forecast = darwin_delay(darwin.arrival_forecast, public_arrival);
+                fill.forecasts |= forecast.is_some();
+                forecast
+            })
+    };
+    StopDelays {
+        arrival,
+        departure,
+        darwin_departed,
+        fill,
+    }
 }
 
 /// The cancellation rules of [`train_live`] (see its doc), shared with the
@@ -1560,21 +1633,13 @@ fn calling_points_json(rows: &[&CallingPointRow]) -> serde_json::Value {
     )
 }
 
-/// Reads the live profile of every train in `uids` on `date`: one query for
-/// the `trains`/`train_current_state` rows, one for their calling points,
-/// one for `train_reasons`, then `build_journey_stops_batch`. A train with
-/// no `trains` row is absent. Never writes.
-pub async fn fetch_train_lives(
+/// The `trains` and `train_current_state` rows of `uids` on `date`.
+async fn read_train_rows(
     pool: &PgPool,
     date: NaiveDate,
     uids: &[String],
-    config: &LiveConfig,
-    now: DateTime<Utc>,
-) -> anyhow::Result<HashMap<String, TrainLive>> {
-    if uids.is_empty() {
-        return Ok(HashMap::new());
-    }
-    let trains: Vec<TrainRow> = sqlx::query_as(
+) -> anyhow::Result<Vec<TrainRow>> {
+    Ok(sqlx::query_as(
         "SELECT tr.id AS trains_id, tr.train_uid, tr.skipped_stations, tr.platform, \
                 tr.planned_platform, cs.status, cs.delay_minutes, cs.updated_at \
          FROM trains tr \
@@ -1584,7 +1649,118 @@ pub async fn fetch_train_lives(
     .bind(date)
     .bind(uids)
     .fetch_all(pool)
-    .await?;
+    .await?)
+}
+
+/// Each train's calling points as `trains.calling_points` JSON.
+fn calling_points_by_uid(rows: &[CallingPointRow]) -> HashMap<&str, serde_json::Value> {
+    let mut by_uid: HashMap<&str, Vec<&CallingPointRow>> = HashMap::new();
+    for row in rows {
+        by_uid.entry(row.uid.as_str()).or_default().push(row);
+    }
+    by_uid
+        .iter()
+        .map(|(uid, rows)| (*uid, calling_points_json(rows)))
+        .collect()
+}
+
+/// Adds a placeholder row for every train of `uids` with no `trains` row
+/// (TRUST has never heard of it), returning their UIDs: with Darwin on they
+/// still get a profile (no TRUST state, no reasons), kept only if Darwin
+/// knew something. No `trains` id is 0, so a placeholder reads no events.
+fn add_trains_without_rows(trains: &mut Vec<TrainRow>, uids: &[String]) -> HashSet<String> {
+    let have: HashSet<String> = trains.iter().map(|t| t.train_uid.clone()).collect();
+    let mut added = HashSet::new();
+    for uid in uids {
+        if have.contains(uid) || !added.insert(uid.clone()) {
+            continue;
+        }
+        trains.push(TrainRow {
+            trains_id: 0,
+            train_uid: uid.clone(),
+            skipped_stations: Vec::new(),
+            platform: None,
+            planned_platform: None,
+            status: None,
+            delay_minutes: None,
+            updated_at: None,
+        });
+    }
+    added
+}
+
+/// One read of the Push Port's locations for every train that has stops.
+/// Best effort: a failed read is logged and the plan is annotated from TRUST
+/// and boards only.
+async fn darwin_calls_for(
+    pool: &PgPool,
+    date: NaiveDate,
+    trains: &[TrainRow],
+    built: &[anyhow::Result<Option<Vec<JourneyStop>>>],
+) -> HashMap<String, crate::data::trip_plan_darwin::TrainCalls> {
+    let with_stops: Vec<&str> = trains
+        .iter()
+        .zip(built)
+        .filter(|(_, stops)| matches!(stops, Ok(Some(_))))
+        .map(|(train, _)| train.train_uid.as_str())
+        .collect();
+    match crate::data::trip_plan_darwin::fetch_calls(pool, date, &with_stops).await {
+        Ok(calls) => calls,
+        Err(err) => {
+            tracing::warn!(error = ?err, "trip plan live: Darwin read failed; using TRUST and boards only");
+            HashMap::new()
+        }
+    }
+}
+
+/// Reads the live profile of every train in `uids` on `date`: one query for
+/// the `trains`/`train_current_state` rows, one for their calling points,
+/// one for `train_reasons`, then `build_journey_stops_batch`. A train with
+/// no `trains` row is absent. TRUST and boards only: journey feasibility
+/// reads trains this way. Never writes.
+pub async fn fetch_train_lives(
+    pool: &PgPool,
+    date: NaiveDate,
+    uids: &[String],
+    config: &LiveConfig,
+    now: DateTime<Utc>,
+) -> anyhow::Result<HashMap<String, TrainLive>> {
+    read_train_lives(pool, date, uids, config, now, false).await
+}
+
+/// [`fetch_train_lives`] for the plan being annotated or re-planned
+/// (`/Trips/plan`): where TRUST has no data for a train (no state, or a
+/// stale one) or for a call, the Darwin Push Port's times fill in, by the
+/// rules in [`crate::data::trip_plan_darwin`]; one more query for the whole
+/// list. With `config.darwin_fill` off, exactly [`fetch_train_lives`]. A
+/// train with no `trains` row is kept when Darwin gave it something.
+pub async fn fetch_train_lives_with_darwin(
+    pool: &PgPool,
+    date: NaiveDate,
+    uids: &[String],
+    config: &LiveConfig,
+    now: DateTime<Utc>,
+) -> anyhow::Result<HashMap<String, TrainLive>> {
+    read_train_lives(pool, date, uids, config, now, config.darwin_fill).await
+}
+
+async fn read_train_lives(
+    pool: &PgPool,
+    date: NaiveDate,
+    uids: &[String],
+    config: &LiveConfig,
+    now: DateTime<Utc>,
+    darwin: bool,
+) -> anyhow::Result<HashMap<String, TrainLive>> {
+    if uids.is_empty() {
+        return Ok(HashMap::new());
+    }
+    let mut trains = read_train_rows(pool, date, uids).await?;
+    let without_row = if darwin {
+        add_trains_without_rows(&mut trains, uids)
+    } else {
+        HashSet::new()
+    };
     if trains.is_empty() {
         return Ok(HashMap::new());
     }
@@ -1598,7 +1774,11 @@ pub async fn fetch_train_lives(
     .bind(&found)
     .fetch_all(pool)
     .await?;
-    let trains_ids: Vec<i64> = trains.iter().map(|t| t.trains_id).collect();
+    let trains_ids: Vec<i64> = trains
+        .iter()
+        .map(|t| t.trains_id)
+        .filter(|id| *id != 0)
+        .collect();
     let reason_rows: Vec<ReasonDbRow> = sqlx::query_as(
         "SELECT r.trains_id, r.msg_type, r.reason_code, r.canx_type, s.tiploc \
          FROM train_reasons r \
@@ -1609,14 +1789,7 @@ pub async fn fetch_train_lives(
     .fetch_all(pool)
     .await?;
 
-    let mut points_by_uid: HashMap<&str, Vec<&CallingPointRow>> = HashMap::new();
-    for row in &calling_points {
-        points_by_uid.entry(row.uid.as_str()).or_default().push(row);
-    }
-    let json_by_uid: HashMap<&str, serde_json::Value> = points_by_uid
-        .iter()
-        .map(|(uid, rows)| (*uid, calling_points_json(rows)))
-        .collect();
+    let json_by_uid = calling_points_by_uid(&calling_points);
     let mut reasons: HashMap<i64, Vec<ReasonRow>> = HashMap::new();
     for row in reason_rows {
         reasons.entry(row.trains_id).or_default().push(row.reason);
@@ -1644,6 +1817,11 @@ pub async fn fetch_train_lives(
         })
         .collect();
     let built = crate::data::journey::build_journey_stops_batch(pool, &requests).await?;
+    let darwin_calls = if darwin {
+        darwin_calls_for(pool, date, &trains, &built).await
+    } else {
+        HashMap::new()
+    };
 
     let mut out = HashMap::new();
     for (train, stops) in trains.iter().zip(built) {
@@ -1655,6 +1833,10 @@ pub async fn fetch_train_lives(
                 continue;
             }
         };
+        let darwin_times = darwin_calls
+            .get(&train.train_uid)
+            .map(|calls| crate::data::trip_plan_darwin::resolve(&stops, calls))
+            .unwrap_or_default();
         let profile = train_live(TrainLiveInput {
             date,
             stops: &stops,
@@ -1664,7 +1846,12 @@ pub async fn fetch_train_lives(
                 .get(&train.trains_id)
                 .map(Vec::as_slice)
                 .unwrap_or_default(),
+            darwin: &darwin_times,
         });
+        if without_row.contains(&train.train_uid) && !profile.has_data() {
+            continue;
+        }
+        profile.darwin_fill.record();
         out.insert(train.train_uid.clone(), profile);
     }
     Ok(out)
@@ -1749,6 +1936,7 @@ mod tests {
             status,
             state_updated_at: None,
             reasons,
+            darwin: &[],
         })
     }
 
@@ -2571,6 +2759,340 @@ mod tests {
         assert_eq!(onward.interchange_feasible, Some(false));
         assert_eq!(onward.relies_on_late_departure, None);
     }
+
+    // --- Three-leg plans: delays chain along the legs (DS-591) ---
+
+    /// A -> B on U1 (08:00-08:10), B -> C on U2 (08:20-08:40), C -> D on U3
+    /// (08:50-09:10); five minutes to change at each. `u1`/`u2` are the
+    /// delays Darwin's boards give the first two trains at their boarding
+    /// stops (carried to their arrivals); U3 reads on time.
+    fn three_leg_plan(u1: i32, u2: i32) -> (Vec<SegmentResult>, bool) {
+        let connections = vec![
+            conn("U1", "A", "B", 480, 490),
+            conn("U2", "B", "C", 500, 520),
+            conn("U3", "C", "D", 530, 550),
+        ];
+        let mut interchange = InterchangeData {
+            modal_change: schedule_query::ModalChangeBuffer::default(),
+            change_time_by_tiploc: HashMap::new(),
+            tiploc_to_crs: HashMap::new(),
+            crs_to_tiplocs: HashMap::new(),
+            fixed_links_from_crs: HashMap::new(),
+        };
+        for (crs, tiploc) in [("AAA", "A"), ("BBB", "B"), ("CCC", "C"), ("DDD", "D")] {
+            interchange
+                .tiploc_to_crs
+                .insert(tiploc.to_string(), crs.to_string());
+            interchange
+                .crs_to_tiplocs
+                .insert(crs.to_string(), vec![tiploc.to_string()]);
+        }
+        let mut segments = crate::data::trip_planning_itinerary::plan_via_waypoints(
+            &connections,
+            &interchange,
+            date(),
+            "AAA",
+            &[],
+            "DDD",
+            NaiveTime::from_hms_opt(7, 50, 0).unwrap(),
+            "fastest",
+            3,
+        )
+        .unwrap();
+        let mut lives = HashMap::new();
+        for (uid, from, to, dep, arr, delay) in [
+            ("U1", "A", "B", 480, 490, u1),
+            ("U2", "B", "C", 500, 520, u2),
+            ("U3", "C", "D", 530, 550, 0),
+        ] {
+            let mut stops = vec![stop(from, None, Some(dep)), stop(to, Some(arr), None)];
+            stops[0].board = Some(board("x", Some(delay), false));
+            lives.insert(uid.to_string(), profile(&stops, None, &[]));
+        }
+        let chains = chains_for(
+            &connections,
+            &HashSet::from(["U1".to_string(), "U2".to_string(), "U3".to_string()]),
+        );
+        let config = LiveConfig::default();
+        annotate(
+            &mut segments,
+            &LiveContext {
+                date: date(),
+                now: utc(470),
+                config: &config,
+                interchange: &interchange,
+                chains: &chains,
+                lives: &lives,
+                snapshot: None,
+                overlaid: &HashSet::new(),
+                overlaid_read: &HashSet::new(),
+            },
+        );
+        let invalidated = plan_invalidated(&segments, &interchange);
+        (segments, invalidated)
+    }
+
+    /// Each train leg's `live`, in order.
+    fn leg_lives(segments: &[SegmentResult]) -> Vec<LegLive> {
+        segments[0].itineraries[0]
+            .legs
+            .iter()
+            .map(|leg| match leg {
+                PlannedLeg::Train { live, .. } => live
+                    .clone()
+                    .flatten()
+                    .map(|l| *l)
+                    .expect("a train leg with live data"),
+                other @ PlannedLeg::Transfer { .. } => panic!("expected a train leg: {other:?}"),
+            })
+            .collect()
+    }
+
+    #[test]
+    fn a_three_leg_plan_whose_delays_all_fit_stays_feasible_and_chains_the_arrivals() {
+        // U1 4 late into B (08:14, ready 08:19 for the 08:20); U2 5 late
+        // into C (08:45, ready 08:50 for the 08:50).
+        let (segments, invalidated) = three_leg_plan(4, 5);
+        assert!(!invalidated);
+        assert_eq!(segments[0].itineraries[0].live_feasible, Some(true));
+        let lives = leg_lives(&segments);
+        assert_eq!(lives[0].arrival_delay_minutes, Some(4));
+        assert_eq!(lives[1].arrival_delay_minutes, Some(5));
+        assert_eq!(lives[1].interchange_feasible, Some(true));
+        assert_eq!(lives[2].interchange_feasible, Some(true));
+    }
+
+    #[test]
+    fn the_second_change_of_a_three_leg_plan_fails_on_its_own_train_though_the_first_holds() {
+        // U2 6 late into C: 08:46 + 5 is after the 08:50, though U1's
+        // change onto U2 is fine.
+        let (segments, invalidated) = three_leg_plan(4, 6);
+        assert!(invalidated);
+        assert_eq!(segments[0].itineraries[0].live_feasible, Some(false));
+        let lives = leg_lives(&segments);
+        assert_eq!(lives[1].interchange_feasible, Some(true));
+        assert_eq!(lives[2].interchange_feasible, Some(false));
+    }
+
+    #[test]
+    fn a_late_first_train_breaks_the_first_change_of_a_three_leg_plan_even_with_a_late_second() {
+        // U1 10 late (in 08:20, ready 08:25): U2 5 late leaves 08:25, which
+        // works (and is flagged as relying on lateness).
+        let (segments, invalidated) = three_leg_plan(10, 5);
+        assert!(!invalidated);
+        let lives = leg_lives(&segments);
+        assert_eq!(lives[1].interchange_feasible, Some(true));
+        assert!(lives[1].relies_on_late_departure.is_some());
+        // One minute later in it does not.
+        let (segments, invalidated) = three_leg_plan(11, 5);
+        assert!(invalidated);
+        assert_eq!(leg_lives(&segments)[1].interchange_feasible, Some(false));
+    }
+
+    // --- Darwin Push Port times in a profile (DS-591) ---
+
+    fn darwin_stop() -> StopDarwin {
+        StopDarwin::default()
+    }
+
+    fn profile_with_darwin(stops: &[JourneyStop], darwin: &[Option<StopDarwin>]) -> TrainLive {
+        train_live(TrainLiveInput {
+            date: date(),
+            stops,
+            status: None,
+            state_updated_at: None,
+            reasons: &[],
+            darwin,
+        })
+    }
+
+    fn arr_delays(live: &TrainLive) -> Vec<Option<i32>> {
+        evaluate(live).iter().map(|p| p.arr_delay).collect()
+    }
+
+    #[test]
+    fn a_darwin_forecast_fills_a_train_trust_has_no_state_for() {
+        // No TRUST state: no estimates on the stops. Darwin forecasts B
+        // seven minutes late.
+        let darwin = vec![
+            None,
+            Some(StopDarwin {
+                arrival_forecast: Some(utc(497)),
+                departure_forecast: Some(utc(498)),
+                ..darwin_stop()
+            }),
+            None,
+            None,
+        ];
+        let live = profile_with_darwin(&stops(), &darwin);
+        assert!(live.has_data());
+        assert_eq!(
+            live.darwin_fill,
+            DarwinFill {
+                actuals: false,
+                forecasts: true
+            }
+        );
+        // Carried forward from B to the calls ahead, as any delay is.
+        assert_eq!(arr_delays(&live), [None, Some(7), Some(7), Some(7)]);
+        let points = evaluate(&live);
+        assert_eq!(points[3].live_arr, Some(517));
+        assert!(adjusted_connections("U1", &points).is_some());
+    }
+
+    #[test]
+    fn a_darwin_forecast_does_not_alter_a_fresh_trust_delay() {
+        let mut stops = stops();
+        crate::data::journey::apply_delay_estimates(&mut stops, Some(5));
+        let darwin = vec![
+            None,
+            None,
+            Some(StopDarwin {
+                arrival_forecast: Some(utc(512)),
+                departure_forecast: Some(utc(513)),
+                ..darwin_stop()
+            }),
+            Some(StopDarwin {
+                arrival_forecast: Some(utc(2)),
+                ..darwin_stop()
+            }),
+        ];
+        let live = profile_with_darwin(&stops, &darwin);
+        assert_eq!(live.darwin_fill, DarwinFill::default());
+        assert_eq!(arr_delays(&live), [None, Some(5), Some(5), Some(5)]);
+        // And with no Darwin at all it is the same profile.
+        let without = profile_with_darwin(&stops, &[]);
+        assert_eq!(arr_delays(&without), arr_delays(&live));
+    }
+
+    #[test]
+    fn a_darwin_actual_at_a_call_trust_never_reported_beats_the_carried_estimate() {
+        // TRUST reported A (5 late) and carries 5 to the rest; Darwin has an
+        // actual at B (a call TRUST does not cover): 9 late.
+        let mut stops = stops();
+        stops[0].actual_departure = Some(utc(485));
+        stops[0].last_event_type = Some("DEPARTURE".to_string());
+        stops[0].delay_minutes = Some(5);
+        crate::data::journey::apply_delay_estimates(&mut stops, Some(5));
+        let darwin = vec![
+            None,
+            Some(StopDarwin {
+                arrival_actual: Some(utc(499)),
+                ..darwin_stop()
+            }),
+            None,
+            None,
+        ];
+        let live = profile_with_darwin(&stops, &darwin);
+        assert_eq!(
+            live.darwin_fill,
+            DarwinFill {
+                actuals: true,
+                forecasts: false
+            }
+        );
+        let points = evaluate(&live);
+        assert_eq!(points[1].arr_delay, Some(9));
+        // TRUST's carried estimate stays for the calls ahead, but no live
+        // time runs backward behind the actual.
+        assert_eq!(points[2].arr_delay, Some(5));
+        assert!(points[2].live_arr >= points[1].live_dep);
+    }
+
+    #[test]
+    fn a_darwin_actual_departure_marks_the_call_departed() {
+        let darwin = vec![
+            Some(StopDarwin {
+                departure_actual: Some(utc(483)),
+                ..darwin_stop()
+            }),
+            None,
+            None,
+            None,
+        ];
+        let live = profile_with_darwin(&stops(), &darwin);
+        let fact = live.fact("A", [None, Some(480)]).expect("fact");
+        assert!(fact.departed);
+        assert_eq!(fact.dep_delay, Some(3));
+    }
+
+    #[test]
+    fn a_stale_trust_state_falls_back_to_darwin_for_the_calls_ahead() {
+        // TRUST reported A (3 late) but its state is stale: no estimates
+        // (`fetch_train_lives` passes no delay), so Darwin's forecast of 8
+        // at C is what is known there.
+        let mut stops = stops();
+        stops[0].actual_departure = Some(utc(483));
+        stops[0].last_event_type = Some("DEPARTURE".to_string());
+        stops[0].delay_minutes = Some(3);
+        let darwin = vec![
+            None,
+            None,
+            Some(StopDarwin {
+                arrival_forecast: Some(utc(508)),
+                ..darwin_stop()
+            }),
+            None,
+        ];
+        let live = profile_with_darwin(&stops, &darwin);
+        assert!(live.darwin_fill.forecasts);
+        let points = evaluate(&live);
+        assert_eq!(points[0].dep_delay, Some(3));
+        assert_eq!(points[1].arr_delay, Some(3));
+        assert_eq!(points[2].arr_delay, Some(8));
+        assert_eq!(points[3].arr_delay, Some(8));
+    }
+
+    #[test]
+    fn darwin_never_lowers_a_delay_trust_reported_for_a_call() {
+        let mut stops = stops();
+        stops[1].actual_arrival = Some(utc(496));
+        stops[1].last_event_type = Some("ARRIVAL".to_string());
+        stops[1].delay_minutes = Some(6);
+        let darwin = vec![
+            None,
+            Some(StopDarwin {
+                arrival_actual: Some(utc(492)),
+                departure_actual: Some(utc(493)),
+                departure_forecast: Some(utc(493)),
+                ..darwin_stop()
+            }),
+            None,
+            None,
+        ];
+        let live = profile_with_darwin(&stops, &darwin);
+        assert_eq!(live.darwin_fill, DarwinFill::default());
+        let points = evaluate(&live);
+        assert_eq!(points[1].arr_delay, Some(6));
+        assert!(
+            !live
+                .fact("B", [Some(490), Some(491)])
+                .expect("fact")
+                .departed
+        );
+    }
+
+    #[test]
+    fn an_early_darwin_time_is_no_delay_and_a_missing_scheduled_time_is_ignored() {
+        let mut stops = stops();
+        stops[1].timetable.working_minute_arrival = None;
+        let darwin = vec![
+            None,
+            Some(StopDarwin {
+                arrival_forecast: Some(utc(480)),
+                departure_forecast: Some(utc(489)),
+                ..darwin_stop()
+            }),
+            None,
+            None,
+        ];
+        let live = profile_with_darwin(&stops, &darwin);
+        let fact = live.fact("B", [None, Some(491)]).expect("fact");
+        // Early is clamped to on time; no scheduled arrival to measure
+        // against.
+        assert_eq!(fact.dep_delay, Some(0));
+        assert_eq!(fact.arr_delay, None);
+    }
 }
 
 /// Pins [`service_minute`] and [`service_instant`] around both clock changes
@@ -3111,5 +3633,148 @@ mod dst_pinning_tests {
                 "{date} + {minute} min"
             );
         }
+    }
+}
+
+/// The Darwin reads of [`fetch_train_lives_with_darwin`] (DS-591).
+#[cfg(test)]
+mod darwin_read_tests {
+    use super::*;
+    use sqlx::postgres::PgPoolOptions;
+
+    fn date() -> NaiveDate {
+        NaiveDate::from_ymd_opt(2026, 10, 5).unwrap()
+    }
+
+    /// An empty train list reads nothing, Darwin included: the pool here
+    /// can never connect, so any query would fail the call.
+    #[tokio::test]
+    async fn an_empty_train_list_skips_every_read_darwin_included() {
+        let pool = PgPoolOptions::new()
+            .connect_lazy("postgres://nobody@127.0.0.1:1/none")
+            .unwrap();
+        let config = LiveConfig::default();
+        let now = Utc::now();
+        let lives = fetch_train_lives_with_darwin(&pool, date(), &[], &config, now)
+            .await
+            .unwrap();
+        assert!(lives.is_empty());
+        let calls = crate::data::trip_plan_darwin::fetch_calls(&pool, date(), &[])
+            .await
+            .unwrap();
+        assert!(calls.is_empty());
+    }
+
+    async fn connect() -> PgPool {
+        let url = std::env::var("DATABASE_URL").expect("DATABASE_URL must be set");
+        PgPoolOptions::new()
+            .connect(&url)
+            .await
+            .expect("connect to postgres")
+    }
+
+    async fn cleanup(pool: &PgPool) {
+        for sql in [
+            "DELETE FROM darwin_calls WHERE rid = 'TDW-TDWMID1'",
+            "DELETE FROM darwin_services WHERE rid = 'TDW-TDWMID1'",
+            "DELETE FROM schedule_calling_points_full WHERE uid = 'TDWMID1'",
+        ] {
+            sqlx::query(sql).execute(pool).await.expect("cleanup");
+        }
+    }
+
+    /// A train booked 23:50 to 00:10 (the next day) with Darwin forecasting
+    /// the arrival at "00:25": 15 late, not 23 hours and 45 minutes early,
+    /// and the same arrival at "23:58" (the evening before the booked
+    /// 00:10) is early, so no delay.
+    #[tokio::test]
+    #[ignore = "requires a live database; run with `cargo test -p api \
+                data::trip_plan_live -- --ignored --test-threads=1`"]
+    async fn a_darwin_forecast_across_midnight_is_dated_by_the_service_day() {
+        let pool = connect().await;
+        let uid = "TDWMID1";
+        let rid = "TDW-TDWMID1";
+        let ts: DateTime<Utc> = "2026-10-05T20:00:00Z".parse().unwrap();
+        let connections = [Connection {
+            operator: schedule_query::OperatorId::UNKNOWN,
+            uid: uid.to_string().into(),
+            from_tiploc: "TDWMA".to_string().into(),
+            to_tiploc: "TDWMB".to_string().into(),
+            departure_min: 1430,
+            arrival_min: 1450,
+            working_departure_min: 1430,
+            working_arrival_min: 1450,
+            can_board: true,
+            can_alight: true,
+        }];
+        let chain: Vec<&Connection> = connections.iter().collect();
+
+        for (forecast, delay) in [("00:25", 15), ("23:58", 0)] {
+            cleanup(&pool).await;
+            sqlx::query(
+                "INSERT INTO schedule_calling_points_full \
+                 (service_date, uid, seq, tiploc, kind, booked_arrival, booked_departure, day_offset) \
+                 VALUES ($1, $2, 0, 'TDWMA', 'origin', NULL, '23:50', 0), \
+                        ($1, $2, 1, 'TDWMB', 'terminate', '00:10', NULL, 1)",
+            )
+            .bind(date())
+            .bind(uid)
+            .execute(&pool)
+            .await
+            .expect("seed schedule");
+            sqlx::query(
+                "INSERT INTO darwin_services (rid, uid, ssd, toc, is_passenger, is_deleted, \
+                                              schedule_ts, message_ts) \
+                 VALUES ($1, $2, $3, 'LS', TRUE, FALSE, $4, $4)",
+            )
+            .bind(rid)
+            .bind(uid)
+            .bind(date())
+            .bind(ts)
+            .execute(&pool)
+            .await
+            .expect("seed darwin_services");
+            for (tiploc, wta, wtd, arrival_et) in [
+                ("TDWMA", "", "23:50", None),
+                ("TDWMB", "00:10", "", Some(forecast)),
+            ] {
+                sqlx::query(
+                    "INSERT INTO darwin_calls (rid, tiploc, wta, wtd, wtp, ssd, arrival_et, \
+                                               schedule_ts, ts_ts) \
+                     VALUES ($1, $2, $3, $4, '', $5, $6, $7, $7)",
+                )
+                .bind(rid)
+                .bind(tiploc)
+                .bind(wta)
+                .bind(wtd)
+                .bind(date())
+                .bind(arrival_et)
+                .bind(ts)
+                .execute(&pool)
+                .await
+                .expect("seed darwin_calls");
+            }
+
+            let config = LiveConfig::default();
+            let now: DateTime<Utc> = "2026-10-05T21:00:00Z".parse().unwrap();
+            let uids = [uid.to_string()];
+            let lives = fetch_train_lives_with_darwin(&pool, date(), &uids, &config, now)
+                .await
+                .unwrap();
+            let live = lives.get(uid).expect("a profile from Darwin alone");
+            let points = evaluate_chain(&chain, live);
+            assert_eq!(points[1].arr_delay, Some(delay), "forecast {forecast}");
+            assert_eq!(
+                points[1].live_arr,
+                Some(1450 + u32::try_from(delay).unwrap()),
+                "forecast {forecast}"
+            );
+            // Without Darwin the same train has no profile at all.
+            let plain = fetch_train_lives(&pool, date(), &uids, &config, now)
+                .await
+                .unwrap();
+            assert!(plain.is_empty(), "{plain:?}");
+        }
+        cleanup(&pool).await;
     }
 }

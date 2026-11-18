@@ -25,6 +25,28 @@ follows, so it can deploy first.
 - The bare form is deprecated and will be dropped once
   `distant_signal_legacy_member_id_requests_total` stays at zero.
 
+## 2026-11-18: `GET /Trips/plan` live times fall back to Darwin where TRUST has no data
+
+Behaviour change, additive (DS-591); no schema, migration or grant change
+(the generated types and the OpenAPI document are untouched). A train leg's
+`live.delayMinutes`, `live.arrivalDelayMinutes` and `liveFeasible` are the
+same fields as before, now more often right.
+
+- TRUST has no report for a minority of trains (and reports at timing
+  points only), so a late train it has not reported was planned as on time. For the
+  trains of the plan being annotated or re-planned, a call TRUST has no data
+  for now gets Darwin's Push Port times: an actual time where there is one,
+  else its forecast when the train has no TRUST state or a stale one. A late
+  first leg can now make a change infeasible, re-plan the journey onto a
+  later train, and show its `arrivalDelayMinutes`.
+- TRUST stays the default. A call TRUST has reported keeps TRUST's delay (a
+  Darwin time never lowers it), and a train with fresh TRUST state keeps its
+  carried delay for the calls ahead, except where Darwin has an actual time
+  for a call TRUST never reported.
+- Not changed: saved-journey feasibility, journey breaks and notifications
+  do not use Darwin times. `TRIP_PLAN_LIVE_DARWIN_ENABLED=false` turns the
+  fill off. See `docs/trip-plan-live.md`.
+
 ## 2026-11-18: `GET /Journeys/{id}/legs/{legId}/candidates?earlier=N` adds the trains just before the search
 
 Additive (DS-589); no migration or grant change. Without `earlier` the

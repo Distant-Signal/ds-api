@@ -76,7 +76,11 @@ fn same_visit(stop: &JourneyStop, call: &DarwinCall) -> bool {
 
 /// The index into `calls` of `stop`'s location, if one matches (see the
 /// module docs). `stops` is the whole train, for the TIPLOC-only rule.
-fn find_call(stops: &[JourneyStop], index: usize, calls: &[DarwinCall]) -> Option<usize> {
+pub(crate) fn find_call(
+    stops: &[JourneyStop],
+    index: usize,
+    calls: &[DarwinCall],
+) -> Option<usize> {
     let stop = &stops[index];
     let tiploc = stop.tiploc.as_deref()?;
     let at_tiploc: Vec<usize> = calls
