@@ -1093,6 +1093,7 @@ mod tests {
             status: Some("en_route"),
             state_updated_at: None,
             reasons: &[],
+            darwin: &[],
         });
         let timing = train_leg_timing("A1", date(), &stops, "PBO", "YRK", Some(&live)).unwrap();
         assert_eq!(timing.live_dep, at(540));

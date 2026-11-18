@@ -2742,8 +2742,14 @@ async fn plan_live(
         if wanted.is_empty() {
             break;
         }
-        let fetched =
-            trip_plan_live::fetch_train_lives(&app.database, date, &wanted, config, now).await?;
+        let fetched = trip_plan_live::fetch_train_lives_with_darwin(
+            &app.database,
+            date,
+            &wanted,
+            config,
+            now,
+        )
+        .await?;
         read.extend(wanted);
         let new_uids: HashSet<String> = fetched.keys().cloned().collect();
         let graph_for_chains = graph.clone();
@@ -4716,6 +4722,7 @@ mod tests {
 mod db_tests {
     mod count_series;
     mod direct_series;
+    mod live_darwin;
     mod live_in_search;
     mod operator_filter;
     mod operator_rule;

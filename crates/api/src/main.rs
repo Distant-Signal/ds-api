@@ -518,6 +518,8 @@ async fn server_main() -> anyhow::Result<()> {
         // The trip-plan graph builds' counter and timing (DS-225).
         routes::trips::register_graph_metrics();
         routes::trips::register_replan_metrics();
+        // Plans whose live times Darwin filled in where TRUST had none (DS-591).
+        data::trip_plan_darwin::register_metrics();
         // "I missed this train" confirmations, by what the train had done.
         routes::journey_replan::register_metrics();
         // Usage analytics' feature and event counters at 0 (DS-190).

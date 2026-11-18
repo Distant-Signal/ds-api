@@ -90,6 +90,7 @@ pub mod trains;
 pub mod transit_planning;
 pub mod travel_order;
 pub mod trip_leg_details;
+pub mod trip_plan_darwin;
 pub mod trip_plan_live;
 pub mod trip_plan_overnight;
 pub mod trip_planning;
