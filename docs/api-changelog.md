@@ -3,6 +3,31 @@
 Changes to the Distant Signal (DS) HTTP API that a client such as DS-MCP
 needs to know about. Newest first. Field names are as served (camelCase).
 
+## 2026-11-19: a missed train's alternatives offer the next morning's first trains from 20:00, not only after midnight
+
+Behaviour change, additive (DS-534); no field, schema, migration or grant
+change, and the OpenAPI document and `api-types/api.ts` are unchanged.
+
+- `GET /Journeys/{id}/legs/{legId}/alternatives?cause=missed|cancelled|connection`
+  (and the suggestions stored for a break of those causes) searched the
+  leg's own service date and the next only once the clock was past that
+  date's midnight, so at 23:47 a traveller who missed the last train was
+  offered no morning train until 00:00. Now the next service date is
+  searched too from 20:00 London on the leg's date (wall-clock, so also on
+  the clock-change days), and at any hour when the leg's own date has no
+  train left to offer. The next date's trains are searched from its midnight
+  and merged as before (`serviceDate` of that date, real instants), then
+  ranked and cut to nine like every set: a morning train appears where no
+  earlier arrival beats it, so a late train of the leg's date still ranks
+  first. A request is still allowed only inside the miss window (`409
+  miss_window_closed` after 04:00 London the next morning); no bound is put on
+  the next date's departures, so the 05:00 first train is offered.
+- `cause=choice` is unchanged: it adds the next date only once past midnight,
+  as before.
+- `distant_signal_api_replan_across_midnight_total` gains a `reason` label
+  (`past_midnight`, `evening`, `nothing_left`); the unlabelled series is
+  replaced by the three, so sum over `reason`.
+
 ## 2026-11-18: `API_SERVE_NUMERIC_IDS` withholds the numeric ids beside opaque ones (stage 2b of the opaque ids, off by default)
 
 No change in behaviour until the switch is turned (DS-534). The chart's

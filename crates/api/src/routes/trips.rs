@@ -2920,20 +2920,51 @@ pub(crate) struct ReplanQuery {
     /// ([`REPLAN_ACROSS_MIDNIGHT_METRIC`]). Off by default: only a journey's
     /// alternatives ask ([`Self::across_midnight`]).
     pub across_midnight: bool,
+    /// A traveller who gave up on a train wants the next morning's first
+    /// trains offered at once (DS-534): also search the next service date
+    /// from [`EVENING_ROLLOVER_MINUTE`] on `date`'s clock, and when `date`'s
+    /// own plan is empty ([`Self::next_date_when_empty`]). Implies
+    /// `across_midnight`; set by [`Self::next_morning`].
+    pub next_morning: bool,
 }
 
-/// `api_replan_across_midnight_total`: journey searches that also loaded
-/// the next service date's graph because they ran past midnight on their
-/// own date (a missed-train search made between 00:00 and 04:00).
+/// The minute on a service date's London clock (20:00) from which a
+/// missed-train search also looks at the next service date.
+///
+/// Why 20:00: the last trains of a night on most routes leave between 22:30
+/// and 00:30, so by 20:00 a traveller who has just missed one may well have
+/// no own-date train worth waiting for, and the next morning's first ones
+/// (about 05:00) are the answer. From then the extra graph is loaded at the
+/// cost of one more search; before it a miss has plenty of own-date trains
+/// and the next date adds nothing (a date with no train left at all is
+/// covered by [`ReplanQuery::next_date_when_empty`], whatever the hour).
+/// The minute is wall-clock minutes since London midnight
+/// (`service_minute`), so it is 20:00 on a clock-change day too: the changes
+/// happen at 01:00 UTC (01:00 to 02:00 London), nowhere near 20:00, which is
+/// always a single instant (tested through `common::zone`).
+pub const EVENING_ROLLOVER_MINUTE: u32 = 20 * 60;
+
+/// `api_replan_across_midnight_total{reason}`: journey searches that also
+/// loaded the next service date's graph, by why: `past_midnight` (the search
+/// ran past its own date's midnight, a missed-train search made between
+/// 00:00 and 04:00), `evening` (a missed-train search from 20:00 on its own
+/// date, [`EVENING_ROLLOVER_MINUTE`]) or `nothing_left` (the own date's plan
+/// was empty, at any hour).
 pub const REPLAN_ACROSS_MIDNIGHT_METRIC: &str = "api_replan_across_midnight_total";
 
-/// Registers [`REPLAN_ACROSS_MIDNIGHT_METRIC`] at 0 at startup, so an
-/// alert's `increase()` sees the first one after a restart.
+/// The `reason` labels of [`REPLAN_ACROSS_MIDNIGHT_METRIC`].
+const ROLLOVER_REASONS: [&str; 3] = ["past_midnight", "evening", "nothing_left"];
+
+/// Registers [`REPLAN_ACROSS_MIDNIGHT_METRIC`] at 0 for each reason at
+/// startup, so an alert's `increase()` sees the first one after a restart.
 pub fn register_replan_metrics() {
-    metrics::counter!(ds_runtime::metrics::metric_name(
-        REPLAN_ACROSS_MIDNIGHT_METRIC
-    ))
-    .increment(0);
+    for reason in ROLLOVER_REASONS {
+        metrics::counter!(
+            ds_runtime::metrics::metric_name(REPLAN_ACROSS_MIDNIGHT_METRIC),
+            "reason" => reason
+        )
+        .increment(0);
+    }
 }
 
 impl ReplanQuery {
@@ -2945,16 +2976,64 @@ impl ReplanQuery {
         self
     }
 
-    /// The next service date to search too, when this query asks for it
-    /// and its time is past `date`'s midnight; `None` otherwise.
-    pub(crate) fn next_date_searched(&self) -> Option<NaiveDate> {
-        let minute = match self.searched_time() {
+    /// This search, also over the next service date from the evening on
+    /// and when its own date has nothing (see the `next_morning` field);
+    /// implies [`Self::across_midnight`].
+    #[must_use]
+    pub(crate) fn next_morning(mut self) -> Self {
+        self.across_midnight = true;
+        self.next_morning = true;
+        self
+    }
+
+    /// [`Self::next_morning`] when `wanted`, else the query as it is.
+    #[must_use]
+    pub(crate) fn next_morning_if(self, wanted: bool) -> Self {
+        if wanted { self.next_morning() } else { self }
+    }
+
+    /// The searched time's minutes from `date`'s London midnight.
+    fn searched_minute(&self) -> u32 {
+        match self.searched_time() {
             trip_planning_itinerary::TimeBound::DepartAfter(m)
             | trip_planning_itinerary::TimeBound::ArriveBy(m) => m,
+        }
+    }
+
+    /// The next service date to search too, by the clock, when this query
+    /// asks for it: its time is past `date`'s midnight, or for a
+    /// [`Self::next_morning`] search from [`EVENING_ROLLOVER_MINUTE`];
+    /// `None` otherwise.
+    pub(crate) fn next_date_searched(&self) -> Option<NaiveDate> {
+        let from = if self.next_morning {
+            EVENING_ROLLOVER_MINUTE
+        } else {
+            1440
         };
         self.date
             .succ_opt()
-            .filter(|_| self.across_midnight && minute >= 1440)
+            .filter(|_| self.across_midnight && self.searched_minute() >= from)
+    }
+
+    /// The `reason` label of [`REPLAN_ACROSS_MIDNIGHT_METRIC`] for a date
+    /// found by [`Self::next_date_searched`].
+    fn rollover_reason(&self) -> &'static str {
+        if self.searched_minute() >= 1440 {
+            "past_midnight"
+        } else {
+            "evening"
+        }
+    }
+
+    /// The next service date to search when `date`'s own plan came back
+    /// empty, at any hour, for a [`Self::next_morning`] search; `None`
+    /// otherwise. "Too few" own-date trains is not a trigger of its own: the
+    /// next departures are searched one by one (`next_departures`), so the
+    /// search that finds none of `date`'s trains left asks this date.
+    pub(crate) fn next_date_when_empty(&self) -> Option<NaiveDate> {
+        self.date
+            .succ_opt()
+            .filter(|_| self.across_midnight && self.next_morning)
     }
 
     /// A departure-time search from `depart_after_min` on `date`, with no
@@ -2980,6 +3059,7 @@ impl ReplanQuery {
             vias: Vec::new(),
             avoid: trip_planning_itinerary::AvoidLists::default(),
             across_midnight: false,
+            next_morning: false,
         }
     }
 
@@ -3103,6 +3183,7 @@ pub(crate) async fn regular_plan_query(
         vias,
         avoid,
         across_midnight: false,
+        next_morning: false,
     })
 }
 
@@ -3199,32 +3280,43 @@ pub(crate) async fn plan_for_journey(
     // this permit and merged as `/Trips/plan?acrossMidnight=true` does, so
     // the minutes stay on `query.date`'s clock (the next date's shifted a
     // day on). A next date with no published timetable adds nothing.
+    //
+    // From 20:00 on its own date (or past midnight) the two dates are
+    // planned together; a `next_morning` search whose own date comes back
+    // empty earlier in the day asks the next date afterwards. Before the
+    // date's end the next date is searched from its own midnight (the clock
+    // saturates at 00:00), with no later bound: the first morning trains
+    // leave after the window's 04:00 and must be offered.
     let time = query.searched_time();
     let next_date = query.next_date_searched();
     let first_plan = plan_on_date(app, &graph, &inputs, query.date, time, &permit);
     let second_plan = async {
-        let Some(next) = next_date else {
-            return Ok(None);
-        };
-        let Some(next_graph) = load_graph(app, next, marker).await? else {
-            return Ok(None);
-        };
-        metrics::counter!(ds_runtime::metrics::metric_name(
-            REPLAN_ACROSS_MIDNIGHT_METRIC
-        ))
-        .increment(1);
-        plan_on_date(
-            app,
-            &next_graph,
-            &inputs,
-            next,
-            time.a_day_earlier(),
-            &permit,
-        )
-        .await
-        .map(Some)
+        match next_date {
+            Some(next) => {
+                plan_next_date(
+                    app,
+                    &inputs,
+                    next,
+                    time,
+                    marker.clone(),
+                    &permit,
+                    query.rollover_reason(),
+                )
+                .await
+            }
+            None => Ok(None),
+        }
     };
-    let (first, second) = tokio::try_join!(first_plan, second_plan)?;
+    let (first, mut second) = tokio::try_join!(first_plan, second_plan)?;
+    if next_date.is_none()
+        && first
+            .segments
+            .iter()
+            .all(|segment| segment.itineraries.is_empty())
+        && let Some(next) = query.next_date_when_empty()
+    {
+        second = plan_next_date(app, &inputs, next, time, marker, &permit, "nothing_left").await?;
+    }
     let segments = match second {
         Some(second) => crate::data::trip_plan_overnight::merge_across_midnight(
             first.segments,
@@ -3241,6 +3333,31 @@ pub(crate) async fn plan_for_journey(
             .map(|segment| segment.itineraries)
             .unwrap_or_default(),
     ))
+}
+
+/// `next`'s plan from the moment `time` (on the previous date's clock; a
+/// day earlier on `next`'s, saturating at 00:00), counted under `reason`.
+/// `None` when no timetable is published for `next`.
+async fn plan_next_date(
+    app: &App,
+    inputs: &DateInputs,
+    next: NaiveDate,
+    time: trip_planning_itinerary::TimeBound,
+    marker: trip_planning::GraphMarker,
+    permit: &PlanPermit,
+    reason: &'static str,
+) -> Result<Option<DatePlan>, (StatusCode, String)> {
+    let Some(next_graph) = load_graph(app, next, marker).await? else {
+        return Ok(None);
+    };
+    metrics::counter!(
+        ds_runtime::metrics::metric_name(REPLAN_ACROSS_MIDNIGHT_METRIC),
+        "reason" => reason
+    )
+    .increment(1);
+    plan_on_date(app, &next_graph, inputs, next, time.a_day_earlier(), permit)
+        .await
+        .map(Some)
 }
 
 /// Splits, trims, uppercases and CAPS the `?waypoints=` list. Factored out of
@@ -3855,6 +3972,119 @@ mod tests {
         assert_eq!(query.next_date_searched(), None);
         query.day_offset = 1;
         assert_eq!(query.next_date_searched(), Some(next));
+    }
+
+    /// The query a missed-train search makes on service date `date` at the
+    /// London wall-clock reading `local` (a `YYYY-MM-DD HH:MM` on `date` or
+    /// the morning after), its minute worked out as the route does.
+    fn missed_query_at(date: &str, local: &str, next_morning: bool) -> ReplanQuery {
+        let date: NaiveDate = date.parse().expect("date");
+        let local = chrono::NaiveDateTime::parse_from_str(local, "%Y-%m-%d %H:%M").expect("local");
+        let at = common::zone::london_to_utc_earliest(local).expect("a London time");
+        let minute = trip_plan_live::service_minute(date, at).expect("after midnight");
+        let mut query = replan_query(minute);
+        query.date = date;
+        query.across_midnight().next_morning_if(next_morning)
+    }
+
+    /// The date decision at the representative London times, on an ordinary
+    /// winter day, a summer one and the two clock-change nights: a
+    /// `next_morning` search adds the next date from 20:00 on, and the old
+    /// rule (past midnight only) is what a choice makes.
+    #[test]
+    fn a_next_morning_search_adds_the_next_date_from_the_evening() {
+        // (service date, the day after, a note)
+        for (date, next, note) in [
+            ("2026-01-14", "2026-01-15", "winter"),
+            ("2026-07-15", "2026-07-16", "summer"),
+            ("2026-10-24", "2026-10-25", "the night the clocks go back"),
+            ("2026-10-25", "2026-10-26", "the day the clocks went back"),
+            (
+                "2026-03-28",
+                "2026-03-29",
+                "the night the clocks go forward",
+            ),
+            (
+                "2026-03-29",
+                "2026-03-30",
+                "the day the clocks went forward",
+            ),
+        ] {
+            let expected: NaiveDate = next.parse().expect("date");
+            for (local_date, time, searches) in [
+                (date, "00:00", false),
+                (date, "19:59", false),
+                (date, "20:00", true),
+                (date, "23:47", true),
+                (next, "00:01", true),
+                (next, "03:59", true),
+                (next, "04:01", true),
+            ] {
+                let local = format!("{local_date} {time}");
+                let query = missed_query_at(date, &local, true);
+                assert_eq!(
+                    query.next_date_searched(),
+                    searches.then_some(expected),
+                    "{note}: {local}"
+                );
+                // A choice keeps the old rule: only past midnight.
+                let choice = missed_query_at(date, &local, false);
+                assert_eq!(
+                    choice.next_date_searched(),
+                    (local_date == next).then_some(expected),
+                    "{note} (choice): {local}"
+                );
+            }
+        }
+    }
+
+    /// The clock changes fall at 01:00 UTC, so 20:00 London is one instant on
+    /// every date and the wall-clock minute 1200 is 20:00 on the change days
+    /// too; the repeated and skipped hours are well before it.
+    #[test]
+    fn the_evening_threshold_is_a_single_instant_on_the_clock_change_days() {
+        use common::zone::{LocalTime, london_resolve};
+        assert_eq!(EVENING_ROLLOVER_MINUTE, 1200);
+        for date in ["2026-10-25", "2026-03-29", "2026-10-24", "2026-03-28"] {
+            let date: NaiveDate = date.parse().expect("date");
+            let evening = date.and_hms_opt(20, 0, 0).expect("time");
+            let LocalTime::Single(at) = london_resolve(evening) else {
+                panic!("{date} 20:00 is not a single instant");
+            };
+            // 20:00 is 1200 wall-clock minutes after local midnight.
+            assert_eq!(
+                trip_plan_live::service_minute(date, at),
+                Some(EVENING_ROLLOVER_MINUTE),
+                "{date}"
+            );
+        }
+        let clocks_back: NaiveDate = "2026-10-25".parse().expect("date");
+        let clocks_forward: NaiveDate = "2026-03-29".parse().expect("date");
+        let repeated = clocks_back.and_hms_opt(1, 30, 0).expect("time");
+        let skipped = clocks_forward.and_hms_opt(1, 30, 0).expect("time");
+        assert!(matches!(
+            london_resolve(repeated),
+            LocalTime::Ambiguous { .. }
+        ));
+        assert_eq!(london_resolve(skipped), LocalTime::Gap);
+    }
+
+    /// Only a `next_morning` query asks its next date when its own plan is
+    /// empty; the date is the day after, at any hour.
+    #[test]
+    fn only_a_next_morning_search_asks_the_next_date_when_its_own_is_empty() {
+        let next: NaiveDate = "2099-05-06".parse().expect("date");
+        assert_eq!(
+            replan_query(720).next_morning().next_date_when_empty(),
+            Some(next)
+        );
+        assert_eq!(replan_query(720).next_date_when_empty(), None);
+        assert_eq!(
+            replan_query(720).across_midnight().next_date_when_empty(),
+            None
+        );
+        // And not by the clock at midday.
+        assert_eq!(replan_query(720).next_morning().next_date_searched(), None);
     }
 
     /// An itinerary with no legs leaving at `departure_min` and arriving

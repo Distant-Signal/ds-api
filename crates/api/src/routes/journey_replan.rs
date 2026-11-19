@@ -448,8 +448,10 @@ pub(crate) enum AskCause {
 /// A journey alternatives' search (`ReplanQuery::depart_after`) that also
 /// looks at the next service date once past `date`'s midnight, so a traveller
 /// who misses the last train of the night is offered the first one of the
-/// morning. Only these searches ask: the regular journeys plan sweep builds
-/// its queries itself and never crosses midnight.
+/// morning. The caller adds `next_morning_if` for a traveller who gave up on
+/// a train: from 20:00 on `date`, or when `date` has nothing, the next date
+/// is searched too. Only these searches ask: the regular journeys plan sweep
+/// builds its queries itself and never crosses midnight.
 fn across_midnight_query(
     origin: String,
     destination: String,
@@ -591,6 +593,10 @@ pub(crate) async fn plan_suggestions(
         .unwrap_or(0)
         .max(crate::data::trip_planning_itinerary::DEFAULT_MAX_CHANGES);
     let last_leg_id = legs[last_train].id;
+    // A traveller who gave up on a train (missed, cancelled, a connection
+    // lost) is offered the next morning's first trains straight away; one
+    // choosing another train, which has not gone, is not (DS-534).
+    let next_morning = cause != "user_choice";
 
     // The replaced trains' operators, and the tickets on them.
     let replaced_uids: Vec<String> = (index..=last_train)
@@ -656,7 +662,8 @@ pub(crate) async fn plan_suggestions(
             "options",
             max_changes,
             filter_rule.clone(),
-        ),
+        )
+        .next_morning_if(next_morning),
         slot,
     )
     .await
@@ -680,7 +687,8 @@ pub(crate) async fn plan_suggestions(
             "fastest",
             max_changes,
             filter_rule.clone(),
-        ),
+        )
+        .next_morning_if(next_morning),
         NEXT_DEPARTURES,
         excluded_uid.as_deref(),
         slot,
@@ -715,7 +723,8 @@ pub(crate) async fn plan_suggestions(
                 "fastest",
                 max_changes,
                 filter_rule.clone(),
-            ),
+            )
+            .next_morning_if(next_morning),
             slot,
         )
         .await
@@ -762,7 +771,8 @@ pub(crate) async fn plan_suggestions(
                 "fastest",
                 max_changes,
                 Some(trip_planner::OperatorRule::only(same_operators).cif_trains_only()),
-            ),
+            )
+            .next_morning_if(next_morning),
             2,
             excluded_uid.as_deref(),
             slot,
@@ -792,7 +802,8 @@ pub(crate) async fn plan_suggestions(
                 "fastest",
                 max_changes,
                 Some(trip_planner::OperatorRule::only(filter.mask())),
-            ),
+            )
+            .next_morning_if(next_morning),
             1,
             excluded_uid.as_deref(),
             slot,
@@ -837,7 +848,8 @@ pub(crate) async fn plan_suggestions(
                 "fastest",
                 max_changes,
                 None,
-            ),
+            )
+            .next_morning_if(next_morning),
             1,
             excluded_uid.as_deref(),
             slot,
