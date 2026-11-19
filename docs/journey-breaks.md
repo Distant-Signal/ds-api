@@ -123,12 +123,21 @@ date and its real instants; taking it replaces the leg with one dated the
 next day, whose own miss window is 04:00 the morning after that date. The
 original leg's window decides whether the request is allowed at all, so a
 leg dated the next day never makes it, or the ordering of the journey,
-wrong. Only a search that starts past midnight does this: before midnight the
-next morning's trains are not offered. Only the alternatives' searches ask
-for it: the regular journeys plan sweep never crosses midnight. With no
+wrong. For a missed, cancelled or connection-missed leg the next date is
+searched from 20:00 London on the leg's date, not only past midnight
+(`EVENING_ROLLOVER_MINUTE`, wall-clock minutes of that date, so it is 20:00
+on a clock-change day too), and also at any hour when the leg's own date
+has no train left to offer, so a traveller at 23:47 is offered the first
+morning trains at once. The next date is searched from its own midnight and
+merged by the same rules: the result is ranked and cut to nine as every set
+is, so a morning train only appears where no earlier arrival beats it.
+"I'd rather choose another train" (`cause=choice`) is unchanged: it crosses
+midnight only once the clock has. Only the alternatives' searches ask for
+it: the regular journeys plan sweep never crosses midnight. With no
 timetable published for the next date it adds nothing.
-`distant_signal_api_replan_across_midnight_total` counts the searches that
-loaded the next date's graph. Today's graph and tomorrow's are prewarmed
+`distant_signal_api_replan_across_midnight_total{reason}` counts the searches
+that loaded the next date's graph, by `past_midnight`, `evening` or
+`nothing_left`. Today's graph and tomorrow's are prewarmed
 (`prewarm_graphs`), so after midnight the next date is today's and warm;
 the date before it is the one that may need building on the first search.
 

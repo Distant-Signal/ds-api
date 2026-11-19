@@ -3385,34 +3385,147 @@ async fn a_miss_after_midnight_is_offered_the_next_mornings_trains() {
     assert_eq!(leg_dates().await, [date()]);
 }
 
-/// Before midnight on the fixture day the search is as it was: its own
-/// day's trains only, though the next day has a timetable.
+/// Late in the evening (DS-534) a traveller who missed a train is offered the
+/// last trains of the fixture day, its night train and the next day's first
+/// morning trains straight away, not only once the clock is past midnight.
 #[tokio::test]
 #[ignore = "requires a live database: DATABASE_URL"]
-async fn a_miss_before_midnight_is_not_offered_the_next_days_trains() {
+async fn a_miss_late_in_the_evening_is_offered_the_last_trains_and_the_next_mornings() {
     let _now = pin_now();
     let pool = connect().await;
     let _cleanup = cleanup(&pool).await;
     seed_timetable(&pool).await;
     seed_late_train(&pool, "RP0006", "23:50", "23:59").await;
+    seed_train_on(&pool, DATE, "RPO001", "00:20", "01:20", 1).await;
+    seed_train_on(&pool, NEXT_DATE, "RPN001", "05:00", "06:00", 0).await;
+    seed_train_on(&pool, NEXT_DATE, "RPN002", "05:30", "06:30", 0).await;
+    let token = seed_session(&pool, USER).await;
+    let router = router(pool.clone());
+    let (journey_id, leg_id) = create_journey(&router, &token).await;
+
+    // 23:47: both the fixture day's trains still to come and the next
+    // day's first, each on its own service date and real instants.
+    let _evening = crate::routes::pin_london_now_for_tests(london_at(0, 23, 47));
+    let found = missed_alternatives(&router, &token, journey_id, leg_id).await;
+    let offered = first_trains(&found);
+    for (uid, service_date) in [("RP0006", DATE), ("RPO001", DATE), ("RPN001", NEXT_DATE)] {
+        assert!(
+            offered
+                .iter()
+                .any(|(u, d)| (u.as_str(), d.as_str()) == (uid, service_date)),
+            "{uid} on {service_date} in {found}"
+        );
+    }
+    assert_eq!(
+        instant_of(&suggestion_on(&found, "RP0006")["departure"]),
+        london_at(0, 23, 50),
+        "{found}"
+    );
+    assert_eq!(
+        instant_of(&suggestion_on(&found, "RPN001")["departure"]),
+        london_at(1, 5, 0),
+        "{found}"
+    );
+    // The late train ranks ahead of the morning one.
+    let position = |uid: &str| offered.iter().position(|(u, _)| u == uid);
+    assert!(position("RP0006") < position("RPN001"), "{found}");
+    // None is offered from before the search's moment.
+    for suggestion in found["suggestions"].as_array().expect("suggestions") {
+        assert!(
+            instant_of(&suggestion["departure"]) >= london_at(0, 23, 46),
+            "{found}"
+        );
+    }
+}
+
+/// The situation the website's end-to-end fixture needs: the fixture day has
+/// no train left and its candidates are all on the next day (dated by their
+/// own service date, early the next morning). Before midnight they are
+/// found; none of the next day's later trains is cut off by the miss window,
+/// which only decides whether the request is allowed.
+#[tokio::test]
+#[ignore = "requires a live database: DATABASE_URL"]
+async fn a_miss_before_midnight_finds_trains_that_run_only_on_the_next_day() {
+    let _now = pin_now();
+    let pool = connect().await;
+    let _cleanup = cleanup(&pool).await;
+    seed_timetable(&pool).await;
+    seed_train_on(&pool, NEXT_DATE, "RPN001", "03:47", "04:02", 0).await;
+    seed_train_on(&pool, NEXT_DATE, "RPN002", "04:47", "05:02", 0).await;
+    let token = seed_session(&pool, USER).await;
+    let router = router(pool.clone());
+    let (journey_id, leg_id) = create_journey(&router, &token).await;
+
+    let _evening = crate::routes::pin_london_now_for_tests(london_at(0, 23, 47));
+    let found = missed_alternatives(&router, &token, journey_id, leg_id).await;
+    let offered = first_trains(&found);
+    for uid in ["RPN001", "RPN002"] {
+        assert!(
+            offered
+                .iter()
+                .any(|(u, d)| (u.as_str(), d.as_str()) == (uid, NEXT_DATE)),
+            "{uid} in {found}"
+        );
+    }
+    for (uid, service_date) in &offered {
+        assert_eq!(service_date, NEXT_DATE, "{uid} in {found}");
+    }
+}
+
+/// Earlier in the day the fixture day's own trains fill the list and the next
+/// day is not merged in: at 12:00 with trains still to come, only those.
+#[tokio::test]
+#[ignore = "requires a live database: DATABASE_URL"]
+async fn a_miss_at_midday_is_not_offered_the_next_days_trains() {
+    let _now = pin_now();
+    let pool = connect().await;
+    let _cleanup = cleanup(&pool).await;
+    seed_timetable(&pool).await;
+    for (uid, dep, arr) in [
+        ("RP0007", "12:30", "12:59"),
+        ("RP0008", "13:00", "13:29"),
+        ("RP0009", "13:30", "13:59"),
+        ("RP0006", "23:50", "23:59"),
+    ] {
+        seed_late_train(&pool, uid, dep, arr).await;
+    }
     seed_train_on(&pool, NEXT_DATE, "RPN001", "05:00", "06:00", 0).await;
     let token = seed_session(&pool, USER).await;
     let router = router(pool.clone());
     let (journey_id, leg_id) = create_journey(&router, &token).await;
 
-    // 23:30: the 23:50 is the only train left; the 05:00 next morning is
-    // left out.
-    let _evening = crate::routes::pin_london_now_for_tests(london_at(0, 23, 30));
+    let _midday = crate::routes::pin_london_now_for_tests(london_at(0, 12, 0));
     let found = missed_alternatives(&router, &token, journey_id, leg_id).await;
     let offered = first_trains(&found);
     assert!(!offered.is_empty(), "{found}");
     for (uid, service_date) in &offered {
-        assert_eq!(
-            (uid.as_str(), service_date.as_str()),
-            ("RP0006", DATE),
-            "{found}"
-        );
+        assert_eq!(service_date, DATE, "{uid} in {found}");
     }
+}
+
+/// At midday with no train of the fixture day left at all, the next day's
+/// first trains are offered rather than nothing.
+#[tokio::test]
+#[ignore = "requires a live database: DATABASE_URL"]
+async fn a_miss_at_midday_with_no_train_left_is_offered_the_next_mornings() {
+    let _now = pin_now();
+    let pool = connect().await;
+    let _cleanup = cleanup(&pool).await;
+    seed_timetable(&pool).await;
+    seed_train_on(&pool, NEXT_DATE, "RPN001", "05:00", "06:00", 0).await;
+    let token = seed_session(&pool, USER).await;
+    let router = router(pool.clone());
+    let (journey_id, leg_id) = create_journey(&router, &token).await;
+
+    let _midday = crate::routes::pin_london_now_for_tests(london_at(0, 12, 0));
+    let found = missed_alternatives(&router, &token, journey_id, leg_id).await;
+    let offered = first_trains(&found);
+    assert!(
+        offered
+            .iter()
+            .any(|(u, d)| (u.as_str(), d.as_str()) == ("RPN001", NEXT_DATE)),
+        "{found}"
+    );
 }
 
 /// Past midnight with nothing published for the next day: the fixture day's
