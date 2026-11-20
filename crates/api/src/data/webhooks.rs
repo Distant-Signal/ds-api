@@ -98,6 +98,12 @@ fn seal_for_row(ring: &KeyRing, secret: &str, id: i64) -> Result<Sealed, OpenErr
     ring.seal_in(secret, &secret_context(id))
 }
 
+/// Turns the webhook routes on or off without reading the environment.
+#[cfg(test)]
+pub(crate) fn set_enabled_for_tests(on: bool) {
+    ENABLED.store(on, Ordering::Relaxed);
+}
+
 /// Whether the webhook routes are on ([`init_from_env`]).
 pub fn enabled() -> bool {
     ENABLED.load(Ordering::Relaxed)
@@ -145,7 +151,11 @@ pub fn generate_secret() -> String {
 #[serde(rename_all = "camelCase")]
 #[ts(rename = "WebhookDestination")]
 pub struct WebhookRow {
+    // Deprecated (DS-534): use `public_id`; withheld (0) once the numeric
+    // ids are (`API_SERVE_NUMERIC_IDS`).
     pub id: i64,
+    // `w_` and 32 hex digits (`webhook_destinations.public_id`).
+    pub public_id: String,
     /// `generic`, `ntfy` or `gotify`.
     pub kind: String,
     pub name: String,
@@ -163,7 +173,7 @@ pub struct WebhookRow {
     pub created_at: DateTime<Utc>,
 }
 
-const COLUMNS: &str = "id, kind, name, url, secret_ciphertext IS NOT NULL AS has_secret, enabled, \
+const COLUMNS: &str = "id, public_id, kind, name, url, secret_ciphertext IS NOT NULL AS has_secret, enabled, \
                        disabled_reason, last_success_at, last_failure_at, last_error, created_at";
 
 /// The user's destinations, oldest first.

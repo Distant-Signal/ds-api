@@ -16,6 +16,10 @@
 //! | [`Device`] | `push_subscriptions` | `d_` |
 //! | [`Break`] | `journey_breaks` | `b_` |
 //! | [`Template`] | `journey_templates` | `r_` (a regular journey) |
+//! | [`Deletion`] | `delegated_deletions` | `x_` (a deleted journey's record) |
+//! | [`Token`] | `personal_api_tokens` | `k_` |
+//! | [`Webhook`] | `webhook_destinations` | `w_` |
+//! | [`Away`] | `user_away_periods` | `a_` |
 //!
 //! During the deprecation window every route takes either form in the path
 //! or in a request body: a segment that parses as an integer is a legacy
@@ -91,6 +95,23 @@ pub struct Break;
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Template;
 
+/// `delegated_deletions.public_id`: one deleted journey's record, listed
+/// under Recently deleted and under Connected apps.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Deletion;
+
+/// `personal_api_tokens.public_id`: a personal API token.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Token;
+
+/// `webhook_destinations.public_id`: an outbound webhook destination.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Webhook;
+
+/// `user_away_periods.public_id`: a time-away period.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Away;
+
 impl Kind for Journey {
     const PREFIX: &'static str = "j_";
     const NOUN: &'static str = "journey";
@@ -145,14 +166,54 @@ impl Kind for Template {
     const ONE: &'static str = "SELECT public_id FROM journey_templates WHERE id = $1";
 }
 
+impl Kind for Deletion {
+    const PREFIX: &'static str = "x_";
+    const NOUN: &'static str = "deleted journey";
+    const LABEL: &'static str = "deletion";
+    const RESOLVE: &'static str = "SELECT id FROM delegated_deletions WHERE public_id = $1";
+    const BATCH: &'static str = "SELECT id, public_id FROM delegated_deletions WHERE id = ANY($1)";
+    const ONE: &'static str = "SELECT public_id FROM delegated_deletions WHERE id = $1";
+}
+
+impl Kind for Token {
+    const PREFIX: &'static str = "k_";
+    const NOUN: &'static str = "token";
+    const LABEL: &'static str = "token";
+    const RESOLVE: &'static str = "SELECT id FROM personal_api_tokens WHERE public_id = $1";
+    const BATCH: &'static str = "SELECT id, public_id FROM personal_api_tokens WHERE id = ANY($1)";
+    const ONE: &'static str = "SELECT public_id FROM personal_api_tokens WHERE id = $1";
+}
+
+impl Kind for Webhook {
+    const PREFIX: &'static str = "w_";
+    const NOUN: &'static str = "webhook";
+    const LABEL: &'static str = "webhook";
+    const RESOLVE: &'static str = "SELECT id FROM webhook_destinations WHERE public_id = $1";
+    const BATCH: &'static str = "SELECT id, public_id FROM webhook_destinations WHERE id = ANY($1)";
+    const ONE: &'static str = "SELECT public_id FROM webhook_destinations WHERE id = $1";
+}
+
+impl Kind for Away {
+    const PREFIX: &'static str = "a_";
+    const NOUN: &'static str = "time away period";
+    const LABEL: &'static str = "away";
+    const RESOLVE: &'static str = "SELECT id FROM user_away_periods WHERE public_id = $1";
+    const BATCH: &'static str = "SELECT id, public_id FROM user_away_periods WHERE id = ANY($1)";
+    const ONE: &'static str = "SELECT public_id FROM user_away_periods WHERE id = $1";
+}
+
 /// The `kind` labels of the legacy-id counter.
-pub const LEGACY_KINDS: [&str; 6] = [
+pub const LEGACY_KINDS: [&str; 10] = [
     Journey::LABEL,
     Leg::LABEL,
     Tracking::LABEL,
     Device::LABEL,
     Break::LABEL,
     Template::LABEL,
+    Deletion::LABEL,
+    Token::LABEL,
+    Webhook::LABEL,
+    Away::LABEL,
 ];
 
 /// The counter of members-route requests that named a member by the bare
@@ -242,6 +303,15 @@ pub type DeviceRef = PublicRef<Device>;
 pub type BreakRef = PublicRef<Break>;
 /// A regular journey (`journey_templates` row) as the caller named it.
 pub type TemplateRef = PublicRef<Template>;
+/// A deleted journey's record (`delegated_deletions` row) as the caller
+/// named it.
+pub type DeletionRef = PublicRef<Deletion>;
+/// A personal API token as the caller named it.
+pub type TokenRef = PublicRef<Token>;
+/// A webhook destination as the caller named it.
+pub type WebhookRef = PublicRef<Webhook>;
+/// A time-away period as the caller named it.
+pub type AwayRef = PublicRef<Away>;
 
 /// Whether `s` has the shape of a public id with this `prefix` (which says
 /// nothing about whether a row has it).
@@ -386,6 +456,10 @@ mod tests {
     const JOURNEY: &str = "j_0123456789abcdef0123456789abcdef";
     const BREAK: &str = "b_0123456789abcdef0123456789abcdef";
     const TEMPLATE: &str = "r_0123456789abcdef0123456789abcdef";
+    const DELETION: &str = "x_0123456789abcdef0123456789abcdef";
+    const TOKEN: &str = "k_0123456789abcdef0123456789abcdef";
+    const WEBHOOK: &str = "w_0123456789abcdef0123456789abcdef";
+    const AWAY: &str = "a_0123456789abcdef0123456789abcdef";
 
     #[test]
     fn member_segments_are_classified_by_shape() {
@@ -449,7 +523,13 @@ mod tests {
         assert!(JourneyRef::parse(JOURNEY).is_some());
         assert!(BreakRef::parse(BREAK).is_some());
         assert!(TemplateRef::parse(TEMPLATE).is_some());
-        let all = [JOURNEY, LEG, TRACKING, DEVICE, BREAK, TEMPLATE];
+        assert!(DeletionRef::parse(DELETION).is_some());
+        assert!(TokenRef::parse(TOKEN).is_some());
+        assert!(WebhookRef::parse(WEBHOOK).is_some());
+        assert!(AwayRef::parse(AWAY).is_some());
+        let all = [
+            JOURNEY, LEG, TRACKING, DEVICE, BREAK, TEMPLATE, DELETION, TOKEN, WEBHOOK, AWAY,
+        ];
         for (kind, own) in all.iter().enumerate() {
             for (other, id) in all.iter().enumerate() {
                 let accepted = match kind {
@@ -458,7 +538,11 @@ mod tests {
                     2 => TrackingRef::parse(id).is_some(),
                     3 => DeviceRef::parse(id).is_some(),
                     4 => BreakRef::parse(id).is_some(),
-                    _ => TemplateRef::parse(id).is_some(),
+                    5 => TemplateRef::parse(id).is_some(),
+                    6 => DeletionRef::parse(id).is_some(),
+                    7 => TokenRef::parse(id).is_some(),
+                    8 => WebhookRef::parse(id).is_some(),
+                    _ => AwayRef::parse(id).is_some(),
                 };
                 assert_eq!(accepted, kind == other, "{own} against {id}");
             }
@@ -504,6 +588,19 @@ mod tests {
             TemplateRef::expected(),
             "a template id is a number or a r_ id"
         );
+        assert_eq!(
+            DeletionRef::expected(),
+            "a deleted journey id is a number or a x_ id"
+        );
+        assert_eq!(TokenRef::expected(), "a token id is a number or a k_ id");
+        assert_eq!(
+            WebhookRef::expected(),
+            "a webhook id is a number or a w_ id"
+        );
+        assert_eq!(
+            AwayRef::expected(),
+            "a time away period id is a number or a a_ id"
+        );
     }
 
     #[test]
@@ -524,7 +621,10 @@ mod tests {
     fn every_kind_is_registered_in_the_counter() {
         assert_eq!(
             LEGACY_KINDS,
-            ["journey", "leg", "tracking", "device", "break", "template"]
+            [
+                "journey", "leg", "tracking", "device", "break", "template", "deletion", "token",
+                "webhook", "away"
+            ]
         );
         let recorder = metrics_exporter_prometheus::PrometheusBuilder::new().build_recorder();
         let handle = recorder.handle();
@@ -569,6 +669,30 @@ mod tests {
                         .unwrap(),
                     11
                 );
+                assert_eq!(
+                    DeletionRef::parse("12")
+                        .unwrap()
+                        .resolve(&pool)
+                        .await
+                        .unwrap(),
+                    12
+                );
+                assert_eq!(
+                    TokenRef::parse("13").unwrap().resolve(&pool).await.unwrap(),
+                    13
+                );
+                assert_eq!(
+                    WebhookRef::parse("14")
+                        .unwrap()
+                        .resolve(&pool)
+                        .await
+                        .unwrap(),
+                    14
+                );
+                assert_eq!(
+                    AwayRef::parse("15").unwrap().resolve(&pool).await.unwrap(),
+                    15
+                );
             });
         });
         let rendered = handle.render();
@@ -588,6 +712,10 @@ mod tests {
             rendered.contains(r#"distant_signal_legacy_id_requests_total{kind="template"} 1"#),
             "{rendered}"
         );
+        for kind in ["deletion", "token", "webhook", "away"] {
+            let line = format!(r#"distant_signal_legacy_id_requests_total{{kind="{kind}"}} 1"#);
+            assert!(rendered.contains(&line), "{line} missing from {rendered}");
+        }
         assert!(!rendered.contains(r#"kind="tracking""#), "{rendered}");
     }
 }

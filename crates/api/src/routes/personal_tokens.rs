@@ -26,6 +26,7 @@ use crate::app::{App, Router};
 use crate::auth::delegated::{error_response, log_hash};
 use crate::auth::{self, AuthenticatedUser, SESSION_COOKIE_NAME, hash_session_token, parse_cookie};
 use crate::data::personal_tokens::{self as data, CreateOutcome, RevokeReason, TokenRow};
+use crate::data::public_id::TokenRef;
 use crate::personal_tokens::{PersonalScope, token};
 
 pub fn router() -> Router {
@@ -331,8 +332,14 @@ async fn revoke_one(
     if !same_origin(&app, &headers) {
         return cross_site();
     }
-    let Ok(id) = id.parse::<i64>() else {
+    // Either form: the number or the `k_` id. Anything else names no token,
+    // which is a 204 as an unknown number is.
+    let Some(reference) = TokenRef::parse(&id) else {
         return StatusCode::NO_CONTENT.into_response();
+    };
+    let id = match reference.resolve(&app.database).await {
+        Ok(id) => id,
+        Err(err) => return database_error("resolve the token id")(err.into()),
     };
     match data::revoke(&app.database, id, Some(&user.id), RevokeReason::User).await {
         Ok(revoked) => {

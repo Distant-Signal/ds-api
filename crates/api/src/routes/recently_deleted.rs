@@ -39,7 +39,7 @@
 //! its leave-by settings are gone with the old journey.
 
 use axum::Json;
-use axum::extract::{Path, State};
+use axum::extract::State;
 use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
 use chrono::{DateTime, NaiveDate, Utc};
@@ -49,6 +49,7 @@ use crate::app::{App, Router};
 use crate::auth::AuthenticatedUser;
 use crate::data::{delegated, journeys, leg_validation, recently_deleted, train_tracking};
 use crate::routes::journey_itinerary::RouteError;
+use crate::routes::journey_ref::DeletionId;
 
 pub fn router() -> Router {
     Router::new()
@@ -120,7 +121,7 @@ async fn get_list(State(app): State<App>, user: AuthenticatedUser) -> Response {
 async fn delete_one(
     State(app): State<App>,
     user: AuthenticatedUser,
-    Path(id): Path<i64>,
+    DeletionId(id): DeletionId,
 ) -> Response {
     if !recently_deleted::enabled() {
         return not_found();
@@ -407,7 +408,7 @@ fn refused(status: StatusCode, code: &'static str, message: impl Into<String>) -
 async fn post_restore(
     State(app): State<App>,
     user: AuthenticatedUser,
-    Path(id): Path<i64>,
+    DeletionId(id): DeletionId,
 ) -> Response {
     if !recently_deleted::enabled() {
         return not_found();

@@ -7,7 +7,10 @@
 //! `{train_subscription_id}` on the group route, `t_`) and `DeviceId`
 //! (`{id}` on the device route, `d_`) do the same for the other kinds
 //! (`data::public_id`), as do `BreakId` (`{break_id}`, `b_`) and
-//! `TemplateId` (`{template_id}`, `r_`, a regular journey). The other
+//! `TemplateId` (`{template_id}`, `r_`, a regular journey), `DeletionId`
+//! (`{id}`, `x_`), `WebhookId` (`{id}`, `w_`) and `AwayId` (`{period_id}`,
+//! `a_`). A personal token's `{id}` (`k_`) is parsed in its handler: an id
+//! that names nothing there is a 204, not a 400. The other
 //! captures of a route (a revision, a date) are read with a `Path` of one
 //! of the small structs below, which ignore the captures they do not name.
 //!
@@ -25,7 +28,9 @@ use axum::http::request::Parts;
 use serde::Deserialize;
 
 use crate::app::App;
-use crate::data::public_id::{Break, Device, Journey, Kind, Leg, PublicRef, Template, Tracking};
+use crate::data::public_id::{
+    Away, Break, Deletion, Device, Journey, Kind, Leg, PublicRef, Template, Tracking, Webhook,
+};
 
 /// The internal id of the object of kind `K` that the first capture of
 /// `names` the route has holds.
@@ -146,6 +151,46 @@ impl FromRequestParts<App> for TemplateId {
         resolve::<Template>(parts, app, &["template_id"])
             .await
             .map(Self)
+    }
+}
+
+/// The internal id of the deleted-journey record (`delegated_deletions`
+/// row, `x_`) a route's `{id}` capture names.
+#[derive(Debug, Clone, Copy)]
+pub struct DeletionId(pub i64);
+
+impl FromRequestParts<App> for DeletionId {
+    type Rejection = (StatusCode, String);
+
+    async fn from_request_parts(parts: &mut Parts, app: &App) -> Result<Self, Self::Rejection> {
+        resolve::<Deletion>(parts, app, &["id"]).await.map(Self)
+    }
+}
+
+/// The internal id of the webhook destination (`w_`) a route's `{id}`
+/// capture names. Only an alias: the sealed secret stays bound to the
+/// numeric id.
+#[derive(Debug, Clone, Copy)]
+pub struct WebhookId(pub i64);
+
+impl FromRequestParts<App> for WebhookId {
+    type Rejection = (StatusCode, String);
+
+    async fn from_request_parts(parts: &mut Parts, app: &App) -> Result<Self, Self::Rejection> {
+        resolve::<Webhook>(parts, app, &["id"]).await.map(Self)
+    }
+}
+
+/// The internal id of the time-away period (`a_`) a route's `{period_id}`
+/// capture names.
+#[derive(Debug, Clone, Copy)]
+pub struct AwayId(pub i64);
+
+impl FromRequestParts<App> for AwayId {
+    type Rejection = (StatusCode, String);
+
+    async fn from_request_parts(parts: &mut Parts, app: &App) -> Result<Self, Self::Rejection> {
+        resolve::<Away>(parts, app, &["period_id"]).await.map(Self)
     }
 }
 

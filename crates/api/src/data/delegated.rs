@@ -442,7 +442,11 @@ pub async fn delete_journey_delegated(
 #[ts(rename = "ConnectedAppDeletion")]
 #[serde(rename_all = "camelCase")]
 pub struct DeletionRow {
+    // Deprecated (DS-534): use `public_id`; withheld (0) once the numeric
+    // ids are (`API_SERVE_NUMERIC_IDS`).
     pub id: i64,
+    // `x_` and 32 hex digits (`delegated_deletions.public_id`).
+    pub public_id: String,
     pub client: String,
     pub deleted_at: DateTime<Utc>,
     /// What the journey was, as [`delete_journey_delegated`] stored it.
@@ -455,7 +459,7 @@ pub struct DeletionRow {
 /// list's, `data::recently_deleted`).
 pub async fn recent_deletions(pool: &PgPool, user_id: &str) -> Result<Vec<DeletionRow>> {
     Ok(sqlx::query_as::<_, DeletionRow>(
-        "SELECT id, client, deleted_at, summary FROM delegated_deletions \
+        "SELECT id, public_id, client, deleted_at, summary FROM delegated_deletions \
          WHERE user_id = $1 AND client <> $3 AND deleted_at > now() - make_interval(days => $2) \
          ORDER BY deleted_at DESC, id DESC LIMIT 200",
     )

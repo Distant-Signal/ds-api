@@ -3,7 +3,7 @@
 //! (reason `away`). Session only; not offered to delegated clients.
 
 use axum::Json;
-use axum::extract::{Path, State};
+use axum::extract::State;
 use axum::http::StatusCode;
 use chrono::NaiveDate;
 use serde::{Deserialize, Serialize};
@@ -12,6 +12,7 @@ use crate::app::{App, Router};
 use crate::auth::AuthenticatedUser;
 use crate::data::regular_journeys::london_date;
 use crate::data::time_away::{self, SaveOutcome, TimeAwayPeriod};
+use crate::routes::journey_ref::AwayId;
 
 pub fn router() -> Router {
     Router::new()
@@ -131,7 +132,7 @@ async fn post_time_away(
 async fn put_time_away(
     State(app): State<App>,
     user: AuthenticatedUser,
-    Path(period_id): Path<i64>,
+    AwayId(period_id): AwayId,
     Json(body): Json<TimeAwayRequest>,
 ) -> Result<Json<TimeAwayResponse>, (StatusCode, String)> {
     let input = validated(&body)?;
@@ -152,7 +153,7 @@ async fn put_time_away(
 async fn delete_time_away(
     State(app): State<App>,
     user: AuthenticatedUser,
-    Path(period_id): Path<i64>,
+    AwayId(period_id): AwayId,
 ) -> Result<StatusCode, (StatusCode, String)> {
     if time_away::delete(&app.database, &user.id, period_id)
         .await
@@ -179,6 +180,7 @@ mod tests {
             let Json(response) = saved(SaveOutcome::Saved {
                 period: TimeAwayPeriod {
                     id: 1,
+                    public_id: "a_0123456789abcdef0123456789abcdef".into(),
                     starts_on: NaiveDate::from_ymd_opt(2026, 12, 1).unwrap(),
                     ends_on: NaiveDate::from_ymd_opt(2026, 12, 3).unwrap(),
                     label: None,

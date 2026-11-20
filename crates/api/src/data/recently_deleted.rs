@@ -199,7 +199,11 @@ pub(crate) async fn record_web_deletion(
 #[derive(Debug, Clone, sqlx::FromRow, Serialize, ts_rs::TS)]
 #[serde(rename_all = "camelCase")]
 pub struct RecentlyDeletedJourney {
+    // Deprecated (DS-534): use `public_id`; withheld (0) once the numeric
+    // ids are (`API_SERVE_NUMERIC_IDS`).
     pub id: i64,
+    // `x_` and 32 hex digits (`delegated_deletions.public_id`).
+    pub public_id: String,
     /// `web` for the user's own delete, else the connected app's name.
     pub client: String,
     pub deleted_at: DateTime<Utc>,
@@ -218,7 +222,7 @@ pub async fn list(
 ) -> Result<Vec<RecentlyDeletedJourney>> {
     let kept = kept_days_sql("$2");
     Ok(sqlx::query_as::<_, RecentlyDeletedJourney>(&format!(
-        "SELECT id, client, deleted_at, \
+        "SELECT id, public_id, client, deleted_at, \
                 deleted_at + make_interval(days => {kept}) AS expires_at, summary \
          FROM delegated_deletions \
          WHERE user_id = $1 AND deleted_at > now() - make_interval(days => {kept}) \

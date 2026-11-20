@@ -309,7 +309,7 @@ export type ConnectableApp = { name: string, displayName: string, scopes: Array<
 /**
  * A delegated delete, as the Connected apps page lists it.
  */
-export type ConnectedAppDeletion = { id: number, client: string, deletedAt: string, 
+export type ConnectedAppDeletion = { id: number, publicId: string, client: string, deletedAt: string, 
 /**
  * What the journey was, as [`delete_journey_delegated`] stored it.
  */
@@ -493,7 +493,7 @@ export type CreatedPersonalTokenResponse = {
 /**
  * The token. Shown once; Distant Signal keeps only its hash.
  */
-token: string, id: number, name: string, 
+token: string, id: number, publicId: string, name: string, 
 /**
  * The token's last 4 characters, shown as `dsp_...hint`.
  */
@@ -3060,7 +3060,7 @@ name: string, };
  * A token as the Connected apps page and the account export show it.
  * Never carries the hash.
  */
-export type PersonalTokenRow = { id: number, name: string, 
+export type PersonalTokenRow = { id: number, publicId: string, name: string, 
 /**
  * The token's last 4 characters, shown as `dsp_...hint`.
  */
@@ -3710,7 +3710,7 @@ export type RecentlyClearedResponse = { results: Array<RecentlyClearedIncident>,
 /**
  * One recently deleted journey, as the list shows it.
  */
-export type RecentlyDeletedJourney = { id: number, 
+export type RecentlyDeletedJourney = { id: number, publicId: string, 
 /**
  * `web` for the user's own delete, else the connected app's name.
  */
@@ -4941,7 +4941,7 @@ export type TicketKind = "single" | "return" | "unknown";
 /**
  * One period, as `GET /preferences/time-away` serves it.
  */
-export type TimeAwayPeriod = { id: number, 
+export type TimeAwayPeriod = { id: number, publicId: string, 
 /**
  * The first date away (a London date).
  */
@@ -6574,7 +6574,7 @@ how: WaypointHow, };
  * A destination as the settings page shows it. Never carries the secret,
  * only whether one is set.
  */
-export type WebhookDestination = { id: number, 
+export type WebhookDestination = { id: number, publicId: string, 
 /**
  * `generic`, `ntfy` or `gotify`.
  */

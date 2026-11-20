@@ -2,7 +2,8 @@
 //! id next to an object's opaque one, behind `API_SERVE_NUMERIC_IDS`.
 //!
 //! Every response that names a journey, leg, tracked train, push device,
-//! break or regular journey carries the opaque id (`publicId`,
+//! break, regular journey, deleted-journey record, personal token, webhook
+//! destination or time-away period carries the opaque id (`publicId`,
 //! `journeyPublicId`, `openBreakPublicId`, `legPublicIds`, ...) beside the
 //! numeric one (`id`, `journeyId`, `openBreakId`, `legIds`, ...). The
 //! numeric ones stay in the schema (the `/v1` breaking-change gate forbids
@@ -37,12 +38,11 @@
 //! without a line here; the tests below read the generated
 //! `api-types/api.ts` and fail when one does not follow it.
 //!
-//! Left alone, on purpose, because they have no opaque id yet or are not
-//! about an opaque object: time away, webhook, personal token and connected
-//! app ids, `RecentlyDeletedJourney.id`, `deletedJourneyIds` (served beside
-//! `deletedJourneyCount` until a frontend reads the count, then dropped) and
-//! `trainsId` (already `0`). A template leg's `id`, `RevisionLeg.ticketIds`
-//! and the two deleted-journey `journeyId`s are no longer served at all
+//! Left alone, on purpose, because they are not an opaque object's id:
+//! `deletedJourneyIds` (served beside `deletedJourneyCount` until a frontend
+//! reads the count, then dropped) and `trainsId` (already `0`); the tests
+//! below list each one. A template leg's `id`, `RevisionLeg.ticketIds` and
+//! the two deleted-journey `journeyId`s are no longer served at all
 //! (DS-534). The account export
 //! keeps its numeric ids ([`KeepNumericIds`]): it is the owner's own data
 //! and its rows join on them.
@@ -646,14 +646,17 @@ mod tests {
         out
     }
 
-    /// Numeric id fields that sit in a type with opaque ids and have none of
-    /// their own, on purpose (each has no opaque id yet or is not an
-    /// object's id): the template responses' deleted journey ids. They are
-    /// served only until a frontend that reads `deletedJourneyCount` is
-    /// deployed; a later change drops them and these entries with them.
-    const UNPAIRED_NUMERIC_IDS: [(&str, &str); 2] = [
+    /// Numeric id fields of a response type that have no opaque partner, on
+    /// purpose (each is not an object's id): the deleted journey ids of the
+    /// time-away and template responses, which are served only until a
+    /// frontend that reads `deletedJourneyCount` is deployed (a later change
+    /// drops them and these entries with them), and `trainsId` (always `0`).
+    const UNPAIRED_NUMERIC_IDS: [(&str, &str); 5] = [
+        ("LineTrainLiveStatus", "trainsId"),
+        ("PublicTrainResponse", "trainsId"),
         ("SetTemplateActiveResponse", "deletedJourneyIds"),
         ("SkipTemplateDateResponse", "deletedJourneyIds"),
+        ("TimeAwayResponse", "deletedJourneyIds"),
     ];
 
     fn has_opaque_id(object: &ObjectType) -> bool {
@@ -701,11 +704,18 @@ mod tests {
         assert!(covered >= 40, "only {covered} id pairs found in api.ts");
     }
 
+    /// Every response type, not only the ones that already have an opaque
+    /// id: a type with a numeric id and no opaque one (time away, webhooks,
+    /// personal tokens and deleted records were such types) would otherwise
+    /// be invisible here.
     #[test]
-    fn no_type_with_an_opaque_id_has_a_numeric_id_without_one() {
+    fn every_numeric_id_in_a_response_has_an_opaque_one_or_is_listed() {
         let types = object_types();
         let mut allowed_seen = 0;
-        for object in types.iter().filter(|object| has_opaque_id(object)) {
+        for object in types
+            .iter()
+            .filter(|object| !object.name.ends_with("Request"))
+        {
             for (key, ty) in &object.fields {
                 let Some(opaque) = opaque_partner(key) else {
                     continue;
@@ -715,7 +725,7 @@ mod tests {
                 }
                 assert!(
                     UNPAIRED_NUMERIC_IDS.contains(&(object.name.as_str(), key.as_str())),
-                    "{}.{key} is a numeric id in a type that has opaque ids, but has no \
+                    "{}.{key} is a numeric id in a response, but has no \
                      `{opaque}` beside it: add the opaque field (named after it, so the \
                      numeric one is withheld in stage 2b, see numeric_ids.rs) or list it in \
                      UNPAIRED_NUMERIC_IDS with the reason",

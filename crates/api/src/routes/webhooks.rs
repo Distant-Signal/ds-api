@@ -20,7 +20,7 @@
 //! JSON `{error, message}`.
 
 use axum::Json;
-use axum::extract::{Path, State};
+use axum::extract::State;
 use axum::http::{HeaderMap, HeaderValue, StatusCode, header};
 use axum::response::{IntoResponse, Response};
 use serde::{Deserialize, Serialize};
@@ -32,6 +32,7 @@ use crate::data::webhooks::{
     self as data, CreateOutcome, Kind, MAX_NAME_CHARS, MAX_PER_USER, MAX_SECRET_CHARS,
     MAX_URL_CHARS, NewWebhook, WebhookRow,
 };
+use crate::routes::journey_ref::WebhookId;
 use crate::routes::personal_tokens::{cross_site, same_origin};
 
 pub fn router() -> Router {
@@ -325,7 +326,7 @@ async fn update_webhook(
     State(app): State<App>,
     user: AuthenticatedUser,
     headers: HeaderMap,
-    Path(id): Path<i64>,
+    WebhookId(id): WebhookId,
     body: Result<Json<UpdateWebhookRequest>, axum::extract::rejection::JsonRejection>,
 ) -> Response {
     if !data::enabled() {
@@ -348,7 +349,7 @@ async fn delete_webhook(
     State(app): State<App>,
     user: AuthenticatedUser,
     headers: HeaderMap,
-    Path(id): Path<i64>,
+    WebhookId(id): WebhookId,
 ) -> Response {
     if !data::enabled() {
         return disabled();
@@ -483,6 +484,7 @@ mod tests {
                 secret: Some("whsec_leak".into()),
                 destination: WebhookRow {
                     id: 1,
+                    public_id: "w_0123456789abcdef0123456789abcdef".into(),
                     kind: "generic".into(),
                     name: "n".into(),
                     url: "https://h.example".into(),
