@@ -3,6 +3,41 @@
 Changes to the Distant Signal (DS) HTTP API that a client such as DS-MCP
 needs to know about. Newest first. Field names are as served (camelCase).
 
+## 2026-11-20: rate-limit series registered at 0, per-class fill gauges, and a bucket of their own for link-preview reads
+
+Metrics and rate-limit behaviour, additive (DS-534); no route, field or
+schema change, and the OpenAPI document and `api-types/api.ts` are
+unchanged. No limit value changes.
+
+- `distant_signal_api_rate_limited_total{class,caller}`,
+  `distant_signal_api_rate_limit_peer_fallback_total{class}` and
+  `distant_signal_api_rate_limit_service_auth_rejected_total{class,reason}`
+  are registered at 0 when the api starts, for every label set the limiter
+  can produce (and the personal-token listener's three), so `increase()`
+  sees the first hit after a restart.
+- New gauges, refreshed every 15 s (one pass over the limiter's table, never
+  per request), labelled by `class` and `caller` only (never a client
+  address or key):
+  `distant_signal_api_rate_limit_max_fill_ratio` is the fullest tracked
+  bucket, 0 when idle and 1 when that client's next request would be
+  refused; `distant_signal_api_rate_limit_keys_near_limit` counts tracked
+  buckets at or above 0.8. Sampled, so use `max_over_time` for history.
+- `GET /Train/by-uid/*` carrying `X-DS-Preview: 1` (the frontend's
+  link-preview reads, which carry no `X-Real-IP` so Next's data cache is
+  shared) is charged to one bucket of its own, `caller="preview"`
+  (`svc:preview`), instead of the frontend pod's shared per-peer
+  `train_by_uid` bucket: a crawler spending it no longer fails other
+  peer-keyed reads, and they no longer fail previews. Sized by
+  `API_RATE_LIMIT_TRAIN_PREVIEW_PER_MINUTE` (default 600) and
+  `API_RATE_LIMIT_TRAIN_PREVIEW_BURST` (default 200), settable through
+  `api.extraEnv`. The marker is honoured only from a peer whose
+  `X-Real-IP` is believed (`API_RATE_LIMIT_TRUST_X_REAL_IP`,
+  `API_RATE_LIMIT_TRUSTED_PROXIES`), only on `/Train/by-uid/*`, and only
+  for an anonymous request; the frontend's `/api` proxy never forwards it.
+  Without the header nothing changes.
+- Docs fix: `POST /public/events` under an MCP bearer is charged to the
+  `svc:mcp` bucket of the `events` class, not per IP.
+
 ## 2026-11-19: a missed train's alternatives offer the next morning's first trains from 20:00, not only after midnight
 
 Behaviour change, additive (DS-534); no field, schema, migration or grant
