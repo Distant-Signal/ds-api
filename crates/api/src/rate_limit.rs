@@ -34,7 +34,11 @@
 //!   Irish train page's `/public/island-of-ireland/trains/*` (an
 //!   anonymous page of DB reads, uncached);
 //! - `POST /public/events` (opt-in usage analytics, DS-190), in a budget of
-//!   its own so a chatty page can't spend a visitor's public-write budget;
+//!   its own so a chatty page can't spend a visitor's public-write budget.
+//!   Anonymous, it is per client IP; under a verified MCP bearer it is
+//!   charged to the `svc:mcp` bucket of the events class (one bucket for
+//!   the whole service, never per IP: the bearer is checked before the key
+//!   is chosen);
 //! - every other public write (non-GET/HEAD/OPTIONS), with a generous
 //!   default, as a backstop for anonymous write amplification.
 //!
@@ -44,6 +48,29 @@
 //!
 //! A limited request gets `429 Too Many Requests` with `Retry-After`, and is counted in
 //! `distant_signal_api_rate_limited_total{class,caller}`.
+//!
+//! ## Link-preview reads
+//!
+//! The frontend renders link previews (page metadata and `card.png`) on its
+//! own behalf, not the visitor's, through Next's data cache, which keys on
+//! the request headers: a per-visitor `X-Real-IP` would give every visitor
+//! their own cache entry, so those reads carry none and, before this class,
+//! all keyed on the frontend pod and shared one `train_by_uid` bucket with
+//! every other peer-keyed read: a crawler walking `/train/<uid>/<date>`
+//! could spend it and make every preview (and every other such read) fail.
+//! The frontend now marks the `GET /Train/by-uid/*` preview read with
+//! `X-DS-Preview: 1` ([`PREVIEW_HEADER`]). Such a request is charged to its
+//! own bucket (`svc:preview`, `API_RATE_LIMIT_TRAIN_PREVIEW_*`, default
+//! 600/min burst 200: cached reads, one api call per train a minute), so
+//! it can neither be starved by other reads nor starve them. The marker is
+//! honoured only on `/Train/by-uid/*`, only for an anonymous request (a
+//! bearer decides first), and only under the same trust rule as
+//! `X-Real-IP` (`API_RATE_LIMIT_TRUST_X_REAL_IP` and a peer inside
+//! `API_RATE_LIMIT_TRUSTED_PROXIES`): the frontend's `/api` proxy builds
+//! its upstream headers from scratch and never forwards it, so a browser
+//! cannot set it. A client that reaches the api directly (in-cluster only)
+//! can set it, and gets the preview bucket instead of its own per-IP one:
+//! still a finite budget, the same exposure `X-Real-IP` has.
 //!
 //! ## Trusted service callers (the MCP)
 //!
@@ -126,6 +153,10 @@ use crate::auth::internal_oauth::{ServiceClaims, VerifyError};
 /// The header the frontend proxy sets to the real client address.
 pub const REAL_IP_HEADER: &str = "x-real-ip";
 
+/// The marker the frontend puts on a link-preview read of
+/// `GET /Train/by-uid/*` (value `1`); see the module doc.
+pub const PREVIEW_HEADER: &str = "x-ds-preview";
+
 /// Which limit a request falls under.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum LimitClass {
@@ -170,6 +201,9 @@ pub enum Caller {
     DelegatedUser,
     /// A delegated client: its ceiling across every user.
     DelegatedClient,
+    /// The frontend's link-preview reads (`X-DS-Preview`): one bucket for
+    /// all of them.
+    Preview,
 }
 
 impl Caller {
@@ -179,6 +213,7 @@ impl Caller {
             Caller::Mcp => "mcp",
             Caller::DelegatedUser => "delegated_user",
             Caller::DelegatedClient => "delegated_client",
+            Caller::Preview => "preview",
         }
     }
 }
@@ -318,12 +353,28 @@ pub struct RateLimitSettings {
     #[arg(long, env = "API_RATE_LIMIT_PUBLIC_WRITE_BURST", default_value_t = 60)]
     pub public_write_burst: u32,
 
-    /// `POST /public/events`, per client IP (the MCP's too: it has no
-    /// business sending events). A page sends a few per view.
+    /// `POST /public/events`, per client IP; under an MCP bearer it is the
+    /// `svc:mcp` bucket of this class, not per IP (the MCP has no business
+    /// sending events). A page sends a few per view.
     #[arg(long, env = "API_RATE_LIMIT_EVENTS_PER_MINUTE", default_value_t = 60)]
     pub events_per_minute: u32,
     #[arg(long, env = "API_RATE_LIMIT_EVENTS_BURST", default_value_t = 30)]
     pub events_burst: u32,
+
+    /// Link-preview reads of `/Train/by-uid/*` (`X-DS-Preview`): one bucket
+    /// for the frontend's cached preview fetches, see the module doc.
+    #[arg(
+        long,
+        env = "API_RATE_LIMIT_TRAIN_PREVIEW_PER_MINUTE",
+        default_value_t = 600
+    )]
+    pub train_preview_per_minute: u32,
+    #[arg(
+        long,
+        env = "API_RATE_LIMIT_TRAIN_PREVIEW_BURST",
+        default_value_t = 200
+    )]
+    pub train_preview_burst: u32,
 
     /// The MCP's own budget (one bucket for the whole service, see the
     /// module doc). Login has none: the bearer is ignored there.
@@ -424,6 +475,8 @@ impl Default for RateLimitSettings {
             public_write_burst: 60,
             events_per_minute: 60,
             events_burst: 30,
+            train_preview_per_minute: 600,
+            train_preview_burst: 200,
             mcp_trip_plan_per_minute: 100,
             mcp_trip_plan_burst: 30,
             mcp_train_by_uid_per_minute: 600,
@@ -477,6 +530,10 @@ impl RateLimitSettings {
                 class.label()
             );
         }
+        ensure!(
+            self.train_preview_per_minute > 0 && self.train_preview_burst > 0,
+            "the link-preview rate limit needs a per-minute rate and a burst of at least 1"
+        );
         for (class, (per_minute, burst)) in [
             (
                 LimitClass::TripPlan,
@@ -538,6 +595,9 @@ impl RateLimitSettings {
         let (per_minute, burst) = match (caller, class) {
             (_, LimitClass::Login) => (self.login_per_minute, self.login_burst),
             (_, LimitClass::Events) => (self.events_per_minute, self.events_burst),
+            (Caller::Preview, LimitClass::TrainByUid) => {
+                (self.train_preview_per_minute, self.train_preview_burst)
+            }
             (_, LimitClass::DelegatedRead) => {
                 (self.delegated_read_per_minute, self.delegated_read_burst)
             }
@@ -562,7 +622,7 @@ impl RateLimitSettings {
             // Delegated callers are only ever charged delegated classes
             // (`enforce`); the public quota is the conservative answer.
             (
-                Caller::Public | Caller::DelegatedUser | Caller::DelegatedClient,
+                Caller::Public | Caller::DelegatedUser | Caller::DelegatedClient | Caller::Preview,
                 LimitClass::TripPlan,
             ) => (self.trip_plan_per_minute, self.trip_plan_burst),
             (
@@ -570,7 +630,7 @@ impl RateLimitSettings {
                 LimitClass::TrainByUid,
             ) => (self.train_by_uid_per_minute, self.train_by_uid_burst),
             (
-                Caller::Public | Caller::DelegatedUser | Caller::DelegatedClient,
+                Caller::Public | Caller::DelegatedUser | Caller::DelegatedClient | Caller::Preview,
                 LimitClass::PublicWrite,
             ) => (self.public_write_per_minute, self.public_write_burst),
         };
@@ -970,6 +1030,92 @@ impl RateLimiter {
             || peer.is_some_and(|peer| self.trusted_proxies.iter().any(|c| c.contains(peer.ip())))
     }
 
+    /// Whether an anonymous request is the frontend's link-preview read:
+    /// `GET /Train/by-uid/*` carrying [`PREVIEW_HEADER`] from a peer whose
+    /// `X-Real-IP` would be believed (the module doc's trust rule).
+    fn is_preview_read(
+        &self,
+        class: LimitClass,
+        path: &str,
+        headers: &HeaderMap,
+        peer: Option<SocketAddr>,
+    ) -> bool {
+        class == LimitClass::TrainByUid
+            && path.starts_with("/Train/by-uid/")
+            && self.settings.trust_x_real_ip
+            && self.peer_is_trusted_proxy(peer)
+            && headers
+                .get(PREVIEW_HEADER)
+                .and_then(|value| value.to_str().ok())
+                .is_some_and(|value| value.trim() == "1")
+    }
+
+    /// Each tracked key's fill, folded per (class, caller): see
+    /// [`FillStats`]. One pass over the table under the limiter's lock
+    /// (at most [`MAX_TRACKED_KEYS`] entries: a subtraction and a compare
+    /// each), run by [`RateLimiter::spawn_fill_gauges`] every
+    /// [`FILL_GAUGE_INTERVAL`], never per request.
+    #[expect(
+        clippy::expect_used,
+        reason = "a poisoned lock means another thread already panicked"
+    )]
+    fn fill_snapshot(&self, now: Instant) -> HashMap<(LimitClass, Caller), FillStats> {
+        let state = self.state.lock().expect("rate limiter lock poisoned");
+        let mut out: HashMap<(LimitClass, Caller), FillStats> = HashMap::new();
+        for (&(class, client), &tat) in &state.tat {
+            let caller = client.caller();
+            let quota = self.settings.quota(class, caller);
+            let fill = tat.saturating_duration_since(now).as_secs_f64()
+                / quota.tolerance.as_secs_f64().max(f64::MIN_POSITIVE);
+            let series = out.entry((class, caller)).or_default();
+            series.max_fill = series.max_fill.max(fill);
+            if fill >= NEAR_LIMIT_FILL {
+                series.near_limit += 1;
+            }
+        }
+        out
+    }
+
+    /// Sets the fill gauges from [`RateLimiter::fill_snapshot`]; every
+    /// series with no tracked key goes back to 0.
+    fn publish_fill_gauges(&self, now: Instant) {
+        let snapshot = self.fill_snapshot(now);
+        for (class, caller) in limited_series() {
+            let stats = snapshot.get(&(class, caller)).copied().unwrap_or_default();
+            metrics::gauge!(
+                ds_runtime::metrics::metric_name(MAX_FILL_METRIC),
+                "class" => class.label(),
+                "caller" => caller.label()
+            )
+            .set(stats.max_fill);
+            let near_limit = f64::from(stats.near_limit);
+            metrics::gauge!(
+                ds_runtime::metrics::metric_name(NEAR_LIMIT_METRIC),
+                "class" => class.label(),
+                "caller" => caller.label()
+            )
+            .set(near_limit);
+        }
+    }
+
+    /// Publishes the fill gauges every [`FILL_GAUGE_INTERVAL`] for the life
+    /// of the process. Needs a Tokio runtime; a disabled limiter tracks
+    /// nothing, so it spawns nothing.
+    pub fn spawn_fill_gauges(self: &Arc<Self>) {
+        if !self.settings.enabled {
+            return;
+        }
+        let limiter = Arc::clone(self);
+        tokio::spawn(async move {
+            let mut tick = tokio::time::interval(FILL_GAUGE_INTERVAL);
+            tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+            loop {
+                tick.tick().await;
+                limiter.publish_fill_gauges(Instant::now());
+            }
+        });
+    }
+
     fn note_peer_fallback(&self, class: LimitClass) {
         metrics::counter!(
             ds_runtime::metrics::metric_name("api_rate_limit_peer_fallback_total"),
@@ -985,6 +1131,130 @@ impl RateLimiter {
                  socket peer (usually the frontend pod, shared by every such client); logged \
                  once, counted in distant_signal_api_rate_limit_peer_fallback_total"
             );
+        }
+    }
+}
+
+/// A bucket's fill at or above this counts as near its limit.
+const NEAR_LIMIT_FILL: f64 = 0.8;
+/// How often the fill gauges are recomputed.
+const FILL_GAUGE_INTERVAL: Duration = Duration::from_secs(15);
+/// `distant_signal_api_rate_limit_max_fill_ratio{class,caller}`: the fullest
+/// tracked bucket, from 0 (idle) to 1 (the next request is refused). No
+/// per-key label: it says how close any client gets without naming one.
+const MAX_FILL_METRIC: &str = "api_rate_limit_max_fill_ratio";
+/// `distant_signal_api_rate_limit_keys_near_limit{class,caller}`: tracked
+/// buckets at or above [`NEAR_LIMIT_FILL`].
+const NEAR_LIMIT_METRIC: &str = "api_rate_limit_keys_near_limit";
+
+/// One (class, caller)'s fill over the tracked keys, at a moment.
+#[derive(Debug, Clone, Copy, Default, PartialEq)]
+struct FillStats {
+    max_fill: f64,
+    near_limit: u32,
+}
+
+/// Every (class, caller) pair [`enforce`] can charge: the label sets of the
+/// rate-limit metrics. `every_charged_pair_is_in_limited_series` drives the
+/// real middleware to keep this list whole.
+fn limited_series() -> Vec<(LimitClass, Caller)> {
+    const ANONYMOUS: [LimitClass; 5] = [
+        LimitClass::Login,
+        LimitClass::TripPlan,
+        LimitClass::TrainByUid,
+        LimitClass::PublicWrite,
+        LimitClass::Events,
+    ];
+    // The MCP's bearer is ignored on login.
+    const MCP: [LimitClass; 4] = [
+        LimitClass::TripPlan,
+        LimitClass::TrainByUid,
+        LimitClass::PublicWrite,
+        LimitClass::Events,
+    ];
+    const DELEGATED: [LimitClass; 3] = [
+        LimitClass::DelegatedRead,
+        LimitClass::DelegatedWrite,
+        LimitClass::DelegatedDelete,
+    ];
+    let mut out = Vec::new();
+    out.extend(ANONYMOUS.map(|class| (class, Caller::Public)));
+    out.extend(MCP.map(|class| (class, Caller::Mcp)));
+    out.push((LimitClass::TrainByUid, Caller::Preview));
+    for class in DELEGATED {
+        out.push((class, Caller::DelegatedUser));
+        out.push((class, Caller::DelegatedClient));
+    }
+    out
+}
+
+/// Registers the limiter's series at 0 when the api starts. The counters
+/// are otherwise created by their first increment, already at 1, and
+/// `increase()` cannot see that first hit: with the api restarting every
+/// few hours, a rare limit's first 429 after each restart never showed.
+/// Registers `api_rate_limited_total{class,caller}` for every pair in
+/// [`limited_series`] (plus the personal-token listener's three),
+/// `api_rate_limit_peer_fallback_total{class}` for the anonymous classes,
+/// `api_rate_limit_service_auth_rejected_total{class,reason}`, and the fill
+/// gauges. Like `route_metrics::register`, call it once the recorder is
+/// installed.
+pub fn register_metrics() {
+    for (class, caller) in limited_series() {
+        metrics::counter!(
+            ds_runtime::metrics::metric_name("api_rate_limited_total"),
+            "class" => class.label(),
+            "caller" => caller.label()
+        )
+        .increment(0);
+        metrics::gauge!(
+            ds_runtime::metrics::metric_name(MAX_FILL_METRIC),
+            "class" => class.label(),
+            "caller" => caller.label()
+        )
+        .set(0.0);
+        metrics::gauge!(
+            ds_runtime::metrics::metric_name(NEAR_LIMIT_METRIC),
+            "class" => class.label(),
+            "caller" => caller.label()
+        )
+        .set(0.0);
+    }
+    // `crate::personal_tokens::gate` and `crate::auth::test_auth` count
+    // their own refusals in the same series.
+    for caller in ["personal_auth_failure", "personal_token", "test_auth"] {
+        metrics::counter!(
+            ds_runtime::metrics::metric_name("api_rate_limited_total"),
+            "class" => "personal_token",
+            "caller" => caller
+        )
+        .increment(0);
+    }
+    for class in [
+        LimitClass::Login,
+        LimitClass::TripPlan,
+        LimitClass::TrainByUid,
+        LimitClass::PublicWrite,
+        LimitClass::Events,
+    ] {
+        metrics::counter!(
+            ds_runtime::metrics::metric_name("api_rate_limit_peer_fallback_total"),
+            "class" => class.label()
+        )
+        .increment(0);
+    }
+    for class in [
+        LimitClass::TripPlan,
+        LimitClass::TrainByUid,
+        LimitClass::PublicWrite,
+        LimitClass::Events,
+    ] {
+        for reason in ["invalid_token", "wrong_group"] {
+            metrics::counter!(
+                ds_runtime::metrics::metric_name("api_rate_limit_service_auth_rejected_total"),
+                "class" => class.label(),
+                "reason" => reason
+            )
+            .increment(0);
         }
     }
 }
@@ -1132,14 +1402,18 @@ pub async fn enforce(
                 .extensions()
                 .get::<ConnectInfo<SocketAddr>>()
                 .map(|ConnectInfo(addr)| *addr);
-            let Some((client, source)) = limiter.client_key(request.headers(), peer) else {
-                // No header and no peer: only in tests that bypass the listener.
-                return next.run(request).await;
-            };
-            if source == KeySource::Peer && limiter.settings.trust_x_real_ip {
-                limiter.note_peer_fallback(class);
+            if limiter.is_preview_read(class, request.uri().path(), request.headers(), peer) {
+                ClientKey::Service(Caller::Preview)
+            } else {
+                let Some((client, source)) = limiter.client_key(request.headers(), peer) else {
+                    // No header and no peer: only in tests that bypass the listener.
+                    return next.run(request).await;
+                };
+                if source == KeySource::Peer && limiter.settings.trust_x_real_ip {
+                    limiter.note_peer_fallback(class);
+                }
+                ClientKey::Ip(client)
             }
-            ClientKey::Ip(client)
         }
     };
     match limiter.check_at(class, client, Instant::now()) {
@@ -2104,5 +2378,550 @@ mod tests {
         let (ip, source) = scoped.client_key(&headers, Some(outside)).unwrap();
         assert_eq!(source, KeySource::Peer);
         assert_eq!(ip, "198.51.100.1".parse::<IpAddr>().unwrap());
+    }
+
+    // ---- metrics registered at 0, fill gauges, link-preview reads ----
+
+    use axum_prometheus::metrics_exporter_prometheus::PrometheusBuilder;
+
+    const RATE_LIMITED: &str = "distant_signal_api_rate_limited_total";
+    const PEER_FALLBACK: &str = "distant_signal_api_rate_limit_peer_fallback_total";
+    const MAX_FILL: &str = "distant_signal_api_rate_limit_max_fill_ratio";
+    const NEAR_LIMIT: &str = "distant_signal_api_rate_limit_keys_near_limit";
+
+    fn label_of<'a>(line: &'a str, name: &str) -> Option<&'a str> {
+        let rest = line.split_once(&format!("{name}=\""))?.1;
+        Some(rest.split_once('"')?.0)
+    }
+
+    /// The value of the series of `metric` carrying every one of `labels`.
+    fn series_value(rendered: &str, metric: &str, labels: &[(&str, &str)]) -> Option<f64> {
+        rendered
+            .lines()
+            .filter(|line| line.starts_with(&format!("{metric}{{")))
+            .find(|line| {
+                labels
+                    .iter()
+                    .all(|(name, value)| label_of(line, name) == Some(*value))
+            })
+            .and_then(|line| line.rsplit(' ').next()?.parse().ok())
+    }
+
+    #[test]
+    fn every_series_is_registered_at_zero() {
+        let recorder = PrometheusBuilder::new().build_recorder();
+        let _guard = metrics::set_default_local_recorder(&recorder);
+        register_metrics();
+        let rendered = recorder.handle().render();
+        for (class, caller) in limited_series() {
+            let labels = [("class", class.label()), ("caller", caller.label())];
+            for metric in [RATE_LIMITED, MAX_FILL, NEAR_LIMIT] {
+                assert_eq!(
+                    series_value(&rendered, metric, &labels),
+                    Some(0.0),
+                    "{metric} {labels:?}"
+                );
+            }
+        }
+        for class in [
+            "login",
+            "trip_plan",
+            "train_by_uid",
+            "public_write",
+            "events",
+        ] {
+            assert_eq!(
+                series_value(&rendered, PEER_FALLBACK, &[("class", class)]),
+                Some(0.0),
+                "peer fallback {class}"
+            );
+        }
+        for caller in ["personal_auth_failure", "personal_token", "test_auth"] {
+            assert_eq!(
+                series_value(
+                    &rendered,
+                    RATE_LIMITED,
+                    &[("class", "personal_token"), ("caller", caller)]
+                ),
+                Some(0.0),
+                "personal token {caller}"
+            );
+        }
+        for (class, reason) in [("trip_plan", "invalid_token"), ("events", "wrong_group")] {
+            assert_eq!(
+                series_value(
+                    &rendered,
+                    "distant_signal_api_rate_limit_service_auth_rejected_total",
+                    &[("class", class), ("reason", reason)]
+                ),
+                Some(0.0)
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn a_hit_increments_only_its_series() {
+        let recorder = PrometheusBuilder::new().build_recorder();
+        let _guard = metrics::set_default_local_recorder(&recorder);
+        register_metrics();
+        let router = router(settings());
+        let ip = Some("203.0.113.5");
+        for _ in 0..2 {
+            let response = call(
+                &router,
+                "GET",
+                "/Train/by-uid/C12345/2026-09-27",
+                ip,
+                FRONTEND,
+            )
+            .await;
+            assert_eq!(response.status(), StatusCode::OK);
+        }
+        let limited = call(
+            &router,
+            "GET",
+            "/Train/by-uid/C12345/2026-09-27",
+            ip,
+            FRONTEND,
+        )
+        .await;
+        assert_eq!(limited.status(), StatusCode::TOO_MANY_REQUESTS);
+        let rendered = recorder.handle().render();
+        for (class, caller) in limited_series() {
+            let hit = class == LimitClass::TrainByUid && caller == Caller::Public;
+            assert_eq!(
+                series_value(
+                    &rendered,
+                    RATE_LIMITED,
+                    &[("class", class.label()), ("caller", caller.label())]
+                ),
+                Some(if hit { 1.0 } else { 0.0 }),
+                "{} {}",
+                class.label(),
+                caller.label()
+            );
+        }
+        // A real client address was present, so nothing fell back to the peer.
+        for class in [
+            "login",
+            "trip_plan",
+            "train_by_uid",
+            "public_write",
+            "events",
+        ] {
+            assert_eq!(
+                series_value(&rendered, PEER_FALLBACK, &[("class", class)]),
+                Some(0.0)
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn a_peer_keyed_request_increments_only_its_fallback_series() {
+        let recorder = PrometheusBuilder::new().build_recorder();
+        let _guard = metrics::set_default_local_recorder(&recorder);
+        register_metrics();
+        let router = router(settings());
+        let response = call(&router, "GET", "/Trips/plan", None, FRONTEND).await;
+        assert_eq!(response.status(), StatusCode::OK);
+        let rendered = recorder.handle().render();
+        for class in [
+            "login",
+            "trip_plan",
+            "train_by_uid",
+            "public_write",
+            "events",
+        ] {
+            assert_eq!(
+                series_value(&rendered, PEER_FALLBACK, &[("class", class)]),
+                Some(if class == "trip_plan" { 1.0 } else { 0.0 }),
+                "{class}"
+            );
+        }
+    }
+
+    /// Drives every kind of caller into a 429 through the real middleware
+    /// and checks the (class, caller) pairs it counts are exactly
+    /// [`limited_series`]: a pair missing from the list would not be
+    /// registered at 0, an extra one would be a series that never moves.
+    #[tokio::test]
+    async fn every_charged_pair_is_in_limited_series() {
+        use crate::auth::delegated::Scope;
+        let recorder = PrometheusBuilder::new().build_recorder();
+        let _guard = metrics::set_default_local_recorder(&recorder);
+        let one = RateLimitSettings {
+            login_burst: 1,
+            trip_plan_burst: 1,
+            train_by_uid_burst: 1,
+            public_write_burst: 1,
+            events_burst: 1,
+            train_preview_burst: 1,
+            mcp_trip_plan_burst: 1,
+            mcp_train_by_uid_burst: 1,
+            mcp_public_write_burst: 1,
+            delegated_read_burst: 1,
+            delegated_write_burst: 1,
+            delegated_delete_burst: 1,
+            delegated_client_multiplier: 1,
+            ..settings()
+        };
+        let (server, verifier) = mock_authentik().await;
+        let router = router_with(RateLimiter::with_service_callers(
+            one.clone(),
+            ServiceCallerAuth::new(Arc::new(verifier), "srv-ds-mcp"),
+        ));
+        for (method, uri) in [
+            ("GET", "/public/auth/login"),
+            ("GET", "/Trips/plan"),
+            ("GET", "/Train/by-uid/C12345/2026-09-27"),
+            ("POST", "/public/lines"),
+            ("POST", "/public/events"),
+        ] {
+            for _ in 0..2 {
+                call(&router, method, uri, Some("203.0.113.5"), FRONTEND).await;
+            }
+        }
+        for _ in 0..2 {
+            call_preview(
+                &router,
+                "/Train/by-uid/C12345/2026-09-27",
+                Some("1"),
+                None,
+                FRONTEND,
+            )
+            .await;
+        }
+        let mcp = token(&server.uri(), &["srv-ds-mcp"]);
+        for (method, uri) in [
+            ("GET", "/Trips/plan"),
+            ("GET", "/Train/by-uid/C12345/2026-09-27"),
+            ("POST", "/public/lines"),
+            ("POST", "/public/events"),
+        ] {
+            for _ in 0..2 {
+                call_with_bearer(&router, method, uri, Some(&mcp), MCP_POD).await;
+            }
+        }
+        let delegated = axum::Router::new()
+            .route("/Journeys/itinerary", post(|| async { "ok" }))
+            .layer(axum::middleware::from_fn_with_state(
+                RateLimiter::new(one),
+                enforce,
+            ));
+        for scope in [
+            Scope::JourneysRead,
+            Scope::JourneysWrite,
+            Scope::JourneysDelete,
+        ] {
+            // The user's own bucket, then the client's ceiling (another
+            // user, whose own bucket still has room).
+            for sub in ["alice", "alice", "bob"] {
+                delegated
+                    .clone()
+                    .oneshot(delegated_request(sub, scope))
+                    .await
+                    .unwrap();
+            }
+        }
+        let rendered = recorder.handle().render();
+        let mut counted: Vec<(String, String)> = rendered
+            .lines()
+            .filter(|line| line.starts_with(&format!("{RATE_LIMITED}{{")))
+            .filter_map(|line| {
+                Some((
+                    label_of(line, "class")?.to_string(),
+                    label_of(line, "caller")?.to_string(),
+                ))
+            })
+            .collect();
+        let mut expected: Vec<(String, String)> = limited_series()
+            .into_iter()
+            .map(|(class, caller)| (class.label().to_string(), caller.label().to_string()))
+            .collect();
+        counted.sort();
+        expected.sort();
+        assert_eq!(counted, expected);
+    }
+
+    async fn call_preview(
+        router: &axum::Router,
+        uri: &str,
+        marker: Option<&str>,
+        real_ip: Option<&str>,
+        peer: &str,
+    ) -> Response {
+        let mut request = axum::http::Request::builder().method("GET").uri(uri);
+        if let Some(marker) = marker {
+            request = request.header(PREVIEW_HEADER, marker);
+        }
+        if let Some(ip) = real_ip {
+            request = request.header(REAL_IP_HEADER, ip);
+        }
+        let mut request = request.body(Body::empty()).unwrap();
+        request
+            .extensions_mut()
+            .insert(ConnectInfo(peer.parse::<SocketAddr>().unwrap()));
+        router.clone().oneshot(request).await.unwrap()
+    }
+
+    const TRAIN: &str = "/Train/by-uid/C12345/2026-09-27";
+
+    /// A preview read has its own bucket: a crawler spending it leaves
+    /// every other peer-keyed read alone, and a crowd of other reads
+    /// cannot spend the previews' (the frontend pod is the peer of both).
+    #[tokio::test]
+    async fn preview_reads_have_their_own_bucket() {
+        let shared = router(RateLimitSettings {
+            train_preview_per_minute: 60,
+            train_preview_burst: 3,
+            ..settings()
+        });
+        for n in 0..3 {
+            let response = call_preview(&shared, TRAIN, Some("1"), None, FRONTEND).await;
+            assert_eq!(response.status(), StatusCode::OK, "preview {n}");
+        }
+        let limited = call_preview(&shared, TRAIN, Some("1"), None, FRONTEND).await;
+        assert_eq!(limited.status(), StatusCode::TOO_MANY_REQUESTS);
+        assert!(limited.headers().contains_key(header::RETRY_AFTER));
+        // The same peer's unmarked reads (burst 2) and a visitor's own
+        // reads are untouched.
+        for _ in 0..2 {
+            let response = call_preview(&shared, TRAIN, None, None, FRONTEND).await;
+            assert_eq!(response.status(), StatusCode::OK);
+        }
+        let visitor = call_preview(&shared, TRAIN, None, Some("203.0.113.5"), FRONTEND).await;
+        assert_eq!(visitor.status(), StatusCode::OK);
+        // And the reverse: with the peer bucket spent, previews still work.
+        let peer_spent = router(settings());
+        for _ in 0..2 {
+            call_preview(&peer_spent, TRAIN, None, None, FRONTEND).await;
+        }
+        let spent = call_preview(&peer_spent, TRAIN, None, None, FRONTEND).await;
+        assert_eq!(spent.status(), StatusCode::TOO_MANY_REQUESTS);
+        let preview = call_preview(&peer_spent, TRAIN, Some("1"), None, FRONTEND).await;
+        assert_eq!(preview.status(), StatusCode::OK);
+    }
+
+    /// The marker is only believed from a peer whose `X-Real-IP` would be,
+    /// only on `/Train/by-uid/*` and only as exactly `1`: anything else is
+    /// the caller's own per-IP bucket, so it cannot dodge the limit.
+    #[tokio::test]
+    async fn the_preview_marker_cannot_dodge_the_per_ip_limit() {
+        let preview_burst = RateLimitSettings {
+            train_preview_per_minute: 60,
+            train_preview_burst: 50,
+            ..settings()
+        };
+        let ip = Some("203.0.113.5");
+        let outside = "198.51.100.1:4000";
+        // A peer outside the trusted range.
+        let scoped = router(RateLimitSettings {
+            trusted_proxies: "10.0.0.0/8".to_string(),
+            ..preview_burst.clone()
+        });
+        for _ in 0..2 {
+            let response = call_preview(&scoped, TRAIN, Some("1"), None, outside).await;
+            assert_eq!(response.status(), StatusCode::OK);
+        }
+        let limited = call_preview(&scoped, TRAIN, Some("1"), None, outside).await;
+        assert_eq!(
+            limited.status(),
+            StatusCode::TOO_MANY_REQUESTS,
+            "an untrusted peer's marker is ignored"
+        );
+        // The trusted peer inside the same range is honoured.
+        for _ in 0..5 {
+            let response = call_preview(&scoped, TRAIN, Some("1"), None, FRONTEND).await;
+            assert_eq!(response.status(), StatusCode::OK);
+        }
+        // X-Real-IP trust off: the marker goes with it.
+        let untrusting = router(RateLimitSettings {
+            trust_x_real_ip: false,
+            ..preview_burst.clone()
+        });
+        for _ in 0..2 {
+            call_preview(&untrusting, TRAIN, Some("1"), ip, FRONTEND).await;
+        }
+        let limited = call_preview(&untrusting, TRAIN, Some("1"), ip, FRONTEND).await;
+        assert_eq!(limited.status(), StatusCode::TOO_MANY_REQUESTS);
+        // Not the exact value: the caller's own per-IP bucket, as before.
+        let open = router(preview_burst);
+        for (n, marker) in ["true", "0", ""].into_iter().enumerate() {
+            let client = format!("203.0.113.{}", 10 + n);
+            for _ in 0..2 {
+                let response =
+                    call_preview(&open, TRAIN, Some(marker), Some(&client), FRONTEND).await;
+                assert_eq!(response.status(), StatusCode::OK);
+            }
+            let limited = call_preview(&open, TRAIN, Some(marker), Some(&client), FRONTEND).await;
+            assert_eq!(
+                limited.status(),
+                StatusCode::TOO_MANY_REQUESTS,
+                "{marker:?}"
+            );
+        }
+        // Not a by-uid read: the marker means nothing there.
+        let client = Some("203.0.113.6");
+        for _ in 0..2 {
+            call_preview(&open, "/Trips/plan", Some("1"), client, FRONTEND).await;
+        }
+        let limited = call_preview(&open, "/Trips/plan", Some("1"), client, FRONTEND).await;
+        assert_eq!(
+            limited.status(),
+            StatusCode::TOO_MANY_REQUESTS,
+            "the marker means nothing outside /Train/by-uid/*"
+        );
+    }
+
+    /// A bearer decides first: the marker never turns an MCP request into
+    /// a preview one, nor lets a bad bearer through.
+    #[tokio::test]
+    async fn a_bearer_beats_the_preview_marker() {
+        let (server, router) = mcp_router().await;
+        let mcp = token(&server.uri(), &["srv-ds-mcp"]);
+        let mut request = axum::http::Request::builder()
+            .method("GET")
+            .uri(TRAIN)
+            .header(PREVIEW_HEADER, "1")
+            .header(header::AUTHORIZATION, "Bearer not-a-token")
+            .body(Body::empty())
+            .unwrap();
+        request
+            .extensions_mut()
+            .insert(ConnectInfo(FRONTEND.parse::<SocketAddr>().unwrap()));
+        let response = router.clone().oneshot(request).await.unwrap();
+        assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+        let response = call_with_bearer(&router, "GET", TRAIN, Some(&mcp), MCP_POD).await;
+        assert_eq!(response.status(), StatusCode::OK);
+    }
+
+    #[test]
+    fn preview_defaults_and_validation() {
+        let d = RateLimitSettings::default();
+        assert_eq!(
+            (d.train_preview_per_minute, d.train_preview_burst),
+            (600, 200)
+        );
+        let settings = RateLimitSettings {
+            train_preview_burst: 0,
+            ..RateLimitSettings::default()
+        };
+        assert!(settings.validate().is_err());
+        assert_eq!(
+            ClientKey::Service(Caller::Preview).to_string(),
+            "svc:preview"
+        );
+    }
+
+    #[test]
+    fn fill_is_the_share_of_the_burst_a_key_has_spent() {
+        // 60 a minute: one request costs a second; a burst of 4 is 4 s.
+        let limiter = RateLimiter::new(RateLimitSettings {
+            train_by_uid_per_minute: 60,
+            train_by_uid_burst: 4,
+            ..RateLimitSettings::default()
+        });
+        let t0 = Instant::now();
+        let busy = ClientKey::Ip("203.0.113.1".parse().unwrap());
+        let quiet = ClientKey::Ip("203.0.113.2".parse().unwrap());
+        let key = (LimitClass::TrainByUid, Caller::Public);
+        assert!(limiter.fill_snapshot(t0).is_empty());
+
+        for _ in 0..3 {
+            limiter.check_at(LimitClass::TrainByUid, busy, t0).unwrap();
+        }
+        limiter.check_at(LimitClass::TrainByUid, quiet, t0).unwrap();
+        let stats = limiter.fill_snapshot(t0)[&key];
+        assert_eq!(
+            stats,
+            FillStats {
+                max_fill: 0.75,
+                near_limit: 0
+            }
+        );
+
+        // The fourth request empties the bucket: fill 1, the next refused.
+        limiter.check_at(LimitClass::TrainByUid, busy, t0).unwrap();
+        assert!(limiter.check_at(LimitClass::TrainByUid, busy, t0).is_err());
+        let stats = limiter.fill_snapshot(t0)[&key];
+        assert_eq!(
+            stats,
+            FillStats {
+                max_fill: 1.0,
+                near_limit: 1
+            }
+        );
+
+        // It drains at the sustained rate: two seconds on, half full.
+        let later = t0 + Duration::from_secs(2);
+        let stats = limiter.fill_snapshot(later)[&key];
+        assert_eq!(
+            stats,
+            FillStats {
+                max_fill: 0.5,
+                near_limit: 0
+            }
+        );
+
+        // Recovered keys stay tracked but at 0.
+        let stats = limiter.fill_snapshot(t0 + Duration::from_secs(10))[&key];
+        assert_eq!(
+            stats,
+            FillStats {
+                max_fill: 0.0,
+                near_limit: 0
+            }
+        );
+
+        // Another caller of the same class is its own series, so the
+        // preview bucket's by-design fullness never hides a client's.
+        limiter
+            .check_at(LimitClass::TrainByUid, ClientKey::Service(Caller::Mcp), t0)
+            .unwrap();
+        let snapshot = limiter.fill_snapshot(t0);
+        assert_eq!(snapshot.len(), 2);
+        assert!(snapshot[&(LimitClass::TrainByUid, Caller::Mcp)].max_fill > 0.0);
+    }
+
+    #[test]
+    fn the_fill_gauges_follow_the_table_and_carry_no_key_label() {
+        let recorder = PrometheusBuilder::new().build_recorder();
+        let _guard = metrics::set_default_local_recorder(&recorder);
+        register_metrics();
+        let limiter = RateLimiter::new(RateLimitSettings {
+            train_by_uid_per_minute: 60,
+            train_by_uid_burst: 4,
+            ..RateLimitSettings::default()
+        });
+        let t0 = Instant::now();
+        let client = ClientKey::Ip("203.0.113.1".parse().unwrap());
+        for _ in 0..4 {
+            limiter
+                .check_at(LimitClass::TrainByUid, client, t0)
+                .unwrap();
+        }
+        limiter.publish_fill_gauges(t0);
+        let rendered = recorder.handle().render();
+        let labels = [("class", "train_by_uid"), ("caller", "public")];
+        assert_eq!(series_value(&rendered, MAX_FILL, &labels), Some(1.0));
+        assert_eq!(series_value(&rendered, NEAR_LIMIT, &labels), Some(1.0));
+        let other = [("class", "login"), ("caller", "public")];
+        assert_eq!(series_value(&rendered, MAX_FILL, &other), Some(0.0));
+        for line in rendered
+            .lines()
+            .filter(|line| line.starts_with(MAX_FILL) || line.starts_with(NEAR_LIMIT))
+        {
+            assert!(!line.contains("203.0.113"), "{line}");
+            assert_eq!(
+                line.matches('=').count(),
+                2,
+                "only class and caller: {line}"
+            );
+        }
+        // Later, the bucket has drained and the gauges fall back.
+        limiter.publish_fill_gauges(t0 + Duration::from_secs(10));
+        let rendered = recorder.handle().render();
+        assert_eq!(series_value(&rendered, MAX_FILL, &labels), Some(0.0));
+        assert_eq!(series_value(&rendered, NEAR_LIMIT, &labels), Some(0.0));
     }
 }

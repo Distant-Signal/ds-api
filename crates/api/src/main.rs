@@ -524,6 +524,11 @@ async fn server_main() -> anyhow::Result<()> {
         // a rare route's first request after a restart is visible to
         // increase()/rate(). See `api::route_metrics`.
         api::route_metrics::register();
+        // The rate limiter's counters at 0 (a limit's first hit after a
+        // restart is then visible to increase()) and its per-class fill
+        // gauges, refreshed every 15 s. See `api::rate_limit`.
+        api::rate_limit::register_metrics();
+        rate_limiter.spawn_fill_gauges();
         api::edge::register_panic_metric();
         // Requests that name an object by its numeric id, per kind: the
         // gate for refusing numeric ids (DS-534).
