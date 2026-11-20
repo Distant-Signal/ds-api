@@ -39,8 +39,11 @@
 //!
 //! Left alone, on purpose, because they have no opaque id yet or are not
 //! about an opaque object: time away, webhook, personal token and connected
-//! app ids, `RecentlyDeletedJourney`, a template leg's `id`, `ticketIds`,
-//! `deletedJourneyIds` and `trainsId` (already `0`). The account export
+//! app ids, `RecentlyDeletedJourney.id`, `deletedJourneyIds` (served beside
+//! `deletedJourneyCount` until a frontend reads the count, then dropped) and
+//! `trainsId` (already `0`). A template leg's `id`, `RevisionLeg.ticketIds`
+//! and the two deleted-journey `journeyId`s are no longer served at all
+//! (DS-534). The account export
 //! keeps its numeric ids ([`KeepNumericIds`]): it is the owner's own data
 //! and its rows join on them.
 //!
@@ -645,10 +648,10 @@ mod tests {
 
     /// Numeric id fields that sit in a type with opaque ids and have none of
     /// their own, on purpose (each has no opaque id yet or is not an
-    /// object's id): revision legs' ticket ids and the template responses'
-    /// deleted journey ids.
-    const UNPAIRED_NUMERIC_IDS: [(&str, &str); 3] = [
-        ("RevisionLeg", "ticketIds"),
+    /// object's id): the template responses' deleted journey ids. They are
+    /// served only until a frontend that reads `deletedJourneyCount` is
+    /// deployed; a later change drops them and these entries with them.
+    const UNPAIRED_NUMERIC_IDS: [(&str, &str); 2] = [
         ("SetTemplateActiveResponse", "deletedJourneyIds"),
         ("SkipTemplateDateResponse", "deletedJourneyIds"),
     ];
@@ -726,5 +729,35 @@ mod tests {
             UNPAIRED_NUMERIC_IDS.len(),
             "UNPAIRED_NUMERIC_IDS has an entry no type needs any more"
         );
+    }
+
+    /// Ids that no consumer used are not served at all (DS-534), and the
+    /// count that replaces `deletedJourneyIds` is.
+    #[test]
+    fn ids_with_no_use_are_gone_from_the_api_types() {
+        let types = object_types();
+        let fields = |name: &str| {
+            types
+                .iter()
+                .find(|object| object.name == name)
+                .unwrap_or_else(|| panic!("{name} is not in api.ts"))
+                .fields
+                .iter()
+                .map(|(key, _)| key.as_str())
+                .collect::<Vec<_>>()
+        };
+        assert!(!fields("RevisionLeg").contains(&"ticketIds"));
+        assert!(!fields("JourneyTemplateLegDetailResponse").contains(&"id"));
+        assert!(!fields("RecentlyDeletedJourney").contains(&"journeyId"));
+        assert!(!fields("ConnectedAppDeletion").contains(&"journeyId"));
+        for name in [
+            "TimeAwayResponse",
+            "SetTemplateActiveResponse",
+            "SkipTemplateDateResponse",
+        ] {
+            let found = fields(name);
+            assert!(found.contains(&"deletedJourneyCount"), "{name}");
+            assert!(found.contains(&"deletedJourneyIds"), "{name}");
+        }
     }
 }

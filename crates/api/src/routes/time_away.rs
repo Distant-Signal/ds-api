@@ -47,6 +47,10 @@ pub(crate) struct TimeAwayResponse {
     /// Journeys already added for those dates that nobody had touched, now
     /// deleted.
     deleted_journey_ids: Vec<i64>,
+    // `deleted_journey_ids.len()` (DS-534, additive). The ids are served
+    // only until a frontend that reads this count is deployed, then a later
+    // change drops them: nothing can use a deleted journey's id.
+    deleted_journey_count: usize,
 }
 
 fn internal_error(err: &anyhow::Error) -> (StatusCode, String) {
@@ -73,6 +77,7 @@ fn saved(outcome: SaveOutcome) -> Result<Json<TimeAwayResponse>, (StatusCode, St
             deleted_journey_ids,
         } => Ok(Json(TimeAwayResponse {
             period,
+            deleted_journey_count: deleted_journey_ids.len(),
             deleted_journey_ids,
         })),
         SaveOutcome::TooMany => Err((
@@ -159,5 +164,31 @@ async fn delete_time_away(
             StatusCode::NOT_FOUND,
             "no time away with that id".to_string(),
         ))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// `deletedJourneyCount` is the length of `deletedJourneyIds`, which is
+    /// still served until a frontend that reads the count is deployed.
+    #[test]
+    fn the_response_counts_the_journeys_it_deleted() {
+        for deleted in [vec![], vec![4, 5]] {
+            let Json(response) = saved(SaveOutcome::Saved {
+                period: TimeAwayPeriod {
+                    id: 1,
+                    starts_on: NaiveDate::from_ymd_opt(2026, 12, 1).unwrap(),
+                    ends_on: NaiveDate::from_ymd_opt(2026, 12, 3).unwrap(),
+                    label: None,
+                },
+                deleted_journey_ids: deleted.clone(),
+            })
+            .unwrap();
+            let value = serde_json::to_value(response).unwrap();
+            assert_eq!(value["deletedJourneyIds"], serde_json::json!(deleted));
+            assert_eq!(value["deletedJourneyCount"], deleted.len());
+        }
     }
 }

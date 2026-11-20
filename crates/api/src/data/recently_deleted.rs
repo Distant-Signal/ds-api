@@ -200,9 +200,6 @@ pub(crate) async fn record_web_deletion(
 #[serde(rename_all = "camelCase")]
 pub struct RecentlyDeletedJourney {
     pub id: i64,
-    /// The deleted journey's id. It no longer exists; a journey saved again
-    /// gets a new one.
-    pub journey_id: i64,
     /// `web` for the user's own delete, else the connected app's name.
     pub client: String,
     pub deleted_at: DateTime<Utc>,
@@ -221,7 +218,7 @@ pub async fn list(
 ) -> Result<Vec<RecentlyDeletedJourney>> {
     let kept = kept_days_sql("$2");
     Ok(sqlx::query_as::<_, RecentlyDeletedJourney>(&format!(
-        "SELECT id, journey_id, client, deleted_at, \
+        "SELECT id, client, deleted_at, \
                 deleted_at + make_interval(days => {kept}) AS expires_at, summary \
          FROM delegated_deletions \
          WHERE user_id = $1 AND deleted_at > now() - make_interval(days => {kept}) \

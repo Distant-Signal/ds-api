@@ -38,6 +38,36 @@ unchanged. No limit value changes.
 - Docs fix: `POST /public/events` under an MCP bearer is charged to the
   `svc:mcp` bucket of the `events` class, not per IP.
 
+## 2026-11-20: ids nothing uses are no longer served; `deletedJourneyCount` added (DS-534)
+
+Cookie-only website responses; none of these types is in `/v1`
+(`api-types/openapi/v1.json`) or reachable by a personal token or a
+delegated client, so the `/v1` breaking-change check is not engaged. No
+migration, grant or schema change: the database columns stay (the account
+export, which serialises the rows, is unchanged).
+
+- **Removed** (the website reads none of them; DS-MCP's types have none of
+  them; each was a counter of the owner's own rows with no route to take it):
+  - `RevisionLeg.ticketIds` (`GET /Journeys/{id}/revisions`). Retention still
+    reads `journey_revision_legs.ticket_ids` internally.
+  - `JourneyTemplateLegDetailResponse.id`, a regular journey's leg
+    (`GET /JourneyTemplates/{id}`). A leg is identified by its position.
+  - `RecentlyDeletedJourney.journeyId` and `ConnectedAppDeletion.journeyId`
+    (`GET /Journeys/recently-deleted` and the Connected apps page): the id of
+    a journey that no longer exists.
+- **Added**: `deletedJourneyCount` (integer, the length of
+  `deletedJourneyIds`) beside `deletedJourneyIds` on `TimeAwayResponse`
+  (`POST`/`PUT /public/preferences/time-away`), `SetTemplateActiveResponse`
+  (pause, resume, pause until) and `SkipTemplateDateResponse` (skip).
+- **Not removed yet**: `deletedJourneyIds` is still served, because the
+  deployed website reads its length. Stage 2, a later change after a frontend
+  that reads `deletedJourneyCount` is deployed: drop `deletedJourneyIds` from
+  the three responses (and its entries in the numeric-id guard's allowlist).
+  A client should read the count, not the array.
+- The stage 2b list of ids "not changed" (2026-11-18) therefore shrinks to
+  the time away, webhook, personal token and deleted-journey record ids and
+  `deletedJourneyIds`.
+
 ## 2026-11-19: a missed train's alternatives offer the next morning's first trains from 20:00, not only after midnight
 
 Behaviour change, additive (DS-534); no field, schema, migration or grant
