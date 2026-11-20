@@ -309,7 +309,7 @@ export type ConnectableApp = { name: string, displayName: string, scopes: Array<
 /**
  * A delegated delete, as the Connected apps page lists it.
  */
-export type ConnectedAppDeletion = { id: number, client: string, journeyId: number, deletedAt: string, 
+export type ConnectedAppDeletion = { id: number, client: string, deletedAt: string, 
 /**
  * What the journey was, as [`delete_journey_delegated`] stored it.
  */
@@ -2114,7 +2114,7 @@ recurrenceKind: RecurrenceKind, intervalWeeks: number, anchorWeek: string | null
  */
 dayOverrides: Array<DayOverride>, };
 
-export type JourneyTemplateLegDetailResponse = { id: number, originCrs: string | null, originName: string | null, destinationCrs: string | null, destinationName: string | null, departAfter: string | null, departBefore: string | null, arriveAfter: string | null, arriveBefore: string | null, };
+export type JourneyTemplateLegDetailResponse = { originCrs: string | null, originName: string | null, destinationCrs: string | null, destinationName: string | null, departAfter: string | null, departBefore: string | null, arriveAfter: string | null, arriveBefore: string | null, };
 
 /**
  * One row of `GET /JourneyTemplates/mine` -- deliberately lighter than the
@@ -3712,11 +3712,6 @@ export type RecentlyClearedResponse = { results: Array<RecentlyClearedIncident>,
  */
 export type RecentlyDeletedJourney = { id: number, 
 /**
- * The deleted journey's id. It no longer exists; a journey saved again
- * gets a new one.
- */
-journeyId: number, 
-/**
  * `web` for the user's own delete, else the connected app's name.
  */
 client: string, deletedAt: string, 
@@ -4091,7 +4086,7 @@ export type RevisionFault = "operator" | "user" | "none" | "unknown";
 /**
  * One revision leg as served by `GET /Journeys/{id}/revisions`.
  */
-export type RevisionLeg = { position: number, sourceLegId: number | null, sourceLegPublicId: string | null, kind: JourneyLegKind, trainUid: string | null, serviceDate: string, atocCode: string | null, originCrs: string | null, originName: string | null, destinationCrs: string | null, destinationName: string | null, bookedDeparture: string | null, bookedArrival: string | null, transitMode: TransitMode | null, originPlace: string | null, destinationPlace: string | null, lineName: string | null, plannedDeparture: string | null, plannedArrival: string | null, ticketIds: Array<number>, fate: RevisionLegFate, 
+export type RevisionLeg = { position: number, sourceLegId: number | null, sourceLegPublicId: string | null, kind: JourneyLegKind, trainUid: string | null, serviceDate: string, atocCode: string | null, originCrs: string | null, originName: string | null, destinationCrs: string | null, destinationName: string | null, bookedDeparture: string | null, bookedArrival: string | null, transitMode: TransitMode | null, originPlace: string | null, destinationPlace: string | null, lineName: string | null, plannedDeparture: string | null, plannedArrival: string | null, fate: RevisionLegFate, 
 /**
  * An untracked leg's stops and network ride (DS-237, additive), so
  * going back to this plan keeps them; `null` otherwise and on a
@@ -4259,7 +4254,7 @@ templateIds: Array<number>, templatePublicIds: Array<string>,
 /**
  * Untouched journeys a pause deleted.
  */
-deletedJourneyIds: Array<number>, };
+deletedJourneyIds: Array<number>, deletedJourneyCount: number, };
 
 /**
  * `PUT /JourneyTemplates/{id}/paused-until`'s body.
@@ -4541,7 +4536,7 @@ serviceDates: Array<string>, templateIds: Array<number>, templatePublicIds: Arra
 /**
  * Journeys already added for that date, now deleted.
  */
-deletedJourneyIds: Array<number>, };
+deletedJourneyIds: Array<number>, deletedJourneyCount: number, };
 
 /**
  * `GET /public/stations/{crs}/accessibility`: the station's RDM
@@ -4985,7 +4980,7 @@ export type TimeAwayResponse = { period: TimeAwayPeriod,
  * Journeys already added for those dates that nobody had touched, now
  * deleted.
  */
-deletedJourneyIds: Array<number>, };
+deletedJourneyIds: Array<number>, deletedJourneyCount: number, };
 
 /**
  * A reusable, named "after/before" bound pair on a `NaiveTime` --

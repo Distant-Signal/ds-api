@@ -444,7 +444,6 @@ pub async fn delete_journey_delegated(
 pub struct DeletionRow {
     pub id: i64,
     pub client: String,
-    pub journey_id: i64,
     pub deleted_at: DateTime<Utc>,
     /// What the journey was, as [`delete_journey_delegated`] stored it.
     #[ts(as = "crate::ts_values::DeletedJourneySummary")]
@@ -456,7 +455,7 @@ pub struct DeletionRow {
 /// list's, `data::recently_deleted`).
 pub async fn recent_deletions(pool: &PgPool, user_id: &str) -> Result<Vec<DeletionRow>> {
     Ok(sqlx::query_as::<_, DeletionRow>(
-        "SELECT id, client, journey_id, deleted_at, summary FROM delegated_deletions \
+        "SELECT id, client, deleted_at, summary FROM delegated_deletions \
          WHERE user_id = $1 AND client <> $3 AND deleted_at > now() - make_interval(days => $2) \
          ORDER BY deleted_at DESC, id DESC LIMIT 200",
     )

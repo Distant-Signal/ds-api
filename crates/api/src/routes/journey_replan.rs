@@ -2784,6 +2784,8 @@ mod wire_tests {
         assert_eq!(after["revisions"][0]["legs"][0]["fate"], "missed");
         assert!(after["revisions"][0].get("id").is_none());
         assert!(after["revisions"][0]["legs"][0].get("revisionId").is_none());
+        // The tickets table's ids are not served (DS-534).
+        assert!(after["revisions"][0]["legs"][0].get("ticketIds").is_none());
     }
 
     /// `409 suggestion_stale` was built with `json!`; the typed body

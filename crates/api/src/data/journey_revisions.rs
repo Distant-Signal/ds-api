@@ -484,6 +484,10 @@ pub struct RevisionLeg {
     pub line_name: Option<String>,
     pub planned_departure: Option<DateTime<Utc>>,
     pub planned_arrival: Option<DateTime<Utc>>,
+    // Not served (DS-534): no consumer reads it and it counted the
+    // tickets table. The column stays for retention (`data::retention`).
+    #[serde(skip_serializing)]
+    #[ts(skip)]
     pub ticket_ids: Vec<i64>,
     #[ts(as = "crate::ts_values::RevisionLegFate")]
     pub fate: String,

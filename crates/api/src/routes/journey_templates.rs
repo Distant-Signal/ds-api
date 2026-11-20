@@ -388,10 +388,6 @@ pub(crate) struct SetTemplateActiveRequest {
 /// `PUT /JourneyTemplates/{id}/active`'s response.
 #[derive(Debug, Serialize, ts_rs::TS)]
 #[serde(rename_all = "camelCase")]
-#[expect(
-    clippy::struct_field_names,
-    reason = "the wire names are the ids' names, numeric and opaque"
-)]
 pub(crate) struct SetTemplateActiveResponse {
     /// The template and, if it has one, its pair.
     // Deprecated (DS-534): use `template_public_ids`.
@@ -400,6 +396,10 @@ pub(crate) struct SetTemplateActiveResponse {
     template_public_ids: Vec<String>,
     /// Untouched journeys a pause deleted.
     deleted_journey_ids: Vec<i64>,
+    // `deleted_journey_ids.len()` (DS-534, additive). The ids are served
+    // only until a frontend that reads this count is deployed, then a later
+    // change drops them: nothing can use a deleted journey's id.
+    deleted_journey_count: usize,
 }
 
 #[derive(Debug, Default, Deserialize, ts_rs::TS)]
@@ -433,6 +433,10 @@ pub(crate) struct SkipTemplateDateResponse {
     template_public_ids: Vec<String>,
     /// Journeys already added for that date, now deleted.
     deleted_journey_ids: Vec<i64>,
+    // `deleted_journey_ids.len()` (DS-534, additive). The ids are served
+    // only until a frontend that reads this count is deployed, then a later
+    // change drops them: nothing can use a deleted journey's id.
+    deleted_journey_count: usize,
 }
 
 #[derive(Debug, Serialize, ts_rs::TS)]
@@ -451,7 +455,6 @@ pub(crate) struct MaterializeTemplateResponse {
 #[derive(Debug, Serialize, ts_rs::TS)]
 #[serde(rename_all = "camelCase")]
 pub(crate) struct JourneyTemplateLegDetailResponse {
-    id: i64,
     origin_crs: Option<String>,
     origin_name: Option<String>,
     destination_crs: Option<String>,
@@ -1169,7 +1172,6 @@ async fn get_journey_template(
         legs: legs
             .into_iter()
             .map(|leg| JourneyTemplateLegDetailResponse {
-                id: leg.id,
                 origin_crs: leg.origin_crs,
                 origin_name: leg.origin_name,
                 destination_crs: leg.destination_crs,
@@ -1485,6 +1487,7 @@ async fn put_journey_template_active(
     Ok(Json(SetTemplateActiveResponse {
         template_public_ids: template_public_ids(&app, &outcome.template_ids).await?,
         template_ids: outcome.template_ids,
+        deleted_journey_count: outcome.deleted_journey_ids.len(),
         deleted_journey_ids: outcome.deleted_journey_ids,
     }))
 }
@@ -1632,6 +1635,7 @@ async fn put_journey_template_paused_until(
     Ok(Json(SetTemplateActiveResponse {
         template_public_ids: template_public_ids(&app, &outcome.template_ids).await?,
         template_ids: outcome.template_ids,
+        deleted_journey_count: outcome.deleted_journey_ids.len(),
         deleted_journey_ids: outcome.deleted_journey_ids,
     }))
 }
@@ -1690,6 +1694,7 @@ async fn post_journey_template_skip(
             service_dates: dates,
             template_public_ids: template_public_ids(&app, &template_ids).await?,
             template_ids,
+            deleted_journey_count: deleted_journey_ids.len(),
             deleted_journey_ids,
         })),
         regular_journeys::SkipOutcome::NotFound => Err((
@@ -3636,6 +3641,10 @@ mod db_tests {
         .await;
         assert_eq!(status, StatusCode::OK);
         assert_eq!(body["deletedJourneyIds"], serde_json::json!([]));
+        assert_eq!(
+            body["deletedJourneyCount"],
+            body["deletedJourneyIds"].as_array().unwrap().len()
+        );
         let (_, mine) = request(
             router.clone(),
             "/JourneyTemplates/mine".to_string(),
@@ -3701,6 +3710,10 @@ mod db_tests {
         assert_eq!(status, StatusCode::OK, "{body}");
         assert_eq!(body["serviceDate"], today.to_string());
         assert_eq!(body["deletedJourneyIds"], serde_json::json!([todays]));
+        assert_eq!(
+            body["deletedJourneyCount"],
+            body["deletedJourneyIds"].as_array().unwrap().len()
+        );
         assert!(!journey_exists(&pool, todays).await);
         let (_, mine) = request(
             router.clone(),
@@ -3760,6 +3773,10 @@ mod db_tests {
         assert_eq!(body["serviceDate"], tomorrow.to_string());
         assert_eq!(body["templateIds"], serde_json::json!([id]));
         assert_eq!(body["deletedJourneyIds"], serde_json::json!([]));
+        assert_eq!(
+            body["deletedJourneyCount"],
+            body["deletedJourneyIds"].as_array().unwrap().len()
+        );
 
         // A past date is refused; so is someone else's template.
         let (status, _) = post_json(
@@ -3876,6 +3893,10 @@ mod db_tests {
             serde_json::json!([wed.to_string(), thu.to_string()])
         );
         assert_eq!(body["deletedJourneyIds"], serde_json::json!([weds]));
+        assert_eq!(
+            body["deletedJourneyCount"],
+            body["deletedJourneyIds"].as_array().unwrap().len()
+        );
         let (_, detail) = request(
             router.clone(),
             format!("/JourneyTemplates/{id}"),
@@ -4149,6 +4170,10 @@ mod db_tests {
         assert_eq!(body["period"]["label"], "Holiday");
         // Only the untouched journey inside the dates, and only the user's.
         assert_eq!(body["deletedJourneyIds"], serde_json::json!([untouched]));
+        assert_eq!(
+            body["deletedJourneyCount"],
+            body["deletedJourneyIds"].as_array().unwrap().len()
+        );
         for kept in [picked, outside, others] {
             assert!(journey_exists(&pool, kept).await, "{kept}");
         }
@@ -4205,6 +4230,10 @@ mod db_tests {
         .await;
         assert_eq!(status, StatusCode::OK, "{body}");
         assert_eq!(body["deletedJourneyIds"], serde_json::json!([outside]));
+        assert_eq!(
+            body["deletedJourneyCount"],
+            body["deletedJourneyIds"].as_array().unwrap().len()
+        );
         assert_eq!(body["period"]["label"], Value::Null);
 
         // Someone else's: not found. Bad dates: 400.
@@ -4323,6 +4352,10 @@ mod db_tests {
         assert_eq!(status, StatusCode::OK, "{body}");
         assert_eq!(body["templateIds"], serde_json::json!([id, return_id]));
         assert_eq!(body["deletedJourneyIds"], serde_json::json!([before]));
+        assert_eq!(
+            body["deletedJourneyCount"],
+            body["deletedJourneyIds"].as_array().unwrap().len()
+        );
         assert!(journey_exists(&pool, ticketed).await, "a ticket keeps it");
         assert!(
             journey_exists(&pool, on_the_day).await,
@@ -5350,5 +5383,61 @@ mod db_tests {
 
         cleanup_user(&pool, user_id).await;
         cleanup_user(&pool, other).await;
+    }
+}
+
+#[cfg(test)]
+mod response_tests {
+    use super::{
+        JourneyTemplateLegDetailResponse, SetTemplateActiveResponse, SkipTemplateDateResponse,
+    };
+    use chrono::NaiveDate;
+
+    /// `deletedJourneyCount` is the length of `deletedJourneyIds`, which is
+    /// still served until a frontend that reads the count is deployed.
+    #[test]
+    fn the_pause_and_skip_responses_count_the_journeys_they_deleted() {
+        for deleted in [vec![], vec![7, 8, 9]] {
+            let paused = serde_json::to_value(SetTemplateActiveResponse {
+                template_ids: vec![5],
+                template_public_ids: vec!["r_00000000000000000000000000000005".to_string()],
+                deleted_journey_ids: deleted.clone(),
+                deleted_journey_count: deleted.len(),
+            })
+            .unwrap();
+            assert_eq!(paused["deletedJourneyIds"], serde_json::json!(deleted));
+            assert_eq!(paused["deletedJourneyCount"], deleted.len());
+
+            let date = NaiveDate::from_ymd_opt(2026, 12, 1).unwrap();
+            let skipped = serde_json::to_value(SkipTemplateDateResponse {
+                service_date: date,
+                service_dates: vec![date],
+                template_ids: vec![5],
+                template_public_ids: vec!["r_00000000000000000000000000000005".to_string()],
+                deleted_journey_ids: deleted.clone(),
+                deleted_journey_count: deleted.len(),
+            })
+            .unwrap();
+            assert_eq!(skipped["deletedJourneyIds"], serde_json::json!(deleted));
+            assert_eq!(skipped["deletedJourneyCount"], deleted.len());
+        }
+    }
+
+    /// A template leg's row id is not served (DS-534): no route takes it.
+    #[test]
+    fn a_template_leg_has_no_id() {
+        let leg = serde_json::to_value(JourneyTemplateLegDetailResponse {
+            origin_crs: Some("WAT".to_string()),
+            origin_name: None,
+            destination_crs: Some("RDG".to_string()),
+            destination_name: None,
+            depart_after: None,
+            depart_before: None,
+            arrive_after: None,
+            arrive_before: None,
+        })
+        .unwrap();
+        assert!(leg.get("id").is_none(), "{leg}");
+        assert_eq!(leg["originCrs"], "WAT");
     }
 }

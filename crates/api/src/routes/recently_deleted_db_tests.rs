@@ -258,7 +258,8 @@ async fn a_deleted_journey_is_listed_and_saved_again() {
     assert_eq!(list["connectedAppRetentionDays"], 30);
     let items = list["items"].as_array().unwrap();
     assert_eq!(items.len(), 1);
-    assert_eq!(items[0]["journeyId"], journey);
+    // The deleted journey's id is not served (DS-534).
+    assert!(items[0].get("journeyId").is_none(), "{list}");
     assert_eq!(items[0]["client"], "web");
     let deleted_at: chrono::DateTime<Utc> =
         serde_json::from_value(items[0]["deletedAt"].clone()).unwrap();
