@@ -3,6 +3,58 @@
 Changes to the Distant Signal (DS) HTTP API that a client such as DS-MCP
 needs to know about. Newest first. Field names are as served (camelCase).
 
+## 2026-11-20: opaque ids for deleted-journey records, personal tokens, webhook destinations and time-away periods (DS-534, wave 3)
+
+Additive; the numeric ids stay in every schema. `api-types/api.ts` gains the
+fields below; none of these types is in the `/v1` OpenAPI document, so
+`api-types/openapi/v1.json` is unchanged.
+
+- **New `publicId` (string), beside the numeric `id`, on** the rows of four
+  tables, each with its own prefix and 32 lowercase hex digits (122 random
+  bits, not derived from `id`):
+  - `x_` deleted-journey records, `delegated_deletions`: `RecentlyDeletedJourney`
+    (`GET /Journeys/recently-deleted` items) and `ConnectedAppDeletion`
+    (`GET /public/account/connected-apps` `recentDeletions`). One id serves
+    both lists.
+  - `k_` personal API tokens: `PersonalTokenRow` (the `tokens` list, and
+    `tokenNotice` of `GET /public/account/connected-apps-notice`) and
+    `CreatedPersonalTokenResponse` (`POST /public/account/personal-tokens`).
+  - `w_` webhook destinations: `WebhookDestination` (the `destinations` list,
+    and the create and update responses).
+  - `a_` time-away periods: `TimeAwayPeriod` (`GET`, and `period` of the
+    `POST` and `PUT` responses of `/public/preferences/time-away`).
+- **Every route that takes one of these ids accepts the number or the
+  opaque id** in the path: `POST /Journeys/recently-deleted/{id}/restore`,
+  `DELETE /Journeys/recently-deleted/{id}`,
+  `DELETE /public/account/personal-tokens/{id}`,
+  `PATCH` and `DELETE /public/account/webhooks/{id}`,
+  `PUT` and `DELETE /public/preferences/time-away/{period_id}`. An opaque
+  id that no row has, or another user's, answers what an unknown number
+  does (404, and 204 for the two deletes that are idempotent: a token and a
+  webhook destination); a segment that is neither a number nor that
+  family's id answers 400, except a token's, which is still a 204 as it was
+  for any non-number. A request body never carries one of these ids.
+- Webhook destinations keep their numeric id as the primary key and as the
+  additional authenticated data of the stored signing secret: the opaque id
+  is only an alias resolved to the number before anything is decrypted, so
+  no secret is re-sealed. The notifier's `token-created-{id}` tags and the
+  delivery ids are unchanged.
+- **Stage 2b** (`API_SERVE_NUMERIC_IDS=false`, as above) covers the four
+  families by the naming rule: their `id` is served as `0` and the
+  `publicId` stays. Before turning it off, the website must read `publicId`
+  for these lists (the deployed one still reads `id`). `deletedJourneyIds`
+  on the time-away and template responses has no opaque partner and is
+  served as before; it leaves with the `deletedJourneyCount` cleanup.
+- **Stage 3**: numeric ids in these paths are counted per family in
+  `distant_signal_legacy_id_requests_total{kind="deletion"|"token"|"webhook"|"away"}`
+  (registered at 0). Once a family has been at zero for 30 days its routes
+  stop accepting numbers, as the earlier families will.
+- The account export carries each row's `public_id` beside its numeric `id`
+  (`connectedAppDeletions`, `recentlyDeletedJourneys`, `personalApiTokens`,
+  `webhookDestinations`, `timeAway`).
+- Requires ds-core v0.17.4 (`public_id` on the four tables, filled for
+  existing rows).
+
 ## 2026-11-20: rate-limit series registered at 0, per-class fill gauges, and a bucket of their own for link-preview reads
 
 Metrics and rate-limit behaviour, additive (DS-534); no route, field or

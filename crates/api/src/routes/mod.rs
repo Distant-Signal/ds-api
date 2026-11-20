@@ -62,6 +62,8 @@ mod notification_settings_db_tests;
 pub mod notifications;
 #[cfg(test)]
 mod numeric_ids_db_tests;
+#[cfg(test)]
+mod opaque_ids_p2_db_tests;
 pub mod operator_history;
 pub mod operators;
 pub mod personal_tokens;

@@ -75,7 +75,11 @@ pub async fn touch(pool: &PgPool, token_id: i64) -> Result<()> {
 #[serde(rename_all = "camelCase")]
 #[ts(rename = "PersonalTokenRow")]
 pub struct TokenRow {
+    // Deprecated (DS-534): use `public_id`; withheld (0) once the numeric
+    // ids are (`API_SERVE_NUMERIC_IDS`).
     pub id: i64,
+    // `k_` and 32 hex digits (`personal_api_tokens.public_id`).
+    pub public_id: String,
     pub name: String,
     /// The token's last 4 characters, shown as `dsp_...hint`.
     pub hint: String,
@@ -89,7 +93,7 @@ pub struct TokenRow {
 /// first.
 pub async fn list_active(pool: &PgPool, user_id: &str) -> Result<Vec<TokenRow>> {
     Ok(sqlx::query_as::<_, TokenRow>(
-        "SELECT id, name, hint, scopes, created_at, expires_at, last_used_at \
+        "SELECT id, public_id, name, hint, scopes, created_at, expires_at, last_used_at \
          FROM personal_api_tokens \
          WHERE user_id = $1 AND revoked_at IS NULL AND expires_at > now() \
          ORDER BY created_at DESC, id DESC",
@@ -116,7 +120,7 @@ pub const NEW_TOKEN_NOTICE_DAYS: i64 = 7;
 /// [`NEW_TOKEN_NOTICE_DAYS`], for the banner every page shows.
 pub async fn recent_token(pool: &PgPool, user_id: &str) -> Result<Option<TokenRow>> {
     Ok(sqlx::query_as::<_, TokenRow>(
-        "SELECT id, name, hint, scopes, created_at, expires_at, last_used_at \
+        "SELECT id, public_id, name, hint, scopes, created_at, expires_at, last_used_at \
          FROM personal_api_tokens \
          WHERE user_id = $1 AND revoked_at IS NULL AND expires_at > now() \
            AND created_at > now() - make_interval(days => $2) \
@@ -172,7 +176,7 @@ pub async fn create(
     let row = sqlx::query_as::<_, TokenRow>(
         "INSERT INTO personal_api_tokens (user_id, name, token_hash, hint, scopes, expires_at) \
          VALUES ($1, $2, $3, $4, $5, now() + make_interval(days => $6)) \
-         RETURNING id, name, hint, scopes, created_at, expires_at, last_used_at",
+         RETURNING id, public_id, name, hint, scopes, created_at, expires_at, last_used_at",
     )
     .bind(new.user_id)
     .bind(new.name)

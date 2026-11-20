@@ -32,7 +32,11 @@ pub const MAX_LABEL_CHARS: usize = 60;
 #[serde(rename_all = "camelCase")]
 #[ts(rename = "TimeAwayPeriod")]
 pub struct TimeAwayPeriod {
+    // Deprecated (DS-534): use `public_id`; withheld (0) once the numeric
+    // ids are (`API_SERVE_NUMERIC_IDS`).
     pub id: i64,
+    // `a_` and 32 hex digits (`user_away_periods.public_id`).
+    pub public_id: String,
     /// The first date away (a London date).
     pub starts_on: NaiveDate,
     /// The last date away, inclusive.
@@ -98,7 +102,7 @@ pub async fn list(
     now: DateTime<Utc>,
 ) -> anyhow::Result<Vec<TimeAwayPeriod>> {
     Ok(sqlx::query_as(
-        "SELECT id, starts_on, ends_on, label FROM user_away_periods \
+        "SELECT id, public_id, starts_on, ends_on, label FROM user_away_periods \
          WHERE user_id = $1 AND ends_on >= $2 ORDER BY starts_on, id",
     )
     .bind(user_id)
@@ -151,7 +155,7 @@ pub async fn create(
     }
     let period: TimeAwayPeriod = sqlx::query_as(
         "INSERT INTO user_away_periods (user_id, starts_on, ends_on, label) \
-         VALUES ($1, $2, $3, $4) RETURNING id, starts_on, ends_on, label",
+         VALUES ($1, $2, $3, $4) RETURNING id, public_id, starts_on, ends_on, label",
     )
     .bind(user_id)
     .bind(input.starts_on)
@@ -192,7 +196,7 @@ pub async fn update(
     let mut tx = pool.begin().await?;
     let period: Option<TimeAwayPeriod> = sqlx::query_as(
         "UPDATE user_away_periods SET starts_on = $3, ends_on = $4, label = $5 \
-         WHERE id = $1 AND user_id = $2 RETURNING id, starts_on, ends_on, label",
+         WHERE id = $1 AND user_id = $2 RETURNING id, public_id, starts_on, ends_on, label",
     )
     .bind(id)
     .bind(user_id)

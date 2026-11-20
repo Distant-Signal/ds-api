@@ -1005,9 +1005,19 @@ pub(crate) mod db_tests {
             1
         );
 
-        // A break and a regular journey carry the opaque id the api serves
-        // them by (DS-534), beside their numeric ids.
-        for (key, prefix) in [("journeyBreaks", "b_"), ("journeyTemplates", "r_")] {
+        // A break, a regular journey, a deleted-journey record, a personal
+        // token, a webhook destination and a time-away period carry the
+        // opaque id the api serves them by (DS-534), beside their numeric
+        // ids.
+        for (key, prefix) in [
+            ("journeyBreaks", "b_"),
+            ("journeyTemplates", "r_"),
+            ("connectedAppDeletions", "x_"),
+            ("recentlyDeletedJourneys", "x_"),
+            ("personalApiTokens", "k_"),
+            ("webhookDestinations", "w_"),
+            ("timeAway", "a_"),
+        ] {
             let rows = json[key].as_array().unwrap();
             assert!(!rows.is_empty(), "{key} has a row");
             for row in rows {
