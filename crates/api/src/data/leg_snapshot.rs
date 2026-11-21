@@ -405,6 +405,30 @@ mod tests {
         assert_eq!(snapshot.status(), None);
     }
 
+    /// The document `scripts/restore-leg-snapshots-from-archive.py` writes
+    /// (its test regenerates the file from the script's builder): it must
+    /// parse as a version 1 snapshot with every key it sets understood, and
+    /// serialise back to the same JSON, so the script cannot drift from
+    /// this type (an unknown or misspelt key would be dropped by the
+    /// round trip and fail the comparison).
+    #[test]
+    fn the_archive_restore_script_golden_document_is_read() {
+        // Read at run time, not `include_str!`: the images' build context
+        // leaves `scripts/tests` out and this file is test-only.
+        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../scripts/tests/fixtures/leg-snapshot-archive.golden.json");
+        let golden: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(path).unwrap()).unwrap();
+        let snapshot = LegSnapshot::parse(&golden).expect("the golden document parses");
+        assert_eq!(snapshot.source, Source::Archive);
+        assert_eq!(snapshot.train_uid, "C12345");
+        assert_eq!(snapshot.final_arrival_delay_minutes, Some(7));
+        assert_eq!(snapshot.train_cancelled, Some(false));
+        assert_eq!(snapshot.status(), Some("completed"));
+        assert_eq!(snapshot.calling_points.len(), 3);
+        assert_eq!(snapshot.to_value(), golden);
+    }
+
     #[test]
     fn the_outcome_gives_the_status() {
         let snapshot = LegSnapshot::from_train(facts(), Utc::now());

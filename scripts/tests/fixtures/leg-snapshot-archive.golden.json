@@ -1,0 +1,44 @@
+{
+  "callingPoints": [
+    {
+      "bookedDeparture": "09:00:00",
+      "dayOffset": 0,
+      "kind": "Origin",
+      "platform": "3",
+      "tiploc": "PADTON"
+    },
+    {
+      "bookedArrival": "09:25:00",
+      "bookedDeparture": "09:27:00",
+      "dayOffset": 0,
+      "kind": "Intermediate",
+      "platform": "7",
+      "publicArrival": "09:25:00",
+      "publicDeparture": "09:27:00",
+      "tiploc": "READING"
+    },
+    {
+      "bookedArrival": "10:05:00",
+      "dayOffset": 0,
+      "kind": "Terminate",
+      "tiploc": "SWINDON"
+    }
+  ],
+  "capturedAt": "2026-11-21T12:00:00Z",
+  "destinationCrs": "SWI",
+  "finalArrivalDelayMinutes": 7,
+  "matchedLineId": "gwr",
+  "originCrs": "PAD",
+  "plannedPlatform": "3",
+  "platform": "3",
+  "scheduledDeparture": "2026-11-01T09:00:00Z",
+  "serviceDate": "2026-11-01",
+  "skippedStations": [
+    "RDG"
+  ],
+  "source": "archive",
+  "trainCancelled": false,
+  "trainId": "1A23",
+  "trainUid": "C12345",
+  "v": 1
+}
