@@ -41,10 +41,33 @@
 //!
 //! A leg with no subscription (never matched, or its train untracked) is
 //! not recorded. Untracked legs have no train and are skipped.
+//!
+//! # The leg's own copy of its train (DS-643)
+//!
+//! The outcome is all `trains` pruning used to leave on the leg, so an old
+//! matched leg had no stops. [`snapshot_legs`] runs after the outcomes, in
+//! the same pass, and keeps `journey_legs.final_train_uid`, `final_snapshot`
+//! and `final_snapshot_at` ([`crate::data::leg_snapshot`] is the document):
+//!
+//! - as soon as the leg's subscription has a `trains` row with calling
+//!   points (they are static, so it does not wait for the leg to finish):
+//!   the document without an outcome;
+//! - when the leg's outcome is recorded: the outcome keys, and, while the
+//!   `trains` row is still held, the row read again (the platform and
+//!   skipped stops move during the day). `final_snapshot_at` then passes
+//!   `final_recorded_at`, which is what marks a leg done.
+//!
+//! A leg is only written while it still has the subscription the row was
+//! read for, so "Change train" and the sweep cannot cross. A leg with a
+//! snapshot and no subscription (its train was untracked) has the copy
+//! cleared. `train_subscriptions` has no calling points of its own (the
+//! column went with `tracked_trains`' in 20260906140000), so when the
+//! `trains` row is already gone there is no source to snapshot from.
 
 use chrono::NaiveDate;
 use sqlx::PgPool;
 
+use crate::data::leg_snapshot::{LegSnapshot, TrainFacts};
 use crate::data::stop_delay::{StopDelay, StopDelayTarget};
 
 /// Legs read per batch.
@@ -172,7 +195,206 @@ pub async fn record_final_arrivals(pool: &PgPool, today: NaiveDate) -> anyhow::R
     if recorded > 0 {
         tracing::info!(recorded, "recorded journey legs' final arrivals");
     }
+    // Best effort: the copy never holds up the outcomes or the pruning that
+    // follows, and the next pass tries again.
+    match snapshot_legs(pool).await {
+        Ok(snapshotted) if snapshotted > 0 => {
+            tracing::info!(snapshotted, "snapshotted journey legs' trains");
+        }
+        Ok(_) => {}
+        Err(err) => tracing::warn!(error = ?err, "could not snapshot journey legs' trains"),
+    }
     Ok(recorded)
+}
+
+/// What the snapshot pass reads for one leg.
+#[derive(Debug, Clone, sqlx::FromRow)]
+struct SnapshotFacts {
+    id: i64,
+    subscription_id: i64,
+    snapshot: Option<serde_json::Value>,
+    recorded: bool,
+    delay_minutes: Option<i32>,
+    cancelled: Option<bool>,
+    train_uid: Option<String>,
+    train_id: Option<String>,
+    train_service_date: Option<NaiveDate>,
+    origin_crs: Option<String>,
+    destination_crs: Option<String>,
+    scheduled_departure: Option<chrono::DateTime<chrono::Utc>>,
+    matched_line_id: Option<String>,
+    platform: Option<String>,
+    planned_platform: Option<String>,
+    skipped_stations: Option<Vec<String>>,
+    calling_points: Option<serde_json::Value>,
+}
+
+impl SnapshotFacts {
+    fn train(&self) -> Option<TrainFacts> {
+        Some(TrainFacts {
+            train_uid: self.train_uid.clone()?,
+            train_id: self.train_id.clone(),
+            service_date: self.train_service_date?,
+            origin_crs: self.origin_crs.clone(),
+            destination_crs: self.destination_crs.clone(),
+            scheduled_departure: self.scheduled_departure,
+            matched_line_id: self.matched_line_id.clone(),
+            platform: self.platform.clone(),
+            planned_platform: self.planned_platform.clone(),
+            skipped_stations: self.skipped_stations.clone().unwrap_or_default(),
+            calling_points: self.calling_points.clone(),
+        })
+    }
+}
+
+/// The document to store for a leg now, or `None` when there is nothing to
+/// write (no source, or one it cannot read). Pure, so it is tested
+/// without a database.
+fn next_snapshot(facts: &SnapshotFacts, now: chrono::DateTime<chrono::Utc>) -> Option<LegSnapshot> {
+    let outcome = facts
+        .recorded
+        .then_some((facts.delay_minutes, facts.cancelled));
+    let existing = match &facts.snapshot {
+        Some(value) => Some(LegSnapshot::parse(value)?),
+        None => None,
+    };
+    let fresh = facts
+        .train()
+        .map(|train| LegSnapshot::from_train(train, now));
+    let base = match (fresh, existing) {
+        // The row is held: read again, keeping the earlier copy's stops if
+        // the row has lost them.
+        (Some(mut fresh), existing) => {
+            if fresh.calling_points.is_empty() {
+                match existing {
+                    Some(earlier) => fresh.calling_points = earlier.calling_points,
+                    // Nothing static to keep yet: wait for the timetable, or
+                    // for the outcome.
+                    None if outcome.is_none() => return None,
+                    None => {}
+                }
+            }
+            fresh
+        }
+        // The row is gone: only the outcome can still be added.
+        (None, Some(existing)) => {
+            outcome?;
+            existing
+        }
+        (None, None) => return None,
+    };
+    Some(match outcome {
+        Some((delay, cancelled)) => base.with_outcome(delay, cancelled),
+        None => base,
+    })
+}
+
+static SNAPSHOT_LEGS_SQL: &str = "\
+    SELECT jl.id, ts.id AS subscription_id, jl.final_snapshot AS snapshot, \
+           jl.final_recorded_at IS NOT NULL AS recorded, \
+           jl.final_arrival_delay_minutes AS delay_minutes, \
+           jl.final_train_cancelled AS cancelled, \
+           tr.train_uid, tr.train_id, tr.service_date AS train_service_date, \
+           tr.origin_crs, tr.destination_crs, tr.scheduled_departure, tr.matched_line_id, \
+           tr.platform, tr.planned_platform, tr.skipped_stations, tr.calling_points \
+    FROM journey_legs jl \
+    JOIN train_subscriptions ts ON ts.id = jl.train_subscription_id \
+    LEFT JOIN trains tr ON tr.id = ts.trains_id \
+    WHERE jl.kind = 'train' AND jl.id > $1 \
+      AND ( \
+          (jl.final_snapshot IS NULL AND tr.id IS NOT NULL \
+           AND (jl.final_recorded_at IS NOT NULL \
+                OR (jsonb_typeof(tr.calling_points) = 'array' \
+                    AND jsonb_array_length(tr.calling_points) > 0))) \
+          OR (jl.final_snapshot IS NOT NULL AND jl.final_recorded_at IS NOT NULL \
+              AND jl.final_snapshot_at < jl.final_recorded_at)) \
+    ORDER BY jl.id \
+    LIMIT $2";
+
+/// Writes the snapshot of every train leg that needs one (module docs), at
+/// most `MAX_BATCHES * BATCH` legs read per call. Returns how many legs it
+/// wrote. Idempotent: a leg is written only while it has no snapshot or
+/// its outcome is newer than it, and only while it still has the
+/// subscription it was read with.
+pub async fn snapshot_legs(pool: &PgPool) -> anyhow::Result<u64> {
+    let mut after = 0_i64;
+    let mut written = 0;
+    for _ in 0..MAX_BATCHES {
+        let legs: Vec<SnapshotFacts> = sqlx::query_as(SNAPSHOT_LEGS_SQL)
+            .bind(after)
+            .bind(BATCH)
+            .fetch_all(pool)
+            .await?;
+        let Some(last) = legs.last() else { break };
+        after = last.id;
+        let full = i64::try_from(legs.len()).unwrap_or(i64::MAX) == BATCH;
+        written += snapshot_batch(pool, &legs).await?;
+        if !full {
+            break;
+        }
+    }
+    clear_orphan_snapshots(pool).await?;
+    Ok(written)
+}
+
+async fn snapshot_batch(pool: &PgPool, legs: &[SnapshotFacts]) -> anyhow::Result<u64> {
+    let now = chrono::Utc::now();
+    let mut ids = Vec::new();
+    let mut subscriptions = Vec::new();
+    let mut uids = Vec::new();
+    let mut documents = Vec::new();
+    for leg in legs {
+        let Some(snapshot) = next_snapshot(leg, now) else {
+            continue;
+        };
+        ids.push(leg.id);
+        subscriptions.push(leg.subscription_id);
+        uids.push(snapshot.train_uid.clone());
+        documents.push(snapshot.to_value().to_string());
+    }
+    if ids.is_empty() {
+        return Ok(0);
+    }
+    let result = sqlx::query(
+        "UPDATE journey_legs jl \
+         SET final_train_uid = v.uid, final_snapshot = v.document::jsonb, \
+             final_snapshot_at = now() \
+         FROM UNNEST($1::bigint[], $2::bigint[], $3::text[], $4::text[]) \
+              AS v(id, subscription_id, uid, document) \
+         WHERE jl.id = v.id AND jl.train_subscription_id = v.subscription_id \
+           AND (jl.final_snapshot IS NULL OR jl.final_snapshot_at < jl.final_recorded_at)",
+    )
+    .bind(&ids)
+    .bind(&subscriptions)
+    .bind(&uids)
+    .bind(&documents)
+    .execute(pool)
+    .await?;
+    Ok(result.rows_affected())
+}
+
+/// Clears the copy off a leg that no longer has a subscription (its train
+/// was untracked, or retention took the subscription): nothing shows it, and
+/// it should not outlive the leg's train.
+async fn clear_orphan_snapshots(pool: &PgPool) -> anyhow::Result<u64> {
+    let mut cleared = 0;
+    loop {
+        let result = sqlx::query(
+            "UPDATE journey_legs SET final_train_uid = NULL, final_snapshot = NULL, \
+                 final_snapshot_at = NULL \
+             WHERE id IN ( \
+                 SELECT id FROM journey_legs \
+                 WHERE final_snapshot IS NOT NULL AND train_subscription_id IS NULL \
+                 ORDER BY id LIMIT $1)",
+        )
+        .bind(BATCH)
+        .execute(pool)
+        .await?;
+        cleared += result.rows_affected();
+        if i64::try_from(result.rows_affected()).unwrap_or(i64::MAX) < BATCH {
+            return Ok(cleared);
+        }
+    }
 }
 
 async fn record_batch(pool: &PgPool, legs: &[LegFacts], today: NaiveDate) -> anyhow::Result<u64> {
@@ -376,6 +598,82 @@ mod tests {
             record(None, None),
             "a train never activated"
         );
+    }
+
+    fn facts() -> SnapshotFacts {
+        SnapshotFacts {
+            id: 1,
+            subscription_id: 2,
+            snapshot: None,
+            recorded: false,
+            delay_minutes: None,
+            cancelled: None,
+            train_uid: Some("C1".to_owned()),
+            train_id: None,
+            train_service_date: Some(d(TODAY)),
+            origin_crs: None,
+            destination_crs: None,
+            scheduled_departure: None,
+            matched_line_id: None,
+            platform: Some("1".to_owned()),
+            planned_platform: None,
+            skipped_stations: Some(Vec::new()),
+            calling_points: Some(serde_json::json!([{"tiploc": "A", "kind": "Origin"}])),
+        }
+    }
+
+    #[test]
+    fn a_held_train_with_calling_points_is_snapshotted_before_the_leg_completes() {
+        let snapshot = next_snapshot(&facts(), chrono::Utc::now()).unwrap();
+        assert_eq!(snapshot.train_uid, "C1");
+        assert_eq!(snapshot.calling_points.len(), 1);
+        assert_eq!(snapshot.final_arrival_delay_minutes, None);
+        assert_eq!(snapshot.train_cancelled, None);
+    }
+
+    #[test]
+    fn a_train_with_no_timetable_waits_for_one_or_for_the_outcome() {
+        let mut leg = facts();
+        leg.calling_points = None;
+        assert_eq!(next_snapshot(&leg, chrono::Utc::now()), None);
+        leg.recorded = true;
+        leg.delay_minutes = Some(3);
+        leg.cancelled = Some(false);
+        let snapshot = next_snapshot(&leg, chrono::Utc::now()).unwrap();
+        assert_eq!(snapshot.calling_points, Vec::<serde_json::Value>::new());
+        assert_eq!(snapshot.final_arrival_delay_minutes, Some(3));
+    }
+
+    #[test]
+    fn the_outcome_is_merged_and_a_gone_train_keeps_its_earlier_copy() {
+        let earlier = next_snapshot(&facts(), chrono::Utc::now()).unwrap();
+        let mut leg = facts();
+        leg.snapshot = Some(earlier.to_value());
+        leg.recorded = true;
+        leg.delay_minutes = Some(17);
+        leg.cancelled = Some(false);
+        // The row is gone: only the outcome is added.
+        leg.train_uid = None;
+        leg.calling_points = None;
+        let merged = next_snapshot(&leg, chrono::Utc::now()).unwrap();
+        assert_eq!(merged.calling_points, earlier.calling_points);
+        assert_eq!(merged.platform, earlier.platform);
+        assert_eq!(merged.final_arrival_delay_minutes, Some(17));
+        // No outcome yet and no row: nothing to write.
+        leg.recorded = false;
+        assert_eq!(next_snapshot(&leg, chrono::Utc::now()), None);
+        // No row and no copy: nothing to write.
+        leg.snapshot = None;
+        leg.recorded = true;
+        assert_eq!(next_snapshot(&leg, chrono::Utc::now()), None);
+    }
+
+    #[test]
+    fn a_copy_of_another_version_is_left_alone() {
+        let mut leg = facts();
+        leg.snapshot = Some(serde_json::json!({"v": 2}));
+        leg.recorded = true;
+        assert_eq!(next_snapshot(&leg, chrono::Utc::now()), None);
     }
 
     #[test]

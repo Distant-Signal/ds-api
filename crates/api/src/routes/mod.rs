@@ -52,6 +52,8 @@ pub mod journeys;
 #[cfg(test)]
 mod leave_by_db_tests;
 #[cfg(test)]
+mod leg_snapshot_db_tests;
+#[cfg(test)]
 mod leg_validation_db_tests;
 pub mod line_status;
 pub mod line_timetable;

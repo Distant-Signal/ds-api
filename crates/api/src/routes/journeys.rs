@@ -1775,6 +1775,16 @@ pub(crate) struct JourneyLegDetailResponse {
     /// `blend_darwin_eta`, all reused unchanged; design doc §4). `None`
     /// for an unmatched (`train_subscription_id IS NULL`) leg.
     tracked_train_state: Option<train_tracking::TrackedTrainState>,
+    /// Where a matched train leg's `trackedTrainState` detail comes from
+    /// (additive, 2026-11-21): `live` while the train's data is held;
+    /// `snapshot` once it is pruned but the leg kept its own copy (booked
+    /// stops, platform and the recorded outcome, no live movements); and
+    /// `unavailable` when it is pruned and no copy was kept. `null` on a leg
+    /// with no matched train yet and on an untracked leg.
+    train_detail: Option<crate::data::leg_snapshot::TrainDetail>,
+    /// When the leg's copy was last written; set only when `trainDetail` is
+    /// `snapshot`. Additive, 2026-11-21.
+    snapshot_at: Option<DateTime<Utc>>,
     /// `null` when the leg has no matched train yet, or no known
     /// origin/destination to check against (nothing to report -- not
     /// "checked and clean"). See `station_skip.rs` and this plan's §5.2.
@@ -2456,6 +2466,10 @@ async fn build_journey_detail_response(
     let mut leg_states: Vec<Option<train_tracking::TrackedTrainState>> =
         (0..leg_rows.len()).map(|_| None).collect();
     let mut stop_states = crate::routes::train::attach_journey_stops_batch(app, blended).await;
+    // A matched leg whose `trains` row was pruned is rendered from the
+    // leg's own copy (`data::leg_snapshot`), or marked unavailable.
+    let train_details =
+        attach_leg_snapshots(app, &leg_rows, &stop_leg_indexes, &mut stop_states).await;
     // Operator + TRUST reason overlays (train_operator / train_reasons),
     // batched for every leg and applied after the batched stop build so
     // per-stop live status sees the stops.
@@ -2513,12 +2527,17 @@ async fn build_journey_detail_response(
     };
 
     let mut legs = Vec::with_capacity(leg_rows.len());
-    for (((leg, tracked_train_state), connection), timetable) in leg_rows
+    for (leg_index, (((leg, tracked_train_state), connection), timetable)) in leg_rows
         .into_iter()
         .zip(leg_states)
         .zip(connections)
         .zip(timetables)
+        .enumerate()
     {
+        let (train_detail, snapshot_at) = train_details
+            .get(&leg_index)
+            .copied()
+            .map_or((None, None), |(detail, at)| (Some(detail), at));
         // Low finding #5 (2026-09-25 review): `TrackedTrainState` is reused
         // verbatim here for BOTH the owner's own read and every non-owner
         // read this function serves -- a fellow group member
@@ -2588,6 +2607,8 @@ async fn build_journey_detail_response(
             match_mode: leg.match_mode,
             window_searched: leg.window_searched,
             tracked_train_state,
+            train_detail,
+            snapshot_at,
             leg_skip,
             kind: leg.kind,
             transit_mode: leg.transit_mode,
@@ -2713,6 +2734,63 @@ async fn build_journey_detail_response(
         station_buffer_minutes: own_leave_by.station_buffer_minutes,
         leave_by: own_leave_by.leave_by,
     })
+}
+
+/// Fills each leg's `trainDetail` and renders the legs whose `trains` row is
+/// gone from their own copy (`data::leg_snapshot::apply`). `states[i]` is
+/// the state of leg `leg_indexes[i]`; the result is keyed by leg index and
+/// holds only train legs with a matched train.
+async fn attach_leg_snapshots(
+    app: &App,
+    leg_rows: &[journeys::JourneyLegWithNamesRow],
+    leg_indexes: &[usize],
+    states: &mut [train_tracking::TrackedTrainState],
+) -> std::collections::HashMap<
+    usize,
+    (
+        crate::data::leg_snapshot::TrainDetail,
+        Option<DateTime<Utc>>,
+    ),
+> {
+    use crate::data::leg_snapshot::{self, LegSnapshot, TrainDetail};
+    let pruned_leg_ids: Vec<i64> = leg_indexes
+        .iter()
+        .zip(states.iter())
+        .filter(|(_, state)| state.trains_id.is_none() && leg_snapshot::was_matched(state))
+        .map(|(&index, _)| leg_rows[index].id)
+        .collect();
+    let stored = leg_snapshot::read_for_legs(&app.database, &pruned_leg_ids)
+        .await
+        .unwrap_or_else(|err| {
+            tracing::warn!(error = ?err, "could not read leg snapshots");
+            std::collections::HashMap::new()
+        });
+    let mut details = std::collections::HashMap::new();
+    let mut snapshots: Vec<Option<LegSnapshot>> = vec![None; states.len()];
+    for (position, (&index, state)) in leg_indexes.iter().zip(states.iter()).enumerate() {
+        let leg = &leg_rows[index];
+        if leg.kind != journeys::LEG_KIND_TRAIN {
+            continue;
+        }
+        if state.trains_id.is_some() {
+            details.insert(index, (TrainDetail::Live, None));
+        } else if leg_snapshot::was_matched(state) {
+            let kept = stored
+                .get(&leg.id)
+                .and_then(|(value, at)| LegSnapshot::parse(value).map(|parsed| (parsed, *at)));
+            match kept {
+                Some((parsed, at)) => {
+                    snapshots[position] = Some(parsed);
+                    details.insert(index, (TrainDetail::Snapshot, Some(at)));
+                }
+                None => {
+                    details.insert(index, (TrainDetail::Unavailable, None));
+                }
+            }
+        }
+    }
+    leg_snapshot::apply(&app.database, states, &snapshots).await;
+    details
 }
 
 /// Every leg as `journey_feasibility` judges it (each leg's `connection`,

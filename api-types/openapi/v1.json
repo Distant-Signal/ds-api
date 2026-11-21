@@ -1025,6 +1025,14 @@
             "format": "date",
             "type": "string"
           },
+          "snapshotAt": {
+            "description": "When the leg's copy was last written; set only when `trainDetail` is\n`snapshot`. Additive, 2026-11-21.",
+            "format": "date-time",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
           "ticket": {
             "anyOf": [
               {
@@ -1057,6 +1065,17 @@
               }
             ],
             "description": "`Some` once a train is bound -- the EXACT same shape\n`GET /Train/{trackingId}` returns\n(`train_tracking::TRACKED_TRAIN_STATE_SELECT`, `attach_journey_stops`,\n`blend_darwin_eta`, all reused unchanged; design doc §4). `None`\nfor an unmatched (`train_subscription_id IS NULL`) leg."
+          },
+          "trainDetail": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/TrainDetail"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Where a matched train leg's `trackedTrainState` detail comes from\n(additive, 2026-11-21): `live` while the train's data is held;\n`snapshot` once it is pruned but the leg kept its own copy (booked\nstops, platform and the recorded outcome, no live movements); and\n`unavailable` when it is pruned and no copy was kept. `null` on a leg\nwith no matched train yet and on an untracked leg."
           },
           "transitLineId": {
             "type": [
@@ -4169,6 +4188,26 @@
           {
             "const": "awaitingReport",
             "description": "Its first report is due (or we can't tell when it is): the existing\nwaiting states.",
+            "type": "string"
+          }
+        ]
+      },
+      "TrainDetail": {
+        "description": "What the journey routes say about where a train leg's detail comes from\n(`trainDetail`).",
+        "oneOf": [
+          {
+            "const": "live",
+            "description": "The shared `trains` row is still held: live data.",
+            "type": "string"
+          },
+          {
+            "const": "snapshot",
+            "description": "The row is gone; the stops, platform and outcome come from the leg's\nown copy (`snapshotAt` says when it was last written). There is no\nlive data.",
+            "type": "string"
+          },
+          {
+            "const": "unavailable",
+            "description": "The row is gone and the leg holds no copy: the train's detail is no\nlonger available.",
             "type": "string"
           }
         ]

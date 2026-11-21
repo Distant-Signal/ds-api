@@ -3,6 +3,33 @@
 Changes to the Distant Signal (DS) HTTP API that a client such as DS-MCP
 needs to know about. Newest first. Field names are as served (camelCase).
 
+## 2026-11-21: a train leg keeps its train's detail after the train is pruned (DS-643)
+
+Additive. `api-types/api.ts` and `api-types/openapi/v1.json` gain the
+fields below (and the `TrainDetail` schema). Needs ds-core v0.17.5 (`journey_legs.final_train_uid`,
+`final_snapshot`, `final_snapshot_at`).
+
+- **New on each leg of `GET /Journeys/{id}` and `GET /Journeys/shared/{token}`:**
+  - `trainDetail` (`"live"`, `"snapshot"`, `"unavailable"` or `null`): where
+    a matched train leg's `trackedTrainState` detail comes from. `live`: the
+    train's data is held. `snapshot`: it was pruned (about 30 days after the
+    service date) but the leg kept its own copy, so the train UID and id,
+    booked times and stops, origin platform, skipped stops and the recorded
+    outcome (`delayMinutes`, `status` `completed` or `cancelled`) are still
+    served; there are no live movements, estimates, boards or reasons.
+    `unavailable`: pruned and no copy was kept (a leg that finished before
+    this change), so the stops are empty and the client should say the
+    train's detail is no longer held, not that it is waiting for a first
+    movement. `null`: no matched train yet, or an untracked leg.
+  - `snapshotAt` (RFC 3339 or `null`): when the copy was last written; set
+    only with `snapshot`.
+- The copy is written by the hourly retention pass as soon as a leg has a
+  train with calling points (the timetable is static), and again, with the
+  outcome, when the leg completes. It is deleted with its leg and journey,
+  exported in "Download my data" as the leg's `final_*` columns, removed with
+  the account, and cleared when the leg's train is changed or untracked.
+- `GET /Journeys/mine` rows are unchanged.
+
 ## 2026-11-20: opaque ids for deleted-journey records, personal tokens, webhook destinations and time-away periods (DS-534, wave 3)
 
 Additive; the numeric ids stay in every schema. `api-types/api.ts` gains the
