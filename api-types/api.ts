@@ -1558,6 +1558,20 @@ windowSearched: boolean,
  */
 trackedTrainState: TrackedTrainState | null, 
 /**
+ * Where a matched train leg's `trackedTrainState` detail comes from
+ * (additive, 2026-11-21): `live` while the train's data is held;
+ * `snapshot` once it is pruned but the leg kept its own copy (booked
+ * stops, platform and the recorded outcome, no live movements); and
+ * `unavailable` when it is pruned and no copy was kept. `null` on a leg
+ * with no matched train yet and on an untracked leg.
+ */
+trainDetail: TrainDetail | null, 
+/**
+ * When the leg's copy was last written; set only when `trainDetail` is
+ * `snapshot`. Additive, 2026-11-21.
+ */
+snapshotAt: string | null, 
+/**
  * `null` when the leg has no matched train yet, or no known
  * origin/destination to check against (nothing to report -- not
  * "checked and clean"). See `station_skip.rs` and this plan's §5.2.
@@ -5519,6 +5533,12 @@ export type TrainArrivalsPage = { results: Array<TrainArrivalResult>, nextCursor
  * unbounded.
  */
 export type TrainArrivalsWindow = { from: WindowBound, to: WindowBound | null, };
+
+/**
+ * What the journey routes say about where a train leg's detail comes from
+ * (`trainDetail`).
+ */
+export type TrainDetail = "live" | "snapshot" | "unavailable";
 
 /**
  * `GET /public/trains/by-headcode`'s body.

@@ -655,6 +655,9 @@ pub(crate) mod db_tests {
         let journey = format!("(SELECT id FROM journeys WHERE user_id = '{user}' LIMIT 1)");
         exec(pool, &format!("INSERT INTO journey_legs (journey_id, leg_order, service_date, train_subscription_id) VALUES ({journey}, 0, CURRENT_DATE, {sub})"), &[]).await;
         let leg = format!("(SELECT id FROM journey_legs WHERE journey_id = {journey} LIMIT 1)");
+        // The leg's copy of its train (`data::leg_snapshot`): personal data
+        // the export carries and the deletion removes.
+        exec(pool, &format!("UPDATE journey_legs SET final_train_uid = 'SNAP-' || $1, final_snapshot_at = NOW(), final_snapshot = jsonb_build_object('v', 1, 'source', 'live', 'capturedAt', NOW(), 'trainUid', 'SNAP-' || $1, 'serviceDate', CURRENT_DATE, 'callingPoints', '[]'::jsonb) WHERE id = {leg}"), u).await;
         exec(pool, &format!("INSERT INTO journey_leg_notification_state (user_id, journey_leg_id, last_notified_skipped, last_notified_at) VALUES ($1, {leg}, false, NOW())"), u).await;
         // Regular journeys' leave-by bookkeeping and a morning summary.
         exec(pool, &format!("INSERT INTO regular_journey_push_state (journey_id, user_id, leave_leg_id, leave_by_sent, leave_by_sent_at, pushes) VALUES ({journey}, $1, {leg}, NOW(), NOW(), 1)"), u).await;
@@ -847,6 +850,17 @@ pub(crate) mod db_tests {
             .await;
             assert_eq!(n, 0, "{table}.{column} survived the deletion");
         }
+        // The leg's copy of its train went with its leg.
+        assert_eq!(
+            scalar_i64(
+                &pool,
+                "SELECT COUNT(*) FROM journey_legs WHERE final_train_uid = 'SNAP-' || $1",
+                &[user],
+            )
+            .await,
+            0,
+            "a leg snapshot survived the deletion"
+        );
         // Child tables with no users FK went with their parents.
         for (sql, what) in [
             (
@@ -983,6 +997,14 @@ pub(crate) mod db_tests {
         assert_eq!(json["tickets"].as_array().unwrap().len(), 2);
         assert_eq!(json["groupMemberships"].as_array().unwrap().len(), 3);
         assert_eq!(json["journeys"][0]["legs"].as_array().unwrap().len(), 1);
+        // The leg's copy of its train is exported with the leg.
+        let exported_leg = &json["journeys"][0]["legs"][0];
+        assert_eq!(exported_leg["final_train_uid"], "SNAP-acct-exp-user");
+        assert_eq!(
+            exported_leg["final_snapshot"]["trainUid"],
+            "SNAP-acct-exp-user"
+        );
+        assert!(exported_leg["final_snapshot_at"].is_string());
         assert_eq!(
             json["journeyTemplates"][0]["legs"]
                 .as_array()

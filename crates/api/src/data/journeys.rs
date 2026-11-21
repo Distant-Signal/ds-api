@@ -2363,7 +2363,10 @@ async fn set_leg_train_subscription_locked(
     };
 
     let result = sqlx::query(
-        "UPDATE journey_legs SET train_subscription_id = $1, match_mode = 'manual' \
+        // The copy of the old train goes (`data::leg_snapshot`); the sweep
+        // writes the new train's.
+        "UPDATE journey_legs SET train_subscription_id = $1, match_mode = 'manual', \
+             final_train_uid = NULL, final_snapshot = NULL, final_snapshot_at = NULL \
          WHERE journey_legs.id = $2 AND journey_legs.journey_id = $3",
     )
     .bind(train_subscription_id)
