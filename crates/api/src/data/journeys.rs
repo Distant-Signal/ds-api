@@ -3031,6 +3031,33 @@ pub struct JourneyListItem {
     #[serde(skip_serializing)]
     #[ts(skip)]
     pub train_uid: Option<String>,
+    /// Where the current train leg's detail comes from (additive,
+    /// 2026-11-22), as on `GET /Journeys/{id}`'s legs (`TrainDetail`):
+    /// `live` while the train's data is held; `snapshot` once it is pruned
+    /// but the leg kept its own copy; `unavailable` when pruned and no copy
+    /// was kept. `null` for an open or untracked leg. For `snapshot` and
+    /// `unavailable` the leg's recorded outcome, when there is one, fills
+    /// `status` (`completed` or `cancelled`) and `delayMinutes`; there is
+    /// nothing live to say beyond it.
+    #[sqlx(skip)]
+    pub train_detail: Option<crate::data::leg_snapshot::TrainDetail>,
+    /// When the leg's copy was last written; set only with `snapshot`.
+    pub snapshot_at: Option<DateTime<Utc>>,
+    /// Whether the current leg holds a copy, internal: with a missing
+    /// `trains` row it makes `train_detail` `snapshot`.
+    #[serde(skip_serializing)]
+    #[ts(skip)]
+    pub snapshot_kept: bool,
+    /// The current leg's recorded arrival delay when its train was pruned,
+    /// internal: `delay_minutes` for such a leg.
+    #[serde(skip_serializing)]
+    #[ts(skip)]
+    pub snapshot_delay_minutes: Option<i32>,
+    /// The last train leg's recorded arrival delay when its train was
+    /// pruned, internal: `final_arrival_delay_minutes` for such a leg.
+    #[serde(skip_serializing)]
+    #[ts(skip)]
+    pub final_snapshot_delay_minutes: Option<i32>,
     /// The current leg's kind: `train` or `untracked` (spec 2026-10-20
     /// §2.4). For an untracked leg `originName`/`destinationName` carry its
     /// place names, and the five fields below are set.
@@ -3247,6 +3274,49 @@ async fn apply_final_arrival_delays(
     Ok(())
 }
 
+/// Fills each row's `train_detail` and `snapshot_at`, and the recorded
+/// outcome of a train that was pruned (`data::leg_snapshot`): the status
+/// came from the query; the delay is put here, after the live delays were
+/// read, which find nothing for a train that is gone.
+fn apply_leg_snapshots(rows: &mut [JourneyListItem]) {
+    use crate::data::leg_snapshot::TrainDetail;
+    use crate::data::stop_delay::DelayBasis;
+    for row in rows {
+        if row.kind == LEG_KIND_TRAIN {
+            let matched = matches!(
+                row.resolution_status.as_deref(),
+                Some("resolved" | "schedule_matched")
+            );
+            if row.trains_id.is_some() {
+                row.train_detail = Some(TrainDetail::Live);
+            } else if matched && row.snapshot_kept {
+                row.train_detail = Some(TrainDetail::Snapshot);
+            } else if matched {
+                row.train_detail = Some(TrainDetail::Unavailable);
+            }
+            if row.trains_id.is_none()
+                && matched
+                && let Some(minutes) = row.snapshot_delay_minutes
+            {
+                row.delay_minutes = Some(minutes);
+                row.delay_basis = Some(DelayBasis::Public);
+                row.delay_provisional = false;
+            }
+        }
+        // Only a copy has a date to give.
+        row.snapshot_at = (row.train_detail == Some(TrainDetail::Snapshot))
+            .then(|| row.snapshot_at.unwrap_or_default());
+        if row.final_trains_id.is_none()
+            && row.final_arrival_delay_minutes.is_none()
+            && row.final_status.as_deref() != Some("cancelled")
+            && let Some(minutes) = row.final_snapshot_delay_minutes
+        {
+            row.final_arrival_delay_minutes = Some(minutes);
+            row.final_arrival_delay_provisional = false;
+        }
+    }
+}
+
 impl crate::data::tracking_phase::PhaseRow for JourneyListItem {
     fn phase_key(&self) -> Option<(&str, NaiveDate)> {
         self.train_uid
@@ -3442,14 +3512,35 @@ static LIST_JOURNEYS_SQL: std::sync::LazyLock<String> = std::sync::LazyLock::new
     let r_destination = leg_crs_sql(LegEnd::Destination, "jl", "ts", "tr");
     let r_origin_place = leg_place_sql(LegEnd::Origin, "jl");
     let r_destination_place = leg_place_sql(LegEnd::Destination, "jl");
+    // A matched train leg whose `trains` row was pruned (`leg_snapshot`): its
+    // recorded outcome stands in for the live status, from the leg's own
+    // `final_*` columns (the sweep and a restore both write them; the
+    // snapshot document's copy of them is not read, so no row detoasts it).
+    let pruned = "(jl.kind = 'train' AND ts.id IS NOT NULL AND ts.trains_id IS NULL \
+                   AND ts.resolution_status IN ('resolved', 'schedule_matched'))";
+    let snap_delay = format!(
+        "(CASE WHEN {pruned} AND jl.final_recorded_at IS NOT NULL \
+              THEN jl.final_arrival_delay_minutes END)"
+    );
+    let snap_status = format!(
+        "(CASE WHEN {pruned} AND jl.final_recorded_at IS NOT NULL \
+              THEN CASE jl.final_train_cancelled WHEN TRUE THEN 'cancelled' \
+                                                 WHEN FALSE THEN 'completed' END END)"
+    );
+    // The leg's status: the live one, else the recorded outcome.
+    let st = format!("COALESCE(cs.status, {snap_status})");
     format!(
         "WITH {ranked}, \
          ranked_legs AS ( \
              SELECT jl.id, jl.journey_id, jl.leg_order, \
                     {r_origin} AS origin_crs, {r_destination} AS destination_crs, \
                     jl.service_date, jl.match_mode, jl.train_subscription_id, \
-                    ts.resolution_status, cs.status, cs.delay_minutes, \
+                    ts.resolution_status, {st} AS status, cs.delay_minutes, \
                     ts.trains_id, tr.train_uid, \
+                    {snap_delay} AS snapshot_delay_minutes, \
+                    (jl.final_snapshot IS NOT NULL) AS snapshot_kept, \
+                    (CASE WHEN jl.final_snapshot IS NOT NULL THEN jl.final_snapshot_at END) \
+                        AS snapshot_at, \
                     jl.kind, jl.transit_mode, jl.line_name, {r_origin_place} AS origin_place, \
                     {r_destination_place} AS destination_place, \
                     jl.planned_departure, jl.planned_arrival, \
@@ -3462,20 +3553,21 @@ static LIST_JOURNEYS_SQL: std::sync::LazyLock<String> = std::sync::LazyLock::new
                     FIRST_VALUE({r_destination}) OVER last_leg AS last_destination_crs, \
                     FIRST_VALUE({r_destination_place}) OVER last_leg AS last_destination_place, \
                     COUNT(*) FILTER (WHERE jl.kind = 'train') OVER journey AS train_leg_count, \
-                    COUNT(*) FILTER (WHERE jl.kind = 'train' AND cs.status = 'cancelled') \
+                    COUNT(*) FILTER (WHERE jl.kind = 'train' AND {st} = 'cancelled') \
                         OVER journey AS cancelled_leg_count, \
                     COUNT(*) FILTER (WHERE jl.kind = 'train' AND jl.train_subscription_id IS NULL) \
                         OVER journey AS unmatched_leg_count, \
                     COUNT(*) FILTER (WHERE CASE WHEN jl.kind = 'untracked' \
                                                 THEN jl.planned_arrival <= now() \
-                                                WHEN ts.trains_id IS NULL THEN FALSE \
+                                                WHEN ts.trains_id IS NULL \
+                                                THEN COALESCE({st} = 'completed', FALSE) \
                                                 ELSE cs.status = 'completed' \
                                                      OR (cs.status IS DISTINCT FROM 'cancelled' \
                                                          AND {leg_arrived}) \
                                            END) OVER journey AS finished_leg_count, \
                     COUNT(*) FILTER (WHERE CASE WHEN jl.kind = 'untracked' \
                                                 THEN jl.planned_departure <= now() \
-                                                ELSE cs.status IN ('en_route', 'completed') \
+                                                ELSE {st} IN ('en_route', 'completed') \
                                            END) OVER journey AS started_leg_count, \
                     FIRST_VALUE(CASE WHEN jl.kind = 'train' THEN ts.trains_id END) \
                         OVER last_train AS final_trains_id, \
@@ -3487,14 +3579,16 @@ static LIST_JOURNEYS_SQL: std::sync::LazyLock<String> = std::sync::LazyLock::new
                         OVER last_train AS final_destination_crs, \
                     FIRST_VALUE(CASE WHEN jl.kind = 'train' THEN cs.delay_minutes END) \
                         OVER last_train AS final_working_delay_minutes, \
-                    FIRST_VALUE(CASE WHEN jl.kind = 'train' THEN cs.status END) \
+                    FIRST_VALUE(CASE WHEN jl.kind = 'train' THEN {st} END) \
                         OVER last_train AS final_status, \
+                    FIRST_VALUE(CASE WHEN jl.kind = 'train' THEN {snap_delay} END) \
+                        OVER last_train AS final_snapshot_delay_minutes, \
                     ROW_NUMBER() OVER ( \
                         PARTITION BY jl.journey_id \
-                        ORDER BY (cs.status IS DISTINCT FROM 'completed' \
+                        ORDER BY ({st} IS DISTINCT FROM 'completed' \
                                   AND NOT (jl.kind = 'untracked' \
                                            AND jl.planned_arrival <= now())) DESC, \
-                                 CASE WHEN cs.status = 'completed' \
+                                 CASE WHEN {st} = 'completed' \
                                         OR (jl.kind = 'untracked' \
                                             AND jl.planned_arrival <= now()) \
                                       THEN -jl.leg_order ELSE jl.leg_order END ASC \
@@ -3525,7 +3619,9 @@ static LIST_JOURNEYS_SQL: std::sync::LazyLock<String> = std::sync::LazyLock::new
                 rl.train_leg_count, rl.cancelled_leg_count, rl.unmatched_leg_count, \
                 rl.finished_leg_count, rl.started_leg_count, \
                 rl.final_trains_id, rl.final_train_uid, rl.final_service_date, \
-                rl.final_destination_crs, rl.final_working_delay_minutes, rl.final_status \
+                rl.final_destination_crs, rl.final_working_delay_minutes, rl.final_status, \
+                rl.final_snapshot_delay_minutes, rl.snapshot_delay_minutes, \
+                rl.snapshot_kept, rl.snapshot_at \
          FROM recent r \
          JOIN ranked_legs rl ON rl.journey_id = r.id AND rl.rn = 1 \
          LEFT JOIN stations so ON so.crs = UPPER(rl.origin_crs)::bpchar \
@@ -3645,6 +3741,7 @@ pub(crate) async fn list_journeys_for_user_capped(
     let mut rows = rows;
     crate::data::stop_delay::apply_public_delays(pool, &mut rows).await?;
     apply_final_arrival_delays(pool, &mut rows).await?;
+    apply_leg_snapshots(&mut rows);
     let now = Utc::now();
     crate::data::irish_trains::attach(pool, &mut rows, now).await;
     for row in &mut rows {

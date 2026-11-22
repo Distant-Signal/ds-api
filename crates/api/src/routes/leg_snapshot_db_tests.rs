@@ -298,3 +298,137 @@ async fn a_leg_keeps_its_train_after_the_train_is_pruned() {
 
     cleanup(&pool).await;
 }
+
+async fn new_journey(pool: &PgPool) -> i64 {
+    sqlx::query_scalar("INSERT INTO journeys (user_id) VALUES ($1) RETURNING id")
+        .bind(USER)
+        .fetch_one(pool)
+        .await
+        .unwrap()
+}
+
+/// Records a leg's outcome as the sweep does when the leg completes.
+async fn record_outcome(pool: &PgPool, leg: i64, delay: Option<i32>, cancelled: bool) {
+    sqlx::query(
+        "UPDATE journey_legs SET final_arrival_delay_minutes = $2, final_train_cancelled = $3, \
+             final_recorded_at = now() WHERE id = $1",
+    )
+    .bind(leg)
+    .bind(delay)
+    .bind(cancelled)
+    .execute(pool)
+    .await
+    .unwrap();
+}
+
+/// `GET /Journeys/mine` says where each journey's current leg's train detail
+/// comes from, and a pruned train's recorded outcome stands in for its
+/// status and delay (DS-638), so a recovered leg is not read as one that
+/// "got no report".
+#[tokio::test]
+#[ignore = "requires DATABASE_URL (a migrated database); --test-threads=1"]
+async fn the_journey_list_says_where_each_legs_train_detail_comes_from() {
+    let pool = connect().await;
+    cleanup(&pool).await;
+    let cookie = session(&pool).await;
+    let date = NaiveDate::from_ymd_opt(2026, 1, 14).unwrap();
+
+    // A train still held: live.
+    let held = seed_train(&pool, UID, date).await;
+    let (live, _) = seed_leg(&pool, new_journey(&pool).await, 1, date, Some(held)).await;
+
+    // Pruned after completing late: a copy with its outcome.
+    let late_train = seed_train(&pool, "LEGSNAP2", date).await;
+    let (late, _) = seed_leg(&pool, new_journey(&pool).await, 1, date, Some(late_train)).await;
+    record_outcome(&pool, late, Some(7), false).await;
+
+    // Pruned after being cancelled.
+    let cancelled_train = seed_train(&pool, "LEGSNAP3", date).await;
+    let (cancelled, _) = seed_leg(
+        &pool,
+        new_journey(&pool).await,
+        1,
+        date,
+        Some(cancelled_train),
+    )
+    .await;
+    record_outcome(&pool, cancelled, None, true).await;
+
+    snapshot_legs(&pool).await.unwrap();
+    for train in [late_train, cancelled_train] {
+        sqlx::query("DELETE FROM trains WHERE id = $1")
+            .bind(train)
+            .execute(&pool)
+            .await
+            .unwrap();
+    }
+
+    // Pruned before any copy existed, with an outcome recorded.
+    let (outcome_only, _) = seed_leg(&pool, new_journey(&pool).await, 1, date, None).await;
+    record_outcome(&pool, outcome_only, Some(4), false).await;
+    // Pruned with nothing kept at all.
+    let (nothing, _) = seed_leg(&pool, new_journey(&pool).await, 1, date, None).await;
+
+    // An untracked leg has no train.
+    let untracked: i64 = sqlx::query_scalar(
+        "INSERT INTO journey_legs (journey_id, leg_order, service_date, match_mode, \
+             window_searched, kind, transit_mode, origin_place, destination_place, \
+             planned_departure, planned_arrival) \
+         VALUES ($1, 1, $2, 'manual', FALSE, 'untracked', 'bus', 'Zed', 'Yon', \
+                 '2026-01-14T10:00:00Z', '2026-01-14T10:30:00Z') RETURNING id",
+    )
+    .bind(new_journey(&pool).await)
+    .bind(date)
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+
+    let router = router(pool.clone());
+    let (status, list) = get(&router, "/Journeys/mine", &cookie).await;
+    assert_eq!(status, StatusCode::OK, "{list}");
+    let rows = list.as_array().expect("an array");
+    assert_eq!(rows.len(), 6, "{list}");
+    let row = |leg: i64| {
+        rows.iter()
+            .find(|row| row["legId"] == leg)
+            .unwrap_or_else(|| panic!("a row for leg {leg}: {list}"))
+    };
+
+    let live = row(live);
+    assert_eq!(live["trainDetail"], "live");
+    assert_eq!(live["snapshotAt"], Value::Null);
+
+    let late = row(late);
+    assert_eq!(late["trainDetail"], "snapshot");
+    assert!(late["snapshotAt"].is_string(), "{late}");
+    assert_eq!(late["status"], "completed");
+    assert_eq!(late["delayMinutes"], 7);
+    assert_eq!(late["delayBasis"], "public");
+    assert_eq!(late["finalArrivalDelayMinutes"], 7);
+    assert_eq!(late["finishedLegCount"], 1);
+    assert_eq!(late["travelled"], true);
+
+    let cancelled = row(cancelled);
+    assert_eq!(cancelled["trainDetail"], "snapshot");
+    assert_eq!(cancelled["status"], "cancelled");
+    assert_eq!(cancelled["delayMinutes"], Value::Null);
+    assert_eq!(cancelled["cancelledLegCount"], 1);
+
+    let outcome_only = row(outcome_only);
+    assert_eq!(outcome_only["trainDetail"], "unavailable");
+    assert_eq!(outcome_only["snapshotAt"], Value::Null);
+    assert_eq!(outcome_only["status"], "completed");
+    assert_eq!(outcome_only["delayMinutes"], 4);
+
+    let nothing = row(nothing);
+    assert_eq!(nothing["trainDetail"], "unavailable");
+    assert_eq!(nothing["status"], Value::Null);
+    assert_eq!(nothing["delayMinutes"], Value::Null);
+    assert_eq!(nothing["finalArrivalDelayMinutes"], Value::Null);
+
+    let untracked = row(untracked);
+    assert_eq!(untracked["trainDetail"], Value::Null);
+    assert_eq!(untracked["snapshotAt"], Value::Null);
+
+    cleanup(&pool).await;
+}
