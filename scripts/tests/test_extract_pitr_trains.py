@@ -119,6 +119,10 @@ TABLE_ORDER = {
 TRAIN_IDS = "(101, 102, 103)"
 
 
+@unittest.skipUnless(
+    shutil.which("initdb") and shutil.which("pg_ctl") and shutil.which("psql"),
+    "PostgreSQL server binaries are not on PATH",
+)
 class PostgresCase(unittest.TestCase):
     """A throwaway server with a scratch and a live database."""
 
