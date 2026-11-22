@@ -39,8 +39,16 @@ schema is `scripts/tests/fixtures/pitr-train-schema.sql`, `pg_dump -s` of
 those migrations.
 
 Sequences need no `setval`: restored ids are far below the live sequences.
-The batch asserts it (`max(trains.id)` above every restored id, and
-`preflight.sql` checks the two child tables too).
+The batch asserts it per table, because each table has its own sequence and
+very different id ranges (on production `max(trains.id)` is about 8.3 million
+while event ids reach 20 million): the `DO $guard$` block at the top of every
+batch has three separate checks, each comparing the live `max(id)` of one table
+with the highest id restored into that same table (`trains`,
+`train_movement_events`, `train_current_state`), each with its own message
+(`trains ids are not above the restored trains ids`, `event ids ...`,
+`state ids ...`). Never compare one table's max with another table's ids (the
+first version did, and refused to run on production). `preflight.sql` reports
+the same three checks as `*_ids_ok`.
 
 ## Guards (the batch never overwrites)
 
@@ -75,6 +83,18 @@ is the `trains` row with that `(train_uid, service_date)`. None: counted
 `ambiguous`. A train whose rows contain a NUL byte, whose columns are not the
 known ones, or whose children do not point at it: `rejected`. All are skipped
 and counted, never guessed.
+
+## Older backups
+
+A backup from before `train_service_labels` existed (the 2026-11-09 one, T1)
+has no such table. The extract script cannot name a missing table in its
+query, so its read-only session first runs
+`SELECT to_regclass('public.train_service_labels') IS NOT NULL ... \gset` and
+puts the label subquery in a psql variable: the real subquery when the table
+exists (same result as before), `NULL::jsonb` when it does not. Every train
+then has no label, the plan counts 0 labels to insert, the batch has no label
+INSERT and `verify.sql` expects 0 labels. The batch's schema guard still
+checks the LIVE column sets, which do have the table.
 
 ## Running it, per target
 
@@ -112,6 +132,21 @@ On the live database, as a role that can write these tables:
    (row for row, `to_jsonb(live) = extracted`), except for trains the
    preflight reported as skipped; `subscriptions_linked` equals
    `subscriptions_expected`.
+
+Every row comparison in `verify.sql` is looked up by primary key first
+(`x.id = ...`, `x.trains_id = ... AND x.msg_type = ...`) and only then
+compared as jsonb. An unkeyed `WHERE to_jsonb(x) = <row>` converts every row
+of the table for every extracted row: on 8 million events it ran for hours and
+timed out. A unit test fails on any `to_jsonb(x) =` in the generated
+`verify.sql` or `preflight.sql` without a key predicate on the same alias, and
+a database test checks `verify.sql` runs in under 2 seconds with 200,000
+events in the table. `preflight.sql` compares by key only.
+
+Before sealing anything, run the generated `preflight.sql` and `verify.sql`,
+and the guard block of a batch (read-only: `BEGIN; ... ROLLBACK;`, or
+just the `DO` block) against the LIVE database. Both of the first-run
+failures (the guard refusing to run, `verify.sql` timing out) only show on
+production-sized live data, never on the small test databases.
 
 Run T1 and T2 separately. A train present in both would be restored by the
 first and left alone by the second.

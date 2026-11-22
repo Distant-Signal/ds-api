@@ -18,11 +18,13 @@ import importlib.util
 import io
 import json
 import os
+import re
 import shutil
 import stat
 import subprocess
 import sys
 import tempfile
+import time
 import unittest
 from pathlib import Path
 from types import ModuleType
@@ -243,7 +245,12 @@ class PostgresCase(unittest.TestCase):
             self.assertEqual(ex.main(list(argv)), 0)
         return out.getvalue()
 
-    def extract(self, targets: Path | None = None, emit: bool = True) -> Path:
+    def extract(
+        self,
+        targets: Path | None = None,
+        emit: bool = True,
+        scratch: str = "scratch",
+    ) -> Path:
         argv = [
             "extract",
             "--targets",
@@ -251,7 +258,7 @@ class PostgresCase(unittest.TestCase):
             "--target",
             "T1",
             "--psql",
-            self.psql_cmd(),
+            self.psql_cmd(scratch),
             "--out",
             str(self.tmp / "extract.jsonl"),
         ]
@@ -615,6 +622,50 @@ class GuardTests(PostgresCase):
         self.assertIn("not above", done.stderr)
         self.assertEqual(self.psql("live", "SELECT count(*) FROM trains").strip(), "0")
 
+    def run_guard(self, tops: tuple[int, int, int]) -> subprocess.CompletedProcess[str]:
+        return subprocess.run(
+            [
+                "psql",
+                "-X",
+                "-At",
+                "-v",
+                "ON_ERROR_STOP=1",
+                "-h",
+                self.sock,
+                "-U",
+                "t",
+                "-d",
+                "live",
+                "-c",
+                ex.shape_check(tops),
+            ],
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+
+    def test_guard_checks_each_table_against_its_own_max(self) -> None:
+        # live max ids: trains 900000, events 950000, state 970000. An event id
+        # above the live max(trains.id) (as on production) must not trip the
+        # trains check: only the events table's own max counts.
+        self.psql(
+            "live",
+            "INSERT INTO train_movement_events (id, dedup_key, msg_type, raw_body, "
+            "trains_id) VALUES (30000000, 'big', '0003', '{}', 900000);",
+        )
+        self.assertEqual(self.run_guard((101, 20_000_000, 7002)).returncode, 0)
+        self.assertEqual(self.run_guard((899_999, 949_999, 969_999)).returncode, 0)
+
+    def test_guard_names_the_table_whose_ids_are_too_high(self) -> None:
+        for tops, message in [
+            ((900_000, 1, 1), "trains ids are not above the restored trains ids"),
+            ((1, 950_000, 1), "event ids are not above the restored event ids"),
+            ((1, 1, 970_000), "state ids are not above the restored state ids"),
+        ]:
+            done = self.run_guard(tops)
+            self.assertNotEqual(done.returncode, 0, tops)
+            self.assertIn(message, done.stderr)
+
     def test_changed_live_schema_aborts_the_batch(self) -> None:
         sql = self.extract()
         self.psql("live", "ALTER TABLE trains ADD COLUMN extra text;")
@@ -667,6 +718,69 @@ class GuardTests(PostgresCase):
             self.psql("live", "SELECT count(*) FROM trains WHERE id = 900000").strip(),
             "1",
         )
+
+
+class OlderBackupTests(PostgresCase):
+    """A backup from before train_service_labels existed has no such table."""
+
+    @override
+    def setUp(self) -> None:
+        super().setUp()
+        self.psql("postgres", "CREATE DATABASE nolabels")
+        self.addCleanup(self.psql, "postgres", "DROP DATABASE nolabels")
+        self.psql("nolabels", SCHEMA.read_text(encoding="utf-8"))
+        self.psql("nolabels", "DROP TABLE train_service_labels;")
+        self.psql(
+            "nolabels", SCRATCH_SEED.split("INSERT INTO train_service_labels", 1)[0]
+        )
+
+    def test_missing_labels_table_extracts_with_no_labels(self) -> None:
+        sql = self.extract(scratch="nolabels")
+        manifest = json.loads((sql / "manifest.json").read_text())
+        self.assertEqual(manifest["toInsert"]["trains"], 3)
+        self.assertEqual(manifest["toInsert"]["train_service_labels"], 0)
+        self.apply(sql)
+        for table in TABLE_ORDER:
+            if table == "train_service_labels":
+                continue
+            where = (
+                f"id IN {TRAIN_IDS}"
+                if table == "trains"
+                else f"trains_id IN {TRAIN_IDS}"
+            )
+            self.assertEqual(
+                self.rows("live", table, where),
+                self.rows("nolabels", table, where),
+                table,
+            )
+        self.assertEqual(self.rows("live", "train_service_labels"), [])
+        v = self.verify(sql)
+        self.assertEqual((v["labels_expected"], v["labels_ok"]), (0, 0))
+        self.assertEqual(v["trains_expected"], v["trains_ok"])
+
+    def test_scratch_script_keeps_the_label_query_when_the_table_exists(self) -> None:
+        out = self.psql(
+            "scratch", ex.scratch_script([("C10101", dt.date(2026, 10, 10))])
+        )
+        line = next(ln for ln in out.splitlines() if ln.startswith("{"))
+        self.assertEqual(
+            json.loads(line)["label"]["service_class"], "passenger_express"
+        )
+
+
+class VerifyPerformanceTests(PostgresCase):
+    def test_verify_is_keyed_so_big_tables_do_not_matter(self) -> None:
+        sql = self.extract()
+        self.psql(
+            "live",
+            "INSERT INTO train_movement_events (id, dedup_key, msg_type, raw_body, "
+            "trains_id) SELECT 20000000 + g, 'perf' || g, '0003', '{}', 900000 "
+            "FROM generate_series(1, 200000) g; ANALYZE train_movement_events;",
+        )
+        self.apply(sql)
+        started = time.monotonic()
+        self.verify(sql)
+        self.assertLess(time.monotonic() - started, 2.0)
 
 
 class PreflightTests(PostgresCase):
@@ -739,6 +853,41 @@ class PreflightTests(PostgresCase):
         self.assertIn("would insert train_movement_events", out)
         for needle in ("C10101", "5001", HOSTILE_UID):
             self.assertNotIn(needle, out)
+
+
+class KeyedComparisonTests(unittest.TestCase):
+    """No `to_jsonb(x) =` may run without a key predicate on the same alias."""
+
+    @staticmethod
+    def bundles() -> list[object]:
+        train = dict.fromkeys(ex.TRAINS_COLS)
+        train.update(id=1, train_uid="U", service_date="2026-10-10")
+        events = [{**dict.fromkeys(ex.EVENTS_COLS), "id": 2, "trains_id": 1}]
+        return [ex.Bundle(train, events, None, [], None, [1])]
+
+    @staticmethod
+    def unkeyed(sql: str) -> list[str]:
+        bad = []
+        for match in re.finditer(r"to_jsonb\((\w+)\)\s*=", sql):
+            alias = match.group(1)
+            froms = list(re.finditer(rf"FROM\s+\w+\s+{alias}\b", sql[: match.start()]))
+            scope = sql[froms[-1].end() : match.start()] if froms else ""
+            if not re.search(rf"\b{alias}\.\w+\s*=", scope):
+                bad.append(sql[match.start() - 60 : match.end() + 20])
+        return bad
+
+    def test_generated_verify_and_preflight_compare_by_key_first(self) -> None:
+        bundles = self.bundles()
+        verify = ex.verify_sql(bundles)
+        self.assertEqual(self.unkeyed(verify), [])
+        self.assertEqual(self.unkeyed(ex.preflight_sql(bundles)), [])
+        self.assertEqual(verify.count("to_jsonb(x) ="), 5)
+
+    def test_the_check_catches_an_unkeyed_comparison(self) -> None:
+        sql = "SELECT 1 FROM trains x WHERE to_jsonb(x) = j->'train'"
+        self.assertEqual(len(self.unkeyed(sql)), 1)
+        keyed = "FROM trains x WHERE x.id = (j->>'id')::bigint AND to_jsonb(x) = j"
+        self.assertEqual(self.unkeyed(keyed), [])
 
 
 class HostileStringTests(unittest.TestCase):
