@@ -96,13 +96,20 @@ async fn seed_train(pool: &PgPool, uid: &str, date: NaiveDate) -> i64 {
         {"tiploc": "ZZSNAPC", "kind": "Terminate", "bookedArrival": "09:40:00",
          "publicArrival": "09:40:00"},
     ]);
+    // TRUST's train id is unique per date: only the first train has `1A23`.
+    let train_id = if uid == UID {
+        "1A23".to_owned()
+    } else {
+        format!("9{}", &uid[uid.len() - 3..])
+    };
     sqlx::query_scalar(
         "INSERT INTO trains (train_uid, service_date, train_id, origin_crs, destination_crs, \
                              calling_points, platform, planned_platform) \
-         VALUES ($1, $2, '1A23', 'ZTA', 'ZTC', $3, '5', '4') RETURNING id",
+         VALUES ($1, $2, $3, 'ZTA', 'ZTC', $4, '5', '4') RETURNING id",
     )
     .bind(uid)
     .bind(date)
+    .bind(train_id)
     .bind(calling_points)
     .fetch_one(pool)
     .await
