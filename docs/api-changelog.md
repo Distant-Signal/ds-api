@@ -3,6 +3,26 @@
 Changes to the Distant Signal (DS) HTTP API that a client such as DS-MCP
 needs to know about. Newest first. Field names are as served (camelCase).
 
+## 2026-11-22: delegated refusals say why, in a `reason` field (DS-638)
+
+Additive. The delegated listener's refusals gain a string `reason` (and
+`scope` for a missing scope) beside `error` and `message`. `error`, `message`,
+the status codes and `WWW-Authenticate` are unchanged, so existing clients
+keep working; ignore an unknown or absent `reason`. No migration and no
+OpenAPI change (these errors are not in the document).
+
+- `403 delegation_not_granted`: `no_account`, `never_granted`,
+  `revoked_by_user`, `revoked_by_admin`, `revoked_by_backchannel_logout`,
+  `revoked_by_client_logout`, `revoked_inactive`, `revoked_client_disabled`.
+  A revoked grant reads as `never_granted` once its record is purged, 365
+  days after revocation.
+- `401 invalid_token`: `client_disabled`, `token_before_grant`.
+- `403 insufficient_scope`: `missing_scope` (with `scope`) and
+  `route_not_delegated`.
+- Only a token that verified gets a `reason`; one that does not gets the
+  plain 401 without it. Table of what the user should do:
+  connected-apps.md, "Errors".
+
 ## 2026-11-22: `GET /Journeys/mine` says where each row's train detail comes from (DS-638)
 
 Additive. `api-types/api.ts` and `api-types/openapi/v1.json` gain the two

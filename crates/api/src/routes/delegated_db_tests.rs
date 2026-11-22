@@ -1778,3 +1778,118 @@ async fn a_delegated_itinerary_leg_must_call_at_its_overrides() {
 
     cleanup(&pool, prefix).await;
 }
+
+#[tokio::test]
+#[ignore = "requires a live database; run with `cargo test -p api -- --ignored --test-threads=1`"]
+async fn a_refused_delegated_call_says_why() {
+    let pool = connect().await;
+    let prefix = "TEST-DLG-WHY-";
+    cleanup(&pool, prefix).await;
+    let h = harness(pool.clone()).await;
+    let user = format!("{prefix}user");
+    let cookie = seed_user(&pool, &user, &format!("{prefix}s1")).await;
+    let get = |token: String| {
+        let h = &h;
+        async move { send(h, "GET", "/Journeys/mine", &Auth::Bearer(&token), None, &[]).await }
+    };
+    let message = "the user has not granted this app access in Distant Signal";
+    // The body keeps its old fields and adds only `reason`.
+    let denied = |reply: &Reply, reason: &str| {
+        assert_eq!(reply.status, StatusCode::FORBIDDEN, "{}", reply.text);
+        let json = reply.json();
+        assert_eq!(json["error"], "delegation_not_granted", "{}", reply.text);
+        assert_eq!(json["message"], message);
+        assert_eq!(json["reason"], reason, "{}", reply.text);
+        assert_eq!(json.as_object().unwrap().len(), 3, "{}", reply.text);
+    };
+
+    // No account for the sub: only a verified token can learn it.
+    let reply = get(token(&h, &format!("{prefix}nobody"), "journeys:read", 0)).await;
+    denied(&reply, "no_account");
+    // An account that never connected the app.
+    denied(
+        &get(token(&h, &user, "journeys:read", 0)).await,
+        "never_granted",
+    );
+
+    // Every way a grant ends, then a call.
+    for (revoke, expected) in [
+        (RevokeReason::User, "revoked_by_user"),
+        (RevokeReason::Admin, "revoked_by_admin"),
+        (RevokeReason::Backchannel, "revoked_by_backchannel_logout"),
+        (RevokeReason::ClientLogout, "revoked_by_client_logout"),
+        (RevokeReason::Inactive, "revoked_inactive"),
+    ] {
+        grant(&h, &cookie, &["journeys:read"]).await;
+        let revoked =
+            crate::data::delegated::revoke_grants_for_user(&pool, &user, Some("ds-mcp"), revoke)
+                .await
+                .unwrap();
+        assert_eq!(revoked, 1);
+        denied(&get(token(&h, &user, "journeys:read", 0)).await, expected);
+    }
+
+    // The on-request idle expiry.
+    grant(&h, &cookie, &["journeys:read"]).await;
+    sqlx::query(
+        "UPDATE delegated_grants SET last_used_at = now() - INTERVAL '91 days' \
+         WHERE user_id = $1 AND revoked_at IS NULL",
+    )
+    .bind(&user)
+    .execute(&pool)
+    .await
+    .unwrap();
+    denied(
+        &get(token(&h, &user, "journeys:read", 0)).await,
+        "revoked_inactive",
+    );
+
+    // A token minted before the grant.
+    let old = token(&h, &user, "journeys:read", -30);
+    grant(&h, &cookie, &["journeys:read"]).await;
+    let reply = get(old).await;
+    assert_eq!(reply.status, StatusCode::UNAUTHORIZED, "{}", reply.text);
+    let json = reply.json();
+    assert_eq!(json["error"], "invalid_token");
+    assert_eq!(json["message"], "token issued before the grant");
+    assert_eq!(json["reason"], "token_before_grant");
+    assert_eq!(json.as_object().unwrap().len(), 3);
+    assert_eq!(
+        reply.headers.get(header::WWW_AUTHENTICATE).unwrap(),
+        "Bearer error=\"invalid_token\""
+    );
+
+    // A scope the grant lacks: the header and the body agree.
+    let reply = send(
+        &h,
+        "POST",
+        "/Journeys/itinerary",
+        &Auth::Bearer(&token(&h, &user, "journeys:read journeys:write", 0)),
+        Some(json!({})),
+        &[],
+    )
+    .await;
+    assert_eq!(reply.status, StatusCode::FORBIDDEN, "{}", reply.text);
+    let json = reply.json();
+    assert_eq!(json["error"], "insufficient_scope");
+    assert_eq!(json["message"], "this needs the journeys:write scope");
+    assert_eq!(json["reason"], "missing_scope");
+    assert_eq!(json["scope"], "journeys:write");
+    assert_eq!(json.as_object().unwrap().len(), 4);
+    assert_eq!(
+        reply.headers.get(header::WWW_AUTHENTICATE).unwrap(),
+        "Bearer error=\"insufficient_scope\", scope=\"journeys:write\""
+    );
+
+    // A token that does not verify learns nothing, whatever the account.
+    let forged = {
+        let good = token(&h, &user, "journeys:read", 0);
+        let (rest, _) = good.rsplit_once('.').unwrap();
+        format!("{rest}.AAAA")
+    };
+    let reply = get(forged).await;
+    assert_eq!(reply.status, StatusCode::UNAUTHORIZED, "{}", reply.text);
+    assert!(reply.json().get("reason").is_none(), "{}", reply.text);
+
+    cleanup(&pool, prefix).await;
+}

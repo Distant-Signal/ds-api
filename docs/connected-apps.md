@@ -161,11 +161,52 @@ delegated client as for the web app.
 ## Errors
 
 Every error the delegated listener answers a bearer is JSON `{error,
-message}`. A
-handler's or extractor's plain-text error is wrapped there, its `error`
-taken from the status (`bad_request`, `not_found`, `rate_limited`,
-`service_unavailable`, `internal_error`), keeping `Retry-After`
-(`json_errors` in `crates/api/src/auth/delegated.rs`).
+message}`. A handler's or extractor's plain-text error is wrapped there,
+its `error` taken from the status (`bad_request`, `not_found`,
+`rate_limited`, `service_unavailable`, `internal_error`), keeping
+`Retry-After` (`json_errors` in `crates/api/src/auth/delegated.rs`).
+
+### Why a call was refused (`reason`)
+
+The refusals below also carry a string `reason`, a stable code a client can
+turn into advice for the user. It is additive: `error`, `message`, the
+status and `WWW-Authenticate` are as they always were, so a client that
+ignores `reason` keeps working. A client should treat an unknown `reason`
+as the plain error, and a missing one as "no more detail".
+
+A `reason` is only ever sent to a caller whose token verified for the
+client (signature, issuer, audience, expiry and the rest). A token that
+fails verification, or is for another audience, gets the plain `401
+invalid_token` with no `reason`, so the body never tells an unauthenticated
+caller whether an account or a grant exists. No body carries a user
+identifier. The audit log's `reason` values are unchanged.
+
+| Status | `error` | `reason` | When | What the user should do |
+|---|---|---|---|---|
+| 403 | `delegation_not_granted` | `no_account` | The token's user has no Distant Signal account | Create an account on the website, then connect the app |
+| 403 | `delegation_not_granted` | `never_granted` | No grant for this user and app. Also what a grant reads as once its record is purged, 365 days after it was revoked | Connect the app on the consent page, `/account/connected-apps/ds-mcp` |
+| 403 | `delegation_not_granted` | `revoked_by_user` | The user pressed Disconnect | Reconnect on the consent page, if they want it back |
+| 403 | `delegation_not_granted` | `revoked_by_admin` | An admin revoked the user's sessions and grants | Reconnect on the consent page |
+| 403 | `delegation_not_granted` | `revoked_by_backchannel_logout` | The user logged out of Distant Signal, which ends its grants | Reconnect on the consent page |
+| 403 | `delegation_not_granted` | `revoked_by_client_logout` | The app's own logout ended the grant | Reconnect on the consent page |
+| 403 | `delegation_not_granted` | `revoked_inactive` | Unused for 90 days (found on the request or by the hourly sweep) | Reconnect on the consent page |
+| 403 | `delegation_not_granted` | `revoked_client_disabled` | An operator revoked every grant of the app during an incident | Reconnect on the consent page once the app is back, or ask the administrator |
+| 401 | `invalid_token` | `client_disabled` | The app is switched off on the server (the kill switch) | Nothing to do now; ask the administrator when it will be back |
+| 401 | `invalid_token` | `token_before_grant` | The token was minted before the grant (or before "Log out other sessions") | Nothing for the user: the app should get a new token and retry once. If it persists, reconnect |
+| 403 | `insufficient_scope` | `missing_scope` | The grant (or the token, or the app's maximum) lacks the route's scope. The body's `scope` and the header's `scope=` name it | Reconnect on the consent page and tick the scope; `?scopes=journeys:read%20journeys:write` pre-ticks boxes |
+| 403 | `insufficient_scope` | `route_not_delegated` | This route does not accept delegated tokens (message: "this route does not accept delegated tokens") | Nothing the user can do: it is the app's bug |
+
+`missing_scope` also has `scope`, the one scope this route needs (for
+example `journeys:write`). A grant revoked because a newer consent replaced
+it, or by a reason this version does not know, gets no `reason`; that only
+shows in a race with a new consent. A revoked grant's record is kept 365
+days (`DELEGATED_REVOKED_GRANT_RETENTION_DAYS`), so `revoked_*` turns into
+`never_granted` after that. `no_account` can only follow a verified token:
+grants are keyed by the token's `sub`, which is the user's id.
+
+An expired, malformed or wrongly signed token, a wrong audience, the public
+listener and a cookie sent with a bearer have no `reason` (a cookie with a
+bearer is `400 ambiguous_credentials`).
 
 ## Itinerary errors
 
