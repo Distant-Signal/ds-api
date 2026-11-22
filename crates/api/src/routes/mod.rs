@@ -94,6 +94,8 @@ pub mod tfl_stop_page;
 pub mod tfl_stops;
 pub mod time_away;
 pub mod train;
+#[cfg(test)]
+mod train_by_uid_retained_db_tests;
 pub mod trains;
 pub mod transit;
 pub mod trips;

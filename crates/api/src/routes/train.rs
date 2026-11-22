@@ -33,13 +33,13 @@ use std::sync::LazyLock;
 
 use axum::Json;
 use axum::extract::{Path, State};
-use axum::http::StatusCode;
+use axum::http::{HeaderMap, StatusCode};
 use chrono::{NaiveDate, Utc};
 use common::TrackPinRequest;
 use serde::{Deserialize, Serialize};
 
 use crate::app::{App, Router};
-use crate::auth::AuthenticatedUser;
+use crate::auth::{AuthenticatedUser, OptionalAuthenticatedUser};
 use crate::data::{eta_blend, schedule_matching, train_tracking};
 use crate::routes::journey_ref::TrackingId;
 use crate::usage_events::FeatureEvent;
@@ -550,9 +550,25 @@ async fn patch_tracked_train(
 ///
 /// Additive (2026-10-08): the body also carries `provisional` and
 /// `provisionalFrom` for `date` -- see [`PublicTrainResponse`].
+///
+/// A train that is no longer held (DS-638). The timetable rows go about 8
+/// days after the service date and the `trains` row about 30, but a journey
+/// keeps its legs for 548. While the `trains` row exists it is served in
+/// full whether or not the timetable rows do (the stops come from its own
+/// `calling_points`). Once it is gone too, a caller who may read a journey
+/// leg of that train and date is served the leg's own copy
+/// (`data::leg_snapshot`), `trainDetail` `snapshot`: the booked stops,
+/// platform, ends and the recorded outcome, with no live data. "May read" is
+/// the caller's own session (the owner, a group the journey is shared into,
+/// a follower), or the share link of the journey in the
+/// `X-Journey-Share-Token` header. Never by UID and date alone, so the copy
+/// of where someone travelled cannot be found by guessing; everyone else
+/// gets the same 404 as for a train that never existed.
 pub(crate) async fn get_by_uid_and_date(
     State(app): State<App>,
     Path((train_uid, date)): Path<(String, NaiveDate)>,
+    OptionalAuthenticatedUser(user): OptionalAuthenticatedUser,
+    headers: HeaderMap,
 ) -> Result<Json<PublicTrainResponse>, (StatusCode, String)> {
     // 2026-09-26 review, Low finding 11: CIF's own convention (confirmed
     // against `schedule-reference`'s own fixtures/tests, e.g. `"C11052"`)
@@ -594,6 +610,21 @@ pub(crate) async fn get_by_uid_and_date(
         );
     }
 
+    // Neither a `trains` row nor timetable rows: a journey leg's own copy,
+    // for a caller who may read that leg (see this function's doc comment).
+    let mut snapshot_at = None;
+    if state.is_none()
+        && let Some((snapshot, written_at)) =
+            readable_leg_snapshot(&app, user.as_ref(), &headers, &train_uid, date).await?
+    {
+        state = Some(
+            snapshot_public_state(&app, &snapshot)
+                .await
+                .map_err(internal_error("read leg snapshot train state"))?,
+        );
+        snapshot_at = Some(written_at);
+    }
+
     // Best-effort CIF-only schedule enrichment for a train nobody has ever
     // tracked -- see `enrich_public_train_schedule`'s own doc comment for
     // the real, confirmed gap this closes (a shared row can carry full
@@ -633,6 +664,13 @@ pub(crate) async fn get_by_uid_and_date(
 
     match state {
         Some(state) => {
+            let train_detail = if snapshot_at.is_some() {
+                Some(crate::data::leg_snapshot::TrainDetail::Snapshot)
+            } else if state.trains_id == SCHEDULE_ONLY_TRAINS_ID {
+                None
+            } else {
+                Some(crate::data::leg_snapshot::TrainDetail::Live)
+            };
             let state =
                 crate::data::train_operator::attach_to_public_state(&app.database, state).await;
             let (state, schedule_source) = attach_journey_stops_public(&app, state).await;
@@ -642,7 +680,12 @@ pub(crate) async fn get_by_uid_and_date(
                 state: &state,
                 phase: PublicPhaseFields::default(),
             }];
-            crate::data::tracking_phase::attach(&app.database, &mut phase_rows, Utc::now()).await;
+            // A leg's copy has no live phase to derive: `null`, and
+            // `trainDetail` says why.
+            if snapshot_at.is_none() {
+                crate::data::tracking_phase::attach(&app.database, &mut phase_rows, Utc::now())
+                    .await;
+            }
             let [PublicPhaseRow { phase, .. }] = phase_rows;
             Ok(Json(PublicTrainResponse {
                 state,
@@ -652,6 +695,8 @@ pub(crate) async fn get_by_uid_and_date(
                 ),
                 phase,
                 schedule_source,
+                train_detail,
+                snapshot_at,
             }))
         }
         None => Err((
@@ -686,6 +731,18 @@ pub(crate) struct PublicTrainResponse {
     /// set (`data::live_stops`).
     #[serde(rename = "scheduleSource")]
     schedule_source: Option<crate::data::live_stops::ScheduleSource>,
+    /// Where the detail comes from (additive, 2026-11-22), as on a journey
+    /// leg: `live` when the shared `trains` row is held (its stops come from
+    /// the row even once the timetable rows are gone); `snapshot` when it is
+    /// gone and the body is a journey leg's own copy made for a caller who
+    /// may read that leg (booked stops, platform, ends and the recorded
+    /// outcome; no live data, reasons or operator); `null` for a timetable
+    /// that no train has reported on yet.
+    #[serde(rename = "trainDetail")]
+    train_detail: Option<crate::data::leg_snapshot::TrainDetail>,
+    /// When the leg's copy was last written; set only with `snapshot`.
+    #[serde(rename = "snapshotAt")]
+    snapshot_at: Option<chrono::DateTime<Utc>>,
 }
 
 /// The public train's `trackingPhase` and `firstReportExpectedAt`, the
@@ -852,6 +909,134 @@ async fn schedule_only_public_state(
     state.origin_name = name_of(&state.origin_crs);
     state.destination_name = name_of(&state.destination_crs);
     Ok(crate::data::schedule_services::attach_one(&app.database, state).await)
+}
+
+/// The header that carries a journey's share-link token to
+/// `GET /Train/by-uid/{uid}/{date}`, so a visitor of a shared journey can
+/// open the page of a train on it that is no longer held.
+const SHARE_TOKEN_HEADER: &str = "x-journey-share-token";
+
+/// The copy a journey leg holds of `(train_uid, date)`, when the caller may
+/// read that leg: by its session, or by the share link in
+/// [`SHARE_TOKEN_HEADER`]. A token that does not resolve to a live journey
+/// link adds nothing (the session alone is judged), and the answer is the
+/// same `None` whether the copy is missing or not the caller's.
+async fn readable_leg_snapshot(
+    app: &App,
+    user: Option<&AuthenticatedUser>,
+    headers: &HeaderMap,
+    train_uid: &str,
+    date: NaiveDate,
+) -> Result<
+    Option<(
+        crate::data::leg_snapshot::LegSnapshot,
+        chrono::DateTime<Utc>,
+    )>,
+    (StatusCode, String),
+> {
+    let mut shared_journey = None;
+    if let Some(token) = headers
+        .get(SHARE_TOKEN_HEADER)
+        .and_then(|value| value.to_str().ok())
+        .map(str::trim)
+        .filter(|token| !token.is_empty())
+    {
+        shared_journey = crate::data::unlisted_links::resolve_link(&app.database, token)
+            .await
+            .map_err(internal_error("resolve journey share link"))?
+            .filter(|link| link.resource_type == "journey")
+            .and_then(|link| link.resource_id.parse::<i64>().ok());
+    }
+    crate::data::leg_snapshot::find_readable(
+        &app.database,
+        train_uid,
+        date,
+        user.map(|user| user.id.as_str()),
+        shared_journey,
+    )
+    .await
+    .map_err(internal_error("read leg snapshot"))
+}
+
+/// A TRUST train id's headcode (characters 3 to 6 of its 10 characters:
+/// `161Z721T16` is `1Z72`), when it has the headcode's shape. The train's
+/// only headcode once its timetable rows are gone.
+fn trust_headcode(train_id: &str) -> Option<String> {
+    let id: Vec<char> = train_id.chars().collect();
+    if id.len() != 10 {
+        return None;
+    }
+    let headcode: String = id[2..6].iter().collect::<String>().to_ascii_uppercase();
+    let shape: Vec<char> = headcode.chars().collect();
+    (shape[0].is_ascii_digit()
+        && shape[1].is_ascii_uppercase()
+        && shape[2].is_ascii_digit()
+        && shape[3].is_ascii_digit())
+    .then_some(headcode)
+}
+
+/// The public view of a train from a journey leg's copy of it, for a train
+/// whose `trains` row and timetable rows are gone: `trainsId` is
+/// [`SCHEDULE_ONLY_TRAINS_ID`], the timetable fields come from the copy,
+/// its recorded outcome is the status and the delay at the leg's
+/// destination, and every live field is empty. The stops are built from
+/// the copy's calling points by the same code as for a live row.
+async fn snapshot_public_state(
+    app: &App,
+    snapshot: &crate::data::leg_snapshot::LegSnapshot,
+) -> anyhow::Result<crate::data::trains::PublicTrainState> {
+    use crate::data::stop_delay::DelayBasis;
+
+    let codes: Vec<String> = [&snapshot.origin_crs, &snapshot.destination_crs]
+        .into_iter()
+        .flatten()
+        .cloned()
+        .collect();
+    let names = crate::data::queries::station_names_for_crs_batch(&app.database, &codes).await?;
+    let name_of = |crs: &Option<String>| {
+        crs.as_deref()
+            .and_then(|c| names.get(&c.to_uppercase()).cloned())
+    };
+    let delay = snapshot.final_arrival_delay_minutes;
+    Ok(crate::data::trains::PublicTrainState {
+        trains_id: SCHEDULE_ONLY_TRAINS_ID,
+        train_uid: snapshot.train_uid.clone(),
+        service_date: snapshot.service_date,
+        origin_crs: snapshot.origin_crs.clone(),
+        origin_name: name_of(&snapshot.origin_crs),
+        destination_crs: snapshot.destination_crs.clone(),
+        destination_name: name_of(&snapshot.destination_crs),
+        scheduled_departure: snapshot.scheduled_departure,
+        calling_points: (!snapshot.calling_points.is_empty())
+            .then(|| serde_json::Value::Array(snapshot.calling_points.clone())),
+        train_id: snapshot.train_id.clone(),
+        headcode: snapshot.train_id.as_deref().and_then(trust_headcode),
+        status: snapshot.status().map(str::to_owned),
+        last_reported_location: None,
+        last_event_type: None,
+        delay_minutes: delay,
+        delay_basis: delay.map(|_| DelayBasis::Public),
+        delay_provisional: false,
+        working_delay_minutes: None,
+        next_calling_point: None,
+        eta_next: None,
+        eta_source: None,
+        skipped_stations: snapshot.skipped_stations.clone(),
+        platform: snapshot.platform.clone(),
+        planned_platform: snapshot.planned_platform.clone(),
+        journey_stops: None,
+        may_have_arrived: false,
+        predicted_start: None,
+        operator_code: None,
+        operator_name: None,
+        cancelled: false,
+        cancel_reason_code: None,
+        cancel_reason: None,
+        change_of_origin_reason_code: None,
+        change_of_origin_reason: None,
+        cancellation: None,
+        service: crate::data::schedule_services::ServiceModeFields::default(),
+    })
 }
 
 #[expect(

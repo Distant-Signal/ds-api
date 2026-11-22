@@ -3485,6 +3485,20 @@ export type PublicTrainResponse = {
  */
 scheduleSource: ScheduleSource | null, 
 /**
+ * Where the detail comes from (additive, 2026-11-22), as on a journey
+ * leg: `live` when the shared `trains` row is held (its stops come from
+ * the row even once the timetable rows are gone); `snapshot` when it is
+ * gone and the body is a journey leg's own copy made for a caller who
+ * may read that leg (booked stops, platform, ends and the recorded
+ * outcome; no live data, reasons or operator); `null` for a timetable
+ * that no train has reported on yet.
+ */
+trainDetail: TrainDetail | null, 
+/**
+ * When the leg's copy was last written; set only with `snapshot`.
+ */
+snapshotAt: string | null, 
+/**
  * The SHARED `trains` row's own surrogate key, serialized as
  * `trainsId`. Deliberately NOT named `id`, which is what this struct
  * used to call it: every `/Train/{trackingId}` route in this app

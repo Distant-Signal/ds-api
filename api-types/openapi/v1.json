@@ -3364,6 +3364,14 @@
             "type": "array",
             "writeOnly": true
           },
+          "snapshotAt": {
+            "description": "When the leg's copy was last written; set only with `snapshot`.",
+            "format": "date-time",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
           "status": {
             "anyOf": [
               {
@@ -3383,6 +3391,17 @@
                 "type": "null"
               }
             ]
+          },
+          "trainDetail": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/TrainDetail"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Where the detail comes from (additive, 2026-11-22), as on a journey\nleg: `live` when the shared `trains` row is held (its stops come from\nthe row even once the timetable rows are gone); `snapshot` when it is\ngone and the body is a journey leg's own copy made for a caller who\nmay read that leg (booked stops, platform, ends and the recorded\noutcome; no live data, reasons or operator); `null` for a timetable\nthat no train has reported on yet."
           },
           "trainId": {
             "description": "TRUST's 10-character movement-feed train id (`trains.train_id`, e.g.\n`\"721S00MF25\"`) -- set on TRUST activation. NOT the headcode, even\nthough it embeds one; see `headcode` below for that.",

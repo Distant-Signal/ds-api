@@ -3,6 +3,45 @@
 Changes to the Distant Signal (DS) HTTP API that a client such as DS-MCP
 needs to know about. Newest first. Field names are as served (camelCase).
 
+## 2026-11-22: `GET /Train/by-uid/{uid}/{date}` keeps serving a tracked train after it is pruned (DS-638)
+
+Additive. `api-types/api.ts` and `api-types/openapi/v1.json` gain the two
+fields below on `PublicTrainResponse`. No new route and no migration.
+
+- **New on `GET /Train/by-uid/{uid}/{date}`** (and `/v1/Train/by-uid/...` for a
+  personal token):
+  - `trainDetail` (`"live"`, `"snapshot"` or `null`, the journey legs'
+    `trainDetail` semantics): `live` when the shared `trains` row is held;
+    `snapshot` when it is gone and the body is a journey leg's own copy
+    (`journey_legs.final_snapshot`, DS-643): the train UID and id, headcode,
+    ends, booked stops, origin platform, skipped stops and the recorded
+    outcome (`status` `completed` or `cancelled`, `delayMinutes` at the leg's
+    destination). A snapshot has no live movements, estimates, reasons,
+    operator or `trackingPhase` (`null`). `null` for a timetable no train has
+    reported on yet (`trainsId` 0), as before.
+  - `snapshotAt` (RFC 3339 or `null`): when the copy was last written; set only
+    with `snapshot`.
+- **A held `trains` row is served without timetable rows.** The timetable
+  tables are kept about 8 days and `trains` longer; the route reads the stops,
+  platforms, matched ends and the movements, state and reasons from the
+  `trains` row, so a train held after its timetable went was already served
+  (its operator and service mode need the timetable and are then `null` and
+  `train`). Covered by a test now.
+- **The copy is only for a caller who may read the leg.** When neither a
+  `trains` row nor timetable rows exist, the route looks for a journey leg with
+  that train UID and service date and serves its copy only if the caller
+  holds a session that may read the leg's journey (the owner, a group it is
+  shared into, a follower), or sends the journey's share-link token in an
+  `X-Journey-Share-Token` header. Anyone else, and a UID and date nobody has a
+  copy of, get the same `404` as before; the route is otherwise still public.
+  The session cookie must therefore reach this route: the website's
+  `getPublicTrainByUidAndDate` does not forward it yet, so until it does only
+  a call with a cookie or the share header (DS-MCP, a personal token) sees a
+  snapshot.
+- ds-workers keeping a journey's tracked `trains` rows live for the
+  journey's lifetime (DS-638) makes `snapshot` the rare case: a leg whose train
+  was already pruned, or restored from the archive.
+
 ## 2026-11-21: a train leg keeps its train's detail after the train is pruned (DS-643)
 
 Additive. `api-types/api.ts` and `api-types/openapi/v1.json` gain the
