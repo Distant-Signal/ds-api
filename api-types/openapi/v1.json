@@ -1237,6 +1237,15 @@
             ],
             "writeOnly": true
           },
+          "finalSnapshotDelayMinutes": {
+            "description": "The last train leg's recorded arrival delay when its train was\npruned, internal: `final_arrival_delay_minutes` for such a leg.",
+            "format": "int32",
+            "type": [
+              "integer",
+              "null"
+            ],
+            "writeOnly": true
+          },
           "finalStatus": {
             "type": [
               "string",
@@ -1437,6 +1446,28 @@
             },
             "type": "array"
           },
+          "snapshotAt": {
+            "description": "When the leg's copy was last written; set only with `snapshot`.",
+            "format": "date-time",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "snapshotDelayMinutes": {
+            "description": "The current leg's recorded arrival delay when its train was pruned,\ninternal: `delay_minutes` for such a leg.",
+            "format": "int32",
+            "type": [
+              "integer",
+              "null"
+            ],
+            "writeOnly": true
+          },
+          "snapshotKept": {
+            "description": "Whether the current leg holds a copy, internal: with a missing\n`trains` row it makes `train_detail` `snapshot`.",
+            "type": "boolean",
+            "writeOnly": true
+          },
           "sourceTemplateId": {
             "description": "The regular journey (`journey_templates.id`) this journey was made\nfrom, so the card can link to it and offer \"Skip\". Only on the\ncaller's own journeys: `null` on a followed or shared one, and when\nit wasn't made from one or that was deleted. Additive (2026-11-06).",
             "format": "int64",
@@ -1490,6 +1521,17 @@
               }
             ],
             "description": "The current train leg's `trackingPhase` (see\n`train_tracking::TrackedTrainState::tracking_phase`); `None` for an\nopen or untracked leg."
+          },
+          "trainDetail": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/TrainDetail"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Where the current train leg's detail comes from (additive,\n2026-11-22), as on `GET /Journeys/{id}`'s legs (`TrainDetail`):\n`live` while the train's data is held; `snapshot` once it is pruned\nbut the leg kept its own copy; `unavailable` when pruned and no copy\nwas kept. `null` for an open or untracked leg. For `snapshot` and\n`unavailable` the leg's recorded outcome, when there is one, fills\n`status` (`completed` or `cancelled`) and `delayMinutes`; there is\nnothing live to say beyond it."
           },
           "trainLegCount": {
             "description": "The whole journey, not just the current leg (additive, 2026-10-21):\nhow many legs are train legs, have a cancelled train, are train legs\nwith no train picked, are over and have started. A train leg is over\nonce its train is `completed` or has reached the leg's destination\nper `travel_order::train_arrived_sql`; an untracked leg once its\nplanned arrival has passed.",
@@ -1576,6 +1618,7 @@
           "legCount",
           "matchMode",
           "delayProvisional",
+          "snapshotKept",
           "kind",
           "timetableOnRow",
           "trainLegCount",

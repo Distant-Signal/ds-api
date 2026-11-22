@@ -1720,6 +1720,21 @@ delayBasis: DelayBasis | null,
  */
 delayProvisional: boolean, 
 /**
+ * Where the current train leg's detail comes from (additive,
+ * 2026-11-22), as on `GET /Journeys/{id}`'s legs (`TrainDetail`):
+ * `live` while the train's data is held; `snapshot` once it is pruned
+ * but the leg kept its own copy; `unavailable` when pruned and no copy
+ * was kept. `null` for an open or untracked leg. For `snapshot` and
+ * `unavailable` the leg's recorded outcome, when there is one, fills
+ * `status` (`completed` or `cancelled`) and `delayMinutes`; there is
+ * nothing live to say beyond it.
+ */
+trainDetail: TrainDetail | null, 
+/**
+ * When the leg's copy was last written; set only with `snapshot`.
+ */
+snapshotAt: string | null, 
+/**
  * The current leg's kind: `train` or `untracked` (spec 2026-10-20
  * §2.4). For an untracked leg `originName`/`destinationName` carry its
  * place names, and the five fields below are set.

@@ -3,6 +3,32 @@
 Changes to the Distant Signal (DS) HTTP API that a client such as DS-MCP
 needs to know about. Newest first. Field names are as served (camelCase).
 
+## 2026-11-22: `GET /Journeys/mine` says where each row's train detail comes from (DS-638)
+
+Additive. `api-types/api.ts` and `api-types/openapi/v1.json` gain the two
+fields below on `JourneyListItem`. No new route and no migration.
+
+- **New on each row of `GET /Journeys/mine`** (own, followed and group-shared
+  journeys alike; also its delegated and `/v1` forms), for the row's current
+  leg, with the same meaning as on `GET /Journeys/{id}`'s legs:
+  - `trainDetail` (`"live"`, `"snapshot"`, `"unavailable"` or `null`): `live`
+    while the train's data is held; `snapshot` when it was pruned but the leg
+    kept its own copy; `unavailable` when pruned and no copy was kept; `null`
+    for an open or untracked leg.
+  - `snapshotAt` (RFC 3339 or `null`): when the copy was last written; set
+    only with `snapshot`.
+- **A pruned train's recorded outcome now fills the row.** For a matched leg
+  whose train was pruned (`snapshot` or `unavailable`), `status` is
+  `completed` or `cancelled` and `delayMinutes` (with `delayBasis` `public`)
+  the arrival delay, from the outcome the leg recorded when it ended; both
+  stay `null` when none was recorded. The journey-level counts
+  (`finishedLegCount`, `cancelledLegCount`, `startedLegCount`), the choice of
+  current leg and `finalArrivalDelayMinutes` read it too, so a journey whose
+  trains were all pruned reads as finished, not as one that was never
+  reported. Before this, such a row read as a matched train with no status.
+- Nothing is read from the copy's document: the outcome comes from the leg's
+  own `final_*` columns, and the query gains no join.
+
 ## 2026-11-22: `GET /Train/by-uid/{uid}/{date}` keeps serving a tracked train after it is pruned (DS-638)
 
 Additive. `api-types/api.ts` and `api-types/openapi/v1.json` gain the two
@@ -67,7 +93,7 @@ fields below (and the `TrainDetail` schema). Needs ds-core v0.17.5 (`journey_leg
   outcome, when the leg completes. It is deleted with its leg and journey,
   exported in "Download my data" as the leg's `final_*` columns, removed with
   the account, and cleared when the leg's train is changed or untracked.
-- `GET /Journeys/mine` rows are unchanged.
+- `GET /Journeys/mine` rows are unchanged (they gain the same fields on 2026-11-22).
 
 ## 2026-11-20: opaque ids for deleted-journey records, personal tokens, webhook destinations and time-away periods (DS-534, wave 3)
 
