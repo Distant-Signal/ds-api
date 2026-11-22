@@ -180,7 +180,7 @@ impl LegSnapshot {
 
     /// The train's status as the outcome gives it: `completed` or
     /// `cancelled`, `None` when none was recorded.
-    fn status(&self) -> Option<&'static str> {
+    pub(crate) fn status(&self) -> Option<&'static str> {
         match self.train_cancelled {
             Some(true) => Some("cancelled"),
             Some(false) => Some("completed"),
@@ -235,6 +235,60 @@ pub async fn read_for_legs(
         .into_iter()
         .map(|(id, snapshot, at)| (id, (snapshot, at.unwrap_or_default())))
         .collect())
+}
+
+/// The snapshot of a leg a caller may read that was made for
+/// `(train_uid, service_date)` (`final_train_uid`, the leg's `service_date`),
+/// with when it was written, for the train lookup by UID once the train's
+/// `trains` row and its timetable rows are gone.
+///
+/// Where and when someone travelled is theirs (module docs), so this is
+/// never a lookup by UID and date alone: the leg's journey must be one the
+/// caller may read, as `journeys::journey_readable_by` decides (the owner,
+/// a member of a group it is shared into, a valid follower), or the one a
+/// share link the caller presented resolves to (`share_journey_id`, which
+/// the caller has already resolved through `unlisted_links::resolve_link`).
+/// With neither a `user_id` nor a `share_journey_id` nothing is returned.
+/// The newest copy wins when several readable legs have one.
+pub async fn find_readable(
+    pool: &PgPool,
+    train_uid: &str,
+    service_date: NaiveDate,
+    user_id: Option<&str>,
+    share_journey_id: Option<i64>,
+) -> anyhow::Result<Option<(LegSnapshot, DateTime<Utc>)>> {
+    if user_id.is_none() && share_journey_id.is_none() {
+        return Ok(None);
+    }
+    let rows: Vec<(serde_json::Value, Option<DateTime<Utc>>)> = sqlx::query_as(&format!(
+        "SELECT jl.final_snapshot, jl.final_snapshot_at \
+         FROM journey_legs jl JOIN journeys j ON j.id = jl.journey_id \
+         WHERE jl.final_train_uid = $1 AND jl.service_date = $2 \
+           AND jl.final_snapshot IS NOT NULL \
+           AND (j.id = $4 \
+                OR ($3::text IS NOT NULL AND ( \
+                    j.user_id = $3 \
+                    OR EXISTS (SELECT 1 FROM group_journeys gj \
+                               JOIN group_members gm ON gm.group_id = gj.group_id \
+                                                    AND gm.user_id = $3 \
+                               WHERE gj.journey_id = j.id) \
+                    OR EXISTS (SELECT 1 FROM journey_follows f \
+                               WHERE f.journey_id = j.id AND f.user_id = $3 AND {valid})))) \
+         ORDER BY jl.final_snapshot_at DESC NULLS LAST, jl.id DESC \
+         LIMIT 5",
+        valid = crate::data::journey_follows::VALID_FOLLOW,
+    ))
+    .bind(train_uid)
+    .bind(service_date)
+    .bind(user_id)
+    .bind(share_journey_id)
+    .fetch_all(pool)
+    .await?;
+    Ok(rows.into_iter().find_map(|(document, at)| {
+        let snapshot = LegSnapshot::parse(&document)?;
+        (snapshot.train_uid == train_uid && snapshot.service_date == service_date)
+            .then(|| (snapshot, at.unwrap_or_default()))
+    }))
 }
 
 /// Renders each state that has a snapshot from it: `snapshots[i]` belongs
