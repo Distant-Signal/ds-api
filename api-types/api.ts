@@ -2377,6 +2377,32 @@ unmeasurableReason: string | null,
  */
 ticketKnown: boolean, 
 /**
+ * Where the passenger boards: the leg's origin, else the tracked
+ * train's pinned boarding station. `null` when neither is known
+ * (additive, DS-638).
+ */
+boardingCrs: string | null, 
+/**
+ * When the train ACTUALLY left `boardingCrs`, as TRUST reported it
+ * (RFC 3339). `null` when no departure was reported there (TRUST only
+ * reports at timing points, so a boarding station that is not one never
+ * has one), for a bus or ferry, and for a leg whose train data was
+ * pruned. Never an estimate or the booked time.
+ */
+boardingActualDeparture: string | null, 
+/**
+ * `boardingActualDeparture` minus the booked PUBLIC departure there, in
+ * whole minutes (positive is late, truncated toward zero). `null` when
+ * either is missing.
+ */
+boardingDelayMinutes: number | null, 
+/**
+ * Which baseline `boardingDelayMinutes` used, spelled as `delayBasis`;
+ * `null` exactly when `boardingDelayMinutes` is. It can differ from
+ * `delayBasis`: each is judged on its own station's times.
+ */
+boardingDelayBasis: DelayBasis | null, 
+/**
  * The delay against the PUBLIC arrival at `measured_at_crs` (design
  * doc §9 decision 3): measured once the train has arrived (or, at a
  * departure-only station, departed), projected before then

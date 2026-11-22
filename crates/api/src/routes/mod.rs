@@ -28,6 +28,8 @@ pub mod incidents;
 mod irish_train_db_tests;
 pub mod island_of_ireland;
 #[cfg(test)]
+mod journey_boarding_db_tests;
+#[cfg(test)]
 #[expect(
     clippy::too_many_lines,
     reason = "test code: scenario tests read top to bottom"

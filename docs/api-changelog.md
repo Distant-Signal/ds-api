@@ -3,6 +3,41 @@
 Changes to the Distant Signal (DS) HTTP API that a client such as DS-MCP
 needs to know about. Newest first. Field names are as served (camelCase).
 
+## 2026-11-22: a leg's Delay Repay says when its train left the boarding station (DS-638)
+
+Additive. `api-types/api.ts` and `api-types/openapi/v1.json` gain the four
+fields below on `LegDelayRepay`. No new route and no migration. They are
+evidence for "when did my train actually leave where I boarded", next to the
+existing destination-side `delayMinutes`.
+
+- **New on `legs[].delayRepay`** of `GET /Journeys/{id}` (and the delegated
+  and `/v1` forms, for the owner's tracked GB train legs). They are always present on a leg that has a `delayRepay`
+  object, `null` when unknown:
+  - `boardingCrs` (string or `null`): where the passenger boards, the leg's
+    origin CRS, else the tracked train's pinned boarding station (itself the
+    train's own origin when nothing was pinned). An intermediate boarding
+    station is the leg's origin CRS, so it is what this names.
+  - `boardingActualDeparture` (RFC 3339 or `null`): when the train ACTUALLY
+    left `boardingCrs`, from TRUST's DEPARTURE report there (the latest one if
+    it was corrected). `null` when no departure was reported there: TRUST only
+    reports at timing points, so a boarding station that is not one never has
+    one, and an ARRIVAL or a PASS there is not a departure. Never a booked
+    time, an estimate or a guess. Also `null` for a bus or ferry leg, for a leg
+    with no matched train and for a train whose data was pruned (a snapshot
+    keeps no movement events). There is no recency limit: a train pinned for
+    months still answers while its movement events are held.
+  - `boardingDelayMinutes` (integer or `null`): `boardingActualDeparture`
+    minus the booked PUBLIC departure at `boardingCrs`, whole minutes truncated
+    toward zero, positive is late. `null` when either side is missing (no
+    departure reported, or no public or working time to measure against).
+  - `boardingDelayBasis` (`"public"`, `"publicSchedule"`, `"working"` or
+    `null`): which baseline `boardingDelayMinutes` used, spelled as
+    `delayBasis` and with the same rules (TRUST's own public time, else the
+    schedule's public time at that call, else the working time). It can differ
+    from the leg's `delayBasis`, which is judged at the destination, hence its
+    own field. `null` exactly when `boardingDelayMinutes` is.
+- `GET /Journeys/reliability` journeys do not gain these: they roll up one
+  Delay Repay reading per journey, not per leg.
 ## 2026-11-22: delegated refusals say why, in a `reason` field (DS-638)
 
 Additive. The delegated listener's refusals gain a string `reason` (and

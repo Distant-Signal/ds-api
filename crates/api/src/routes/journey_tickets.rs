@@ -475,6 +475,24 @@ pub(crate) struct LegDelayRepay {
     /// Whether the leg's ticket details say single or return; `false`
     /// means the 120-minute band shows both readings.
     pub ticket_known: bool,
+    /// Where the passenger boards: the leg's origin, else the tracked
+    /// train's pinned boarding station. `null` when neither is known
+    /// (additive, DS-638).
+    pub boarding_crs: Option<String>,
+    /// When the train ACTUALLY left `boardingCrs`, as TRUST reported it
+    /// (RFC 3339). `null` when no departure was reported there (TRUST only
+    /// reports at timing points, so a boarding station that is not one never
+    /// has one), for a bus or ferry, and for a leg whose train data was
+    /// pruned. Never an estimate or the booked time.
+    pub boarding_actual_departure: Option<DateTime<Utc>>,
+    /// `boardingActualDeparture` minus the booked PUBLIC departure there, in
+    /// whole minutes (positive is late, truncated toward zero). `null` when
+    /// either is missing.
+    pub boarding_delay_minutes: Option<i32>,
+    /// Which baseline `boardingDelayMinutes` used, spelled as `delayBasis`;
+    /// `null` exactly when `boardingDelayMinutes` is. It can differ from
+    /// `delayBasis`: each is judged on its own station's times.
+    pub boarding_delay_basis: Option<crate::data::stop_delay::DelayBasis>,
 }
 
 /// [`LegDelayRepay::unmeasurable_reason`] for a bus or ferry.
@@ -492,6 +510,10 @@ pub(crate) struct DelayRepayReadings {
     pub atoc_code: Option<String>,
     pub measured_at_crs: Option<String>,
     pub measured_at_name: Option<String>,
+    /// The boarding station (`LegDelayRepay::boarding_crs`).
+    pub boarding_crs: Option<String>,
+    /// The train's reported departure from it, when there was one.
+    pub boarding: Option<crate::data::boarding_departure::BoardingDeparture>,
 }
 
 /// Pure response assembly, given no I/O capability of any kind,
@@ -506,6 +528,8 @@ pub(crate) fn build_leg_delay_repay(
 ) -> LegDelayRepay {
     let live = mode.live_tracking();
     let ticket_type = ticket.map(LegTicket::kind_text);
+    let boarding = readings.boarding.filter(|_| live);
+    let boarding_delay = boarding.and_then(|b| b.delay);
     LegDelayRepay {
         delay_repay: delay_repay_rules::assess(delay_repay_rules::AssessInputs {
             operator: ticket.and_then(LegTicket::operator),
@@ -522,7 +546,25 @@ pub(crate) fn build_leg_delay_repay(
             .then_some(TIMETABLE_ONLY_DELAY_REPAY_REASON),
         ticket_known: delay_repay_rules::ticket_kind(ticket_type)
             != delay_repay_rules::TicketKind::Unknown,
+        boarding_crs: readings.boarding_crs.clone(),
+        boarding_actual_departure: boarding.map(|b| b.actual),
+        boarding_delay_minutes: boarding_delay.map(|d| d.minutes),
+        boarding_delay_basis: boarding_delay.map(|d| d.basis),
     }
+}
+
+/// Where the passenger boards: the leg's own origin, else the train's pin
+/// origin (itself the train's origin when nothing was pinned).
+pub(crate) fn boarding_crs(
+    leg_origin: Option<&str>,
+    state: &crate::data::train_tracking::TrackedTrainState,
+) -> Option<String> {
+    [leg_origin, state.pin_origin_crs.as_deref()]
+        .into_iter()
+        .flatten()
+        .map(str::trim)
+        .find(|crs| !crs.is_empty())
+        .map(str::to_uppercase)
 }
 
 /// Where Delay Repay is measured on a leg, and that station's name when
@@ -554,6 +596,8 @@ pub(crate) struct LegDelayRepayInput<'a> {
     pub state: &'a crate::data::train_tracking::TrackedTrainState,
     /// The leg's own destination CRS and name.
     pub destination: (Option<&'a str>, Option<&'a str>),
+    /// The leg's own origin CRS (where it boards).
+    pub origin_crs: Option<&'a str>,
     pub ticket: Option<&'a LegTicket>,
     /// The leg's recorded outcome (`leg_outcomes`), when it has one:
     /// `(delay at its destination, cancelled)`. It stands in for the
@@ -606,6 +650,58 @@ fn with_recorded(
     (delay, outcome)
 }
 
+/// Each leg's boarding station and, for a leg with a matched train, the
+/// train's reported departure from it (`data::boarding_departure`). Best
+/// effort: a failed read leaves those legs without a departure.
+async fn boarding_readings(
+    app: &App,
+    inputs: &[LegDelayRepayInput<'_>],
+) -> Vec<(
+    Option<String>,
+    Option<crate::data::boarding_departure::BoardingDeparture>,
+)> {
+    let crs: Vec<Option<String>> = inputs
+        .iter()
+        .map(|input| boarding_crs(input.origin_crs, input.state))
+        .collect();
+    let targets: Vec<Option<crate::data::boarding_departure::BoardingTarget>> = inputs
+        .iter()
+        .zip(&crs)
+        .map(|(input, crs)| {
+            if is_irish(input.state) || input.state.service.0.is_timetable_only() {
+                return None;
+            }
+            Some(crate::data::boarding_departure::BoardingTarget {
+                trains_id: input.state.trains_id?,
+                train_uid: input.state.train_uid.clone()?,
+                service_date: input.state.service_date,
+                crs: crs.clone()?,
+            })
+        })
+        .collect();
+    let wanted: Vec<crate::data::boarding_departure::BoardingTarget> =
+        targets.iter().flatten().cloned().collect();
+    let mut departures =
+        crate::data::boarding_departure::boarding_departures(&app.database, &wanted)
+            .await
+            .unwrap_or_else(|err| {
+                tracing::warn!(error = ?err, "could not read boarding departures for Delay Repay");
+                vec![None; wanted.len()]
+            })
+            .into_iter();
+    crs.into_iter()
+        .zip(targets)
+        .map(|(crs, target)| {
+            let departure = if target.is_some() {
+                departures.next().flatten()
+            } else {
+                None
+            };
+            (crs, departure)
+        })
+        .collect()
+}
+
 /// Each leg's estimate (`None` for an Irish train), in two batched reads:
 /// the delay at each destination and whether the train got there. The
 /// operator comes from the state (`train_operator::attach_to_tracked_states`
@@ -637,6 +733,7 @@ pub(crate) async fn leg_delay_repays(
             .filter(|target| target.stop_crs.is_some())
         })
         .collect();
+    let boardings = boarding_readings(app, inputs).await;
     let wanted: Vec<crate::data::stop_delay::StopDelayTarget> =
         targets.iter().flatten().cloned().collect();
     let (delays, outcomes) = if wanted.is_empty() {
@@ -671,35 +768,40 @@ pub(crate) async fn leg_delay_repays(
         .iter()
         .zip(targets)
         .zip(destinations)
-        .map(|((input, target), destination)| {
-            if is_irish(input.state) {
-                return None;
-            }
-            let (live_delay, live_outcome) = if target.is_some() {
-                (delays.next().flatten(), outcomes.next().flatten())
-            } else {
-                (None, None)
-            };
-            // A leg with no destination was recorded, before 2026-11-17,
-            // with the delay wherever its train last reported: not an
-            // arrival there, so only its cancellation is read.
-            let recorded = input
-                .recorded
-                .map(|(minutes, cancelled)| (minutes.filter(|_| destination.is_some()), cancelled));
-            let (delay, outcome) = with_recorded(live_delay, live_outcome, recorded);
-            let (measured_at_crs, measured_at_name) = destination.unzip();
-            Some(build_leg_delay_repay(
-                input.ticket,
-                &DelayRepayReadings {
-                    delay,
-                    outcome,
-                    atoc_code: input.state.operator_code.clone(),
-                    measured_at_crs,
-                    measured_at_name: measured_at_name.flatten(),
-                },
-                input.state.service.0,
-            ))
-        })
+        .zip(boardings)
+        .map(
+            |(((input, target), destination), (boarding_crs, boarding))| {
+                if is_irish(input.state) {
+                    return None;
+                }
+                let (live_delay, live_outcome) = if target.is_some() {
+                    (delays.next().flatten(), outcomes.next().flatten())
+                } else {
+                    (None, None)
+                };
+                // A leg with no destination was recorded, before 2026-11-17,
+                // with the delay wherever its train last reported: not an
+                // arrival there, so only its cancellation is read.
+                let recorded = input.recorded.map(|(minutes, cancelled)| {
+                    (minutes.filter(|_| destination.is_some()), cancelled)
+                });
+                let (delay, outcome) = with_recorded(live_delay, live_outcome, recorded);
+                let (measured_at_crs, measured_at_name) = destination.unzip();
+                Some(build_leg_delay_repay(
+                    input.ticket,
+                    &DelayRepayReadings {
+                        delay,
+                        outcome,
+                        atoc_code: input.state.operator_code.clone(),
+                        measured_at_crs,
+                        measured_at_name: measured_at_name.flatten(),
+                        boarding_crs,
+                        boarding,
+                    },
+                    input.state.service.0,
+                ))
+            },
+        )
         .collect()
 }
 
@@ -893,6 +995,75 @@ mod tests {
         assert_eq!(response.delay_repay.delay_minutes, Some(14));
     }
 
+    /// The boarding fields are always on the object: the departure and its
+    /// delay when TRUST reported one, `null` (never a guess) when not, and
+    /// never for a bus or ferry.
+    #[test]
+    fn boarding_fields_are_present_and_null_when_unknown() {
+        use crate::data::boarding_departure::BoardingDeparture;
+        let actual: DateTime<Utc> = "2026-08-29T10:07:30Z".parse().unwrap();
+        let with = |boarding| DelayRepayReadings {
+            boarding_crs: Some("KGX".into()),
+            boarding,
+            ..readings(None, None)
+        };
+        let reported = build_leg_delay_repay(
+            None,
+            &with(Some(BoardingDeparture {
+                actual,
+                delay: Some(common::public_delay::MeasuredDelay {
+                    minutes: 7,
+                    basis: DelayBasis::PublicSchedule,
+                }),
+            })),
+            ServiceMode::Train,
+        );
+        let json = serde_json::to_value(&reported).unwrap();
+        assert_eq!(json["boardingCrs"], "KGX");
+        assert_eq!(json["boardingActualDeparture"], "2026-08-29T10:07:30Z");
+        assert_eq!(json["boardingDelayMinutes"], 7);
+        assert_eq!(json["boardingDelayBasis"], "publicSchedule");
+
+        // Reported, but no baseline: the time without a delay.
+        let no_baseline = build_leg_delay_repay(
+            None,
+            &with(Some(BoardingDeparture {
+                actual,
+                delay: None,
+            })),
+            ServiceMode::Train,
+        );
+        let json = serde_json::to_value(&no_baseline).unwrap();
+        assert_eq!(json["boardingActualDeparture"], "2026-08-29T10:07:30Z");
+        assert!(json["boardingDelayMinutes"].is_null());
+        assert!(json["boardingDelayBasis"].is_null());
+
+        // Nothing reported: every key present, all null but the CRS.
+        for (readings, mode) in [
+            (with(None), ServiceMode::Train),
+            (
+                with(Some(BoardingDeparture {
+                    actual,
+                    delay: None,
+                })),
+                ServiceMode::Bus,
+            ),
+        ] {
+            let json = serde_json::to_value(build_leg_delay_repay(None, &readings, mode)).unwrap();
+            assert_eq!(json["boardingCrs"], "KGX");
+            for key in [
+                "boardingActualDeparture",
+                "boardingDelayMinutes",
+                "boardingDelayBasis",
+            ] {
+                assert!(
+                    json.get(key).is_some_and(serde_json::Value::is_null),
+                    "{key}"
+                );
+            }
+        }
+    }
+
     /// A bus or ferry leg is never measured: no delay, no estimate, a
     /// reason saying why, and still the claim link and disclaimer.
     #[test]
@@ -929,6 +1100,7 @@ mod tests {
                 atoc_code: Some("GR".into()),
                 measured_at_crs: Some("EDB".into()),
                 measured_at_name: Some("Edinburgh Waverley".into()),
+                ..DelayRepayReadings::default()
             },
             ServiceMode::Train,
         );
