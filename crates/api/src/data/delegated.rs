@@ -84,6 +84,59 @@ pub async fn active_grant(
     .await?)
 }
 
+/// What [`latest_grant_state`] found.
+#[derive(Debug, Clone, PartialEq, Eq, sqlx::FromRow)]
+pub struct LatestGrantState {
+    /// Whether a `users` row has this id.
+    pub has_account: bool,
+    /// The newest grant row for the user and client, active or not.
+    pub grant_id: Option<i64>,
+    /// Its `revoked_reason` (`None` for an active row or one with no reason).
+    pub revoked_reason: Option<String>,
+}
+
+impl LatestGrantState {
+    /// The reason a delegated request with no active grant is refused, for
+    /// the error body's `reason`. `None` when nothing safe can be said (a
+    /// `replaced` row, which means a newer one exists, or an unknown reason).
+    pub fn deny_reason(&self) -> Option<crate::auth::delegated::DenyReason> {
+        use crate::auth::delegated::DenyReason;
+        if !self.has_account {
+            return Some(DenyReason::NoAccount);
+        }
+        match (&self.grant_id, &self.revoked_reason) {
+            (None, _) => Some(DenyReason::NeverGranted),
+            (Some(_), Some(reason)) => DenyReason::for_revoked(reason),
+            (Some(_), None) => None,
+        }
+    }
+}
+
+/// Why `user_id` has no active grant for `client`: whether the account
+/// exists and how the newest grant row (revoked ones included, until the
+/// sweep deletes them) ended. Read-only; for the error body of a request
+/// whose token already verified.
+pub async fn latest_grant_state(
+    pool: &PgPool,
+    user_id: &str,
+    client: &str,
+) -> Result<LatestGrantState> {
+    Ok(sqlx::query_as::<_, LatestGrantState>(
+        "SELECT EXISTS (SELECT 1 FROM users WHERE id = $1) AS has_account, \
+                g.id AS grant_id, g.revoked_reason \
+         FROM (SELECT 1) AS one \
+         LEFT JOIN LATERAL ( \
+             SELECT id, revoked_reason FROM delegated_grants \
+             WHERE user_id = $1 AND client = $2 \
+             ORDER BY created_at DESC, id DESC LIMIT 1 \
+         ) g ON true",
+    )
+    .bind(user_id)
+    .bind(client)
+    .fetch_one(pool)
+    .await?)
+}
+
 /// Records a use, at most once a minute per grant (§5.7 step 5).
 pub async fn touch_grant(pool: &PgPool, grant_id: i64) -> Result<()> {
     sqlx::query(
@@ -643,5 +696,49 @@ mod tests {
                 reason.as_str()
             );
         }
+    }
+
+    fn state(has_account: bool, grant_id: Option<i64>, reason: Option<&str>) -> LatestGrantState {
+        LatestGrantState {
+            has_account,
+            grant_id,
+            revoked_reason: reason.map(str::to_string),
+        }
+    }
+
+    #[test]
+    fn every_way_a_grant_ends_maps_to_a_stable_reason() {
+        let cases = [
+            ("user", "revoked_by_user"),
+            ("admin", "revoked_by_admin"),
+            ("backchannel", "revoked_by_backchannel_logout"),
+            ("client_logout", "revoked_by_client_logout"),
+            ("inactive", "revoked_inactive"),
+            ("client_disabled", "revoked_client_disabled"),
+        ];
+        for (stored, expected) in cases {
+            assert_eq!(
+                state(true, Some(1), Some(stored))
+                    .deny_reason()
+                    .map(crate::auth::delegated::DenyReason::as_str),
+                Some(expected),
+                "{stored}"
+            );
+        }
+        let none = |state: LatestGrantState| {
+            state
+                .deny_reason()
+                .map(crate::auth::delegated::DenyReason::as_str)
+        };
+        assert_eq!(none(state(false, None, None)), Some("no_account"));
+        assert_eq!(
+            none(state(false, Some(1), Some("user"))),
+            Some("no_account")
+        );
+        assert_eq!(none(state(true, None, None)), Some("never_granted"));
+        // A newer grant exists (a race) or an unknown value: no reason.
+        assert_eq!(none(state(true, Some(1), Some("replaced"))), None);
+        assert_eq!(none(state(true, Some(1), Some("future"))), None);
+        assert_eq!(none(state(true, Some(1), None)), None);
     }
 }

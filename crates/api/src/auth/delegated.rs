@@ -650,13 +650,93 @@ async fn verify_delegated(
     Ok(claims)
 }
 
+/// Why a verified delegated token was refused: the additive `reason` of
+/// the error body (docs/connected-apps.md, "Errors"). Only a token that
+/// verified for the client ever gets one, so it never tells an
+/// unauthenticated caller anything. The strings are a stable contract.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DenyReason {
+    /// The token's `sub` has no Distant Signal account.
+    NoAccount,
+    /// No grant row for this user and client (never connected, or the
+    /// revoked row was purged after its retention).
+    NeverGranted,
+    /// The user pressed Disconnect.
+    RevokedByUser,
+    /// An admin revoked the user's sessions and grants.
+    RevokedByAdmin,
+    /// The user logged out of Distant Signal (back-channel logout).
+    RevokedByBackchannelLogout,
+    /// The client reported its own logout.
+    RevokedByClientLogout,
+    /// Unused for 90 days.
+    RevokedInactive,
+    /// An operator revoked every grant of a client during an incident (the
+    /// runbook's SQL, `revoked_reason = 'client_disabled'`).
+    RevokedClientDisabled,
+    /// The client is switched off on the server.
+    ClientDisabled,
+    /// The token was minted before the grant (or before the user's last
+    /// session invalidation).
+    TokenBeforeGrant,
+    /// The grant, the token or the client's maximum lacks the route's scope.
+    MissingScope,
+    /// No delegated route is mounted here.
+    RouteNotDelegated,
+}
+
+impl DenyReason {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            DenyReason::NoAccount => "no_account",
+            DenyReason::NeverGranted => "never_granted",
+            DenyReason::RevokedByUser => "revoked_by_user",
+            DenyReason::RevokedByAdmin => "revoked_by_admin",
+            DenyReason::RevokedByBackchannelLogout => "revoked_by_backchannel_logout",
+            DenyReason::RevokedByClientLogout => "revoked_by_client_logout",
+            DenyReason::RevokedInactive => "revoked_inactive",
+            DenyReason::RevokedClientDisabled => "revoked_client_disabled",
+            DenyReason::ClientDisabled => "client_disabled",
+            DenyReason::TokenBeforeGrant => "token_before_grant",
+            DenyReason::MissingScope => "missing_scope",
+            DenyReason::RouteNotDelegated => "route_not_delegated",
+        }
+    }
+
+    /// The reason for a revoked grant's `revoked_reason`. `replaced` means a
+    /// newer grant exists (only reachable in a race), and an unknown value
+    /// is not one this build knows: neither gets a reason.
+    pub fn for_revoked(reason: &str) -> Option<DenyReason> {
+        match reason {
+            "user" => Some(DenyReason::RevokedByUser),
+            "admin" => Some(DenyReason::RevokedByAdmin),
+            "backchannel" => Some(DenyReason::RevokedByBackchannelLogout),
+            "client_logout" => Some(DenyReason::RevokedByClientLogout),
+            "inactive" => Some(DenyReason::RevokedInactive),
+            "client_disabled" => Some(DenyReason::RevokedClientDisabled),
+            _ => None,
+        }
+    }
+}
+
 /// The JSON error body of the delegated error contract (§5.15).
 pub fn error_response(status: StatusCode, error: &'static str, message: &str) -> Response {
-    let mut response = (
-        status,
-        axum::Json(serde_json::json!({ "error": error, "message": message })),
-    )
-        .into_response();
+    error_response_with(status, error, message, &[])
+}
+
+/// [`error_response`] with extra string fields (`reason`, `scope`) beside
+/// `error` and `message`.
+pub fn error_response_with(
+    status: StatusCode,
+    error: &'static str,
+    message: &str,
+    extra: &[(&str, &str)],
+) -> Response {
+    let mut body = serde_json::json!({ "error": error, "message": message });
+    for (key, value) in extra {
+        body[*key] = serde_json::Value::String((*value).to_string());
+    }
+    let mut response = (status, axum::Json(body)).into_response();
     if status == StatusCode::UNAUTHORIZED {
         response.headers_mut().insert(
             header::WWW_AUTHENTICATE,
@@ -748,7 +828,19 @@ pub async fn gate(
         return reject(Some(client_name), "public_listener", None, invalid());
     }
     if !client.config.enabled {
-        return reject(Some(client_name), "client_disabled", None, invalid());
+        // The reason only goes to a token that verifies: the answer for a
+        // forged or expired one stays the plain 401.
+        let response = if verify_delegated(client, &token).await.is_ok() {
+            error_response_with(
+                StatusCode::UNAUTHORIZED,
+                "invalid_token",
+                "invalid bearer token",
+                &[("reason", DenyReason::ClientDisabled.as_str())],
+            )
+        } else {
+            invalid()
+        };
+        return reject(Some(client_name), "client_disabled", None, response);
     }
     let Ok(claims) = verify_delegated(client, &token).await else {
         return reject(Some(client_name), "invalid_token", None, invalid());
@@ -771,10 +863,11 @@ pub async fn gate(
             Some(client_name),
             "route_not_delegated",
             Some(&claims.sub),
-            error_response(
+            error_response_with(
                 StatusCode::FORBIDDEN,
                 "insufficient_scope",
                 "this route does not accept delegated tokens",
+                &[("reason", DenyReason::RouteNotDelegated.as_str())],
             ),
         );
     };
@@ -990,22 +1083,39 @@ async fn resolve_delegated<S: RequiredScope>(
             "grant lookup failed",
         )
     };
-    let not_granted = || {
-        error_response(
+    let not_granted = |reason: Option<DenyReason>| {
+        let extra: Vec<(&str, &str)> = reason
+            .map(|reason| ("reason", reason.as_str()))
+            .into_iter()
+            .collect();
+        error_response_with(
             StatusCode::FORBIDDEN,
             "delegation_not_granted",
             "the user has not granted this app access in Distant Signal",
+            &extra,
         )
     };
     let Some(grant) = crate::data::delegated::active_grant(&app.database, &token.sub, client)
         .await
         .map_err(database_error)?
     else {
+        // The token verified, so the caller may learn why; a failed lookup
+        // only costs the reason.
+        let reason =
+            match crate::data::delegated::latest_grant_state(&app.database, &token.sub, client)
+                .await
+            {
+                Ok(state) => state.deny_reason(),
+                Err(err) => {
+                    tracing::warn!(error = ?err, "could not look up why a grant is not active");
+                    None
+                }
+            };
         return Err(reject(
             Some(client),
             "delegation_not_granted",
             Some(&token.sub),
-            not_granted(),
+            not_granted(reason),
         ));
     };
     let now = chrono::Utc::now();
@@ -1025,7 +1135,7 @@ async fn resolve_delegated<S: RequiredScope>(
             Some(client),
             "grant_inactive",
             Some(&token.sub),
-            not_granted(),
+            not_granted(Some(DenyReason::RevokedInactive)),
         ));
     }
     let not_before = grant
@@ -1038,19 +1148,24 @@ async fn resolve_delegated<S: RequiredScope>(
             Some(client),
             "issued_before_not_before",
             Some(&token.sub),
-            error_response(
+            error_response_with(
                 StatusCode::UNAUTHORIZED,
                 "invalid_token",
                 "token issued before the grant",
+                &[("reason", DenyReason::TokenBeforeGrant.as_str())],
             ),
         ));
     }
     let effective = effective_scopes(&token.scopes, &grant.scopes, &token.client.max_scopes);
     if !effective.contains(&S::SCOPE) {
-        let mut response = error_response(
+        let mut response = error_response_with(
             StatusCode::FORBIDDEN,
             "insufficient_scope",
             &format!("this needs the {} scope", S::SCOPE.as_str()),
+            &[
+                ("reason", DenyReason::MissingScope.as_str()),
+                ("scope", S::SCOPE.as_str()),
+            ],
         );
         if let Ok(value) = HeaderValue::from_str(&format!(
             "Bearer error=\"insufficient_scope\", scope=\"{}\"",
@@ -1445,6 +1560,13 @@ mod tests {
                     body.contains("insufficient_scope"),
                     "{method} {uri}: {body}"
                 );
+                let json: serde_json::Value = serde_json::from_str(&body).unwrap();
+                assert_eq!(json["reason"], "route_not_delegated", "{method} {uri}");
+                assert_eq!(
+                    json["message"], "this route does not accept delegated tokens",
+                    "{method} {uri}"
+                );
+                assert_eq!(json.as_object().unwrap().len(), 3, "{body}");
             }
         }
 
@@ -1471,8 +1593,27 @@ mod tests {
             );
             let (_, delegated) = routers(auth);
             let token = sign_token(&claims(&server.uri(), |_| {}));
-            let (status, _, body) = send(&delegated, "GET", "/Journeys/mine", &token, false).await;
+            let (status, headers, body) =
+                send(&delegated, "GET", "/Journeys/mine", &token, false).await;
             assert_eq!(status, StatusCode::UNAUTHORIZED, "{body}");
+            // A verified token learns why; the old fields are unchanged.
+            let json: serde_json::Value = serde_json::from_str(&body).unwrap();
+            assert_eq!(json["error"], "invalid_token");
+            assert_eq!(json["message"], "invalid bearer token");
+            assert_eq!(json["reason"], "client_disabled");
+            assert_eq!(json.as_object().unwrap().len(), 3, "{body}");
+            assert_eq!(
+                headers.get(header::WWW_AUTHENTICATE).unwrap(),
+                "Bearer error=\"invalid_token\""
+            );
+            // A token that does not verify gets the plain answer.
+            let forged = {
+                let (rest, _) = token.rsplit_once('.').unwrap();
+                format!("{rest}.AAAA")
+            };
+            let (status, _, body) = send(&delegated, "GET", "/Journeys/mine", &forged, false).await;
+            assert_eq!(status, StatusCode::UNAUTHORIZED, "{body}");
+            assert!(!body.contains("reason"), "{body}");
         }
 
         #[tokio::test]
@@ -1513,6 +1654,7 @@ mod tests {
                 let (status, _, body) =
                     send(&delegated, "GET", "/Journeys/mine", &token, false).await;
                 assert_eq!(status, StatusCode::UNAUTHORIZED, "{what}: {body}");
+                assert!(!body.contains("reason"), "{what}: {body}");
             }
         }
 
