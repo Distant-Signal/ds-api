@@ -282,6 +282,23 @@ def has_nul(value: object) -> bool:
     return False
 
 
+# Backups from before train_service_labels existed (the 2026-11-09 one) lack
+# the table, and a query naming a missing table fails at parse time. The
+# scratch script asks `to_regclass` first and `\gset`s the label subquery into a
+# psql variable: the real subquery when the table exists (identical to the old
+# query), `NULL::jsonb` (no label for any train) when it does not.
+LABEL_VAR = "label_expr"
+LABEL_EXPR = f":{LABEL_VAR}"
+LABEL_SUBQUERY = (
+    "(SELECT to_jsonb(l) FROM train_service_labels l WHERE l.trains_id = t.id)"
+)
+LABEL_PROBE = (
+    "SELECT CASE WHEN to_regclass('public.train_service_labels') IS NOT NULL "
+    f"THEN {dollar_quote(LABEL_SUBQUERY)} ELSE 'NULL::jsonb' END AS {LABEL_VAR} "
+    "\\gset"
+)
+
+
 def bundle_sql(index: int, uid: str, day: dt.date) -> str:
     """Return the read-only query for one train: a JSON line per matching row.
 
@@ -298,8 +315,7 @@ def bundle_sql(index: int, uid: str, day: dt.date) -> str:
         "WHERE s.trains_id = t.id), "
         "'reasons', COALESCE((SELECT jsonb_agg(to_jsonb(r) ORDER BY r.msg_type) "
         "FROM train_reasons r WHERE r.trains_id = t.id), '[]'::jsonb), "
-        "'label', (SELECT to_jsonb(l) FROM train_service_labels l "
-        "WHERE l.trains_id = t.id))::text "
+        f"'label', {LABEL_EXPR})::text "
         f"FROM trains t WHERE t.train_uid = {dollar_quote(uid)} "
         f"AND t.service_date = '{day.isoformat()}'::date;"
     )
@@ -314,6 +330,7 @@ def scratch_script(keys: Sequence[tuple[str, dt.date]]) -> str:
         "SET default_transaction_read_only = on;\n"
         "SET TimeZone = 'UTC';\n"
         "BEGIN READ ONLY;\n"
+        f"{LABEL_PROBE}\n"
         f"{queries}\n"
         "ROLLBACK;\n"
     )
@@ -522,13 +539,17 @@ def col_list(cols: Sequence[str], prefix: str = "") -> str:
     return ", ".join(f"{prefix}{c}" for c in cols)
 
 
-def shape_check(max_id: int) -> str:
+def shape_check(tops: tuple[int, int, int]) -> str:
     """Return a DO block that aborts unless the live schema and ids fit.
 
     The live column sets must equal the ones the rows were written with, and
-    `max(trains.id)` (and the child ids) must be above everything restored, so
-    the sequences cannot hand a restored id out later (no setval is needed).
+    the live `max(id)` of EACH table (trains, train_movement_events,
+    train_current_state, each on its own sequence) must be above the highest id
+    restored into that same table, so the sequences cannot hand a restored id
+    out later (no setval is needed). Never compare one table's max with another
+    table's ids: event ids are far above train ids.
     """
+    trains_top, events_top, state_top = tops
     clauses = []
     for table, cols in TABLES.items():
         names = ",".join(sorted(cols))
@@ -543,8 +564,16 @@ def shape_check(max_id: int) -> str:
         f"  IF {schema_bad} THEN\n"
         "    RAISE EXCEPTION 'schema differs from the extracted columns';\n"
         "  END IF;\n"
-        f"  IF COALESCE((SELECT max(id) FROM trains), 0) <= {max_id} THEN\n"
-        "    RAISE EXCEPTION 'trains ids are not above the restored ids';\n"
+        f"  IF COALESCE((SELECT max(id) FROM trains), 0) <= {trains_top} THEN\n"
+        "    RAISE EXCEPTION 'trains ids are not above the restored trains ids';\n"
+        "  END IF;\n"
+        "  IF COALESCE((SELECT max(id) FROM train_movement_events), 0) "
+        f"<= {events_top} THEN\n"
+        "    RAISE EXCEPTION 'event ids are not above the restored event ids';\n"
+        "  END IF;\n"
+        "  IF COALESCE((SELECT max(id) FROM train_current_state), 0) "
+        f"<= {state_top} THEN\n"
+        "    RAISE EXCEPTION 'state ids are not above the restored state ids';\n"
         "  END IF;\n"
         "END $guard$;"
     )
@@ -646,19 +675,14 @@ def max_ids(bundles: Sequence[Bundle]) -> tuple[int, int, int]:
 
 def batches(bundles: Sequence[Bundle], size: int) -> list[str]:
     """One transaction per `size` trains."""
-    max_id = max((b.train_id for b in bundles), default=0)
-    max_id = max(
-        [max_id]
-        + [int(str(e["id"])) for b in bundles for e in b.events]
-        + [int(str(b.state["id"])) for b in bundles if b.state is not None]
-    )
+    tops = max_ids(bundles)
     out = []
     for start in range(0, len(bundles), size):
         lines = [
             "BEGIN;",
             "SET LOCAL lock_timeout = '5s';",
             "SET LOCAL statement_timeout = '120s';",
-            shape_check(max_id),
+            shape_check(tops),
         ]
         for bundle in bundles[start : start + size]:
             lines.append(train_statement(bundle))
@@ -676,7 +700,8 @@ def docs_literal(bundles: Sequence[Bundle]) -> str:
 def verify_sql(bundles: Sequence[Bundle]) -> str:
     """Return a read-only check that live rows read back identical.
 
-    Row for row: `to_jsonb(live row) = extracted row`. Counts only. For a
+    Row for row: `to_jsonb(live row) = extracted row`, each looked up by its
+    primary key first (an unkeyed comparison scans the whole table). Counts only. For a
     run where every train was inserted, each *_identical equals its
     *_expected; a skipped train (see preflight.sql) shows as a shortfall.
     """
@@ -689,27 +714,33 @@ def verify_sql(bundles: Sequence[Bundle]) -> str:
         "SELECT\n"
         "  count(*) AS trains_expected,\n"
         "  count(*) FILTER (WHERE EXISTS (SELECT 1 FROM trains x\n"
-        "    WHERE to_jsonb(x) = j->'train')) AS trains_identical,\n"
+        "    WHERE x.id = (j->'train'->>'id')::bigint\n"
+        "      AND to_jsonb(x) = j->'train')) AS trains_identical,\n"
         "  (SELECT count(*) FROM d d2, jsonb_array_elements(d2.j->'events') e)\n"
         "    AS events_expected,\n"
         "  (SELECT count(*) FROM d d2, jsonb_array_elements(d2.j->'events') e\n"
         "    WHERE EXISTS (SELECT 1 FROM train_movement_events x\n"
-        "      WHERE to_jsonb(x) = e)) AS events_identical,\n"
+        "      WHERE x.id = (e->>'id')::bigint\n"
+        "        AND to_jsonb(x) = e)) AS events_identical,\n"
         "  count(*) FILTER (WHERE jsonb_typeof(j->'state') = 'object')\n"
         "    AS state_expected,\n"
         "  count(*) FILTER (WHERE jsonb_typeof(j->'state') = 'object'\n"
         "    AND EXISTS (SELECT 1 FROM train_current_state x\n"
-        "      WHERE to_jsonb(x) = j->'state')) AS state_identical,\n"
+        "      WHERE x.id = (j->'state'->>'id')::bigint\n"
+        "        AND to_jsonb(x) = j->'state')) AS state_identical,\n"
         "  (SELECT count(*) FROM d d2, jsonb_array_elements(d2.j->'reasons') e)\n"
         "    AS reasons_expected,\n"
         "  (SELECT count(*) FROM d d2, jsonb_array_elements(d2.j->'reasons') e\n"
         "    WHERE EXISTS (SELECT 1 FROM train_reasons x\n"
-        "      WHERE to_jsonb(x) = e)) AS reasons_identical,\n"
+        "      WHERE x.trains_id = (e->>'trains_id')::bigint\n"
+        "        AND x.msg_type = e->>'msg_type'\n"
+        "        AND to_jsonb(x) = e)) AS reasons_identical,\n"
         "  count(*) FILTER (WHERE jsonb_typeof(j->'label') = 'object')\n"
         "    AS labels_expected,\n"
         "  count(*) FILTER (WHERE jsonb_typeof(j->'label') = 'object'\n"
         "    AND EXISTS (SELECT 1 FROM train_service_labels x\n"
-        "      WHERE to_jsonb(x) = j->'label')) AS labels_identical,\n"
+        "      WHERE x.trains_id = (j->'label'->>'trains_id')::bigint\n"
+        "        AND to_jsonb(x) = j->'label')) AS labels_identical,\n"
         "  (SELECT count(*) FROM d d2, jsonb_array_elements(d2.j->'subs') s)\n"
         "    AS subscriptions_expected,\n"
         "  (SELECT count(*) FROM d d2, jsonb_array_elements(d2.j->'subs') s\n"
