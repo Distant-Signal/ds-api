@@ -15,14 +15,15 @@ addition.
 
 One entry per calling point. Per stop, the overlay applies ONE winning TRUST
 report for the stop's visit (the latest received): an ARRIVAL, a DEPARTURE or
-a PASS.
+a PASS. The winner decides `lastEventType`,
+`variationStatus`, `delayMinutes` and `delayBasis`.
 
 | Field | What it is |
 |---|---|
 | `timetable.publicArrival`, `publicDeparture` | Booked, public timetable (what a passenger is sold). |
 | `timetable.workingArrival`, `workingDeparture`, `workingPass` | Booked, working timetable. |
 | `timetable.scheduledArrival`, `scheduledDeparture` | Booked: the public time, else the working time to the minute. |
-| `actualArrival`, `actualDeparture` | Recorded: set from the winning TRUST report. An ARRIVAL sets `actualArrival` only, a DEPARTURE `actualDeparture` only, a PASS both (except at a booked calling point, where a PASS means the train ran through and sets neither). `null` otherwise. |
+| `actualArrival`, `actualDeparture` | Recorded: set from the winning TRUST report. An ARRIVAL sets `actualArrival` only; a DEPARTURE sets `actualDeparture` and keeps the visit's own ARRIVAL actual in `actualArrival` when one was reported (since 2026-11-24); a PASS sets both (except at a booked calling point, where a PASS means the train ran through and sets neither). `null` otherwise. |
 | `actualArrivalIsActual`, `actualDepartureIsActual` | `true` exactly when the matching `actual*` was set from a TRUST report (a PASS's time included); `false` when it is `null`. Always present. `false` means "no recorded actual", never "on time" and never "estimated". |
 | `estimatedArrival`, `estimatedDeparture` | Estimated: the working time plus the train's running delay (see `estimateSource`). Only set while the matching `actual*` is `null`; never alongside an actual. |
 | `estimateSource` | Where the estimates came from, see below. |
