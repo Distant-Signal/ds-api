@@ -82,7 +82,10 @@ yet, `false` once it is measured.
     booked public departure; `null` when either is missing. The basis is judged
     at the boarding station, so it can differ from `delayBasis`.
 - `GET /Journeys/reliability` `journeys[].actualArrival`: derived (the booked
-  arrival plus the measured delay), not a time TRUST reported.
+  arrival plus the leg's delay), not a time TRUST reported. `isMeasured` is
+  `true` only when that delay was measured at the destination; it is `false`
+  for a forecast (`provisional`), a `notReached` outcome (where
+  `actualArrival` is `null`) and a `differentDestination`.
 
 ## Trip plans
 

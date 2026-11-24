@@ -3899,9 +3899,21 @@ destinationCrs: string | null, destinationName: string | null,
  */
 bookedArrival: string | null, 
 /**
- * The arrival there on the current plan, when known.
+ * The arrival there on the current plan, when known. DERIVED, never a
+ * time TRUST reported: the last leg's booked public arrival plus its
+ * measured or forecast delay in whole minutes. `isMeasured` says which.
  */
 actualArrival: string | null, 
+/**
+ * `true` only when `actualArrival` rests on a delay that was MEASURED
+ * (the train reported at the destination, or the leg recorded its
+ * outcome there). `false` when `actualArrival` is `null`, when the delay
+ * is a forecast (`provisional`), when the train did not reach the
+ * destination (`outcome` `notReached`) and when the current plan ends
+ * somewhere else (`differentDestination`). Always present (additive,
+ * DS-638).
+ */
+isMeasured: boolean, 
 /**
  * Measured against the booked plan after the railway changed it.
  */

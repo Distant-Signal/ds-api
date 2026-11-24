@@ -3,6 +3,26 @@
 Changes to the Distant Signal (DS) HTTP API that a client such as DS-MCP
 needs to know about. Newest first. Field names are as served (camelCase).
 
+## 2026-11-24: `GET /Journeys/reliability` journeys say whether `actualArrival` is measured (DS-638)
+
+Additive. `api-types/api.ts` and `api-types/openapi/v1.json` gain
+`isMeasured` on `ReliabilityJourney`. No new route and no migration.
+
+- **New on each `journeys[]` entry**, next to `actualArrival`, always present:
+  `isMeasured` (boolean).
+- **`actualArrival` is derived, not reported.** It is the last leg's booked
+  public arrival plus its delay in whole minutes; no TRUST arrival time is
+  read into it. Where the journey was measured against the booked plan after
+  a railway-fault change, the same derivation applies to the last leg.
+- **`isMeasured` is `true` only when that delay was measured**: the train
+  reported at the destination, or the leg recorded its outcome there
+  (`provisional` is `false`). It is `false` when `actualArrival` is `null`,
+  when the delay is a forecast (`provisional` is `true`), when the train did
+  not reach the destination (`outcome` `notReached`, where `actualArrival` is
+  `null`) and when the current plan ends somewhere else
+  (`differentDestination`, where `actualArrival` is the other station's
+  derived arrival and says nothing about the booked destination). `false`
+  never means "on time".
 ## 2026-11-24: `journeyStops[]` says which actual times are recorded (DS-638)
 
 Additive. `api-types/api.ts` and `api-types/openapi/v1.json` gain the two
