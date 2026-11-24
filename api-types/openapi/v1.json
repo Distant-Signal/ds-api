@@ -2114,6 +2114,40 @@
       "LegDelayRepay": {
         "description": "A train leg's Delay Repay estimate, as `GET /Journeys/{id}` serves it\non each of the owner's tracked GB train legs (`delayRepay`). The same\nfields the per-ticket route served until 2026-11.",
         "properties": {
+          "boardingActualDeparture": {
+            "description": "When the train ACTUALLY left `boardingCrs`, as TRUST reported it\n(RFC 3339). `null` when no departure was reported there (TRUST only\nreports at timing points, so a boarding station that is not one never\nhas one), for a bus or ferry, and for a leg whose train data was\npruned. Never an estimate or the booked time.",
+            "format": "date-time",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "boardingCrs": {
+            "description": "Where the passenger boards: the leg's origin, else the tracked\ntrain's pinned boarding station. `null` when neither is known\n(additive, DS-638).",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "boardingDelayBasis": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/DelayBasis"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Which baseline `boardingDelayMinutes` used, spelled as `delayBasis`;\n`null` exactly when `boardingDelayMinutes` is. It can differ from\n`delayBasis`: each is judged on its own station's times."
+          },
+          "boardingDelayMinutes": {
+            "description": "`boardingActualDeparture` minus the booked PUBLIC departure there, in\nwhole minutes (positive is late, truncated toward zero). `null` when\neither is missing.",
+            "format": "int32",
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
           "claimUrl": {
             "description": "Always populated, independent of `estimate`: no caller is ever left\nwith nowhere real to go.",
             "type": "string"

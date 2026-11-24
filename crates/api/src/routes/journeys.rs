@@ -2334,6 +2334,7 @@ async fn attach_tickets_and_delay_repay(
                         leg.destination_crs.as_deref(),
                         leg.destination_name.as_deref(),
                     ),
+                    origin_crs: leg.origin_crs.as_deref(),
                     ticket: leg.ticket.as_ref(),
                     recorded: recorded.get(&leg.id).copied(),
                 },
