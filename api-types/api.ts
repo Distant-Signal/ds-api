@@ -1930,6 +1930,18 @@ locationType: LocationType | null,
  */
 parentCrs: string | null, tiploc: string | null, kind: "Origin" | "Intermediate" | "Terminate" | null, actualArrival: string | null, actualDeparture: string | null, 
 /**
+ * `true` exactly when `actual_arrival` was set from a TRUST movement
+ * report (a PASS's time included); `false` when it is `None`. Always
+ * present: `false` means "no recorded actual", never "on time" and
+ * never "estimated" (`estimated_arrival` is the estimate). `false` on a
+ * freshly-built stop, until the movement overlay sets it (DS-638).
+ */
+actualArrivalIsActual: boolean, 
+/**
+ * As `actual_arrival_is_actual`, for `actual_departure`.
+ */
+actualDepartureIsActual: boolean, 
+/**
  * The working time to the minute (`timetable.working_minute_arrival`)
  * plus the train's current overall delay, filled in by
  * `apply_delay_estimates` (below) ONLY while `actual_arrival` is still

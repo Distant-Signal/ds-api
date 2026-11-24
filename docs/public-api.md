@@ -45,6 +45,8 @@ carries `Retry-After`. Any site may read the answers from a browser
 
 The api changelog (`docs/api-changelog.md`) records changes to these
 shapes.
+[actual-vs-estimated-times.md](actual-vs-estimated-times.md) lists which time
+fields are actual, estimated or booked.
 
 ## Attribution
 

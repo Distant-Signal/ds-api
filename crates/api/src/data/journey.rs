@@ -746,11 +746,13 @@ fn overlay_movement_events(stops: &mut [JourneyStop], events: &[queries::Movemen
         match event.event_type.as_deref() {
             Some("ARRIVAL") => {
                 stop.actual_arrival = event.actual_timestamp;
+                stop.actual_arrival_is_actual = event.actual_timestamp.is_some();
                 stop.timetable.working_minute_arrival =
                     backfill(stop.timetable.working_minute_arrival);
             }
             Some("DEPARTURE") => {
                 stop.actual_departure = event.actual_timestamp;
+                stop.actual_departure_is_actual = event.actual_timestamp.is_some();
                 stop.timetable.working_minute_departure =
                     backfill(stop.timetable.working_minute_departure);
             }
@@ -786,6 +788,8 @@ fn overlay_movement_events(stops: &mut [JourneyStop], events: &[queries::Movemen
                 if !booked_calling_point {
                     stop.actual_arrival = event.actual_timestamp;
                     stop.actual_departure = event.actual_timestamp;
+                    stop.actual_arrival_is_actual = event.actual_timestamp.is_some();
+                    stop.actual_departure_is_actual = event.actual_timestamp.is_some();
                 }
                 stop.timetable.working_minute_arrival =
                     backfill(stop.timetable.working_minute_arrival);
@@ -1661,6 +1665,8 @@ pub(crate) mod test_support {
             kind: Some(kind),
             actual_arrival: None,
             actual_departure: None,
+            actual_arrival_is_actual: false,
+            actual_departure_is_actual: false,
             estimated_arrival: None,
             estimated_departure: None,
             estimate_source: None,
@@ -1706,6 +1712,8 @@ mod tests {
             kind: None,
             actual_arrival: None,
             actual_departure: None,
+            actual_arrival_is_actual: false,
+            actual_departure_is_actual: false,
             estimated_arrival: None,
             estimated_departure: None,
             estimate_source: None,
@@ -3253,6 +3261,67 @@ mod tests {
         let expected: Option<DateTime<Utc>> = "2026-09-14T09:12:00Z".parse().ok();
         assert_eq!(stops[0].actual_arrival, expected);
         assert_eq!(stops[0].actual_departure, expected);
+    }
+
+    /// `actualArrivalIsActual`/`actualDepartureIsActual` are true exactly
+    /// when the matching `actual*` was set from a TRUST movement (DS-638):
+    /// an arrival sets only the arrival flag, a departure only the departure
+    /// one, a PASS at a non-booked point both, a PASS at a booked calling
+    /// point neither, a report with no actual time neither, and a stop with
+    /// no report (or only an estimate) neither.
+    #[test]
+    fn overlay_movement_events_flags_exactly_the_actuals_it_set() {
+        use schedule_query::CallingPointKind::{Intermediate, Origin, Terminate};
+        let booked = || StopTimetable {
+            working_minute_arrival: Some("2026-09-14T09:10:00Z".parse().unwrap()),
+            working_minute_departure: Some("2026-09-14T09:11:00Z".parse().unwrap()),
+            ..StopTimetable::default()
+        };
+        let mut untimed = event("UNT", "DEPARTURE", "2026-09-14T09:30:00Z");
+        untimed.actual_timestamp = None;
+        let mut stops = vec![
+            stop_at("DEP", Origin),
+            stop_at("PAS", Intermediate),
+            JourneyStop {
+                timetable: booked(),
+                ..stop_at("BKD", Intermediate)
+            },
+            stop_at("UNT", Intermediate),
+            stop_at("NON", Intermediate),
+            stop_at("ARR", Terminate),
+        ];
+        let events = vec![
+            event("DEP", "DEPARTURE", "2026-09-14T09:02:00Z"),
+            event("PAS", "PASS", "2026-09-14T09:03:00Z"),
+            event("BKD", "PASS", "2026-09-14T09:04:00Z"),
+            untimed,
+            event("ARR", "ARRIVAL", "2026-09-14T09:40:00Z"),
+        ];
+
+        overlay_movement_events(&mut stops, &events);
+        apply_delay_estimates(&mut stops, Some(3));
+
+        let flags = |index: usize| {
+            (
+                stops[index].actual_arrival_is_actual,
+                stops[index].actual_departure_is_actual,
+            )
+        };
+        assert_eq!(flags(0), (false, true), "a departure");
+        assert_eq!(flags(1), (true, true), "a pass at a non-booked point");
+        assert_eq!(flags(2), (false, false), "a pass at a booked calling point");
+        assert_eq!(flags(3), (false, false), "a report with no actual time");
+        assert_eq!(flags(4), (false, false), "no report");
+        assert_eq!(flags(5), (true, false), "an arrival");
+        // The flag always agrees with the field it describes, and an
+        // estimate never sets it.
+        for stop in &stops {
+            assert_eq!(stop.actual_arrival_is_actual, stop.actual_arrival.is_some());
+            assert_eq!(
+                stop.actual_departure_is_actual,
+                stop.actual_departure.is_some()
+            );
+        }
     }
 
     /// THE PASSING-POINT BUG. A schedule that runs through Watford Junction

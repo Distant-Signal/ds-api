@@ -3,6 +3,32 @@
 Changes to the Distant Signal (DS) HTTP API that a client such as DS-MCP
 needs to know about. Newest first. Field names are as served (camelCase).
 
+## 2026-11-24: `journeyStops[]` says which actual times are recorded (DS-638)
+
+Additive. `api-types/api.ts` and `api-types/openapi/v1.json` gain the two
+fields below on `JourneyStop`. No new route and no migration. Nothing else
+changes: which TRUST report wins a stop, `lastEventType`, `variationStatus`,
+`delayMinutes`, `delayBasis` and every `actual*` and `estimated*` value are as
+before. Needs ds-core v0.18.0.
+
+- **New on every `journeyStops[]` entry** (train, journey leg and public train
+  responses alike), always present:
+  - `actualArrivalIsActual` (boolean): `true` exactly when `actualArrival`
+    was set from a TRUST movement report (a PASS's time included).
+  - `actualDepartureIsActual` (boolean): the same for `actualDeparture`.
+- **`false` means "no recorded actual"**: the time is `null` (no report yet, a
+  report with no actual time, a PASS at a booked calling point, or a station
+  TRUST does not report at). It never means "on time" and never means "this is
+  an estimate": an estimate is `estimatedArrival`/`estimatedDeparture`, which
+  is only ever set while the flag is `false`.
+- **Why always present, not absent-when-false.** `POST /Trips/plan`'s
+  `legs[].live.arrivalIsActual` is absent rather than `false`, which suits a
+  field a client usually ignores. Here a client has to branch on "is this
+  time real", and an explicit `false` cannot be mistaken for an older api that
+  did not send the field. Both conventions are documented in
+  `docs/actual-vs-estimated-times.md`, which also lists every field that says
+  a time is actual, estimated or booked, and the `estimateSource` values.
+
 ## 2026-11-22: a leg's Delay Repay says when its train left the boarding station (DS-638)
 
 Additive. `api-types/api.ts` and `api-types/openapi/v1.json` gain the four
