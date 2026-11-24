@@ -124,6 +124,29 @@ OpenAPI change (these errors are not in the document).
   plain 401 without it. Table of what the user should do:
   connected-apps.md, "Errors".
 
+## 2026-11-24: group and shared journey rows say where each row's train detail comes from (DS-684)
+
+Additive. `api-types/api.ts` gains the two fields below on `GroupJourney` and
+`SharedJourney`. No new route and no migration; the OpenAPI document is
+unchanged (these types are not in it).
+
+- **New on each row of `GET /groups/{id}/journeys` and the "shared with me"
+  journey list**, for the row's summarised leg, with the meaning
+  `GET /Journeys/mine` gave them on 2026-11-22:
+  - `trainDetail` (`"live"`, `"snapshot"`, `"unavailable"` or `null`): `live`
+    while the train's data is held; `snapshot` when it was pruned but the leg
+    kept its own copy; `unavailable` when pruned and no copy was kept; `null`
+    for an open or untracked leg.
+  - `snapshotAt` (RFC 3339 or `null`): when the copy was last written; set
+    only with `snapshot`.
+- **A pruned train's recorded outcome now fills the row.** For a matched leg
+  whose train was pruned, `status` is `completed` or `cancelled` and
+  `delayMinutes` (with `delayBasis` `public`) the arrival delay, from the
+  outcome the leg recorded when it ended; both stay `null` when none was
+  recorded. Before this, such a row read as a matched train with no status.
+- A member sees no more than before: status, delay and where the detail comes
+  from. The copy's document is never read, and the query gains no join.
+
 ## 2026-11-22: `GET /Journeys/mine` says where each row's train detail comes from (DS-638)
 
 Additive. `api-types/api.ts` and `api-types/openapi/v1.json` gain the two
