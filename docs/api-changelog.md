@@ -3,6 +3,26 @@
 Changes to the Distant Signal (DS) HTTP API that a client such as DS-MCP
 needs to know about. Newest first. Field names are as served (camelCase).
 
+## 2026-11-24: `journeyStops[]` keeps the arrival actual after the train departs (DS-638)
+
+Additive. No shape change, so no regenerated types. A change of value only:
+`actualArrival` is now also present on a stop whose latest TRUST report is a
+DEPARTURE.
+
+- **Additive: `actualArrival` now present after departure.** Before, a stop
+  showed one report: once the DEPARTURE arrived (it wins as the latest), the
+  stop's `actualArrival` went back to `null`. Now, when a DEPARTURE wins a
+  stop's visit and the visit also has an ARRIVAL report with an actual time
+  (including one rejoined across a long dwell), `actualArrival` is that
+  arrival's time (the latest received if corrected) and `actualArrivalIsActual`
+  is `true`.
+- **Unchanged**: which report wins, so `lastEventType`, `variationStatus`,
+  `delayMinutes` and `delayBasis` stay measured on the departure; `actualDeparture`;
+  a PASS (still sets both at a non-booked point and neither at a booked calling
+  point); a loop's origin never takes its terminus's arrival. A client that
+  read "`actualArrival` is `null` means the train has left" must read
+  `lastEventType` or `actualDeparture` instead.
+
 ## 2026-11-24: `GET /Journeys/reliability` journeys say whether `actualArrival` is measured (DS-638)
 
 Additive. `api-types/api.ts` and `api-types/openapi/v1.json` gain

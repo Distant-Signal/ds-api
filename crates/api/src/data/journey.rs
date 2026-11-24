@@ -753,6 +753,23 @@ fn overlay_movement_events(stops: &mut [JourneyStop], events: &[queries::Movemen
             Some("DEPARTURE") => {
                 stop.actual_departure = event.actual_timestamp;
                 stop.actual_departure_is_actual = event.actual_timestamp.is_some();
+                // The train arrived before it left: keep the visit's own
+                // arrival actual (DS-638), the latest received one. Only the
+                // actual time and its flag; which report wins, the delay and
+                // `last_event_type` stay on the departure.
+                let arrival = visit
+                    .members
+                    .iter()
+                    .copied()
+                    .filter(|&member| {
+                        events[member].event_type.as_deref() == Some("ARRIVAL")
+                            && events[member].actual_timestamp.is_some()
+                    })
+                    .max();
+                if let Some(arrival) = arrival {
+                    stop.actual_arrival = events[arrival].actual_timestamp;
+                    stop.actual_arrival_is_actual = true;
+                }
                 stop.timetable.working_minute_departure =
                     backfill(stop.timetable.working_minute_departure);
             }
@@ -1352,9 +1369,10 @@ fn every_report_is(
 /// -- the earlier call then shows nothing. That needs two complementary
 /// report losses at one station in one journey, and its cost is confined to
 /// display: the merged visit's winner is the DEPARTURE, and
-/// `overlay_movement_events` only ever sets `actual_arrival` from a winning
-/// event whose own type is `ARRIVAL`, so [`confirmed_final_arrival`] cannot
-/// be made to read a still-running train as finished by it. The same bound
+/// [`confirmed_final_arrival`] needs a winning event whose own type is
+/// `ARRIVAL` (a departure winner may now carry the visit's arrival actual,
+/// DS-638, but never reads as the confirmed terminus), so it cannot be made
+/// to read a still-running train as finished by it. The same bound
 /// applies to the mirror case, where an untimed report of a different type
 /// lands in the departures group (`split_into_visits` appends untimed
 /// reports to the last group) and suppresses a rejoin that should have
@@ -3261,6 +3279,114 @@ mod tests {
         let expected: Option<DateTime<Utc>> = "2026-09-14T09:12:00Z".parse().ok();
         assert_eq!(stops[0].actual_arrival, expected);
         assert_eq!(stops[0].actual_departure, expected);
+    }
+
+    /// DS-638: when a DEPARTURE wins a stop's visit, the visit's own ARRIVAL
+    /// actual is kept, so both actual times show once the train has left. The
+    /// winner is unchanged: `lastEventType`, `variationStatus`, the delay and
+    /// its basis stay on the departure.
+    #[test]
+    fn a_departure_that_wins_keeps_the_visits_arrival_actual() {
+        use schedule_query::CallingPointKind::{Intermediate, Origin, Terminate};
+        let mut stops = vec![
+            stop_at("AAA", Origin),
+            stop_at("BBB", Intermediate),
+            stop_at("CCC", Terminate),
+        ];
+        let mut arrival = event("BBB", "ARRIVAL", "2026-09-14T09:20:00Z");
+        arrival.actual_timestamp = Some("2026-09-14T09:22:00Z".parse().unwrap());
+        arrival.variation_status = Some("LATE".into());
+        let mut departure = event("BBB", "DEPARTURE", "2026-09-14T09:21:00Z");
+        departure.actual_timestamp = Some("2026-09-14T09:27:00Z".parse().unwrap());
+        departure.gbtt_timestamp = Some("2026-09-14T09:21:00Z".parse().unwrap());
+        departure.variation_status = Some("LATE".into());
+        let events = vec![
+            event("AAA", "DEPARTURE", "2026-09-14T09:00:00Z"),
+            arrival,
+            departure,
+        ];
+
+        overlay_movement_events(&mut stops, &events);
+
+        let bbb = &stops[1];
+        assert_eq!(bbb.actual_arrival, "2026-09-14T09:22:00Z".parse().ok());
+        assert_eq!(bbb.actual_departure, "2026-09-14T09:27:00Z".parse().ok());
+        assert!(bbb.actual_arrival_is_actual && bbb.actual_departure_is_actual);
+        assert_eq!(bbb.last_event_type.as_deref(), Some("DEPARTURE"));
+        assert_eq!(bbb.delay_minutes, Some(6), "measured on the departure");
+        assert_eq!(
+            bbb.delay_basis,
+            Some(common::public_delay::DelayBasis::Public)
+        );
+        // The origin never arrived; nothing was reported at the terminus.
+        assert_eq!(stops[0].actual_arrival, None);
+        assert!(!stops[0].actual_arrival_is_actual);
+        assert_eq!(stops[2].actual_arrival, None);
+    }
+
+    /// DS-638: the same across a split dwell (an ARRIVAL group, a long wait,
+    /// then the DEPARTURE group, rejoined by `rejoin_split_dwells`), where
+    /// the arrival is not the winner and not adjacent in time.
+    #[test]
+    fn a_split_dwell_keeps_its_arrival_actual_when_the_departure_wins() {
+        use schedule_query::CallingPointKind::{Intermediate, Origin, Terminate};
+        let mut stops = vec![
+            stop_at("AAA", Origin),
+            stop_at("BBB", Intermediate),
+            stop_at("AAA", Intermediate),
+            stop_at("CCC", Terminate),
+        ];
+        let events = vec![
+            event("AAA", "DEPARTURE", "2026-09-14T09:00:00Z"),
+            event("BBB", "ARRIVAL", "2026-09-14T09:20:00Z"),
+            // Held at BBB for forty minutes.
+            event("BBB", "DEPARTURE", "2026-09-14T10:00:00Z"),
+        ];
+
+        overlay_movement_events(&mut stops, &events);
+
+        assert_eq!(stops[1].actual_arrival, "2026-09-14T09:20:00Z".parse().ok());
+        assert_eq!(
+            stops[1].actual_departure,
+            "2026-09-14T10:00:00Z".parse().ok()
+        );
+        assert_eq!(stops[1].last_event_type.as_deref(), Some("DEPARTURE"));
+        assert!(!confirmed_final_arrival(&stops));
+    }
+
+    /// DS-638: a revisit is not a dwell. A loop's origin keeps no arrival
+    /// from the terminus's report, a departure-then-arrival pair at one
+    /// station stays two visits, and a PASS at a booked calling point still
+    /// sets neither actual.
+    #[test]
+    fn keeping_the_arrival_never_borrows_from_another_visit_or_a_booked_pass() {
+        use schedule_query::CallingPointKind::Intermediate;
+        let mut loop_stops = kingston_loop_stops();
+        overlay_movement_events(
+            &mut loop_stops,
+            &[
+                event("WAT", "DEPARTURE", "2026-09-14T06:28:00Z"),
+                event("WAT", "ARRIVAL", "2026-09-14T07:49:00Z"),
+            ],
+        );
+        assert_eq!(loop_stops[0].actual_arrival, None);
+        assert!(!loop_stops[0].actual_arrival_is_actual);
+        assert!(loop_stops[5].actual_arrival.is_some());
+        assert_eq!(loop_stops[5].actual_departure, None);
+
+        // A PASS alone at a two-sided booked stop sets neither actual.
+        let mut booked = vec![JourneyStop {
+            timetable: StopTimetable {
+                working_minute_arrival: Some("2026-09-14T09:10:00Z".parse().unwrap()),
+                working_minute_departure: Some("2026-09-14T09:11:00Z".parse().unwrap()),
+                ..StopTimetable::default()
+            },
+            ..stop_at("SLO", Intermediate)
+        }];
+        overlay_movement_events(&mut booked, &[event("SLO", "PASS", "2026-09-14T09:12:00Z")]);
+        assert_eq!(booked[0].actual_arrival, None);
+        assert_eq!(booked[0].actual_departure, None);
+        assert!(!booked[0].actual_arrival_is_actual && !booked[0].actual_departure_is_actual);
     }
 
     /// `actualArrivalIsActual`/`actualDepartureIsActual` are true exactly
