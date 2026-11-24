@@ -5729,6 +5729,23 @@ identity: string | null, serviceMode: ServiceMode, liveTracking: boolean, };
 export type TrainSearchWindow = { from: WindowBound, to: WindowBound | null, arrivalFrom: WindowBound | null, arrivalTo: WindowBound | null, };
 
 /**
+ * The body of a successful transfer.
+ */
+export type TransferOwnershipResponse = { 
+/**
+ * The new owner's opaque id in this group.
+ */
+ownerMemberId: string, 
+/**
+ * The caller's own opaque id in this group.
+ */
+memberId: string, 
+/**
+ * The caller's role now: always `member`.
+ */
+role: GroupRole, };
+
+/**
  * A line a situation changes the status of, and to what.
  */
 export type TransitAffectedLine = { 

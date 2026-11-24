@@ -3,6 +3,26 @@
 Changes to the Distant Signal (DS) HTTP API that a client such as DS-MCP
 needs to know about. Newest first. Field names are as served (camelCase).
 
+## 2026-11-24: `POST /groups/{id}/transfer-ownership` hands a group to another member (DS-616)
+
+Additive. `api-types/api.ts` and `api-types/openapi/v1.json` gain
+`TransferOwnershipResponse`. No migration. Cookie session only: not a
+delegated route, and the usual Origin check applies.
+
+- **Request**: `{ "memberId": "m_..." }`, the opaque id of the member who
+  becomes the owner (the member list's `memberId`; `memberPublicId` is
+  accepted as an alias).
+- **Success, `200`**: `{ ownerMemberId, memberId, role }`: the new owner's
+  member id, the caller's own, and the caller's role now (`member`). The
+  previous owner stays in the group as a plain member; their shares,
+  follows and custom-line grants are untouched.
+- **Errors**: `403` when the caller is not the owner (also a retry after a
+  success); `404` when the group is not the caller's, or the target is not a
+  member (never was, left or was removed); `400` `cannot_transfer_to_self`;
+  `409` `ownership_changed` when a concurrent transfer or leave got there
+  first. Typed errors are JSON `{ "error", "message" }`; clients match on
+  `error`.
+
 ## 2026-11-24: `journeyStops[]` keeps the arrival actual after the train departs (DS-638)
 
 Additive. No shape change, so no regenerated types. A change of value only:
