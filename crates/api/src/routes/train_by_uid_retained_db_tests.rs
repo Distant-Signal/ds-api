@@ -498,6 +498,15 @@ async fn a_pinned_train_keeps_its_operator_mode_stops_and_actual_times() {
         stops[0]
     );
     assert_eq!(stops[0]["lastEventType"], "DEPARTURE");
+    // The flags say which actual times are recorded ones: only the origin's
+    // departure was reported; false is "no recorded actual", never "on time".
+    assert_eq!(stops[0]["actualDepartureIsActual"], true, "{}", stops[0]);
+    assert_eq!(stops[0]["actualArrivalIsActual"], false, "{}", stops[0]);
+    for stop in &stops[1..] {
+        assert_eq!(stop["actualArrivalIsActual"], false, "{stop}");
+        assert_eq!(stop["actualDepartureIsActual"], false, "{stop}");
+        assert!(stop["actualArrival"].is_null() && stop["actualDeparture"].is_null());
+    }
     assert_eq!(stops[0]["platform"], "5", "the platform TRUST reported");
     // The public delay reads the schedule's public and working times at the
     // call: 4 minutes after the working time, 3 after the public one.
@@ -532,6 +541,7 @@ async fn a_pinned_train_keeps_its_operator_mode_stops_and_actual_times() {
     );
     assert_eq!(body["journeyStops"].as_array().unwrap().len(), 3);
     assert!(body["journeyStops"][0]["actualDeparture"].is_string());
+    assert_eq!(body["journeyStops"][0]["actualDepartureIsActual"], true);
 
     cleanup(&pool).await;
 }

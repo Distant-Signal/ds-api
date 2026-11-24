@@ -1681,12 +1681,20 @@
               "null"
             ]
           },
+          "actualArrivalIsActual": {
+            "description": "`true` exactly when `actual_arrival` was set from a TRUST movement\nreport (a PASS's time included); `false` when it is `None`. Always\npresent: `false` means \"no recorded actual\", never \"on time\" and\nnever \"estimated\" (`estimated_arrival` is the estimate). `false` on a\nfreshly-built stop, until the movement overlay sets it (DS-638).",
+            "type": "boolean"
+          },
           "actualDeparture": {
             "format": "date-time",
             "type": [
               "string",
               "null"
             ]
+          },
+          "actualDepartureIsActual": {
+            "description": "As `actual_arrival_is_actual`, for `actual_departure`.",
+            "type": "boolean"
           },
           "board": {
             "anyOf": [
@@ -1959,6 +1967,8 @@
           }
         },
         "required": [
+          "actualArrivalIsActual",
+          "actualDepartureIsActual",
           "stopStatus",
           "platformChanged",
           "platformSuppressed",
