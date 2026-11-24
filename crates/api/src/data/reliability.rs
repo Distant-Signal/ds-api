@@ -104,8 +104,18 @@ pub struct ReliabilityJourney {
     pub destination_name: Option<String>,
     /// The baseline's booked (public) arrival there, when known.
     pub booked_arrival: Option<DateTime<Utc>>,
-    /// The arrival there on the current plan, when known.
+    /// The arrival there on the current plan, when known. DERIVED, never a
+    /// time TRUST reported: the last leg's booked public arrival plus its
+    /// measured or forecast delay in whole minutes. `isMeasured` says which.
     pub actual_arrival: Option<DateTime<Utc>>,
+    /// `true` only when `actualArrival` rests on a delay that was MEASURED
+    /// (the train reported at the destination, or the leg recorded its
+    /// outcome there). `false` when `actualArrival` is `null`, when the delay
+    /// is a forecast (`provisional`), when the train did not reach the
+    /// destination (`outcome` `notReached`) and when the current plan ends
+    /// somewhere else (`differentDestination`). Always present (additive,
+    /// DS-638).
+    pub is_measured: bool,
     /// Measured against the booked plan after the railway changed it.
     pub against_booked_plan: bool,
     /// The current plan ends somewhere else: no percentage.
@@ -594,6 +604,9 @@ fn journey_delay_repay(
         return None;
     }
     let ticket_type = ticket.map(LegTicket::kind_text);
+    let actual_arrival = actual_arrival.filter(|_| !run.not_reached());
+    let is_measured =
+        actual_arrival.is_some() && !different && run.delay.is_some_and(|delay| !delay.provisional);
     Some(ReliabilityJourney {
         journey_id: last.journey_id,
         journey_public_id: String::new(),
@@ -602,7 +615,8 @@ fn journey_delay_repay(
         destination_crs: destination_crs.clone(),
         destination_name: destination_name.clone(),
         booked_arrival,
-        actual_arrival: actual_arrival.filter(|_| !run.not_reached()),
+        actual_arrival,
+        is_measured,
         against_booked_plan: booked.is_some(),
         different_destination: different,
         delay_repay: delay_repay_rules::assess(delay_repay_rules::AssessInputs {
@@ -736,6 +750,57 @@ mod tests {
         );
         let estimate = journey.delay_repay.estimate.as_ref().expect("an estimate");
         assert_eq!(estimate.band_minutes, 30);
+        assert!(journey.is_measured);
+    }
+
+    /// `isMeasured` is true only for an arrival derived from a measured
+    /// delay at the destination.
+    #[test]
+    fn is_measured_only_for_a_measured_arrival_at_the_destination() {
+        // Recorded delay: measured.
+        let measured =
+            &assemble(&readings(vec![recorded(leg(1, 11, 1), Some(7), false)])).journeys[0];
+        assert!(measured.actual_arrival.is_some() && measured.is_measured);
+
+        // A forecast from a live leg that has not arrived: not measured.
+        let mut live_leg = leg(2, 21, 1);
+        live_leg.status = Some("late".into());
+        let mut input = readings(vec![live_leg]);
+        input.live.insert(
+            21,
+            StopDelay {
+                minutes: 4,
+                basis: DelayBasis::PublicSchedule,
+                provisional: true,
+            },
+        );
+        let forecast = &assemble(&input).journeys[0];
+        assert!(forecast.actual_arrival.is_some());
+        assert!(forecast.delay_repay.provisional && !forecast.is_measured);
+
+        // The same live leg once the train has reported at the destination.
+        input.live.insert(
+            21,
+            StopDelay {
+                minutes: 4,
+                basis: DelayBasis::Public,
+                provisional: false,
+            },
+        );
+        assert!(assemble(&input).journeys[0].is_measured);
+
+        // Not reached: no arrival, not measured.
+        let canx = &assemble(&readings(vec![recorded(leg(3, 31, 1), None, true)])).journeys[0];
+        assert!(canx.actual_arrival.is_none() && !canx.is_measured);
+
+        // A different final station: an arrival time exists, but not a
+        // measurement against the booked destination.
+        let mut elsewhere = recorded(leg(4, 41, 1), Some(5), false);
+        elsewhere.destination_crs = Some("CCC".into());
+        let mut input = readings(vec![elsewhere]);
+        input.baselines.insert(4, baseline(true, true));
+        let different = &assemble(&input).journeys[0];
+        assert!(different.different_destination && !different.is_measured);
     }
 
     #[test]
