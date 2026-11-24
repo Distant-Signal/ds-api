@@ -589,6 +589,83 @@ pub async fn promote_to_admin(
     Ok(result.rows_affected() > 0)
 }
 
+/// What [`transfer_ownership`] did.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TransferOwnershipOutcome {
+    /// The target is now the owner and the previous owner a plain `member`.
+    Transferred,
+    /// The group is gone, or the actor was not its owner when the group
+    /// was locked: a concurrent transfer or leave got there first.
+    OwnerChanged,
+    /// The target is no longer a member of the group.
+    TargetNotMember,
+    /// The target is the actor.
+    TargetIsActor,
+}
+
+/// Hands the group from its owner `actor_user_id` to the member
+/// `target_user_id`, in one transaction: the target becomes `owner` and the
+/// previous owner stays as a plain `member`. Nothing else moves. Shares
+/// (`group_trains`, `group_journeys`, `journey_follows`) are keyed by the
+/// member who added them, custom-line grants by the line's owner, and
+/// `groups.created_by` and `group_invite_links.created_by` record history
+/// only; none of them reads the role, so nothing is rewritten.
+///
+/// The `groups` row is locked `FOR UPDATE` first, the order and the lock
+/// `remove_member` takes, so a concurrent transfer, leave or removal on this
+/// group waits and then sees this one's result; the actor and target roles
+/// are re-read under that lock. The previous owner is demoted before the
+/// target is promoted, so the group never has two owner rows.
+pub async fn transfer_ownership(
+    pool: &PgPool,
+    group_id: &str,
+    actor_user_id: &str,
+    target_user_id: &str,
+) -> Result<TransferOwnershipOutcome> {
+    if actor_user_id == target_user_id {
+        return Ok(TransferOwnershipOutcome::TargetIsActor);
+    }
+    let mut tx = pool.begin().await?;
+    let group: Option<String> =
+        sqlx::query_scalar("SELECT id FROM groups WHERE id = $1 FOR UPDATE")
+            .bind(group_id)
+            .fetch_optional(&mut *tx)
+            .await?;
+    if group.is_none() {
+        return Ok(TransferOwnershipOutcome::OwnerChanged);
+    }
+    let actor_role: Option<String> =
+        sqlx::query_scalar("SELECT role FROM group_members WHERE group_id = $1 AND user_id = $2")
+            .bind(group_id)
+            .bind(actor_user_id)
+            .fetch_optional(&mut *tx)
+            .await?;
+    if actor_role.as_deref() != Some("owner") {
+        return Ok(TransferOwnershipOutcome::OwnerChanged);
+    }
+    let target_role: Option<String> =
+        sqlx::query_scalar("SELECT role FROM group_members WHERE group_id = $1 AND user_id = $2")
+            .bind(group_id)
+            .bind(target_user_id)
+            .fetch_optional(&mut *tx)
+            .await?;
+    if target_role.is_none() {
+        return Ok(TransferOwnershipOutcome::TargetNotMember);
+    }
+    sqlx::query("UPDATE group_members SET role = 'member' WHERE group_id = $1 AND user_id = $2")
+        .bind(group_id)
+        .bind(actor_user_id)
+        .execute(&mut *tx)
+        .await?;
+    sqlx::query("UPDATE group_members SET role = 'owner' WHERE group_id = $1 AND user_id = $2")
+        .bind(group_id)
+        .bind(target_user_id)
+        .execute(&mut *tx)
+        .await?;
+    tx.commit().await?;
+    Ok(TransferOwnershipOutcome::Transferred)
+}
+
 /// Demotes an `admin` back to a plain `member` -- the exact inverse of
 /// `promote_to_admin`, and gated the same way (only `owner` may demote;
 /// the route's job). A no-op (`false`) if the target isn't currently an

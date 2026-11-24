@@ -73,6 +73,10 @@ pub enum FeatureEvent {
     GroupJoinJoined,
     /// ... an unknown, revoked or expired invite, or the group is full.
     GroupJoinRefused,
+    /// `POST /groups/{id}/transfer-ownership`: ownership handed over.
+    GroupOwnershipTransferred,
+    /// ... refused (not the owner, no such member, yourself, a conflict).
+    GroupOwnershipRefused,
     /// `POST /account/connected-apps/{client}`: an app connected.
     ConnectedAppEnabled,
     /// `DELETE /account/connected-apps/{client}`.
@@ -99,6 +103,8 @@ impl FeatureEvent {
         FeatureEvent::GroupJoinViewed,
         FeatureEvent::GroupJoinJoined,
         FeatureEvent::GroupJoinRefused,
+        FeatureEvent::GroupOwnershipTransferred,
+        FeatureEvent::GroupOwnershipRefused,
         FeatureEvent::ConnectedAppEnabled,
         FeatureEvent::ConnectedAppRevoked,
     ];
@@ -124,6 +130,8 @@ impl FeatureEvent {
             FeatureEvent::GroupJoinViewed => ("group_join", "viewed"),
             FeatureEvent::GroupJoinJoined => ("group_join", "joined"),
             FeatureEvent::GroupJoinRefused => ("group_join", "refused"),
+            FeatureEvent::GroupOwnershipTransferred => ("group_ownership", "transferred"),
+            FeatureEvent::GroupOwnershipRefused => ("group_ownership", "refused"),
             FeatureEvent::ConnectedAppEnabled => ("connected_app", "enabled"),
             FeatureEvent::ConnectedAppRevoked => ("connected_app", "revoked"),
         }

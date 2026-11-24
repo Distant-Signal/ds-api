@@ -58,6 +58,7 @@ fn visit_roots(v: &mut Collector) {
     v.visit::<crate::routes::groups::GroupDetailResponse>();
     v.visit::<crate::data::groups::GroupMember>();
     v.visit::<crate::routes::groups::RoleChangeResponse>();
+    v.visit::<crate::routes::groups::TransferOwnershipResponse>();
     v.visit::<crate::data::groups::InviteLink>();
     v.visit::<crate::data::groups::JoinPreview>();
     v.visit::<crate::routes::groups::JoinResponse>();

@@ -54,6 +54,10 @@ pub fn router() -> Router {
             axum::routing::post(demote_member),
         )
         .route(
+            "/groups/{id}/transfer-ownership",
+            axum::routing::post(transfer_ownership),
+        )
+        .route(
             "/groups/{id}/invite-link",
             axum::routing::post(create_invite_link).delete(revoke_invite_link),
         )
@@ -701,6 +705,134 @@ async fn demote_member(
         member_id: target.member_id,
         role: GroupRole::Member,
     }))
+}
+
+/// The body of `POST /groups/{id}/transfer-ownership`.
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct TransferOwnershipRequest {
+    /// The opaque id (`m_...`) of the member who becomes the owner: the
+    /// member list's `memberId`.
+    #[serde(alias = "memberPublicId")]
+    member_id: String,
+}
+
+/// The body of a successful transfer.
+#[derive(Debug, Serialize, ts_rs::TS)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct TransferOwnershipResponse {
+    /// The new owner's opaque id in this group.
+    owner_member_id: String,
+    /// The caller's own opaque id in this group.
+    member_id: String,
+    /// The caller's role now: always `member`.
+    role: GroupRole,
+}
+
+/// The error code of the `409` a transfer gets when the group changed under
+/// it (a concurrent transfer or leave). Stable: clients match on `error`.
+const OWNERSHIP_CHANGED: &str = "ownership_changed";
+/// The error code of the `400` for a transfer to yourself.
+const CANNOT_TRANSFER_TO_SELF: &str = "cannot_transfer_to_self";
+
+/// [`transfer_ownership`]'s error: the usual plain-text `(status, message)`
+/// or a typed JSON body.
+enum TransferError {
+    Plain(StatusCode, String),
+    Typed(StatusCode, &'static str, &'static str),
+}
+
+impl From<(StatusCode, String)> for TransferError {
+    fn from((status, message): (StatusCode, String)) -> Self {
+        TransferError::Plain(status, message)
+    }
+}
+
+impl IntoResponse for TransferError {
+    fn into_response(self) -> axum::response::Response {
+        match self {
+            TransferError::Plain(status, message) => (status, message).into_response(),
+            TransferError::Typed(status, error, message) => (
+                status,
+                Json(serde_json::json!({ "error": error, "message": message })),
+            )
+                .into_response(),
+        }
+    }
+}
+
+fn self_transfer_error() -> TransferError {
+    TransferError::Typed(
+        StatusCode::BAD_REQUEST,
+        CANNOT_TRANSFER_TO_SELF,
+        "You already own this group. Choose another member.",
+    )
+}
+
+/// `POST /groups/{id}/transfer-ownership` -- owner only. The member named
+/// by `memberId` becomes the owner; the caller stays in the group as a
+/// plain `member`, and nothing they shared is touched. A target who is not
+/// a member (never was, or left or was removed) is `404`; the caller
+/// themselves is `400` `cannot_transfer_to_self`; if the caller stopped
+/// being the owner between the permission check and the write (a concurrent
+/// transfer), `409` `ownership_changed`. A retry after success is `403`, as
+/// the caller is no longer the owner. Cookie session only: not a delegated
+/// route.
+async fn transfer_ownership(
+    State(app): State<App>,
+    user: AuthenticatedUser,
+    Path(group_id): Path<String>,
+    Json(req): Json<TransferOwnershipRequest>,
+) -> Result<Json<TransferOwnershipResponse>, TransferError> {
+    let result = transfer_ownership_inner(&app, &user, &group_id, &req.member_id).await;
+    match &result {
+        Ok(_) => FeatureEvent::GroupOwnershipTransferred.record(),
+        Err(TransferError::Plain(status, _) | TransferError::Typed(status, ..))
+            if status.is_client_error() =>
+        {
+            FeatureEvent::GroupOwnershipRefused.record();
+        }
+        Err(_) => {}
+    }
+    result
+}
+
+async fn transfer_ownership_inner(
+    app: &App,
+    user: &AuthenticatedUser,
+    group_id: &str,
+    member: &str,
+) -> Result<Json<TransferOwnershipResponse>, TransferError> {
+    require_role(app, group_id, &user.id, GroupRole::is_owner).await?;
+    let target = resolve_target(app, group_id, &user.id, member).await?;
+    if target.user_id == user.id {
+        return Err(self_transfer_error());
+    }
+    match groups::transfer_ownership(&app.database, group_id, &user.id, &target.user_id)
+        .await
+        .map_err(internal_error("transfer ownership"))?
+    {
+        groups::TransferOwnershipOutcome::Transferred => {
+            let caller = groups::get_group_detail(&app.database, group_id, &user.id)
+                .await
+                .map_err(internal_error("read group"))?
+                .ok_or((StatusCode::NOT_FOUND, "no group with that id".to_string()))?;
+            Ok(Json(TransferOwnershipResponse {
+                owner_member_id: target.member_id,
+                member_id: caller.member_id,
+                role: GroupRole::Member,
+            }))
+        }
+        groups::TransferOwnershipOutcome::OwnerChanged => Err(TransferError::Typed(
+            StatusCode::CONFLICT,
+            OWNERSHIP_CHANGED,
+            "This group changed while you were doing that. Check who owns it and try again.",
+        )),
+        groups::TransferOwnershipOutcome::TargetNotMember => {
+            Err((StatusCode::NOT_FOUND, "no member with that id".to_string()).into())
+        }
+        groups::TransferOwnershipOutcome::TargetIsActor => Err(self_transfer_error()),
+    }
 }
 
 async fn create_invite_link(
@@ -3211,5 +3343,239 @@ mod db_tests {
         assert_eq!(status, StatusCode::OK, "existing member re-click: {body:?}");
 
         wipe().await;
+    }
+
+    async fn member_ref_of(pool: &PgPool, group_id: &str, user_id: &str) -> String {
+        member_ref(pool, group_id, user_id).await
+    }
+
+    async fn transfer(
+        pool: &PgPool,
+        group_id: &str,
+        token: &str,
+        member: &str,
+    ) -> (StatusCode, Value) {
+        post_json(
+            test_router(test_app(pool.clone())),
+            format!("/groups/{group_id}/transfer-ownership"),
+            Some(token),
+            Some(serde_json::json!({ "memberId": member })),
+        )
+        .await
+    }
+
+    async fn role_of(pool: &PgPool, group_id: &str, user_id: &str) -> Option<String> {
+        sqlx::query_scalar("SELECT role FROM group_members WHERE group_id = $1 AND user_id = $2")
+            .bind(group_id)
+            .bind(user_id)
+            .fetch_optional(pool)
+            .await
+            .expect("read role")
+    }
+
+    #[tokio::test]
+    #[ignore = "requires a live database; run with `cargo test -p api transfer_ownership_ -- \
+                --ignored --test-threads=1`"]
+    async fn transfer_ownership_hands_the_group_over_and_the_previous_owner_keeps_access() {
+        const OWNER: &str = "TEST-ROUTE-GROUPS-XFER-OWNER";
+        const HEIR: &str = "TEST-ROUTE-GROUPS-XFER-HEIR";
+        let pool = connect().await;
+        let owner_token = seed_session(&pool, OWNER).await;
+        let heir_token = seed_session(&pool, HEIR).await;
+        let group_id = crate::data::groups::create_group(&pool, "Route Test Transfer", OWNER)
+            .await
+            .expect("create fixture group");
+        seed_membership(&pool, &group_id, HEIR, "member").await;
+        let train = seed_train_subscription(&pool, OWNER).await;
+        let journey = seed_journey(&pool, OWNER).await;
+        crate::data::groups::add_train_to_group(&pool, &group_id, train, OWNER)
+            .await
+            .expect("share a train");
+        crate::data::groups::add_journey_to_group(&pool, &group_id, journey, OWNER)
+            .await
+            .expect("share a journey");
+
+        let heir_ref = member_ref_of(&pool, &group_id, HEIR).await;
+        let owner_ref = member_ref_of(&pool, &group_id, OWNER).await;
+        let (status, body) = transfer(&pool, &group_id, &owner_token, &heir_ref).await;
+        assert_eq!(status, StatusCode::OK, "{body:?}");
+        assert_eq!(body["ownerMemberId"], heir_ref);
+        assert_eq!(body["memberId"], owner_ref);
+        assert_eq!(body["role"], "member");
+        assert_eq!(
+            role_of(&pool, &group_id, HEIR).await.as_deref(),
+            Some("owner")
+        );
+        assert_eq!(
+            role_of(&pool, &group_id, OWNER).await.as_deref(),
+            Some("member")
+        );
+
+        // The previous owner still sees the group, its owner and their shares.
+        let (status, detail) = request(
+            test_router(test_app(pool.clone())),
+            format!("/groups/{group_id}"),
+            Some(&owner_token),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(detail["role"], "member");
+        assert_eq!(detail["ownerMemberId"], heir_ref);
+        let shared: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM group_trains WHERE group_id = $1 AND added_by = $2",
+        )
+        .bind(&group_id)
+        .bind(OWNER)
+        .fetch_one(&pool)
+        .await
+        .expect("count shares");
+        assert_eq!(shared, 1);
+        let shared: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM group_journeys WHERE group_id = $1 AND added_by = $2",
+        )
+        .bind(&group_id)
+        .bind(OWNER)
+        .fetch_one(&pool)
+        .await
+        .expect("count shares");
+        assert_eq!(shared, 1);
+
+        // The previous owner can no longer transfer (403); the new owner can
+        // hand it straight back.
+        let (status, _) = transfer(&pool, &group_id, &owner_token, &heir_ref).await;
+        assert_eq!(status, StatusCode::FORBIDDEN);
+        let (status, _) = transfer(&pool, &group_id, &heir_token, &owner_ref).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(
+            role_of(&pool, &group_id, OWNER).await.as_deref(),
+            Some("owner")
+        );
+
+        cleanup(&pool, &group_id, &[OWNER, HEIR]).await;
+    }
+
+    #[tokio::test]
+    #[ignore = "requires a live database; run with `cargo test -p api transfer_ownership_ -- \
+                --ignored --test-threads=1`"]
+    async fn transfer_ownership_refusals() {
+        const OWNER: &str = "TEST-ROUTE-GROUPS-XREF-OWNER";
+        const ADMIN: &str = "TEST-ROUTE-GROUPS-XREF-ADMIN";
+        const MEMBER: &str = "TEST-ROUTE-GROUPS-XREF-MEMBER";
+        const OUTSIDER: &str = "TEST-ROUTE-GROUPS-XREF-OUTSIDER";
+        let pool = connect().await;
+        let owner_token = seed_session(&pool, OWNER).await;
+        let admin_token = seed_session(&pool, ADMIN).await;
+        seed_session(&pool, MEMBER).await;
+        let outsider_token = seed_session(&pool, OUTSIDER).await;
+        let group_id = crate::data::groups::create_group(&pool, "Route Test Refusals", OWNER)
+            .await
+            .expect("create fixture group");
+        seed_membership(&pool, &group_id, ADMIN, "admin").await;
+        seed_membership(&pool, &group_id, MEMBER, "member").await;
+        let member_ref = member_ref_of(&pool, &group_id, MEMBER).await;
+        let owner_ref = member_ref_of(&pool, &group_id, OWNER).await;
+
+        // A non-owner (even an admin) is 403; a non-member caller is 404.
+        let (status, _) = transfer(&pool, &group_id, &admin_token, &member_ref).await;
+        assert_eq!(status, StatusCode::FORBIDDEN);
+        let (status, _) = transfer(&pool, &group_id, &outsider_token, &member_ref).await;
+        assert_eq!(status, StatusCode::NOT_FOUND);
+        // Self-transfer, by member id or by the caller's own account id: 400.
+        for target in [owner_ref.as_str(), OWNER] {
+            let (status, body) = transfer(&pool, &group_id, &owner_token, target).await;
+            assert_eq!(status, StatusCode::BAD_REQUEST, "{body:?}");
+            assert_eq!(body["error"], "cannot_transfer_to_self");
+        }
+        // Someone who is not a member, a made-up id and another account id: 404.
+        let outsider_ref = format!("m_{}", "0".repeat(32));
+        for target in [outsider_ref.as_str(), OUTSIDER, "no-such-member"] {
+            let (status, _) = transfer(&pool, &group_id, &owner_token, target).await;
+            assert_eq!(status, StatusCode::NOT_FOUND, "{target}");
+        }
+        // A removed member is 404 too, and nothing changed along the way.
+        sqlx::query("DELETE FROM group_members WHERE group_id = $1 AND user_id = $2")
+            .bind(&group_id)
+            .bind(MEMBER)
+            .execute(&pool)
+            .await
+            .expect("remove the member");
+        let (status, _) = transfer(&pool, &group_id, &owner_token, &member_ref).await;
+        assert_eq!(status, StatusCode::NOT_FOUND);
+        assert_eq!(
+            role_of(&pool, &group_id, OWNER).await.as_deref(),
+            Some("owner")
+        );
+        assert_eq!(
+            role_of(&pool, &group_id, ADMIN).await.as_deref(),
+            Some("admin")
+        );
+
+        // Without a session: 401.
+        let (status, _) = post_json(
+            test_router(test_app(pool.clone())),
+            format!("/groups/{group_id}/transfer-ownership"),
+            None,
+            Some(serde_json::json!({ "memberId": owner_ref })),
+        )
+        .await;
+        assert_eq!(status, StatusCode::UNAUTHORIZED);
+
+        cleanup(&pool, &group_id, &[OWNER, ADMIN, MEMBER, OUTSIDER]).await;
+    }
+
+    #[tokio::test]
+    #[ignore = "requires a live database; run with `cargo test -p api transfer_ownership_ -- \
+                --ignored --test-threads=1`"]
+    async fn transfer_ownership_concurrent_transfers_leave_exactly_one_owner() {
+        const OWNER: &str = "TEST-ROUTE-GROUPS-XRACE-OWNER";
+        const A: &str = "TEST-ROUTE-GROUPS-XRACE-A";
+        const B: &str = "TEST-ROUTE-GROUPS-XRACE-B";
+        let pool = connect().await;
+        let owner_token = seed_session(&pool, OWNER).await;
+        seed_session(&pool, A).await;
+        seed_session(&pool, B).await;
+        let group_id = crate::data::groups::create_group(&pool, "Route Test Race", OWNER)
+            .await
+            .expect("create fixture group");
+        seed_membership(&pool, &group_id, A, "member").await;
+        seed_membership(&pool, &group_id, B, "member").await;
+        let a_ref = member_ref_of(&pool, &group_id, A).await;
+        let b_ref = member_ref_of(&pool, &group_id, B).await;
+
+        // Both pass the route's permission check, then race at the write.
+        let (first, second) = tokio::join!(
+            crate::data::groups::transfer_ownership(&pool, &group_id, OWNER, A),
+            crate::data::groups::transfer_ownership(&pool, &group_id, OWNER, B),
+        );
+        let mut outcomes = vec![first.expect("first"), second.expect("second")];
+        outcomes.sort_by_key(|o| format!("{o:?}"));
+        assert_eq!(
+            outcomes,
+            vec![
+                crate::data::groups::TransferOwnershipOutcome::OwnerChanged,
+                crate::data::groups::TransferOwnershipOutcome::Transferred,
+            ]
+        );
+        let owners: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM group_members WHERE group_id = $1 AND role = 'owner'",
+        )
+        .bind(&group_id)
+        .fetch_one(&pool)
+        .await
+        .expect("count owners");
+        assert_eq!(owners, 1);
+        assert_eq!(
+            role_of(&pool, &group_id, OWNER).await.as_deref(),
+            Some("member")
+        );
+
+        // Through the route, the loser sees 409 `ownership_changed` when the
+        // stale owner is passed the data layer's check; here the plain route
+        // answer for the old owner is 403.
+        let (status, _) = transfer(&pool, &group_id, &owner_token, &a_ref).await;
+        assert_eq!(status, StatusCode::FORBIDDEN);
+        let _ = b_ref;
+
+        cleanup(&pool, &group_id, &[OWNER, A, B]).await;
     }
 }

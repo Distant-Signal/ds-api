@@ -21,6 +21,7 @@ with fixed labels (`crates/api/src/usage_events.rs`, `FeatureEvent`):
 | `share_link` | `created`, `viewed`, `not_found` | `POST /Journeys/{id}/share-link`, `GET /Journeys/shared/{token}` |
 | `notification_subscribe` | `succeeded`, `rejected`, `error` | `POST /notifications/subscribe` |
 | `group_join` | `viewed`, `joined`, `refused` | `GET`/`POST /groups/join/{token}` |
+| `group_ownership` | `transferred`, `refused` | `POST /groups/{id}/transfer-ownership` |
 | `connected_app` | `enabled`, `revoked` | `POST`/`DELETE /account/connected-apps/{client}` |
 
 Page loads backed by the api (TfL stop pages, transit networks, lines,
