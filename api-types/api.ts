@@ -1015,7 +1015,22 @@ following: boolean,
  * and service date, for the Irish train page; `null` otherwise.
  * Additive (2026-11-06).
  */
-irishTrain: IrishTrain | null, serviceMode?: ServiceMode, liveTracking?: boolean, };
+irishTrain: IrishTrain | null, 
+/**
+ * Where the summarised train leg's detail comes from (additive,
+ * 2026-11-24), as on `GET /Journeys/mine`: `live` while the train's
+ * data is held; `snapshot` once it is pruned but the leg kept its own
+ * copy; `unavailable` when pruned and no copy was kept. `null` for an
+ * open or untracked leg. For `snapshot` and `unavailable` the leg's
+ * recorded outcome, when there is one, fills `status` (`completed` or
+ * `cancelled`) and `delayMinutes`. Only the outcome is read: never the
+ * copy's document.
+ */
+trainDetail: TrainDetail | null, 
+/**
+ * When the leg's copy was last written; set only with `snapshot`.
+ */
+snapshotAt: string | null, serviceMode?: ServiceMode, liveTracking?: boolean, };
 
 /**
  * Deliberately no `email` field, and `display_name` is deliberately never
@@ -4487,7 +4502,22 @@ following: boolean,
  * and service date, for the Irish train page; `null` otherwise.
  * Additive (2026-11-06).
  */
-irishTrain: IrishTrain | null, serviceMode?: ServiceMode, liveTracking?: boolean, };
+irishTrain: IrishTrain | null, 
+/**
+ * Where the summarised train leg's detail comes from (additive,
+ * 2026-11-24), as on `GET /Journeys/mine`: `live` while the train's
+ * data is held; `snapshot` once it is pruned but the leg kept its own
+ * copy; `unavailable` when pruned and no copy was kept. `null` for an
+ * open or untracked leg. For `snapshot` and `unavailable` the leg's
+ * recorded outcome, when there is one, fills `status` (`completed` or
+ * `cancelled`) and `delayMinutes`. Only the outcome is read: never the
+ * copy's document.
+ */
+trainDetail: TrainDetail | null, 
+/**
+ * When the leg's copy was last written; set only with `snapshot`.
+ */
+snapshotAt: string | null, serviceMode?: ServiceMode, liveTracking?: boolean, };
 
 /**
  * One train shared into one group the CALLER is a member of -- `GroupTrain`

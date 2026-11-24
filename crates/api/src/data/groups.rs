@@ -1757,6 +1757,9 @@ struct GroupJourneyRow {
     transit_mode: Option<String>,
     planned_departure: Option<DateTime<Utc>>,
     planned_arrival: Option<DateTime<Utc>>,
+    snapshot_kept: bool,
+    snapshot_at: Option<DateTime<Utc>>,
+    snapshot_delay_minutes: Option<i32>,
 }
 
 /// A shared journey's display shape for `GET /groups/{id}/journeys` --
@@ -1870,6 +1873,27 @@ pub struct GroupJourney {
     /// and service date, for the Irish train page; `null` otherwise.
     /// Additive (2026-11-06).
     pub irish_train: Option<crate::data::irish_trains::IrishTrain>,
+    /// Where the summarised train leg's detail comes from (additive,
+    /// 2026-11-24), as on `GET /Journeys/mine`: `live` while the train's
+    /// data is held; `snapshot` once it is pruned but the leg kept its own
+    /// copy; `unavailable` when pruned and no copy was kept. `null` for an
+    /// open or untracked leg. For `snapshot` and `unavailable` the leg's
+    /// recorded outcome, when there is one, fills `status` (`completed` or
+    /// `cancelled`) and `delayMinutes`. Only the outcome is read: never the
+    /// copy's document.
+    pub train_detail: Option<crate::data::leg_snapshot::TrainDetail>,
+    /// When the leg's copy was last written; set only with `snapshot`.
+    pub snapshot_at: Option<DateTime<Utc>>,
+    /// Whether the leg holds a copy, internal: with a missing `trains` row
+    /// it makes `train_detail` `snapshot`.
+    #[serde(skip_serializing)]
+    #[ts(skip)]
+    pub snapshot_kept: bool,
+    /// The leg's recorded arrival delay when its train was pruned,
+    /// internal.
+    #[serde(skip_serializing)]
+    #[ts(skip)]
+    pub snapshot_delay_minutes: Option<i32>,
 }
 
 impl crate::data::stop_delay::PublicDelayFields for GroupJourney {
@@ -1937,6 +1961,10 @@ impl From<GroupJourneyRow> for GroupJourney {
             planned_arrival: row.planned_arrival,
             untracked_status: None,
             following: false,
+            train_detail: None,
+            snapshot_at: row.snapshot_at,
+            snapshot_kept: row.snapshot_kept,
+            snapshot_delay_minutes: row.snapshot_delay_minutes,
         }
     }
 }
@@ -2191,6 +2219,112 @@ pub async fn list_group_trains(pool: &PgPool, group_id: &str) -> Result<Vec<Grou
     Ok(items)
 }
 
+/// A matched train leg whose `trains` row was pruned (`leg_snapshot`) shows
+/// its recorded outcome, from the leg's own `final_*` columns (the sweep and
+/// a restore both write them; the snapshot document is never read, so no
+/// row detoasts it, and the query gains no join). Returns the status
+/// expression for `status` (the live one, else the recorded outcome) and
+/// the select-list columns `snapshot_kept`, `snapshot_at` and
+/// `snapshot_delay_minutes`, for the row's leg `jl` and subscription `ts`.
+/// Only status, delay and whether a copy exists reach a member: the same
+/// level of detail a live train gives them.
+fn pruned_leg_sql() -> (String, String) {
+    let pruned = "(jl.kind = 'train' AND ts.id IS NOT NULL AND ts.trains_id IS NULL \
+                   AND ts.resolution_status IN ('resolved', 'schedule_matched'))";
+    let status = format!(
+        "COALESCE(cs.status, (CASE WHEN {pruned} AND jl.final_recorded_at IS NOT NULL \
+              THEN CASE jl.final_train_cancelled WHEN TRUE THEN 'cancelled' \
+                                                 WHEN FALSE THEN 'completed' END END))"
+    );
+    let cols = format!(
+        "(jl.final_snapshot IS NOT NULL) AS snapshot_kept, \
+                (CASE WHEN jl.final_snapshot IS NOT NULL THEN jl.final_snapshot_at END) \
+                    AS snapshot_at, \
+                (CASE WHEN {pruned} AND jl.final_recorded_at IS NOT NULL \
+                      THEN jl.final_arrival_delay_minutes END) AS snapshot_delay_minutes"
+    );
+    (status, cols)
+}
+
+/// The borrowed fields [`apply_leg_snapshots`] reads and fills on a group or
+/// shared journey row.
+struct LegSnapshotFields<'a> {
+    kind: &'a str,
+    resolution_status: Option<&'a str>,
+    trains_id: Option<i64>,
+    snapshot_kept: bool,
+    snapshot_delay_minutes: Option<i32>,
+    train_detail: &'a mut Option<crate::data::leg_snapshot::TrainDetail>,
+    snapshot_at: &'a mut Option<DateTime<Utc>>,
+    delay_minutes: &'a mut Option<i32>,
+    delay_basis: &'a mut Option<crate::data::stop_delay::DelayBasis>,
+    delay_provisional: &'a mut bool,
+}
+
+trait HasLegSnapshot {
+    fn leg_snapshot_fields(&mut self) -> LegSnapshotFields<'_>;
+}
+
+macro_rules! impl_leg_snapshot {
+    ($row:ty) => {
+        impl HasLegSnapshot for $row {
+            fn leg_snapshot_fields(&mut self) -> LegSnapshotFields<'_> {
+                LegSnapshotFields {
+                    kind: &self.kind,
+                    resolution_status: self.resolution_status.as_deref(),
+                    trains_id: self.trains_id,
+                    snapshot_kept: self.snapshot_kept,
+                    snapshot_delay_minutes: self.snapshot_delay_minutes,
+                    train_detail: &mut self.train_detail,
+                    snapshot_at: &mut self.snapshot_at,
+                    delay_minutes: &mut self.delay_minutes,
+                    delay_basis: &mut self.delay_basis,
+                    delay_provisional: &mut self.delay_provisional,
+                }
+            }
+        }
+    };
+}
+
+impl_leg_snapshot!(GroupJourney);
+impl_leg_snapshot!(SharedJourney);
+
+/// Fills each row's `train_detail` and `snapshot_at`, and the recorded delay
+/// of a train that was pruned: the status came from the query; the delay is
+/// put here, after [`apply_public_delays`], which finds nothing for a train
+/// that is gone (as `journeys::apply_leg_snapshots` does for the owner's
+/// list).
+///
+/// [`apply_public_delays`]: crate::data::stop_delay::apply_public_delays
+fn apply_leg_snapshots<T: HasLegSnapshot>(rows: &mut [T]) {
+    use crate::data::leg_snapshot::TrainDetail;
+    use crate::data::stop_delay::DelayBasis;
+    for row in rows {
+        let f = row.leg_snapshot_fields();
+        if f.kind == "train" {
+            let matched = matches!(f.resolution_status, Some("resolved" | "schedule_matched"));
+            if f.trains_id.is_some() {
+                *f.train_detail = Some(TrainDetail::Live);
+            } else if matched && f.snapshot_kept {
+                *f.train_detail = Some(TrainDetail::Snapshot);
+            } else if matched {
+                *f.train_detail = Some(TrainDetail::Unavailable);
+            }
+            if f.trains_id.is_none()
+                && matched
+                && let Some(minutes) = f.snapshot_delay_minutes
+            {
+                *f.delay_minutes = Some(minutes);
+                *f.delay_basis = Some(DelayBasis::Public);
+                *f.delay_provisional = false;
+            }
+        }
+        // Only a copy has a date to give.
+        *f.snapshot_at = (*f.train_detail == Some(TrainDetail::Snapshot))
+            .then(|| f.snapshot_at.unwrap_or_default());
+    }
+}
+
 /// The `fl` (first leg) and `ll` (last leg) laterals the shared-journey
 /// lists name a journey from: the first leg's origin, place and date and
 /// the last leg's destination and place, each through
@@ -2229,6 +2363,7 @@ fn first_last_legs_sql() -> String {
 /// [`crate::data::journeys::travel_ranked_journeys_ctes`] (DS-178).
 static LIST_GROUP_JOURNEYS_SQL: std::sync::LazyLock<String> = std::sync::LazyLock::new(|| {
     let first_last_legs = first_last_legs_sql();
+    let (snap_status, snap_cols) = pruned_leg_sql();
     let ranked = crate::data::journeys::travel_ranked_journeys_ctes(
         "j.id IN (SELECT gj0.journey_id FROM group_journeys gj0 WHERE gj0.group_id = $1)",
         "$2",
@@ -2247,10 +2382,11 @@ static LIST_GROUP_JOURNEYS_SQL: std::sync::LazyLock<String> = std::sync::LazyLoc
                 ll.destination_crs AS last_destination_crs, \
                 COALESCE(sld.name, ll.destination_place) AS last_destination_name, \
                 fl.service_date, ts.resolution_status, \
-                tr.train_uid, cs.status, cs.delay_minutes, ts.trains_id, \
+                tr.train_uid, {snap_status} AS status, cs.delay_minutes, ts.trains_id, \
                 gj.added_by, u.name AS added_by_name, u.username AS added_by_username, \
                 (tr.calling_points IS NOT NULL OR tr.origin_crs IS NOT NULL) AS timetable_on_row, \
-                jl.kind, jl.transit_mode, jl.planned_departure, jl.planned_arrival \
+                jl.kind, jl.transit_mode, jl.planned_departure, jl.planned_arrival, \
+                {snap_cols} \
          FROM recent r \
          JOIN group_journeys gj ON gj.journey_id = r.id AND gj.group_id = $1 \
          JOIN journeys j ON j.id = gj.journey_id \
@@ -2311,6 +2447,7 @@ pub async fn list_group_journeys(pool: &PgPool, group_id: &str) -> Result<Vec<Gr
         .await?;
     let mut items: Vec<GroupJourney> = rows.into_iter().map(GroupJourney::from).collect();
     crate::data::stop_delay::apply_public_delays(pool, &mut items).await?;
+    apply_leg_snapshots(&mut items);
     let now = Utc::now();
     for item in &mut items {
         item.set_untracked_status_at(now);
@@ -2610,6 +2747,9 @@ struct SharedJourneyRow {
     transit_mode: Option<String>,
     planned_departure: Option<DateTime<Utc>>,
     planned_arrival: Option<DateTime<Utc>>,
+    snapshot_kept: bool,
+    snapshot_at: Option<DateTime<Utc>>,
+    snapshot_delay_minutes: Option<i32>,
 }
 
 /// One journey shared into one group the CALLER is a member of --
@@ -2718,6 +2858,27 @@ pub struct SharedJourney {
     /// and service date, for the Irish train page; `null` otherwise.
     /// Additive (2026-11-06).
     pub irish_train: Option<crate::data::irish_trains::IrishTrain>,
+    /// Where the summarised train leg's detail comes from (additive,
+    /// 2026-11-24), as on `GET /Journeys/mine`: `live` while the train's
+    /// data is held; `snapshot` once it is pruned but the leg kept its own
+    /// copy; `unavailable` when pruned and no copy was kept. `null` for an
+    /// open or untracked leg. For `snapshot` and `unavailable` the leg's
+    /// recorded outcome, when there is one, fills `status` (`completed` or
+    /// `cancelled`) and `delayMinutes`. Only the outcome is read: never the
+    /// copy's document.
+    pub train_detail: Option<crate::data::leg_snapshot::TrainDetail>,
+    /// When the leg's copy was last written; set only with `snapshot`.
+    pub snapshot_at: Option<DateTime<Utc>>,
+    /// Whether the leg holds a copy, internal: with a missing `trains` row
+    /// it makes `train_detail` `snapshot`.
+    #[serde(skip_serializing)]
+    #[ts(skip)]
+    pub snapshot_kept: bool,
+    /// The leg's recorded arrival delay when its train was pruned,
+    /// internal.
+    #[serde(skip_serializing)]
+    #[ts(skip)]
+    pub snapshot_delay_minutes: Option<i32>,
 }
 
 impl crate::data::stop_delay::PublicDelayFields for SharedJourney {
@@ -2787,6 +2948,10 @@ impl From<SharedJourneyRow> for SharedJourney {
             planned_arrival: row.planned_arrival,
             untracked_status: None,
             following: false,
+            train_detail: None,
+            snapshot_at: row.snapshot_at,
+            snapshot_kept: row.snapshot_kept,
+            snapshot_delay_minutes: row.snapshot_delay_minutes,
         }
     }
 }
@@ -2875,6 +3040,7 @@ pub async fn shared_journey_groups(
 /// [`crate::data::journeys::travel_ranked_journeys_ctes`] (DS-178).
 static LIST_SHARED_JOURNEYS_SQL: std::sync::LazyLock<String> = std::sync::LazyLock::new(|| {
     let first_last_legs = first_last_legs_sql();
+    let (snap_status, snap_cols) = pruned_leg_sql();
     let ranked = crate::data::journeys::travel_ranked_journeys_ctes(
         &format!("j.user_id <> $1 AND j.id IN ({SHARED_WITH_USER_SQL})"),
         "$2",
@@ -2894,10 +3060,11 @@ static LIST_SHARED_JOURNEYS_SQL: std::sync::LazyLock<String> = std::sync::LazyLo
                 ll.destination_crs AS last_destination_crs, \
                 COALESCE(sld.name, ll.destination_place) AS last_destination_name, \
                 fl.service_date, ts.resolution_status, \
-                tr.train_uid, cs.status, cs.delay_minutes, ts.trains_id, \
+                tr.train_uid, {snap_status} AS status, cs.delay_minutes, ts.trains_id, \
                 gj.added_by, u.name AS added_by_name, u.username AS added_by_username, \
                 (tr.calling_points IS NOT NULL OR tr.origin_crs IS NOT NULL) AS timetable_on_row, \
-                jl.kind, jl.transit_mode, jl.planned_departure, jl.planned_arrival \
+                jl.kind, jl.transit_mode, jl.planned_departure, jl.planned_arrival, \
+                {snap_cols} \
          FROM recent r \
          JOIN group_journeys gj ON gj.journey_id = r.id \
          JOIN group_members me ON me.group_id = gj.group_id AND me.user_id = $1 \
@@ -2945,6 +3112,7 @@ pub async fn list_shared_journeys_for_user(
         .await?;
     let mut items: Vec<SharedJourney> = rows.into_iter().map(SharedJourney::from).collect();
     crate::data::stop_delay::apply_public_delays(pool, &mut items).await?;
+    apply_leg_snapshots(&mut items);
     let now = Utc::now();
     for item in &mut items {
         item.set_untracked_status_at(now);
@@ -5791,6 +5959,271 @@ mod db_tests {
         cleanup(&pool, &["TEST-GROUPS-LISTJOURNEY-1"]).await;
     }
 
+    /// A leg to share in `group_and_shared_journey_lists_show_a_pruned_legs_outcome`:
+    /// `trains` is the live train; `outcome` is (delay, cancelled) recorded
+    /// on the leg; `copy` says whether the leg kept a snapshot document.
+    struct PrunedLegCase {
+        name: &'static str,
+        trains: Option<i64>,
+        outcome: Option<(Option<i32>, bool)>,
+        copy: bool,
+        untracked: bool,
+    }
+
+    /// A pruned train's recorded outcome stands in for its status and delay
+    /// on the group and shared journey lists (DS-684, as `GET
+    /// /Journeys/mine` does for the owner, DS-638), and each row says where
+    /// its train detail comes from. A member sees only status, delay and
+    /// where the detail comes from: never the leg's copy.
+    #[tokio::test]
+    #[expect(clippy::too_many_lines, reason = "one scenario across both lists")]
+    #[ignore = "requires a live database; run with `cargo test -p api \
+                group_and_shared_journey_lists_show_a_pruned_legs_outcome -- --ignored --test-threads=1`"]
+    async fn group_and_shared_journey_lists_show_a_pruned_legs_outcome() {
+        let pool = connect().await;
+        let owner = "TEST-GROUPS-PRUNEDLEG-OWNER";
+        let viewer = "TEST-GROUPS-PRUNEDLEG-VIEWER";
+        let uids = ["ZGPL01"];
+        let clear = || async {
+            sqlx::query("DELETE FROM groups WHERE created_by = $1")
+                .bind(owner)
+                .execute(&pool)
+                .await
+                .unwrap();
+            sqlx::query("DELETE FROM journeys WHERE user_id = $1")
+                .bind(owner)
+                .execute(&pool)
+                .await
+                .unwrap();
+            sqlx::query("DELETE FROM train_subscriptions WHERE user_id = $1")
+                .bind(owner)
+                .execute(&pool)
+                .await
+                .unwrap();
+            cleanup(&pool, &[owner, viewer]).await;
+            sqlx::query(
+                "DELETE FROM train_current_state WHERE trains_id IN \
+                 (SELECT id FROM trains WHERE train_uid = ANY($1))",
+            )
+            .bind(uids.to_vec())
+            .execute(&pool)
+            .await
+            .unwrap();
+            sqlx::query("DELETE FROM trains WHERE train_uid = ANY($1)")
+                .bind(uids.to_vec())
+                .execute(&pool)
+                .await
+                .unwrap();
+        };
+        clear().await;
+
+        seed_user(&pool, owner).await;
+        seed_user(&pool, viewer).await;
+        let group_id = create_group(&pool, "Pruned Leg Test", owner)
+            .await
+            .expect("create group");
+        sqlx::query(
+            "INSERT INTO group_members (group_id, user_id, role) VALUES ($1, $2, 'member')",
+        )
+        .bind(&group_id)
+        .bind(viewer)
+        .execute(&pool)
+        .await
+        .expect("seed member");
+
+        let (held,): (i64,) = sqlx::query_as(
+            "INSERT INTO trains (train_uid, service_date) VALUES ('ZGPL01', CURRENT_DATE) \
+             RETURNING id",
+        )
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        sqlx::query(
+            "INSERT INTO train_current_state (trains_id, status, last_reported_location, \
+                 delay_minutes, updated_at) VALUES ($1, 'en_route', 'Woking', 0, NOW())",
+        )
+        .bind(held)
+        .execute(&pool)
+        .await
+        .unwrap();
+
+        // One shared journey with one leg each.
+        let cases = [
+            PrunedLegCase {
+                name: "live",
+                trains: Some(held),
+                outcome: None,
+                copy: false,
+                untracked: false,
+            },
+            PrunedLegCase {
+                name: "snapshot",
+                trains: None,
+                outcome: Some((Some(7), false)),
+                copy: true,
+                untracked: false,
+            },
+            PrunedLegCase {
+                name: "snapshot_cancelled",
+                trains: None,
+                outcome: Some((None, true)),
+                copy: true,
+                untracked: false,
+            },
+            PrunedLegCase {
+                name: "unavailable_with_outcome",
+                trains: None,
+                outcome: Some((Some(4), false)),
+                copy: false,
+                untracked: false,
+            },
+            PrunedLegCase {
+                name: "unavailable",
+                trains: None,
+                outcome: None,
+                copy: false,
+                untracked: false,
+            },
+            PrunedLegCase {
+                name: "untracked",
+                trains: None,
+                outcome: None,
+                copy: false,
+                untracked: true,
+            },
+        ];
+        let mut journey_ids = Vec::new();
+        for case in &cases {
+            let (journey_id,): (i64,) =
+                sqlx::query_as("INSERT INTO journeys (user_id) VALUES ($1) RETURNING id")
+                    .bind(owner)
+                    .fetch_one(&pool)
+                    .await
+                    .unwrap();
+            if case.untracked {
+                sqlx::query(
+                    "INSERT INTO journey_legs (journey_id, leg_order, service_date, match_mode, \
+                         window_searched, kind, transit_mode, origin_place, destination_place, \
+                         planned_departure, planned_arrival) \
+                     VALUES ($1, 1, CURRENT_DATE, 'manual', FALSE, 'untracked', 'bus', 'Zed', \
+                             'Yon', NOW() + INTERVAL '1 day', NOW() + INTERVAL '1 day 1 hour')",
+                )
+                .bind(journey_id)
+                .execute(&pool)
+                .await
+                .unwrap();
+            } else {
+                let (subscription,): (i64,) = sqlx::query_as(
+                    "INSERT INTO train_subscriptions \
+                        (user_id, service_date, resolution_status, trains_id) \
+                     VALUES ($1, CURRENT_DATE, 'resolved', $2) RETURNING id",
+                )
+                .bind(owner)
+                .bind(case.trains)
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+                let (leg,): (i64,) = sqlx::query_as(
+                    "INSERT INTO journey_legs (journey_id, leg_order, service_date, origin_crs, \
+                         destination_crs, match_mode, train_subscription_id) \
+                     VALUES ($1, 1, CURRENT_DATE, 'WOK', 'WAT', 'auto', $2) RETURNING id",
+                )
+                .bind(journey_id)
+                .bind(subscription)
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+                if let Some((delay, cancelled)) = case.outcome {
+                    sqlx::query(
+                        "UPDATE journey_legs SET final_arrival_delay_minutes = $2, \
+                             final_train_cancelled = $3, final_recorded_at = now() \
+                         WHERE id = $1",
+                    )
+                    .bind(leg)
+                    .bind(delay)
+                    .bind(cancelled)
+                    .execute(&pool)
+                    .await
+                    .unwrap();
+                }
+                if case.copy {
+                    sqlx::query(
+                        "UPDATE journey_legs SET final_train_uid = 'ZGPL01', \
+                             final_snapshot = '{\"platform\": \"PRIVATE-MARKER-9\"}'::jsonb, \
+                             final_snapshot_at = now() WHERE id = $1",
+                    )
+                    .bind(leg)
+                    .execute(&pool)
+                    .await
+                    .unwrap();
+                }
+            }
+            add_journey_to_group(&pool, &group_id, journey_id, owner)
+                .await
+                .expect("share the journey");
+            journey_ids.push(journey_id);
+        }
+
+        let group_journeys = list_group_journeys(&pool, &group_id)
+            .await
+            .expect("list group journeys");
+        let shared_journeys = list_shared_journeys_for_user(&pool, viewer)
+            .await
+            .expect("list shared journeys");
+        let group_json = serde_json::to_value(&group_journeys).unwrap();
+        let shared_json = serde_json::to_value(&shared_journeys).unwrap();
+        for (list, rows) in [("group", group_json), ("shared", shared_json)] {
+            assert!(
+                !rows.to_string().contains("PRIVATE-MARKER"),
+                "{list}: a member never sees the leg's copy"
+            );
+            let rows = rows.as_array().unwrap();
+            assert_eq!(rows.len(), cases.len(), "{list}");
+            let row = |name: &str| {
+                let at = cases.iter().position(|case| case.name == name).unwrap();
+                rows.iter()
+                    .find(|row| row["journeyId"] == journey_ids[at])
+                    .unwrap_or_else(|| panic!("{list}: {name} missing"))
+            };
+
+            let live = row("live");
+            assert_eq!(live["trainDetail"], "live", "{list}");
+            assert!(live["snapshotAt"].is_null(), "{list}");
+            assert_eq!(live["status"], "en_route", "{list}");
+
+            let late = row("snapshot");
+            assert_eq!(late["trainDetail"], "snapshot", "{list}");
+            assert!(late["snapshotAt"].is_string(), "{list}: {late}");
+            assert_eq!(late["status"], "completed", "{list}");
+            assert_eq!(late["delayMinutes"], 7, "{list}");
+            assert_eq!(late["delayBasis"], "public", "{list}");
+            assert_eq!(late["delayProvisional"], false, "{list}");
+
+            let cancelled = row("snapshot_cancelled");
+            assert_eq!(cancelled["trainDetail"], "snapshot", "{list}");
+            assert_eq!(cancelled["status"], "cancelled", "{list}");
+            assert!(cancelled["delayMinutes"].is_null(), "{list}");
+
+            let outcome_only = row("unavailable_with_outcome");
+            assert_eq!(outcome_only["trainDetail"], "unavailable", "{list}");
+            assert!(outcome_only["snapshotAt"].is_null(), "{list}");
+            assert_eq!(outcome_only["status"], "completed", "{list}");
+            assert_eq!(outcome_only["delayMinutes"], 4, "{list}");
+
+            let nothing = row("unavailable");
+            assert_eq!(nothing["trainDetail"], "unavailable", "{list}");
+            assert!(nothing["status"].is_null(), "{list}");
+            assert!(nothing["delayMinutes"].is_null(), "{list}");
+
+            let untracked = row("untracked");
+            assert!(untracked["trainDetail"].is_null(), "{list}");
+            assert!(untracked["snapshotAt"].is_null(), "{list}");
+            assert!(untracked["status"].is_null(), "{list}");
+        }
+
+        clear().await;
+    }
+
     #[tokio::test]
     #[ignore = "requires a live database; see the plan's Global Constraints for the \
                 DATABASE_URL incantation, then run with `cargo test -p api \
@@ -7584,6 +8017,10 @@ mod group_train_wire_shape_tests {
             tracking_phase: None,
             first_report_expected_at: None,
             irish_train: None,
+            train_detail: None,
+            snapshot_at: None,
+            snapshot_kept: false,
+            snapshot_delay_minutes: None,
             kind: "untracked".to_string(),
             transit_mode: Some("walk".to_string()),
             planned_departure: Some("2026-10-21T08:00:00Z".parse().unwrap()),
@@ -7637,8 +8074,10 @@ mod group_train_wire_shape_tests {
                 "plannedDeparture",
                 "resolutionStatus",
                 "serviceDate",
+                "snapshotAt",
                 "status",
                 "trackingPhase",
+                "trainDetail",
                 "trainUid",
                 "transitMode",
                 "untrackedStatus",
@@ -7782,6 +8221,10 @@ mod group_train_wire_shape_tests {
             tracking_phase: phase,
             first_report_expected_at: expected,
             irish_train: None,
+            train_detail: None,
+            snapshot_at: None,
+            snapshot_kept: false,
+            snapshot_delay_minutes: None,
             kind: "train".to_string(),
             transit_mode: None,
             planned_departure: None,
