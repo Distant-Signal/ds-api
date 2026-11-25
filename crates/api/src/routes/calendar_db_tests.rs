@@ -503,6 +503,9 @@ async fn a_feed_reads_past_the_journeys_list_cap() {
     let (past, _) = create_journey_with_untracked_leg(&pool, user, None, &leg)
         .await
         .expect("seed the past journey");
+    // Its UID is read as the numeric one, so it predates the public-id cutover
+    // whatever day the tests run (as `seed_journey` does).
+    backdate(&pool, past).await;
     let cap = crate::data::train_tracking::MINE_LIST_LIMIT;
     for _ in 0..cap {
         seed_journey(&pool, user).await;
