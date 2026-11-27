@@ -306,38 +306,88 @@ pub struct AuthenticatedUser {
     pub login_at: chrono::DateTime<chrono::Utc>,
 }
 
+/// Why [`resolve_session`] did not produce a user.
+enum SessionFailure {
+    /// No live session: the request is anonymous, for this reason.
+    Anonymous(crate::session_events::Rejection),
+    /// The lookup itself failed: the response to send.
+    Unavailable((StatusCode, String)),
+}
+
+/// The one place a session cookie becomes a user or a classified refusal:
+/// shared by [`AuthenticatedUser`] and [`SessionProbeUser`], so the reason
+/// a session did not resolve (`crate::session_events::RejectReason`) is
+/// worked out once. It records nothing itself; each caller records the
+/// rejection it turns into a response.
+async fn resolve_session(parts: &Parts, app: &App) -> Result<AuthenticatedUser, SessionFailure> {
+    use crate::session_events::{ReadFuture, Resolution};
+
+    let token = parse_cookie(&parts.headers, SESSION_COOKIE_NAME);
+    let resolution = crate::session_events::resolve(
+        token.as_deref(),
+        crate::data::users::SessionLifetime::from_config(&app.config).max_age_days,
+        |hashed: String| -> ReadFuture<'_, Option<crate::data::users::SessionUser>> {
+            Box::pin(async move {
+                crate::data::users::get_session_with_user(&app.database, &hashed).await
+            })
+        },
+        |hashed: String| -> ReadFuture<'_, Option<crate::session_events::SessionRowState>> {
+            Box::pin(async move {
+                crate::data::users::get_session_row_state(&app.database, &hashed).await
+            })
+        },
+    )
+    .await
+    .map_err(|err| {
+        if let Some(unavailable) = crate::unavailable::response_for(&err) {
+            return SessionFailure::Unavailable(unavailable);
+        }
+        tracing::error!(error = ?err, "session lookup failed");
+        SessionFailure::Unavailable((
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "session lookup failed".to_string(),
+        ))
+    })?;
+    match resolution {
+        Resolution::Rejected(rejection) => Err(SessionFailure::Anonymous(rejection)),
+        Resolution::Valid(session) => {
+            let hashed = hash_session_token(token.as_deref().unwrap_or_default());
+            slide_session_expiry(app, &hashed, &session).await;
+            Ok(AuthenticatedUser {
+                id: session.id,
+                name: session.name,
+                username: session.username,
+                groups: session.groups,
+                analytics_opt_in: session.analytics_opt_in,
+                login_at: session.session_created_at,
+            })
+        }
+    }
+}
+
+/// The `401` an anonymous request gets: the same two messages as before the
+/// session metrics.
+fn unauthorized(reason: crate::session_events::RejectReason) -> (StatusCode, String) {
+    let message = if reason == crate::session_events::RejectReason::NoCookie {
+        "no session"
+    } else {
+        "session expired or unknown"
+    };
+    (StatusCode::UNAUTHORIZED, message.to_string())
+}
+
 impl FromRequestParts<App> for AuthenticatedUser {
     type Rejection = (StatusCode, String);
 
     async fn from_request_parts(parts: &mut Parts, app: &App) -> Result<Self, Self::Rejection> {
-        let token = parse_cookie(&parts.headers, SESSION_COOKIE_NAME)
-            .ok_or((StatusCode::UNAUTHORIZED, "no session".to_string()))?;
-        let hashed = hash_session_token(&token);
-        let session = crate::data::users::get_session_with_user(&app.database, &hashed)
-            .await
-            .map_err(|err| {
-                if let Some(unavailable) = crate::unavailable::response_for(&err) {
-                    return unavailable;
-                }
-                tracing::error!(error = ?err, "session lookup failed");
-                (
-                    StatusCode::INTERNAL_SERVER_ERROR,
-                    "session lookup failed".to_string(),
-                )
-            })?
-            .ok_or((
-                StatusCode::UNAUTHORIZED,
-                "session expired or unknown".to_string(),
-            ))?;
-        slide_session_expiry(app, &hashed, &session).await;
-        Ok(AuthenticatedUser {
-            id: session.id,
-            name: session.name,
-            username: session.username,
-            groups: session.groups,
-            analytics_opt_in: session.analytics_opt_in,
-            login_at: session.session_created_at,
-        })
+        match resolve_session(parts, app).await {
+            Ok(user) => Ok(user),
+            Err(SessionFailure::Anonymous(rejection)) => {
+                crate::session_events::record_rejected(&rejection);
+                Err(unauthorized(rejection.reason))
+            }
+            Err(SessionFailure::Unavailable(response)) => Err(response),
+        }
     }
 }
 
@@ -359,8 +409,18 @@ async fn slide_session_expiry(app: &App, hashed: &str, session: &crate::data::us
     ) {
         return;
     }
-    if let Err(err) = crate::data::users::extend_session(&app.database, hashed, lifetime).await {
-        tracing::warn!(error = ?err, "failed to slide the session expiry; the session stays valid");
+    match crate::data::users::extend_session(&app.database, hashed, lifetime).await {
+        Ok(Some(new_expiry)) => crate::session_events::record_extended(
+            &session.id,
+            (session.checked_at - session.session_created_at).num_hours(),
+            (new_expiry - session.checked_at).num_hours(),
+        ),
+        // Another request moved it first (or it just ended): nothing to say.
+        Ok(None) => {}
+        Err(err) => {
+            tracing::warn!(error = ?err, "failed to slide the session expiry; the session stays valid");
+            crate::session_events::record_extend_failed(&session.id);
+        }
     }
 }
 
@@ -389,10 +449,47 @@ impl FromRequestParts<App> for OptionalAuthenticatedUser {
     type Rejection = (StatusCode, String);
 
     async fn from_request_parts(parts: &mut Parts, app: &App) -> Result<Self, Self::Rejection> {
-        match AuthenticatedUser::from_request_parts(parts, app).await {
+        match resolve_session(parts, app).await {
             Ok(user) => Ok(OptionalAuthenticatedUser(Some(user))),
-            Err((StatusCode::UNAUTHORIZED, _)) => Ok(OptionalAuthenticatedUser(None)),
-            Err(err) => Err(err),
+            // Anonymous: not an error here, and not recorded either (see
+            // `SessionProbeUser`).
+            Err(SessionFailure::Anonymous(_)) => Ok(OptionalAuthenticatedUser(None)),
+            Err(SessionFailure::Unavailable(response)) => Err(response),
+        }
+    }
+}
+
+/// The extractor of `GET /auth/session`, the frontend's "am I logged in"
+/// call: [`OptionalAuthenticatedUser`] that also records what the call
+/// answered (`crate::session_events::record_probe`), so operators can see
+/// how often "logged out" meant no cookie at all and how often a stale one.
+/// A stale or lapsed cookie also counts as a rejection, once, exactly as on
+/// an authenticated-only route.
+///
+/// The other `OptionalAuthenticatedUser` routes (public pages that only
+/// personalise) record nothing: an anonymous visitor there is normal, and
+/// the frontend's session call already covers the same cookie.
+pub struct SessionProbeUser(pub Option<AuthenticatedUser>);
+
+impl FromRequestParts<App> for SessionProbeUser {
+    type Rejection = (StatusCode, String);
+
+    async fn from_request_parts(parts: &mut Parts, app: &App) -> Result<Self, Self::Rejection> {
+        match resolve_session(parts, app).await {
+            Ok(user) => {
+                crate::session_events::record_probe(None);
+                Ok(SessionProbeUser(Some(user)))
+            }
+            Err(SessionFailure::Anonymous(rejection)) => {
+                crate::session_events::record_probe(Some(rejection.reason));
+                // No cookie is the ordinary logged-out answer; a cookie
+                // that no longer resolves is the lapse worth explaining.
+                if rejection.reason != crate::session_events::RejectReason::NoCookie {
+                    crate::session_events::record_rejected(&rejection);
+                }
+                Ok(SessionProbeUser(None))
+            }
+            Err(SessionFailure::Unavailable(response)) => Err(response),
         }
     }
 }

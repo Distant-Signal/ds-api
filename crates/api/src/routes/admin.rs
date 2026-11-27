@@ -152,6 +152,11 @@ async fn revoke_user_sessions(
     .await
     {
         Ok(Some(revoked)) => {
+            crate::session_events::record_revoked(
+                crate::session_events::RevokeReason::Admin,
+                Some(&target),
+                revoked.sessions_deleted,
+            );
             tracing::warn!(
                 audit = true,
                 event = "admin_session_revoke",

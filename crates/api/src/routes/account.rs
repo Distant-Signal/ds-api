@@ -102,11 +102,23 @@ async fn delete_account(
             .into_response();
     }
 
+    // The sessions go with the account (the cascade), so count them first
+    // for the session-lifecycle log; best-effort, it never blocks deletion.
+    let sessions = users::count_sessions(&app.database, &user.id)
+        .await
+        .unwrap_or(0);
     match account::delete_account(&app.database, &user.id).await {
         Ok(outcome) => {
             // No user id in the log line: the account is gone, and the log
             // should not keep a record of who it was.
             tracing::info!(?outcome, "account deleted at the user's request");
+            if outcome.is_some() {
+                crate::session_events::record_revoked(
+                    crate::session_events::RevokeReason::AccountDeletion,
+                    None,
+                    sessions,
+                );
+            }
         }
         Err(err) => {
             if let Some(unavailable) = crate::unavailable::response_for(&err) {

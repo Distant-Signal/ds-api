@@ -3,6 +3,19 @@
 Changes to the Distant Signal (DS) HTTP API that a client such as DS-MCP
 needs to know about. Newest first. Field names are as served (camelCase).
 
+## 2026-11-27: session lifecycle metrics and logs (DS-638)
+
+Observability only; no API change, no migration, no regenerated types, no
+change to any lifetime, check or response (a refused session still answers
+`401` with the same two messages, and `GET /auth/session` still answers `200`
+with `authenticated: false`). New Prometheus series
+`distant_signal_api_session_events_total{event, reason}`,
+`distant_signal_api_sessions_deleted_total{reason}` and
+`distant_signal_api_session_probe_total{result}`, and one structured INFO log
+line per session created, extended, revoked or refused for a lapse, naming a
+pseudonym of the user and no identifier or credential. See
+[session-revocation.md](session-revocation.md), "Session metrics and logs".
+
 ## 2026-11-24: `POST /groups/{id}/transfer-ownership` hands a group to another member (DS-616)
 
 Additive. `api-types/api.ts` and `api-types/openapi/v1.json` gain
