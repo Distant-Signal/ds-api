@@ -92,8 +92,9 @@ pub fn can_seal() -> bool {
 }
 
 /// Encrypts a destination's secret with the active key for row `id`. The
-/// ring's write format decides the stored format (legacy until ds-core's
-/// stage 2), so this stays within the nonce column's CHECK (12 bytes).
+/// ring's write format decides the stored format: v2 by default since
+/// ds-core v0.18.4 (a 13-byte nonce, which the nonce column's CHECK has
+/// allowed since v0.18.2).
 fn seal_for_row(ring: &KeyRing, secret: &str, id: i64) -> Result<Sealed, OpenError> {
     ring.seal_in(secret, &secret_context(id))
 }
@@ -339,15 +340,19 @@ mod tests {
     }
 
     #[test]
-    fn a_secret_sealed_for_a_row_opens_with_that_row_and_is_still_legacy() {
+    fn a_secret_sealed_for_a_row_is_v2_and_opens_only_with_that_row() {
         let ring = test_ring();
         let sealed = seal_for_row(&ring, "whsec_x", 7).unwrap();
-        // Stage 1b still writes v1: the nonce column's CHECK wants 12 bytes.
-        assert_eq!(sealed.nonce.len(), 12);
+        // Stage 2: the default write format is v2, a 13-byte nonce.
+        assert_eq!(sealed.nonce.len(), 13);
+        assert_eq!(sealed.nonce[0], 2);
         assert_eq!(
             ring.open_in(&sealed, &secret_context(7)).unwrap(),
             "whsec_x"
         );
+        assert!(ring.open_in(&sealed, &secret_context(8)).is_err());
+        // The notifier opens through `open_in` with the same context.
+        assert!(ring.open(&sealed).is_err());
     }
 
     #[test]
@@ -448,7 +453,7 @@ mod tests {
             match create(&pool, &new(a, url)).await.unwrap() {
                 CreateOutcome::Created(row) => {
                     assert!(row.has_secret && row.enabled);
-                    // Bound to the row id, still in the legacy format (12-byte nonce).
+                    // Bound to the row id, in the v2 format (13-byte nonce).
                     let (ciphertext, nonce, key_id): (Vec<u8>, Vec<u8>, String) = sqlx::query_as(
                         "SELECT secret_ciphertext, secret_nonce, secret_key_id \
                          FROM webhook_destinations WHERE id = $1",
@@ -457,7 +462,7 @@ mod tests {
                     .fetch_one(&pool)
                     .await
                     .unwrap();
-                    assert_eq!(nonce.len(), 12);
+                    assert_eq!(nonce.len(), 13);
                     let stored = Sealed {
                         ciphertext,
                         nonce,

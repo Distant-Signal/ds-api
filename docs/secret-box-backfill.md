@@ -16,7 +16,7 @@ one-off Job.
 Run it only when all of these hold. The Job checks the first itself; the rest
 are on the operator, and the run refuses without `--confirm-v2-readers`.
 
-1. ds-core v0.18.2's stage 2 migrations are applied
+1. ds-core v0.18.2's stage 2 migrations (applied in production) are applied
    (`webhook_destinations_secret_nonce_check` is validated and allows 12 or
    13 bytes). The Job reads `pg_constraint` and **refuses to run**, saying
    why, if the check is missing, not validated, or still `= 12`: a v2 value
@@ -27,10 +27,13 @@ are on the operator, and the run refuses without `--confirm-v2-readers`.
    Check the chart's pinned digests, not tags. A reader on older code reads a
    v2 value as undecryptable (the notifier skips the destination and counts
    `notifier_webhook_send_total{outcome="undecryptable"}`).
-3. The write format flip (ds-core `DEFAULT_WRITE_FORMAT = V2`, then the api
-   bump) is deployed, or about to be. The backfill does not depend on it (it
-   writes v2 explicitly), but while the api still writes v1 new legacy rows
-   keep appearing and the run ends non-zero for them. Run it after the flip.
+3. The write format flip is deployed: ds-core v0.18.4 set
+   `DEFAULT_WRITE_FORMAT = V2` and the api builds on that release (this
+   precondition is now met in code; it is met in production once that api is
+   deployed). The backfill does not depend on it (it writes v2 explicitly),
+   but while an api still writes v1, new legacy rows keep appearing and the
+   run ends non-zero for them. Order: deploy the api with the flip, then the
+   dry run, then the real run.
 4. The Job has the api's `DATABASE_URL` (the api role: SELECT and UPDATE on
    `webhook_destinations`; no grant change is needed) and the api's
    `WEBHOOK_SECRET_KEYS`, which must hold **every key a legacy secret was
