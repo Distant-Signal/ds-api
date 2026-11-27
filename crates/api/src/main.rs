@@ -517,6 +517,8 @@ async fn server_main() -> anyhow::Result<()> {
         router = router.layer(metrics_layer);
         spawn_metrics_listener(app.config.metrics_port, metrics_handle);
         routes::auth::register_user_metrics();
+        // Session lifecycle counters at 0 (DS-638).
+        api::session_events::register();
         // Before the migrations, so a database that goes away while they
         // run (or right after) already shows as distant_signal_api_db_up 0.
         data::db_health::register_metrics();

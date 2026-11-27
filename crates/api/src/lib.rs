@@ -52,6 +52,7 @@ pub mod regular_plan_sweep;
 pub mod render;
 pub mod route_metrics;
 pub mod routes;
+pub mod session_events;
 pub mod shutdown;
 #[cfg(test)]
 pub(crate) mod test_support;

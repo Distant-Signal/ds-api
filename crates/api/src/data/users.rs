@@ -613,18 +613,22 @@ pub async fn insert_session(
 /// Every OTHER session of the user (other devices) is untouched -- that's
 /// what `invalidate_all_sessions_and_reissue` ("log out other sessions")
 /// is for.
+///
+/// Returns the owner of the session it deleted, when there was one (for the
+/// session-lifecycle log, `crate::session_events`).
 pub async fn replace_session(
     pool: &PgPool,
     prior_hashed_token: Option<&str>,
     hashed_token: &str,
     user_id: &str,
     ttl_days: i64,
-) -> Result<()> {
+) -> Result<Option<String>> {
     let mut tx = pool.begin().await?;
+    let mut replaced = None;
     if let Some(prior) = prior_hashed_token {
-        sqlx::query("DELETE FROM sessions WHERE id = $1")
+        replaced = sqlx::query_scalar("DELETE FROM sessions WHERE id = $1 RETURNING user_id")
             .bind(prior)
-            .execute(&mut *tx)
+            .fetch_optional(&mut *tx)
             .await?;
     }
     sqlx::query(
@@ -637,7 +641,7 @@ pub async fn replace_session(
     .execute(&mut *tx)
     .await?;
     tx.commit().await?;
-    Ok(())
+    Ok(replaced)
 }
 
 /// Checked `i64` -> `i32` conversion for `ttl_days`, `make_interval(days =>
@@ -766,6 +770,27 @@ pub async fn get_session_with_user(
          FROM sessions s JOIN users u ON u.id = s.user_id \
          WHERE s.id = $1 AND s.expires_at > NOW() \
            AND (u.sessions_invalidated_at IS NULL OR s.created_at >= u.sessions_invalidated_at)",
+    )
+    .bind(hashed_token)
+    .fetch_optional(pool)
+    .await?;
+    Ok(row)
+}
+
+/// The `sessions` row behind a cookie whose [`get_session_with_user`] lookup
+/// found nothing, to say why (`crate::session_events::classify_missing_row`).
+/// One read by primary key, run only on that failure path: a live session
+/// never reaches it. `None` means no row at all (never existed, revoked,
+/// logged out, replaced, or swept after expiry).
+pub async fn get_session_row_state(
+    pool: &PgPool,
+    hashed_token: &str,
+) -> Result<Option<crate::session_events::SessionRowState>> {
+    let row = sqlx::query_as::<_, crate::session_events::SessionRowState>(
+        "SELECT s.user_id, s.created_at, s.expires_at, NOW() AS checked_at, \
+                COALESCE(s.created_at < u.sessions_invalidated_at, FALSE) AS invalidated \
+         FROM sessions s JOIN users u ON u.id = s.user_id \
+         WHERE s.id = $1",
     )
     .bind(hashed_token)
     .fetch_optional(pool)
@@ -1018,15 +1043,15 @@ mod session_lifetime_tests {
 ///    set.
 ///
 /// Returns the new session's plaintext token (never stored -- see
-/// `crate::auth::hash_session_token`); the caller sets this as the new
-/// `distant_signal_session` cookie.
+/// `crate::auth::hash_session_token`), which the caller sets as the new
+/// `distant_signal_session` cookie, and how many rows were deleted.
 pub async fn invalidate_all_sessions_and_reissue(
     pool: &PgPool,
     user_id: &str,
     lifetime: SessionLifetime,
     login_at: chrono::DateTime<chrono::Utc>,
     options: RevokeOthersOptions,
-) -> Result<String> {
+) -> Result<ReissuedSession> {
     let mut tx = pool.begin().await?;
     // The marker is the caller's login time, not `NOW()`: the reissued
     // session carries that time as its `created_at` (below), and
@@ -1038,10 +1063,11 @@ pub async fn invalidate_all_sessions_and_reissue(
         .bind(login_at)
         .execute(&mut *tx)
         .await?;
-    sqlx::query("DELETE FROM sessions WHERE user_id = $1")
+    let sessions_deleted = sqlx::query("DELETE FROM sessions WHERE user_id = $1")
         .bind(user_id)
         .execute(&mut *tx)
-        .await?;
+        .await?
+        .rows_affected();
     // Delegated tokens are refused when issued before the later of the
     // grant's `not_before` and `sessions_invalidated_at`
     // (`auth::delegated`). The marker above is the caller's login time, no
@@ -1114,7 +1140,18 @@ pub async fn invalidate_all_sessions_and_reissue(
     .execute(&mut *tx)
     .await?;
     tx.commit().await?;
-    Ok(token)
+    Ok(ReissuedSession {
+        token,
+        sessions_deleted,
+    })
+}
+
+/// What [`invalidate_all_sessions_and_reissue`] did: the new session's
+/// plaintext token (the cookie value) and the number of sessions it ended.
+/// Deliberately no `Debug`: the token is a credential.
+pub struct ReissuedSession {
+    pub token: String,
+    pub sessions_deleted: u64,
 }
 
 /// What else "log out other sessions" ends besides the sessions. Each is
@@ -1242,12 +1279,23 @@ pub async fn find_user_ids_by_username(pool: &PgPool, username: &str) -> Result<
     Ok(ids)
 }
 
-pub async fn delete_session(pool: &PgPool, hashed_token: &str) -> Result<()> {
-    sqlx::query("DELETE FROM sessions WHERE id = $1")
-        .bind(hashed_token)
-        .execute(pool)
+/// How many sessions `user_id` holds right now (live or not yet swept).
+pub async fn count_sessions(pool: &PgPool, user_id: &str) -> Result<u64> {
+    let count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM sessions WHERE user_id = $1")
+        .bind(user_id)
+        .fetch_one(pool)
         .await?;
-    Ok(())
+    Ok(u64::try_from(count).unwrap_or(0))
+}
+
+/// Deletes one session by its hashed token. Returns the owner of the row it
+/// deleted, `None` when there was no such row (an idempotent logout).
+pub async fn delete_session(pool: &PgPool, hashed_token: &str) -> Result<Option<String>> {
+    let owner = sqlx::query_scalar("DELETE FROM sessions WHERE id = $1 RETURNING user_id")
+        .bind(hashed_token)
+        .fetch_optional(pool)
+        .await?;
+    Ok(owner)
 }
 
 /// Deletes every `sessions` row whose `expires_at` has already passed.
@@ -1269,6 +1317,7 @@ pub async fn prune_expired_sessions(pool: &PgPool) -> Result<u64> {
     let result = sqlx::query("DELETE FROM sessions WHERE expires_at <= NOW()")
         .execute(pool)
         .await?;
+    crate::session_events::record_swept(result.rows_affected());
     Ok(result.rows_affected())
 }
 
@@ -2155,7 +2204,8 @@ mod db_tests {
             RevokeOthersOptions::default(),
         )
         .await
-        .expect("invalidate and reissue");
+        .expect("invalidate and reissue")
+        .token;
 
         // Both prior sessions are gone -- not merely marker-rejected, but
         // actually deleted (immediate, not eventually-consistent).
@@ -2260,7 +2310,8 @@ mod db_tests {
             RevokeOthersOptions::default(),
         )
         .await
-        .expect("reissue");
+        .expect("reissue")
+        .token;
         let session = get_session_with_user(&pool, &crate::auth::hash_session_token(&token))
             .await
             .unwrap()

@@ -12,7 +12,7 @@ use axum::response::{IntoResponse, Redirect, Response};
 use serde::{Deserialize, Serialize};
 
 use crate::app::{App, Router};
-use crate::auth::{self, AuthenticatedUser, OptionalAuthenticatedUser};
+use crate::auth::{self, AuthenticatedUser, SessionProbeUser};
 use crate::data::users;
 
 /// Suffix of `distant_signal_api_users_created_total`: incremented once per
@@ -459,12 +459,31 @@ async fn callback(
         app.config.session_ttl_days,
     )
     .await;
-    if let Err(err) = insert_result {
-        if let Some(unavailable) = crate::unavailable::response_for(&err) {
-            return unavailable.into_response();
+    match insert_result {
+        Ok(replaced_owner) => {
+            use crate::session_events::{
+                CreateReason, RevokeReason, record_created, record_revoked,
+            };
+            let reason = if stored
+                .csrf_state
+                .starts_with(auth::oidc::REAUTH_STATE_PREFIX)
+            {
+                CreateReason::Reauth
+            } else {
+                CreateReason::Login
+            };
+            record_created(reason, &user.id);
+            if let Some(owner) = replaced_owner {
+                record_revoked(RevokeReason::LoginReplaced, Some(&owner), 1);
+            }
         }
-        tracing::error!(error = ?err, "failed to create session");
-        return (StatusCode::INTERNAL_SERVER_ERROR, "login failed").into_response();
+        Err(err) => {
+            if let Some(unavailable) = crate::unavailable::response_for(&err) {
+                return unavailable.into_response();
+            }
+            tracing::error!(error = ?err, "failed to create session");
+            return (StatusCode::INTERNAL_SERVER_ERROR, "login failed").into_response();
+        }
     }
 
     let max_age = session_cookie_max_age_secs(&app);
@@ -534,6 +553,13 @@ async fn continuity_login(
             "matched_by" => matched_by.label()
         )
         .increment(1);
+        // The re-key ended the previous holder's sessions (before the
+        // callback creates this login's session).
+        crate::session_events::record_revoked(
+            crate::session_events::RevokeReason::Rekey,
+            Some(&identity.sub),
+            login.revoked.sessions,
+        );
     }
     if let Some(refusal) = login.refused {
         tracing::warn!(
@@ -597,9 +623,15 @@ async fn logout(State(app): State<App>, headers: axum::http::HeaderMap) -> Respo
     // or already invalid, logout is still a no-op success (idempotent),
     // not an error.
     let deleted = match auth::parse_cookie(&headers, auth::SESSION_COOKIE_NAME) {
-        Some(token) => {
-            users::delete_session(&app.database, &auth::hash_session_token(&token)).await
-        }
+        Some(token) => users::delete_session(&app.database, &auth::hash_session_token(&token))
+            .await
+            .map(|owner| {
+                crate::session_events::record_revoked(
+                    crate::session_events::RevokeReason::UserLogout,
+                    owner.as_deref(),
+                    u64::from(owner.is_some()),
+                );
+            }),
         None => Ok(()),
     };
     logout_response(deleted, cookie_secure(&app))
@@ -714,7 +746,18 @@ async fn revoke_other_sessions(
     )
     .await
     {
-        Ok(token) => token,
+        Ok(reissued) => {
+            crate::session_events::record_revoked(
+                crate::session_events::RevokeReason::RevokeOthers,
+                Some(&user.id),
+                reissued.sessions_deleted,
+            );
+            crate::session_events::record_created(
+                crate::session_events::CreateReason::RevokeOthersReissue,
+                &user.id,
+            );
+            reissued.token
+        }
         Err(err) => {
             if let Some(unavailable) = crate::unavailable::response_for(&err) {
                 return unavailable.into_response();
@@ -810,17 +853,26 @@ async fn backchannel_logout(
             // other failure is a missing or malformed `logout_token`.
             if rejection.status() == StatusCode::PAYLOAD_TOO_LARGE {
                 tracing::warn!("back-channel logout rejected: body too large");
+                crate::session_events::record_backchannel_rejected(
+                    crate::session_events::BackchannelRejectReason::Other,
+                );
                 return backchannel_response(
                     StatusCode::PAYLOAD_TOO_LARGE,
                     Some("invalid_request"),
                 );
             }
             tracing::warn!("back-channel logout rejected: no logout_token form field");
+            crate::session_events::record_backchannel_rejected(
+                crate::session_events::BackchannelRejectReason::Other,
+            );
             return backchannel_response(StatusCode::BAD_REQUEST, Some("invalid_request"));
         }
     };
     if form.logout_token.len() > BACKCHANNEL_MAX_TOKEN_BYTES {
         tracing::warn!("back-channel logout rejected: logout_token too long");
+        crate::session_events::record_backchannel_rejected(
+            crate::session_events::BackchannelRejectReason::InvalidToken,
+        );
         return backchannel_response(StatusCode::BAD_REQUEST, Some("invalid_request"));
     }
     let subject = match app.oidc.verify_logout_token(&form.logout_token).await {
@@ -830,6 +882,9 @@ async fn backchannel_logout(
                 ?reason,
                 "back-channel logout rejected: invalid logout token"
             );
+            crate::session_events::record_backchannel_rejected(
+                crate::session_events::BackchannelRejectReason::InvalidToken,
+            );
             return backchannel_response(StatusCode::BAD_REQUEST, Some("invalid_request"));
         }
     };
@@ -837,6 +892,9 @@ async fn backchannel_logout(
         tracing::warn!(
             "back-channel logout rejected: token names only a sid, which this app cannot map \
              to a user"
+        );
+        crate::session_events::record_backchannel_rejected(
+            crate::session_events::BackchannelRejectReason::InvalidToken,
         );
         return backchannel_response(StatusCode::BAD_REQUEST, Some("invalid_request"));
     };
@@ -851,6 +909,18 @@ async fn backchannel_logout(
     .await
     {
         Ok(revoked) => {
+            match revoked {
+                Some(r) => crate::session_events::record_revoked(
+                    crate::session_events::RevokeReason::Backchannel,
+                    Some(&sub),
+                    r.sessions_deleted,
+                ),
+                // A valid token for a user this app has never seen: answered
+                // 200, counted so a misrouted provider shows up.
+                None => crate::session_events::record_backchannel_rejected(
+                    crate::session_events::BackchannelRejectReason::UnknownUser,
+                ),
+            }
             tracing::info!(
                 audit = true,
                 event = "backchannel_logout",
@@ -930,7 +1000,7 @@ pub(crate) struct SessionResponse {
 
 async fn session(
     State(app): State<App>,
-    OptionalAuthenticatedUser(user): OptionalAuthenticatedUser,
+    SessionProbeUser(user): SessionProbeUser,
 ) -> Json<SessionResponse> {
     let personal_tokens_enabled = app.personal_tokens.enabled();
     match user {

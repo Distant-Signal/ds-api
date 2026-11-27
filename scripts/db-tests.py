@@ -70,6 +70,7 @@ SQLX_TEST_SKIPS = (
     "auth::sliding_session_tests",
     "reads::db_tests",
     "secret_box_backfill::tests",
+    "session_events::db_tests",
     "station_index_sqlx_tests",
     "users::sliding_session_db_tests",
 )
