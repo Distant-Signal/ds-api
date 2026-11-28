@@ -214,28 +214,71 @@ impl Analysis {
     }
 
     /// When the traveller can board leg `index`'s train, from the leg
-    /// before it: its live arrival plus the change time.
+    /// before it: when they are ready after it on live times, plus the
+    /// change time. See [`live_ready_for`].
     pub(crate) fn ready_for(&self, index: usize) -> Option<DateTime<Utc>> {
-        let previous = index.checked_sub(1)?;
-        let timings = self.timings.as_ref()?;
-        let next = self.timing(index);
-        let (arrival, from_crs) = match timings.timings.get(previous)? {
-            LegTiming::Train(t) => (t.live_arr, Some(t.alight_crs.as_str())),
-            // A timetabled leg (DS-237): its re-timed arrival.
-            LegTiming::Untracked { rides, .. } if !rides.is_empty() => {
-                ((*timings.ready_after.get(previous)?)?, None)
-            }
-            LegTiming::Untracked {
-                arrival: Some(arrival),
-                ..
-            } => (*arrival, None),
-            LegTiming::Untracked { .. } | LegTiming::Unknown => return None,
-        };
-        let change = next
-            .and_then(|next| timings.change_minutes(from_crs, arrival, next))
-            .unwrap_or(5);
-        Some(arrival + Duration::minutes(i64::from(change)))
+        live_ready_for(self.timings.as_ref()?, index)
     }
+}
+
+/// When the traveller can board leg `index`'s train, from the leg before
+/// it, on live times: that leg's live arrival (a train), or when the
+/// traveller is ready after it (`ready_after`: an untracked leg shifted by
+/// the delay of what came before it, or a timetabled leg re-timed), plus
+/// the change time. The same time the connection rule judges the change
+/// from, so an alternative is never offered that the rule calls missed.
+///
+/// An untracked previous leg falls back to its planned arrival only when
+/// no live time can be worked out for it (an earlier leg has no times).
+pub(crate) fn live_ready_for(timings: &JourneyTimings, index: usize) -> Option<DateTime<Utc>> {
+    let previous = index.checked_sub(1)?;
+    let next = match timings.timings.get(index) {
+        Some(LegTiming::Train(timing)) => Some(timing),
+        _ => None,
+    };
+    let (arrival, from_crs) = match timings.timings.get(previous)? {
+        LegTiming::Train(t) => (t.live_arr, Some(t.alight_crs.as_str())),
+        // A timetabled leg (DS-237): its re-timed arrival, which has no
+        // planned one to fall back to.
+        LegTiming::Untracked { rides, .. } if !rides.is_empty() => {
+            ((*timings.ready_after.get(previous)?)?, None)
+        }
+        // A walk or a Tube ride starts when the traveller gets there, so
+        // it ends late when they do (DS-638); the planned arrival only
+        // when nothing before it has times.
+        LegTiming::Untracked {
+            arrival: Some(arrival),
+            ..
+        } => (
+            timings
+                .ready_after
+                .get(previous)
+                .copied()
+                .flatten()
+                .unwrap_or(*arrival),
+            None,
+        ),
+        LegTiming::Untracked { .. } | LegTiming::Unknown => return None,
+    };
+    let change = next
+        .and_then(|next| timings.change_minutes(from_crs, arrival, next))
+        .unwrap_or(5);
+    Some(arrival + Duration::minutes(i64::from(change)))
+}
+
+/// Whether the traveller can still catch leg `index`'s own train: it is
+/// served, not cancelled, has not left, and leaves at or after `ready`
+/// (when they are ready to board it, live arrival plus the change time:
+/// the connection rule's own bound).
+pub(crate) fn original_catchable(
+    timing: Option<&TrainLegTiming>,
+    cancelled: bool,
+    ready: Option<DateTime<Utc>>,
+    now: DateTime<Utc>,
+) -> bool {
+    timing.is_some_and(|t| {
+        t.served && !cancelled && t.live_dep > now && ready.is_none_or(|ready| t.live_dep >= ready)
+    })
 }
 
 /// Reads a journey for the break logic: legs, train states with their
@@ -576,6 +619,11 @@ pub(crate) async fn plan_suggestions(
     };
     let timing = analysis.timing(index);
     let ready = analysis.ready_for(index);
+    // The leg's own train, when the traveller can still catch it on live
+    // times (DS-638): it stays an option, as the current plan.
+    let keep_original = ready.is_some()
+        && matches!(cause, "connection" | "user_choice")
+        && original_catchable(timing, analysis.facts[index].whole_cancelled, ready, now);
     let depart_after = match cause {
         "user_choice" => ready
             .or_else(|| timing.map(|t| t.sched_dep - Duration::minutes(60)))
@@ -676,7 +724,37 @@ pub(crate) async fn plan_suggestions(
         operator_only: None,
         outside_operator_filter: false,
     }));
-    let excluded_uid = timing.map(|t| t.uid.clone());
+    let excluded_uid = timing.filter(|_| !keep_original).map(|t| t.uid.clone());
+    if keep_original && let Some(original) = timing {
+        // The earliest way there from the leg's own departure: the
+        // original train, when it still gets there first.
+        let from = crate::data::trip_plan_live::service_minute(date, original.live_dep)
+            .unwrap_or(depart_after_min);
+        let kept = next_departures(
+            app,
+            across_midnight_query(
+                origin.clone(),
+                destination.clone(),
+                date,
+                from,
+                "fastest",
+                max_changes,
+                filter_rule.clone(),
+            ),
+            1,
+            None,
+            slot,
+        )
+        .await?;
+        plans.extend(kept.into_iter().map(|itinerary| Planned {
+            itinerary,
+            date,
+            through_leg_id: last_leg_id,
+            rejoins_leg_id: None,
+            operator_only: None,
+            outside_operator_filter: false,
+        }));
+    }
     let next = next_departures(
         app,
         across_midnight_query(
@@ -934,7 +1012,10 @@ pub(crate) async fn plan_suggestions(
             depart_after,
             booked_arrival,
             trigger,
-            exclude_train: timing.map(|t| (t.uid.clone(), t.date)),
+            exclude_train: timing
+                .filter(|_| !keep_original)
+                .map(|t| (t.uid.clone(), t.date)),
+            earliest_departure: ready,
             context: Context {
                 constraint,
                 entitlement: alternative_ranking::entitlement(cause, fault, booked_departure),
@@ -2847,3 +2928,149 @@ mod wire_tests {
 
 #[cfg(test)]
 mod db_tests;
+
+#[cfg(test)]
+mod live_ready_tests {
+    use std::sync::Arc;
+
+    use chrono::{DateTime, Duration, NaiveDate, Utc};
+    use schedule_query::InterchangeData;
+
+    use super::*;
+    use crate::data::trip_plan_live;
+
+    fn day() -> NaiveDate {
+        NaiveDate::from_ymd_opt(2026, 11, 28).unwrap()
+    }
+
+    /// `hhmm` as a minute of the service day.
+    fn at(hours: u32, minutes: u32) -> DateTime<Utc> {
+        trip_plan_live::service_instant(day(), hours * 60 + minutes).unwrap()
+    }
+
+    fn train(
+        uid: &str,
+        board: (&str, &str),
+        alight: &str,
+        dep: [DateTime<Utc>; 2],
+        arr: [DateTime<Utc>; 2],
+    ) -> LegTiming {
+        LegTiming::Train(TrainLegTiming {
+            uid: uid.to_string(),
+            date: day(),
+            board_crs: board.0.to_string(),
+            board_tiploc: board.1.to_string(),
+            alight_crs: alight.to_string(),
+            sched_dep: dep[0],
+            live_dep: dep[1],
+            sched_arr: arr[0],
+            live_arr: arr[1],
+            served: true,
+        })
+    }
+
+    fn untracked(from: DateTime<Utc>, minutes: i64) -> LegTiming {
+        LegTiming::Untracked {
+            departure: Some(from),
+            arrival: Some(from + Duration::minutes(minutes)),
+            rides: Vec::new(),
+        }
+    }
+
+    /// The owner's journey: a train into Euston 12:27, a 3 minute walk, a
+    /// 17 minute Tube ride and a 2 minute walk (22 minutes, 12:49 at
+    /// Vauxhall), then the 13:01 from Vauxhall (MSN 5, the default).
+    /// `delay` is the first train's.
+    fn journey(delay: i64) -> JourneyTimings {
+        let late = Duration::minutes(delay);
+        let timings = vec![
+            train(
+                "L1",
+                ("MAN", "MNCRPIC"),
+                "EUS",
+                [at(10, 0), at(10, 0)],
+                [at(12, 27), at(12, 27) + late],
+            ),
+            untracked(at(12, 27), 3),
+            untracked(at(12, 30), 17),
+            untracked(at(12, 47), 2),
+            train(
+                "L5",
+                ("VXH", "VAUXHLM"),
+                "WAT",
+                [at(13, 1), at(13, 1)],
+                [at(13, 30), at(13, 30)],
+            ),
+        ];
+        JourneyTimings::from_timings(timings, Arc::new(InterchangeData::default()))
+    }
+
+    #[test]
+    fn depart_after_is_the_shifted_ready_time_plus_the_change_time() {
+        // 7 late: ready at Vauxhall 12:56, plus the MSN 5.
+        assert_eq!(live_ready_for(&journey(7), 4), Some(at(13, 1)));
+        // 8 late: 12:57 + 5; the planned arrival (12:49 + 5) is no longer
+        // what the traveller can make.
+        assert_eq!(live_ready_for(&journey(8), 4), Some(at(13, 2)));
+        assert_eq!(live_ready_for(&journey(0), 4), Some(at(12, 54)));
+    }
+
+    #[test]
+    fn a_train_the_connection_rule_calls_missed_is_not_offered() {
+        // 9 late: ready 12:58, plus 5 = 13:03. A 12:57 or 13:01 train is
+        // gone for the traveller.
+        let ready = live_ready_for(&journey(9), 4).unwrap();
+        for departure in [at(12, 57), at(13, 1)] {
+            assert!(departure < ready);
+        }
+    }
+
+    #[test]
+    fn the_original_train_is_offered_only_while_it_can_be_caught() {
+        let now = at(12, 40);
+        let original = |delay: i64| {
+            let timings = journey(delay);
+            let ready = live_ready_for(&timings, 4);
+            let LegTiming::Train(timing) = &timings.timings[4] else {
+                unreachable!()
+            };
+            original_catchable(Some(timing), false, ready, now)
+        };
+        // Ready 13:01 for the 13:01 train: equal is enough, as the rule.
+        assert!(original(7));
+        assert!(!original(8));
+        assert!(original(0));
+        // Cancelled or gone: never.
+        let timings = journey(0);
+        let LegTiming::Train(timing) = &timings.timings[4] else {
+            unreachable!()
+        };
+        assert!(!original_catchable(Some(timing), true, None, now));
+        assert!(!original_catchable(Some(timing), false, None, at(13, 2)));
+        let mut unserved = timing.clone();
+        unserved.served = false;
+        assert!(!original_catchable(Some(&unserved), false, None, now));
+    }
+
+    /// More delay never makes an earlier train catchable: the ready time
+    /// never falls, so the trains that clear it only ever shrink.
+    #[test]
+    fn more_delay_never_makes_an_earlier_alternative_appear() {
+        let departures: Vec<DateTime<Utc>> =
+            (50..70).map(|m| at(12, 0) + Duration::minutes(m)).collect();
+        let mut previous: Option<(DateTime<Utc>, Vec<DateTime<Utc>>)> = None;
+        for delay in 0..=30 {
+            let ready = live_ready_for(&journey(delay), 4).unwrap();
+            let offered: Vec<DateTime<Utc>> =
+                departures.iter().copied().filter(|d| *d >= ready).collect();
+            if let Some((was_ready, was)) = &previous {
+                assert!(ready >= *was_ready, "ready fell at delay {delay}");
+                assert!(
+                    offered.iter().all(|d| was.contains(d)),
+                    "a train appeared at delay {delay}"
+                );
+            }
+            previous = Some((ready, offered));
+        }
+    }
+}

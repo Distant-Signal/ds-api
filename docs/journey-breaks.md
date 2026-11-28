@@ -104,12 +104,29 @@ request and replays the first answer. They are never served.
 **Where it searches from.** By default the leg's own boarding station,
 at the later of "now" and when the traveller could board (the previous
 leg's live arrival plus the change time): right for someone who arrived late
-at that station. `alternatives?from=<CRS>` searches from another station
+at that station. "Ready" is the one the connection rule judges the change
+from (`connection.gapMinutes`): after a walk or a Tube ride between the two
+trains it is the shifted time, the late train's arrival plus those legs'
+planned minutes (`ready_after`), never the walk's planned arrival; so with
+three untracked legs between, a train that leaves before the traveller can
+get there plus the change time is never offered, to the minute (an
+alternative leaving at `ready - 1 minute` is missed). The same time bounds
+"earlier" candidates for the leg
+(`GET /Journeys/{id}/legs/{legId}/candidates`). `alternatives?from=<CRS>` searches from another station
 instead (the traveller is elsewhere); the code must be a station DS knows
 (`400 invalid_station` otherwise), the time floor and the searches to the
 destination and back onto a later leg are unchanged. The set's
 `trigger.originName` stays the leg's boarding station; its `originCrs` and
 `originName` are where the search started.
+
+**The original train.** For `cause=connection` or `cause=choice` on a leg
+after the first, the leg's own train is offered too while it can still be
+caught: it is served, not cancelled, has not left, and leaves at or after the
+ready time above (equal is enough, as the connection rule has it). It is the
+current plan, so it is identified by its train: the first train of the
+suggestion is the leg's own `trainUid` and `serviceDate`; it appears once
+(duplicates by train are dropped), ranked like any other. Not for
+`missed` or `cancelled`. The response shape is unchanged.
 
 **After midnight.** A search runs on the leg's own service date, on that
 date's clock, so one made between 00:00 and 04:00 the next morning (while
