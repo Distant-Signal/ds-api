@@ -716,7 +716,10 @@ pub fn user_missed_fault(
     connection_onto: Option<&crate::data::journey_feasibility::LegConnection>,
 ) -> &'static str {
     use crate::data::journey_feasibility::ConnectionState;
-    if connection_onto.is_some_and(|c| c.state == ConnectionState::Missed) {
+    // A tight change (DS-638) did not work on live times either: the railway's.
+    if connection_onto
+        .is_some_and(|c| matches!(c.state, ConnectionState::Missed | ConnectionState::Tight))
+    {
         "operator"
     } else {
         "user"
@@ -786,6 +789,7 @@ mod tests {
                 sched_arr: at(arr),
                 live_arr: at(arr),
                 served,
+                departed: false,
             },
         )
     }
@@ -924,6 +928,25 @@ mod tests {
             ),
             None
         );
+        // A tight connection (DS-638: its train has not left) is no break, so
+        // no push; the same change with its train gone is missed and is one.
+        assert_eq!(
+            detect(
+                &[facts(1), facts(2)],
+                &timings,
+                &[None, connection(ConnectionState::Tight)]
+            ),
+            None
+        );
+        assert_eq!(
+            detect(
+                &[facts(1), facts(2)],
+                &timings,
+                &[None, connection(ConnectionState::Missed)]
+            )
+            .map(|d| d.cause),
+            Some(Cause::ConnectionMissed)
+        );
         // A cancelled first leg comes first; a travelled one never counts.
         let mut cancelled = facts(1);
         cancelled.whole_cancelled = true;
@@ -953,6 +976,10 @@ mod tests {
     #[test]
     fn the_data_decides_who_missed_the_train() {
         use crate::data::journey_feasibility::ConnectionState;
+        assert_eq!(
+            user_missed_fault(connection(ConnectionState::Tight).as_ref()),
+            "operator"
+        );
         assert_eq!(
             user_missed_fault(connection(ConnectionState::Missed).as_ref()),
             "operator"

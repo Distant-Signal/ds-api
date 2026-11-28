@@ -3,6 +3,42 @@
 Changes to the Distant Signal (DS) HTTP API that a client such as DS-MCP
 needs to know about. Newest first. Field names are as served (camelCase).
 
+## 2026-11-28: `connection.state` gains `tight`, behind `JOURNEY_TIGHT_CONNECTIONS` (DS-638)
+
+Additive. `api-types/api.ts` and `api-types/openapi/v1.json` gain the
+`tight` member of `ConnectionState` (`ok`, `atRisk`, `tight`, `missed`,
+`unknown`). No migration, no grant. **A client must tolerate a `state` it
+does not know** (treat an unknown one as `atRisk`); the website and DS-MCP
+read `connection.state` on `GET /Journeys/{id}`.
+
+`ConnectionState` is now declared in the OpenAPI document as an extensible
+enum (`x-extensible-enum`, as `LeaveByBasis` is), not a closed one: the
+breaking-change check rejects a new value in a closed enum, and the set may
+gain more. The members are the same five.
+
+Off by default: with `JOURNEY_TIGHT_CONNECTIONS` unset or `false` nothing
+changes and `tight` is never served. With it on (ds-deploy's chart sets it,
+a later change):
+
+- `tight`: the gap to the next train is under the time the change needs
+  (any slack, even a negative estimated one: the train is expected to leave
+  before the traveller can be there) but the train has not left (no actual
+  departure from the boarding stop in TRUST or the Push Port) and is not
+  cancelled. `missed` is now only a change that cannot be made *and* whose
+  train has gone. `atRisk` still means feasible but thin, or booked below
+  the minimum and no worse than booked.
+- A `tight` change opens no `connection_missed` break, so no push and no
+  suggestions; a break already open for a change that is now `tight` ends as
+  recovered by the usual rule (the sweep or a read finds nothing broken).
+  `GET /Journeys/{id}`'s `openBreak` is therefore null for it.
+- After a walk between two trains (a leg with `transitMode` `walk`),
+  `connection.minimumChangeMinutes` is the minimum change time less that
+  walk's planned minutes (never negative): the larger of the two is
+  charged, not both. A Tube ride, bus or timetabled leg is not a walk.
+- Departures are also read from the Push Port for these judgements.
+
+See [journey-breaks.md](journey-breaks.md), "Tight connections".
+
 ## 2026-11-27: session lifecycle metrics and logs (DS-638)
 
 Observability only; no API change, no migration, no regenerated types, no

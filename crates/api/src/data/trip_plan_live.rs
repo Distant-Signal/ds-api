@@ -532,6 +532,19 @@ fn apply_reasons(
 }
 
 impl TrainLive {
+    /// Whether the train has left the call booked at `arrival`/`departure`
+    /// (working minutes): TRUST reported its departure, or the Push Port
+    /// gave an actual one. An estimate, however far past, is not.
+    pub fn departed_from(
+        &self,
+        tiploc: &str,
+        arrival: Option<u32>,
+        departure: Option<u32>,
+    ) -> bool {
+        self.fact(tiploc, [arrival, departure])
+            .is_some_and(|fact| fact.departed)
+    }
+
     fn fact(&self, tiploc: &str, minutes: [Option<u32>; 2]) -> Option<&StopFact> {
         let key = normalize_tiploc(tiploc).to_ascii_uppercase();
         minutes

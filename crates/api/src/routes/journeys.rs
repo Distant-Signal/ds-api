@@ -2828,6 +2828,7 @@ pub(crate) fn leg_inputs<'a>(
                             })
                             .collect()
                     }),
+                    walk: leg.transit_mode.as_deref() == Some("walk"),
                 };
             }
             let state = state.as_ref();

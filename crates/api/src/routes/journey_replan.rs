@@ -260,8 +260,12 @@ pub(crate) fn live_ready_for(timings: &JourneyTimings, index: usize) -> Option<D
         ),
         LegTiming::Untracked { .. } | LegTiming::Unknown => return None,
     };
+    let walk = timings
+        .timings
+        .get(previous)
+        .map_or(0, journey_feasibility::walk_minutes);
     let change = next
-        .and_then(|next| timings.change_minutes(from_crs, arrival, next))
+        .and_then(|next| timings.change_minutes(from_crs, arrival, next, walk))
         .unwrap_or(5);
     Some(arrival + Duration::minutes(i64::from(change)))
 }
@@ -788,7 +792,7 @@ pub(crate) async fn plan_suggestions(
         let change = analysis
             .timings
             .as_ref()
-            .and_then(|t| t.change_minutes(None, next_timing.live_dep, next_timing))
+            .and_then(|t| t.change_minutes(None, next_timing.live_dep, next_timing, 0))
             .unwrap_or(5);
         let deadline = next_timing.live_dep - Duration::minutes(i64::from(change));
         let rejoin = crate::routes::trips::plan_for_journey(
@@ -2937,6 +2941,7 @@ mod live_ready_tests {
     use schedule_query::InterchangeData;
 
     use super::*;
+    use crate::data::journey_feasibility::ConnectionRules;
     use crate::data::trip_plan_live;
 
     fn day() -> NaiveDate {
@@ -2966,6 +2971,7 @@ mod live_ready_tests {
             sched_arr: arr[0],
             live_arr: arr[1],
             served: true,
+            departed: false,
         })
     }
 
@@ -2974,6 +2980,7 @@ mod live_ready_tests {
             departure: Some(from),
             arrival: Some(from + Duration::minutes(minutes)),
             rides: Vec::new(),
+            walk: false,
         }
     }
 
@@ -3002,7 +3009,11 @@ mod live_ready_tests {
                 [at(13, 30), at(13, 30)],
             ),
         ];
-        JourneyTimings::from_timings(timings, Arc::new(InterchangeData::default()))
+        JourneyTimings::from_timings(
+            timings,
+            Arc::new(InterchangeData::default()),
+            ConnectionRules::default(),
+        )
     }
 
     #[test]
