@@ -12,6 +12,7 @@
 pub mod backchannel_logout;
 pub mod delegated;
 pub mod internal_oauth;
+pub mod logout_everywhere;
 pub mod oidc;
 pub mod test_auth;
 

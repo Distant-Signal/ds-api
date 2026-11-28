@@ -255,6 +255,9 @@ pub enum RevokeReason {
     RevokeOthers,
     /// The user logged out of this browser.
     UserLogout,
+    /// "Log out everywhere": every session the user held, this browser's
+    /// included.
+    LogoutEverywhere,
     /// The user deleted their account (sessions go with it).
     AccountDeletion,
     /// A login replaced the session its browser carried.
@@ -273,6 +276,7 @@ impl RevokeReason {
             Self::Admin => "admin",
             Self::RevokeOthers => "revoke_others",
             Self::UserLogout => "user_logout",
+            Self::LogoutEverywhere => "logout_everywhere",
             Self::AccountDeletion => "account_deletion",
             Self::LoginReplaced => "login_replaced",
             Self::Rekey => "rekey",
@@ -281,11 +285,12 @@ impl RevokeReason {
     }
 }
 
-const ALL_REVOKE_REASONS: [RevokeReason; 8] = [
+const ALL_REVOKE_REASONS: [RevokeReason; 9] = [
     RevokeReason::Backchannel,
     RevokeReason::Admin,
     RevokeReason::RevokeOthers,
     RevokeReason::UserLogout,
+    RevokeReason::LogoutEverywhere,
     RevokeReason::AccountDeletion,
     RevokeReason::LoginReplaced,
     RevokeReason::Rekey,

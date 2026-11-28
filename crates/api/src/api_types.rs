@@ -164,6 +164,7 @@ fn visit_roots(v: &mut Collector) {
     v.visit::<crate::data::tfl_arrivals::StopArrivals>();
     // Account, preferences and notifications.
     v.visit::<crate::routes::auth::SessionResponse>();
+    v.visit::<crate::routes::auth::LogoutEverywhereResponse>();
     v.visit::<crate::routes::preferences::PreferencesResponse>();
     v.visit::<crate::routes::preferences::NotificationPreferences>();
     v.visit::<crate::routes::preferences::NotificationPreferencesUpdate>();

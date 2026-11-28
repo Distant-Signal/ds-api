@@ -45,6 +45,9 @@ pub struct AppState {
     /// Read-only personal API tokens (`crate::personal_tokens`). `Default`
     /// is off.
     pub personal_tokens: Arc<crate::personal_tokens::PersonalTokens>,
+    /// "Log out everywhere" (`crate::auth::logout_everywhere`). `Default`
+    /// is off.
+    pub logout_everywhere: crate::auth::logout_everywhere::LogoutEverywhere,
 }
 
 /// Dead-client detection (`client_connection_check_interval` and TCP
@@ -127,6 +130,19 @@ fn build_personal_tokens(
     ))
 }
 
+/// "Log out everywhere": off unless `LOGOUT_EVERYWHERE_ENABLED`, which also
+/// needs `SSO_END_SESSION_URL` (an invalid URL stops startup).
+fn build_logout_everywhere() -> Result<crate::auth::logout_everywhere::LogoutEverywhere> {
+    let logout_everywhere = crate::auth::logout_everywhere::LogoutEverywhere::from_env()?;
+    tracing::info!(
+        enabled = logout_everywhere.enabled(),
+        "log out everywhere ({}, {})",
+        crate::auth::logout_everywhere::ENABLED_ENV,
+        crate::auth::logout_everywhere::END_SESSION_URL_ENV
+    );
+    Ok(logout_everywhere)
+}
+
 /// Hand-rolled rather than `#[derive(Debug)]`. Two independent reasons:
 ///
 /// 1. `OidcClient` holds a `reqwest::Client` and a
@@ -161,6 +177,7 @@ impl std::fmt::Debug for AppState {
             .field("delegated", &self.delegated)
             .field("tfl_arrivals", &self.tfl_arrivals)
             .field("personal_tokens", &self.personal_tokens)
+            .field("logout_everywhere", &self.logout_everywhere)
             .finish()
     }
 }
@@ -358,6 +375,8 @@ impl AppState {
         // unless PERSONAL_TOKENS_ENABLED.
         let personal_tokens = build_personal_tokens(&config, &delegated)?;
 
+        let logout_everywhere = build_logout_everywhere()?;
+
         Ok(Arc::new(Self {
             config,
             database: db,
@@ -368,6 +387,7 @@ impl AppState {
             delegated,
             tfl_arrivals,
             personal_tokens,
+            logout_everywhere,
         }))
     }
 }

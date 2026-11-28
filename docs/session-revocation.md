@@ -20,10 +20,11 @@ logs that say why a session ended are in `crates/api/src/session_events.rs`
 | Who | How | Effect |
 | --- | --- | --- |
 | The user | Account menu, "log out other sessions" (`POST /api/auth/sessions/revoke-others`) | Ends all of their sessions and reissues one for the current browser. The optional body `{"revokeCalendarFeed": true, "revokePersonalTokens": true, "revokeShareLinks": true, "revokeInviteLinks": true}` (all default false) also revokes the calendar feed link, every personal API token, the journey share links the user created and the group invite links the user created |
+| The user | Account menu, "log out everywhere" (`POST /api/auth/logout-everywhere`, off by default: see "Log out everywhere" below) | Ends all of their sessions, this browser's included, then the site sends the browser to the identity provider's end-session URL |
 | An admin | `POST /api/admin/users/revoke-sessions` | Ends all of the target user's sessions |
 | Authentik | Back-channel logout to `POST /api/auth/backchannel-logout` | Ends all of that user's sessions |
 
-All three set `users.sessions_invalidated_at` and delete the user's `sessions`
+All four set `users.sessions_invalidated_at` and delete the user's `sessions`
 rows in one transaction. The next request from a revoked browser is anonymous.
 The user can log in again immediately unless they are also disabled in
 Authentik.
@@ -34,6 +35,72 @@ also revoke every delegated-access grant the user holds (reasons `admin` and
 Connected apps page stops working on its next request and the user must
 connect it again. "Log out other sessions" keeps the grants but refuses
 delegated tokens issued before it. See [connected-apps.md](connected-apps.md).
+
+## Log out everywhere
+
+Off by default. Two settings (chart values to be added in ds-deploy:
+`api.logoutEverywhere.enabled` for `LOGOUT_EVERYWHERE_ENABLED`, and
+`api.logoutEverywhere.endSessionUrl` for `SSO_END_SESSION_URL`):
+
+- `LOGOUT_EVERYWHERE_ENABLED` (default `false`). Off: `POST
+  /auth/logout-everywhere` answers `404` and `GET /auth/session` says
+  `logoutEverywhereEnabled: false`, so the site hides the menu item.
+- `SSO_END_SESSION_URL`: the identity provider's `end_session_endpoint`, for
+  the `distant-signal` provider
+  `https://ds-sso.cursed.solutions/application/o/distant-signal/end-session/`.
+  It is given explicitly, not read from OIDC discovery: discovery is lazy
+  here (nothing at startup touches the network) and the discovery client does
+  not carry the endpoint. It must be an absolute `https` URL with a host and no
+  user info, query or fragment; the api refuses to start otherwise (even with
+  the switch off), and refuses to start with the switch on and no URL.
+
+`POST /api/auth/logout-everywhere` (`POST /auth/logout-everywhere` on the
+api): cookie session only, the same strict Origin/Referer check as logout
+(`403` cross-site, `401` with no live session; delegated and personal tokens
+are not accepted). In one transaction it sets `sessions_invalidated_at`,
+deletes every `sessions` row of the user (the current browser's too) and moves
+each live delegated grant's `not_before` to now. It then clears the session
+cookie and answers `200 {"endSessionUrl": "..."}` (`Cache-Control:
+no-store`); the site clears its own browser-held account data and navigates
+to that URL. The metric and log reason is `logout_everywhere`
+(`session_events_total{event="revoked",reason="logout_everywhere"}`, rows in
+`sessions_deleted_total`).
+
+**Grants.** The call itself behaves like "log out other sessions" for connected
+apps: the grants are kept and refuse delegated tokens issued before now. (It
+does not revoke them: `delegated_grants.revoked_reason` has no value for it,
+and adding one is a ds-core migration.) The identity provider's back-channel
+logout then does: ending the browser's provider session sends a logout token
+for the user to `POST /auth/backchannel-logout`, which revokes the grants
+(reason `backchannel`), as above. That call finds no sessions and still
+answers `200`; a repeat finds no grants either and is still `200`. If the
+browser never reaches the end-session URL, or the provider does not send the
+back-channel logout, the user is logged out of Distant Signal everywhere and
+their connected apps are refused their older tokens, but the grants stay until
+the user disconnects them.
+
+**What it ends.** Every Distant Signal session of the user, on every device. With
+the provider prerequisite below, this browser's identity provider session,
+and through the back-channel logouts every connected app's tokens (DS-MCP's
+tokens and the Distant Signal delegated grant). **What it does not end.**
+Identity provider sessions in other browsers (a login there can sign the user
+straight back in to Distant Signal), and the upstream Discord or Google sessions, which stay. Personal API tokens, the
+calendar feed and share and invite links are untouched. The honest summary:
+it logs the user out of Distant Signal everywhere and out of the provider on
+this browser, not out of everything.
+
+**Provider prerequisite (infra).** The provider's invalidation flow must be
+`default-invalidation-flow` (with its User Logout stage), not the empty
+`default-provider-invalidation-flow`: with the empty one the end-session URL
+ends only the provider token, no back-channel logout is sent and the browser's
+provider session survives. Do not turn the switch on until that is live. With
+no parameters and no registered post-logout redirect URI the endpoint needs
+no `id_token_hint` and redirects straight into the flow; the site sends none,
+and the user lands on the provider's own page afterwards.
+
+**Rollback** is the switch: set `LOGOUT_EVERYWHERE_ENABLED` to `false`
+(or unset it). The route is `404` and the menu item disappears on the next
+session check. Sessions already ended stay ended.
 
 ## Recent login for account deletion
 
@@ -230,7 +297,7 @@ values below; nothing about a user is ever a label.
 | `rejected` | `invalidated` | The row exists but its user's `sessions_invalidated_at` is later than the row's `created_at`. Revocation deletes the rows in the same transaction, so this needs a race (a login committing during a revocation); expect it to stay at 0 |
 | `extended` | `slide` | A due session's expiry slid forward (at most once per `SESSION_EXTEND_THROTTLE_HOURS`) |
 | `extend_failed` | `db_error` | The slide failed; the request went on and the next due request retries |
-| `revoked` | `backchannel`, `admin`, `revoke_others`, `user_logout`, `account_deletion`, `login_replaced`, `rekey`, `expiry_sweep` | Session rows were deleted. `login_replaced`: a login ended the session its browser carried. `rekey`: account continuity re-keyed the account. `expiry_sweep`: the api's sweep deleted lapsed rows (counted once per sweep that deleted any; the `apiMaintenance` cron job has no metrics listener, so its sweeps are not counted) |
+| `revoked` | `backchannel`, `admin`, `revoke_others`, `user_logout`, `logout_everywhere`, `account_deletion`, `login_replaced`, `rekey`, `expiry_sweep` | Session rows were deleted. `login_replaced`: a login ended the session its browser carried. `rekey`: account continuity re-keyed the account. `expiry_sweep`: the api's sweep deleted lapsed rows (counted once per sweep that deleted any; the `apiMaintenance` cron job has no metrics listener, so its sweeps are not counted) |
 | `backchannel_rejected` | `invalid_token`, `unknown_user`, `other` | A back-channel logout that ended nothing: the token failed validation (or named only a `sid`), the token was valid but names no user here (answered 200), or the request had no usable `logout_token` or was too large |
 
 `distant_signal_api_sessions_deleted_total{reason}`: session rows deleted,
@@ -298,7 +365,7 @@ above), then read their lines in order:
 | What you see | What it means |
 | --- | --- |
 | `revoked` `backchannel` shortly before | The identity provider ended one of their sessions there (they logged out of it, it expired, or an admin deleted it), and every session here went with it. See "Per user, not per session" above |
-| `revoked` `revoke_others`, `user_logout` or `login_replaced` | The user did it, from another device or browser (a login on a browser that carried an older session ends that one) |
+| `revoked` `revoke_others`, `user_logout`, `logout_everywhere` or `login_replaced` | The user did it, from another device or browser (a login on a browser that carried an older session ends that one) |
 | `revoked` `admin` | An operator did it |
 | `rejected` `expired_idle` with `expired_hours_ago` | Unused for `SESSION_TTL_DAYS`, noticed on the next visit. `session_age_hours` says how old the login was |
 | `rejected` `expired_absolute` | The 90 day cap |
