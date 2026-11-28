@@ -5039,6 +5039,7 @@ mod db_tests {
             delegated: Arc::default(),
             tfl_arrivals: Arc::default(),
             personal_tokens: Arc::default(),
+            logout_everywhere: crate::auth::logout_everywhere::LogoutEverywhere::default(),
             schedule_crs_line_index: std::collections::HashMap::new(),
         })
     }

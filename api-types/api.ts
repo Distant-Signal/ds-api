@@ -2926,6 +2926,19 @@ export type LocationSuggestionKind = "bus" | "ferry";
 export type LocationType = "station" | "bus_stop" | "ferry_terminal" | "junction" | "siding" | "passing_point" | "other";
 
 /**
+ * What `POST /auth/logout-everywhere` answers: where to send the browser
+ * to end its identity provider session too.
+ */
+export type LogoutEverywhereResponse = { 
+/**
+ * The identity provider's end-session URL (`SSO_END_SESSION_URL`), an
+ * absolute `https` URL with no query. The site navigates the browser
+ * to it; the provider then ends this browser's login session and sends
+ * the back-channel logout.
+ */
+endSessionUrl: string, };
+
+/**
  * `journey_legs.match_mode` (its CHECK constraint).
  */
 export type MatchMode = "unmatched" | "manual" | "auto";
@@ -4347,7 +4360,12 @@ webhooksEnabled: boolean,
  * (`RECENTLY_DELETED_ENABLED`), so the journeys page links to the
  * Recently deleted list; `false` when logged out.
  */
-recentlyDeletedEnabled: boolean, };
+recentlyDeletedEnabled: boolean, 
+/**
+ * Whether "Log out everywhere" is on (`LOGOUT_EVERYWHERE_ENABLED`), so
+ * the account menu offers it; `false` when logged out.
+ */
+logoutEverywhereEnabled: boolean, };
 
 export type SetTemplateActiveRequest = { active: boolean, };
 

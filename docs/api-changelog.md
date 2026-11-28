@@ -3,6 +3,33 @@
 Changes to the Distant Signal (DS) HTTP API that a client such as DS-MCP
 needs to know about. Newest first. Field names are as served (camelCase).
 
+## 2026-11-28: `POST /auth/logout-everywhere` and `logoutEverywhereEnabled`, behind `LOGOUT_EVERYWHERE_ENABLED` (DS-638)
+
+Additive. `api-types/api.ts` gains `LogoutEverywhereResponse` and the
+`SessionInfo` field `logoutEverywhereEnabled` (`GET /auth/session`; `false`
+when logged out). No migration, no grant, no change to `api-types/openapi/v1.json`.
+**A client must tolerate a `SessionInfo` field it does not know.**
+
+Off by default: with `LOGOUT_EVERYWHERE_ENABLED` unset or `false` the route
+answers `404`, `logoutEverywhereEnabled` is `false` and nothing else changes.
+With it on (it needs `SSO_END_SESSION_URL`, the identity provider's
+end-session URL; the api refuses to start without a valid https one):
+
+- `POST /auth/logout-everywhere`: cookie session only (not a delegated or
+  personal-token route), the same Origin/Referer check as `POST /auth/logout`
+  (`403` cross-site, `401` without a session). Ends every session the caller
+  holds, this browser's included, clears the session cookie, and answers
+  `200 {"endSessionUrl": "<SSO_END_SESSION_URL>"}` with `Cache-Control:
+  no-store`. The site then navigates the browser to that URL, which ends the
+  browser's identity provider session; the provider's back-channel logout to
+  `POST /auth/backchannel-logout` follows and revokes the user's connected-app
+  grants (a no-op for the sessions, which are already gone).
+- Connected-app grants are kept by the call itself, but refuse tokens issued
+  before it (as "log out other sessions" does).
+- Session metrics and logs gain the reason `logout_everywhere`.
+
+See [session-revocation.md](session-revocation.md), "Log out everywhere".
+
 ## 2026-11-28: `connection.state` gains `tight`, behind `JOURNEY_TIGHT_CONNECTIONS` (DS-638)
 
 Additive. `api-types/api.ts` and `api-types/openapi/v1.json` gain the

@@ -41,6 +41,10 @@ pub fn router() -> Router {
             axum::routing::post(revoke_other_sessions),
         )
         .route(
+            "/auth/logout-everywhere",
+            axum::routing::post(logout_everywhere),
+        )
+        .route(
             "/auth/backchannel-logout",
             axum::routing::post(backchannel_logout).layer(axum::extract::DefaultBodyLimit::max(
                 BACKCHANNEL_MAX_BODY_BYTES,
@@ -786,6 +790,93 @@ async fn revoke_other_sessions(
     response
 }
 
+/// What `POST /auth/logout-everywhere` answers: where to send the browser
+/// to end its identity provider session too.
+#[derive(Serialize, ts_rs::TS)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct LogoutEverywhereResponse {
+    /// The identity provider's end-session URL (`SSO_END_SESSION_URL`), an
+    /// absolute `https` URL with no query. The site navigates the browser
+    /// to it; the provider then ends this browser's login session and sends
+    /// the back-channel logout.
+    end_session_url: String,
+}
+
+/// "Log out everywhere" (docs/session-revocation.md): ends every session the
+/// caller holds, this browser's included, clears the session cookie and
+/// returns the identity provider's end-session URL for the site to navigate
+/// to. `404` while `LOGOUT_EVERYWHERE_ENABLED` is off.
+///
+/// Same strict Origin/Referer guard as `logout` and cookie-session auth
+/// (`AuthenticatedUser`; delegated and personal tokens are not accepted: the
+/// route is not in `DELEGATED_ROUTES`). Connected apps' grants are kept but
+/// refuse tokens issued before now (`users::end_all_sessions`); the
+/// back-channel logout the provider sends next revokes them. That call finds
+/// no sessions left and still answers `200`.
+#[expect(
+    clippy::expect_used,
+    reason = "cookie and filename header values are built from header-safe ASCII"
+)]
+async fn logout_everywhere(
+    State(app): State<App>,
+    user: AuthenticatedUser,
+    headers: axum::http::HeaderMap,
+) -> Response {
+    let Some(end_session_url) = app.logout_everywhere.end_session_url() else {
+        return StatusCode::NOT_FOUND.into_response();
+    };
+    let expected_origin = auth::expected_browser_origin(&app.config.sso_redirect_url);
+    if let Some(expected_origin) = expected_origin.as_deref()
+        && !auth::is_same_origin(
+            headers.get(header::ORIGIN).and_then(|v| v.to_str().ok()),
+            headers.get(header::REFERER).and_then(|v| v.to_str().ok()),
+            expected_origin,
+        )
+    {
+        tracing::warn!(
+            "log out everywhere rejected: Origin/Referer did not match this app's own origin"
+        );
+        return (StatusCode::FORBIDDEN, "cross-site request rejected").into_response();
+    }
+
+    let sessions_deleted = match users::end_all_sessions(&app.database, &user.id).await {
+        Ok(deleted) => deleted,
+        Err(err) => {
+            if let Some(unavailable) = crate::unavailable::response_for(&err) {
+                return unavailable.into_response();
+            }
+            tracing::error!(error = ?err, "failed to end all sessions");
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "failed to log out everywhere",
+            )
+                .into_response();
+        }
+    };
+    crate::session_events::record_revoked(
+        crate::session_events::RevokeReason::LogoutEverywhere,
+        Some(&user.id),
+        sessions_deleted,
+    );
+
+    let mut response = Json(LogoutEverywhereResponse {
+        end_session_url: end_session_url.to_string(),
+    })
+    .into_response();
+    response
+        .headers_mut()
+        .insert(header::CACHE_CONTROL, HeaderValue::from_static("no-store"));
+    response.headers_mut().append(
+        header::SET_COOKIE,
+        HeaderValue::from_str(&auth::clear_cookie_header(
+            auth::SESSION_COOKIE_NAME,
+            cookie_secure(&app),
+        ))
+        .expect("cookie header value is always valid ASCII"),
+    );
+    response
+}
+
 /// The unauthenticated back-channel logout endpoint's body cap. A real
 /// logout JWT is a few KiB; the form wrapper adds almost nothing.
 const BACKCHANNEL_MAX_BODY_BYTES: usize = 32 * 1024;
@@ -996,6 +1087,9 @@ pub(crate) struct SessionResponse {
     /// (`RECENTLY_DELETED_ENABLED`), so the journeys page links to the
     /// Recently deleted list; `false` when logged out.
     recently_deleted_enabled: bool,
+    /// Whether "Log out everywhere" is on (`LOGOUT_EVERYWHERE_ENABLED`), so
+    /// the account menu offers it; `false` when logged out.
+    logout_everywhere_enabled: bool,
 }
 
 async fn session(
@@ -1017,6 +1111,7 @@ async fn session(
             calendar_feed_enabled: crate::data::calendar_feed::enabled(),
             webhooks_enabled: crate::data::webhooks::enabled(),
             recently_deleted_enabled: crate::data::recently_deleted::enabled(),
+            logout_everywhere_enabled: app.logout_everywhere.enabled(),
         }),
         None => Json(SessionResponse {
             authenticated: false,
@@ -1031,6 +1126,7 @@ async fn session(
             calendar_feed_enabled: false,
             webhooks_enabled: false,
             recently_deleted_enabled: false,
+            logout_everywhere_enabled: false,
         }),
     }
 }
@@ -1181,6 +1277,7 @@ mod tests {
             calendar_feed_enabled: false,
             webhooks_enabled: false,
             recently_deleted_enabled: false,
+            logout_everywhere_enabled: false,
         };
         let json = serde_json::to_value(&response).expect("serializes");
         assert_eq!(
@@ -1205,8 +1302,269 @@ mod tests {
             calendar_feed_enabled: false,
             webhooks_enabled: false,
             recently_deleted_enabled: false,
+            logout_everywhere_enabled: false,
         };
         let json = serde_json::to_value(&response).expect("serializes");
         assert_eq!(json["groups"], serde_json::json!([]));
+    }
+}
+
+/// `POST /auth/logout-everywhere` and the `GET /auth/session` field, through
+/// the real router against real rows. `#[sqlx::test]` modules run in the
+/// superuser pass only (`SQLX_TEST_SKIPS` in scripts/db-tests.py).
+#[cfg(test)]
+mod logout_everywhere_db_tests {
+    use axum::body::Body;
+    use axum::http::{Request, StatusCode, header};
+    use sqlx::PgPool;
+    use tower::ServiceExt;
+
+    use crate::auth::logout_everywhere::LogoutEverywhere;
+    use crate::auth::{SESSION_COOKIE_NAME, hash_session_token};
+    use crate::data::users;
+
+    const ORIGIN: &str = "https://example.invalid";
+    const END_SESSION_URL: &str = "https://sso.example.invalid/application/o/ds/end-session/";
+
+    async fn user(pool: &PgPool, id: &str) {
+        sqlx::query("INSERT INTO users (id) VALUES ($1)")
+            .bind(id)
+            .execute(pool)
+            .await
+            .expect("insert user");
+    }
+
+    async fn session(pool: &PgPool, token: &str, user_id: &str) {
+        sqlx::query(
+            "INSERT INTO sessions (id, user_id, created_at, expires_at) \
+             VALUES ($1, $2, NOW() - INTERVAL '1 hour', NOW() + INTERVAL '13 days')",
+        )
+        .bind(hash_session_token(token))
+        .bind(user_id)
+        .execute(pool)
+        .await
+        .expect("insert session");
+    }
+
+    fn app(pool: PgPool, enabled: bool) -> crate::app::App {
+        let mut app = crate::test_support::inert_app(pool);
+        if enabled {
+            std::sync::Arc::get_mut(&mut app)
+                .expect("the app is not shared yet")
+                .logout_everywhere = LogoutEverywhere::for_tests(END_SESSION_URL);
+        }
+        app
+    }
+
+    fn post(origin: Option<&str>, token: Option<&str>) -> Request<Body> {
+        let mut builder = Request::builder()
+            .method("POST")
+            .uri("/auth/logout-everywhere");
+        if let Some(origin) = origin {
+            builder = builder.header(header::ORIGIN, origin);
+        }
+        if let Some(token) = token {
+            builder = builder.header(header::COOKIE, format!("{SESSION_COOKIE_NAME}={token}"));
+        }
+        builder.body(Body::empty()).expect("request")
+    }
+
+    async fn json(response: axum::response::Response) -> serde_json::Value {
+        let bytes = axum::body::to_bytes(response.into_body(), 1 << 20)
+            .await
+            .expect("body");
+        serde_json::from_slice(&bytes).expect("json body")
+    }
+
+    #[sqlx::test(migrator = "ds_store::migrate::MIGRATOR")]
+    #[ignore = "needs DATABASE_URL (a role that can create databases)"]
+    async fn the_switch_off_answers_404_and_ends_nothing(pool: PgPool) {
+        user(&pool, "LE-OFF").await;
+        session(&pool, "le-off-1", "LE-OFF").await;
+        let app = app(pool.clone(), false);
+        let router = super::router().with_state(app);
+
+        let response = router
+            .clone()
+            .oneshot(post(Some(ORIGIN), Some("le-off-1")))
+            .await
+            .expect("logout-everywhere");
+        assert_eq!(response.status(), StatusCode::NOT_FOUND);
+        assert!(response.headers().get(header::SET_COOKIE).is_none());
+        assert_eq!(users::count_sessions(&pool, "LE-OFF").await.unwrap(), 1);
+
+        let response = router
+            .oneshot(
+                Request::builder()
+                    .uri("/auth/session")
+                    .header(header::COOKIE, format!("{SESSION_COOKIE_NAME}=le-off-1"))
+                    .body(Body::empty())
+                    .expect("request"),
+            )
+            .await
+            .expect("session");
+        let body = json(response).await;
+        assert_eq!(body["authenticated"], serde_json::json!(true));
+        assert_eq!(body["logoutEverywhereEnabled"], serde_json::json!(false));
+    }
+
+    #[sqlx::test(migrator = "ds_store::migrate::MIGRATOR")]
+    #[ignore = "needs DATABASE_URL (a role that can create databases)"]
+    async fn on_it_ends_every_session_of_the_caller_and_only_theirs(pool: PgPool) {
+        let rec = metrics_exporter_prometheus::PrometheusBuilder::new().build_recorder();
+        let handle = rec.handle();
+        let _guard = metrics::set_default_local_recorder(&rec);
+        user(&pool, "LE-A").await;
+        user(&pool, "LE-B").await;
+        session(&pool, "le-a-this", "LE-A").await;
+        session(&pool, "le-a-other", "LE-A").await;
+        session(&pool, "le-b-only", "LE-B").await;
+        sqlx::query(
+            "INSERT INTO delegated_grants \
+                 (user_id, client, client_display_name, scopes, not_before) \
+             VALUES ('LE-A', 'le-client', 'App', '{journeys:read}', NOW() - INTERVAL '1 day')",
+        )
+        .execute(&pool)
+        .await
+        .expect("insert grant");
+        let app = app(pool.clone(), true);
+        let router = super::router().with_state(app);
+
+        // The switch is visible on the session response.
+        let response = router
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri("/auth/session")
+                    .header(header::COOKIE, format!("{SESSION_COOKIE_NAME}=le-a-this"))
+                    .body(Body::empty())
+                    .expect("request"),
+            )
+            .await
+            .expect("session");
+        assert_eq!(
+            json(response).await["logoutEverywhereEnabled"],
+            serde_json::json!(true)
+        );
+
+        let response = router
+            .clone()
+            .oneshot(post(Some(ORIGIN), Some("le-a-this")))
+            .await
+            .expect("logout-everywhere");
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(
+            response
+                .headers()
+                .get(header::CACHE_CONTROL)
+                .and_then(|v| v.to_str().ok()),
+            Some("no-store")
+        );
+        let cookie = response
+            .headers()
+            .get(header::SET_COOKIE)
+            .and_then(|v| v.to_str().ok())
+            .expect("a cleared cookie")
+            .to_string();
+        assert!(
+            cookie.starts_with(&format!("{SESSION_COOKIE_NAME}=;")),
+            "{cookie}"
+        );
+        assert!(cookie.contains("Max-Age=0"), "{cookie}");
+        assert!(cookie.contains("Secure"), "{cookie}");
+        assert_eq!(
+            json(response).await,
+            serde_json::json!({ "endSessionUrl": END_SESSION_URL })
+        );
+
+        assert_eq!(users::count_sessions(&pool, "LE-A").await.unwrap(), 0);
+        assert_eq!(users::count_sessions(&pool, "LE-B").await.unwrap(), 1);
+        let marker: Option<chrono::DateTime<chrono::Utc>> =
+            sqlx::query_scalar("SELECT sessions_invalidated_at FROM users WHERE id = 'LE-A'")
+                .fetch_one(&pool)
+                .await
+                .expect("marker");
+        assert!(marker.is_some());
+        // The grant is kept, but refuses tokens issued before now.
+        let (revoked, refuses_older): (bool, bool) = sqlx::query_as(
+            "SELECT revoked_at IS NOT NULL, not_before > NOW() - INTERVAL '1 minute' \
+             FROM delegated_grants WHERE user_id = 'LE-A'",
+        )
+        .fetch_one(&pool)
+        .await
+        .expect("grant");
+        assert!(!revoked);
+        assert!(refuses_older);
+
+        let rendered = handle.render();
+        for line in [
+            r#"distant_signal_api_session_events_total{event="revoked",reason="logout_everywhere"} 1"#,
+            r#"distant_signal_api_sessions_deleted_total{reason="logout_everywhere"} 2"#,
+        ] {
+            assert!(rendered.contains(line), "{line} missing from {rendered}");
+        }
+
+        // The cookie the browser still holds is now refused.
+        let response = router
+            .oneshot(post(Some(ORIGIN), Some("le-a-this")))
+            .await
+            .expect("second logout-everywhere");
+        assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+
+        // The provider's back-channel logout that follows finds no
+        // sessions: a no-op success that still revokes the grant.
+        let revoked = users::revoke_all_sessions(
+            &pool,
+            "LE-A",
+            crate::data::delegated::RevokeReason::Backchannel,
+        )
+        .await
+        .expect("back-channel revoke")
+        .expect("the user exists");
+        assert_eq!(revoked.sessions_deleted, 0);
+        assert_eq!(revoked.grants_revoked, 1);
+        let again = users::revoke_all_sessions(
+            &pool,
+            "LE-A",
+            crate::data::delegated::RevokeReason::Backchannel,
+        )
+        .await
+        .expect("repeat back-channel revoke")
+        .expect("the user exists");
+        assert_eq!(again.sessions_deleted, 0);
+        assert_eq!(again.grants_revoked, 0);
+    }
+
+    #[sqlx::test(migrator = "ds_store::migrate::MIGRATOR")]
+    #[ignore = "needs DATABASE_URL (a role that can create databases)"]
+    async fn a_cross_origin_post_and_an_anonymous_one_are_refused(pool: PgPool) {
+        user(&pool, "LE-C").await;
+        session(&pool, "le-c-1", "LE-C").await;
+        let app = app(pool.clone(), true);
+        let router = super::router().with_state(app);
+
+        for origin in [Some("https://evil.invalid"), None] {
+            let response = router
+                .clone()
+                .oneshot(post(origin, Some("le-c-1")))
+                .await
+                .expect("cross-origin logout-everywhere");
+            assert_eq!(response.status(), StatusCode::FORBIDDEN, "{origin:?}");
+            assert!(response.headers().get(header::SET_COOKIE).is_none());
+        }
+        assert_eq!(users::count_sessions(&pool, "LE-C").await.unwrap(), 1);
+
+        let response = router
+            .clone()
+            .oneshot(post(Some(ORIGIN), None))
+            .await
+            .expect("anonymous logout-everywhere");
+        assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+        let response = router
+            .oneshot(post(Some(ORIGIN), Some("never-existed")))
+            .await
+            .expect("unknown cookie logout-everywhere");
+        assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+        assert_eq!(users::count_sessions(&pool, "LE-C").await.unwrap(), 1);
     }
 }

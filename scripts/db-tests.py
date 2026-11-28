@@ -67,6 +67,7 @@ SQLX_TEST_SKIPS = (
     "crosswalk::db_tests",
     "freshness::db_tests",
     "line_timetable::db_tests",
+    "routes::auth::logout_everywhere_db_tests",
     "auth::sliding_session_tests",
     "reads::db_tests",
     "secret_box_backfill::tests",

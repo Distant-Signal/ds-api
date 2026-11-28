@@ -1900,6 +1900,7 @@ mod db_tests {
             delegated: std::sync::Arc::default(),
             tfl_arrivals: std::sync::Arc::default(),
             personal_tokens: std::sync::Arc::default(),
+            logout_everywhere: crate::auth::logout_everywhere::LogoutEverywhere::default(),
             schedule_crs_line_index: std::collections::HashMap::new(),
         })
     }

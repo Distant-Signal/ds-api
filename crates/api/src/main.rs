@@ -254,6 +254,8 @@ fn config_defaults() -> ds_runtime::service_args::ConfigDefaults {
         .env(data::calendar_feed::CALENDAR_ENABLED_ENV, Some("false"))
         .env(data::webhooks::WEBHOOKS_ENABLED_ENV, Some("false"))
         .env(data::recently_deleted::ENABLED_ENV, Some("false"))
+        .env(api::auth::logout_everywhere::ENABLED_ENV, Some("false"))
+        .env(api::auth::logout_everywhere::END_SESSION_URL_ENV, None)
         .env(
             data::recently_deleted::RETENTION_DAYS_ENV,
             Some(&data::recently_deleted::DEFAULT_RETENTION_DAYS.to_string()),

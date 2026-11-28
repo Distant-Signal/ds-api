@@ -1251,6 +1251,42 @@ pub async fn revoke_all_sessions(
     }))
 }
 
+/// Ends every session `user_id` holds, the caller's own included, for "log
+/// out everywhere" (`routes::auth::logout_everywhere`). Returns how many
+/// session rows it deleted (0 is fine: a second call, or the back-channel
+/// logout the identity provider sends next, finds none).
+///
+/// One transaction: set `sessions_invalidated_at = NOW()`, delete the rows,
+/// and move each live delegated grant's `not_before` to now, so delegated
+/// tokens issued before this are refused (the same as "log out other
+/// sessions", [`invalidate_all_sessions_and_reissue`]). The grants are NOT
+/// revoked here: the identity provider's back-channel logout that follows
+/// the redirect to its end-session URL revokes them
+/// ([`revoke_all_sessions`], reason `backchannel`), and until then a
+/// connected app only needs to be refused its older tokens. The grant's
+/// `revoked_reason` stays a value the schema already knows.
+pub async fn end_all_sessions(pool: &PgPool, user_id: &str) -> Result<u64> {
+    let mut tx = pool.begin().await?;
+    sqlx::query("UPDATE users SET sessions_invalidated_at = NOW() WHERE id = $1")
+        .bind(user_id)
+        .execute(&mut *tx)
+        .await?;
+    let sessions_deleted = sqlx::query("DELETE FROM sessions WHERE user_id = $1")
+        .bind(user_id)
+        .execute(&mut *tx)
+        .await?
+        .rows_affected();
+    sqlx::query(
+        "UPDATE delegated_grants SET not_before = NOW() \
+         WHERE user_id = $1 AND revoked_at IS NULL",
+    )
+    .bind(user_id)
+    .execute(&mut *tx)
+    .await?;
+    tx.commit().await?;
+    Ok(sessions_deleted)
+}
+
 /// What [`revoke_all_sessions`] ended.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct SessionRevocation {
