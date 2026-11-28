@@ -45,8 +45,9 @@ or as a terminus).
       "operator": "GW",
       "operatorName": "Great Western Railway",
       "headcode": "1A23",
-      "platform": null,
-      "platformStatus": "toBeAnnounced",
+      "platform": "12",
+      "platformStatus": "likely",
+      "platformBasis": "inbound",
       "status": "delayed",
       "delayMinutes": 3,
       "isCancelled": false,
@@ -145,56 +146,94 @@ gains only `board`):
 
 ### `platformStatus`
 
-| Value | `platform` | Means |
-| --- | --- | --- |
-| `confirmed` | the platform | Darwin's platform, confirmed by the operator, not hidden from the public. |
-| `expected` | the platform | A live platform not yet confirmed: Darwin's, else the station's own LDBWS board's. |
-| `booked` | the platform | The timetable's platform, with no live word. |
-| `toBeAnnounced` | `null` | Not announced (see the precedence below). Show "Platform to be announced". |
-| `none` | `null` | No platform known (or the train is cancelled). |
+| Value | `platform` | `platformBasis` | Means |
+| --- | --- | --- | --- |
+| `confirmed` | the platform | `null` | Darwin's platform, confirmed by the operator, not hidden from the public. |
+| `expected` | the platform | `null` | A live platform not yet confirmed: Darwin's, else the station's own LDBWS board's. |
+| `likely` | the platform | `inbound` or `booked` | A prediction, not an announcement: show it labelled as such (see below). |
+| `booked` | the platform | `null` | The timetable's platform, with no live word, where Darwin hides nothing. |
+| `toBeAnnounced` | `null` | `null` | Not announced and nothing independent predicts one. Show "Platform to be announced". |
+| `none` | `null` | `null` | No platform known (or the train is cancelled). |
+
+`platformBasis` for `likely`: `inbound` is the platform the working that forms
+this service (`schedule_turnarounds`: a timetable association, or inferred
+from the platform sequence) arrives at at this station, from Darwin's arrival
+call or, when Darwin has none for it, TRUST's report that the unit arrived
+there and has not moved on (as the train view's `platformBasis` rule 2 reads
+it); stock normally leaves from where it arrived. `booked` is the CIF
+platform.
+
+A client must tolerate a `platformStatus` it does not know. `booked` stays for
+rows where Darwin hides nothing and the station is not listed (below); it was
+shipped before `likely` and keeps its meaning.
 
 ## Platform precedence
 
 For each row, first match wins:
 
-1. **Darwin's platform** for the call, unless Darwin hides it from the
+1. A call Darwin has cancelled: `none`.
+2. **Darwin's platform** for the call, unless Darwin hides it from the
    public. Hidden is the platform flags `pushport_platform` already refuses
    (`platsup`, `cisPlatsup`: `DarwinCall::platform_hidden`) or a suppressed
    location (`suppr`). `confirmed` when Darwin says confirmed, else `expected`.
-2. **Darwin has the call and hides it**: `toBeAnnounced`. Never a fallback to
-   a booked platform, and the hidden platform string is never read past the
-   check, so it cannot reach the JSON (the DB tests search the whole body for
-   it).
 3. **The station's own LDBWS board** (`station_samples`; **departures board
    only**: it holds the station's departures, and its arrivals board is kept
    for tracked trains alone, so the arrivals board skips this step), for rows
-   with
-   neither of the above, when the board is no more than 10 minutes old and
-   exactly one board row and exactly one timetable row share the headcode,
-   the shown time and the destination: `expected`. LDBWS's `serviceID` is a
-   board-relative token and its `rsid` is not unique per day, and the board
-   carries no train UID, so a weaker join is not safe. A row with no headcode,
-   or an ambiguous match on either side, skips this step. The board is read
-   only when some row can use it, and only for rows whose calendar day is
-   today.
-4. **The CIF booked platform** (`schedule_calling_points_full.platform`),
-   `booked`, except at the stations in `STATION_BOARD_NO_BOOKED_PLATFORM_CRS`
-   (below), where it is never shown and the row is `toBeAnnounced`.
-5. `none`.
+   Darwin does not hide, when the board is no more than 10 minutes old and exactly one
+   board row and exactly one timetable row share the headcode, the shown time
+   and the destination: `expected`. LDBWS's `serviceID` is a board-relative
+   token and its `rsid` is not unique per day, and the board carries no train
+   UID, so a weaker join is not safe. A row with no headcode, or an ambiguous
+   match on either side, skips this step. The board is read only when some row
+   can use it, and only for rows whose calendar day is today.
+4. **The inbound working's platform** (departures board only: an arrival's
+   platform is where it arrives): `likely`, basis `inbound` (above).
+5. **The CIF booked platform** (`schedule_calling_points_full.platform`):
+   `likely`, basis `booked`, where Darwin hides this call or the station is in
+   `STATION_BOARD_NO_BOOKED_PLATFORM_CRS`; else `booked`.
+6. `toBeAnnounced` where Darwin hides the call or the station is listed; else
+   `none`.
 
-A call Darwin has cancelled has no platform (`none`).
 `darwin_calls.planned_platform` is not used (it is empty in production).
 
-### London termini
+### The owner decision and the suppression rule
 
-At the six London termini Darwin flags 92 to 99 per cent of public
-departures' platforms as suppressed until they are announced, and the
-timetable's platform there is a guess passengers must not walk to. So at
-`STATION_BOARD_NO_BOOKED_PLATFORM_CRS` (default `VIC,EUS,PAD,KGX,MYB,STP`) a
-booked platform is never shown: the board says `toBeAnnounced`
-("Platform to be announced") unless a public live platform exists (Darwin's,
-unhidden, or the LDBWS board's). A row with no booked platform there is also
-`toBeAnnounced`.
+The first release never showed a timetable platform at the six London
+termini, where Darwin flags 92 to 99 per cent of public departures'
+platforms as suppressed until they are announced. The owner has overridden
+that (2026-11-28): show a likely platform wherever one can be derived,
+always labelled as a prediction, and say "to be announced" only when nothing
+can be derived.
+
+The suppression is still honoured in full:
+
+- A platform Darwin flags suppressed (`platsup`, `cisPlatsup`) or a
+  suppressed location is never served for that service's own call, and its
+  string is never read past the check, so it cannot reach the JSON (the DB
+  tests search the whole body for it).
+- A hidden **inbound arrival** is never a source of a prediction, and
+  neither is TRUST for that working: a prediction comes only from the
+  timetable, or from an inbound working Darwin itself shows publicly (or has
+  no word on).
+- A cancelled call has no platform, and a cancelled inbound working
+  predicts nothing.
+
+When the real platform is announced Darwin takes precedence at once, so a
+wrong prediction flips to the announced platform on the next board (the row's
+`platformStatus` changes from `likely`; clients should label, not pin).
+
+### What is not predicted: the usual platform
+
+A third basis, the platform a service most often uses here, was considered and
+not shipped. The only history of real platforms is `train_movement_events.platform`
+(TRUST, since 2026-10-26), and DS writes movement events only for trains it
+tracks (`trains`/`tracked_trains`), so for most services there is nothing to
+count; Darwin's own calls are kept 2 days. A query would be cheap
+(`trains` by `(train_uid, service_date)`, then `train_movement_events_trains_id`)
+but would answer for almost no row, and a 3-observation majority from
+tracked trains only is not reliable. A real platform history table would be
+a ds-core change (a pre-aggregated per station and service key table fed by
+the full-coverage consumer).
 
 ### Licence assumption
 
@@ -205,7 +244,7 @@ a platform Darwin says is not for the public is never served.
 
 ## How the board is read
 
-Four reads, whatever the size, none per row (the departures board; the
+Reads, whatever the size, none per row (the departures board; the
 arrivals board's differences follow):
 
 1. **Timetable rows**: `search_schedule_calling_point_departures`, the read
@@ -225,9 +264,20 @@ arrivals board's differences follow):
    `(service_date, uid)` and TIPLOC (its primary key), picked the same way.
 4. The station's TIPLOCs (`tiploc_crs_crs_idx`), the names and, if needed, the
    LDBWS board (`station_samples` by primary key).
+5. **Inbound workings**, only for the rows on the board (after the cut to
+   `limit`) with no public platform of their own, and only when there are
+   any: `schedule_turnarounds` by `(service_date, uid)` (its primary key,
+   restricted to this station's TIPLOCs as the turnaround location); then the
+   inbound trains' Darwin calls with the same statement as step 2 (the inbound
+   `(uid, ssd)`, `darwin_services_uid_ssd`, then `darwin_calls`' primary key; never
+   a scan by station); then, only for inbound workings Darwin has no platform
+   for, the train view's `previous_working_arrivals` (`trains`' unique
+   `(train_uid, service_date)`, then `train_movement_events_trains_id`, one
+   latest arrival per working). At most three statements, each a key lookup
+   over at most `limit` keys.
 
-A DB test runs `EXPLAIN` on the Darwin, booked-platform and TIPLOC reads with
-sequential scans disabled and asserts the indexes above (and no sequential
+A DB test runs `EXPLAIN` on the Darwin, booked-platform, turnaround and TIPLOC reads with
+sequential scans disabled and asserts the indexes above (`schedule_turnarounds_pkey` for the turnaround read, and no sequential
 scan of `darwin_calls` or `darwin_services`).
 
 Rows that have left (a Darwin actual departure) or are no longer due (the
@@ -287,7 +337,7 @@ distinct URL once per 20 s), `limit` at 30 and the cheap queries above.
 | Setting | Default | |
 | --- | --- | --- |
 | `STATION_BOARD_ENABLED` | `false` | `404` while off. |
-| `STATION_BOARD_NO_BOOKED_PLATFORM_CRS` | `VIC,EUS,PAD,KGX,MYB,STP` | Comma-separated 3-letter CRS codes; set and blank means none; a bad code stops the api at startup. |
+| `STATION_BOARD_NO_BOOKED_PLATFORM_CRS` | empty | Comma-separated 3-letter CRS codes whose booked platform is shown only as `likely` (basis `booked`), never as `booked`; set and blank means none; a bad code stops the api at startup. It defaulted to `VIC,EUS,PAD,KGX,MYB,STP` (booked platform withheld) until the owner decision above; kept for emergency use. |
 
 Both are in `--print-config-defaults`. The chart values (ds-deploy) are a later
 change, after the image that reads them.
@@ -298,5 +348,6 @@ change with the switch.
 
 **Grants** (the `api` role, `db-grants.yaml`): `SELECT` on `darwin_services`,
 `darwin_calls`, `schedule_destination_departures`,
-`schedule_calling_points_full`, `tiploc_crs`, `station_samples`, `stations`
-and `tocs`. Nothing new is needed.
+`schedule_calling_points_full`, `schedule_turnarounds`, `trains`,
+`train_movement_events`, `tiploc_crs`, `station_samples`, `stations` and `tocs`.
+Nothing new is needed (the api already reads them).

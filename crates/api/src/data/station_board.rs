@@ -4,22 +4,26 @@
 //!
 //! **Platform precedence** ([`resolve_platform`]), first match wins:
 //!
-//! 1. Darwin's platform for the call, unless Darwin hides it from the
+//! 1. A call Darwin has cancelled: `none`.
+//! 2. Darwin's platform for the call, unless Darwin hides it from the
 //!    public (`platsup`, `cisPlatsup`: `DarwinCall::platform_hidden`, the
 //!    rule `pushport_platform` applies; or the location itself is
 //!    suppressed): `confirmed` when Darwin says so, else `expected`.
-//! 2. Darwin has the call and hides it: `toBeAnnounced`. Never a fallback
-//!    to a booked platform, and the hidden string is never read past the
-//!    check.
 //! 3. The station's own LDBWS board row for the same service
 //!    ([`match_ldbws`]), when exactly one row on each side shares the
-//!    headcode, shown time and destination: `expected`.
-//! 4. The CIF booked platform, `booked`; but at a station in
-//!    [`Settings::no_booked_platform_crs`] (the London termini) a booked
-//!    platform is never shown and the answer is `toBeAnnounced`.
-//! 5. `none`.
+//!    headcode, shown time and destination, and Darwin does not hide the
+//!    call: `expected`.
+//! 4. A prediction from independent data, `likely`, always labelled by
+//!    `platformBasis`: `inbound` (the platform the working that forms this
+//!    service arrives at, [`inbound_platforms`]), else `booked` (the CIF
+//!    platform) where Darwin hides this call's platform or the station is
+//!    in [`Settings::no_booked_platform_crs`].
+//! 5. The CIF booked platform, `booked`.
+//! 6. `toBeAnnounced` where Darwin hides the call or the station is in the
+//!    list; else `none`.
 //!
-//! A call Darwin has cancelled has no platform: `none`.
+//! Darwin's hidden platform string is never read past the check, and a
+//! hidden inbound arrival is never a source.
 //!
 //! **Status** ([`live_status`]): `booked` means no live data, so a board
 //! never claims `onTime` without a Darwin forecast or actual to say so.
@@ -33,6 +37,9 @@
 use std::collections::{BTreeSet, HashMap};
 use std::sync::OnceLock;
 
+use crate::data::platform_confirmation::{
+    EARLY_ARRIVAL_SLACK, LATE_ARRIVAL_LIMIT, PreviousWorkingArrival, previous_working_arrivals,
+};
 use anyhow::{Result, bail};
 use chrono::{NaiveDate, NaiveTime, Timelike};
 use common::StationDeparture;
@@ -42,13 +49,13 @@ use sqlx::PgPool;
 
 /// Turns the route on (chart `api.stationBoard.enabled`, default false).
 pub const ENABLED_ENV: &str = "STATION_BOARD_ENABLED";
-/// Comma-separated CRS codes of the stations whose booked platform is never
-/// shown (chart `api.stationBoard.noBookedPlatformCrs`).
+/// Comma-separated CRS codes of the stations whose booked platform is only
+/// ever shown as a labelled prediction (`likely`, basis `booked`), never as
+/// `booked` (chart `api.stationBoard.noBookedPlatformCrs`).
 pub const NO_BOOKED_PLATFORM_CRS_ENV: &str = "STATION_BOARD_NO_BOOKED_PLATFORM_CRS";
-/// The default of [`NO_BOOKED_PLATFORM_CRS_ENV`]: the six London termini
-/// where Darwin hides 92 to 99 per cent of public platforms until they are
-/// announced.
-pub const DEFAULT_NO_BOOKED_PLATFORM_CRS: [&str; 6] = ["VIC", "EUS", "PAD", "KGX", "MYB", "STP"];
+/// The default of [`NO_BOOKED_PLATFORM_CRS_ENV`]: none. (Until 2026-11-28 it
+/// was the six London termini, where the booked platform was withheld.)
+pub const DEFAULT_NO_BOOKED_PLATFORM_CRS: [&str; 0] = [];
 
 /// How old a station's LDBWS board may be and still name a platform.
 pub const LDBWS_MAX_AGE_MINUTES: i64 = 10;
@@ -74,10 +81,9 @@ impl Default for Settings {
 
 impl Settings {
     /// Reads [`ENABLED_ENV`] (default false, as the other switches) and
-    /// [`NO_BOOKED_PLATFORM_CRS_ENV`] (unset is the default six; set and
-    /// blank is none). A code that is not three letters is an error, so a
-    /// typo stops the api instead of quietly showing booked platforms at a
-    /// terminus.
+    /// [`NO_BOOKED_PLATFORM_CRS_ENV`] (unset is the default, none; set and
+    /// blank is none too). A code that is not three letters is an error, so a
+    /// typo stops the api instead of quietly showing booked platforms.
     pub fn from_env() -> Result<Self> {
         let enabled = crate::data::trip_plan_live::env_bool(ENABLED_ENV, false);
         let no_booked_platform_crs = match std::env::var(NO_BOOKED_PLATFORM_CRS_ENV) {
@@ -90,7 +96,7 @@ impl Settings {
         })
     }
 
-    /// Whether `crs` never shows a booked platform.
+    /// Whether `crs` shows its booked platform only as a prediction.
     #[must_use]
     pub fn no_booked_platform(&self, crs: &str) -> bool {
         self.no_booked_platform_crs
@@ -140,11 +146,60 @@ pub enum BoardPlatformStatus {
     Expected,
     /// The timetable's platform, with no live word.
     Booked,
-    /// Not announced: Darwin hides it, or the station never shows a booked
-    /// platform and no live one is public.
+    /// A prediction from independent data, never Darwin's own word: see
+    /// `platformBasis` for what it rests on. Always show it labelled as
+    /// not announced.
+    Likely,
+    /// Not announced: Darwin hides it and nothing independent predicts one.
     ToBeAnnounced,
     /// No platform known.
     None,
+}
+
+/// What a `likely` platform rests on.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, ts_rs::TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(rename = "StationBoardPlatformBasis")]
+pub enum BoardPlatformBasis {
+    /// The working that forms this service arrives at (or is at) this
+    /// platform here, and stock normally leaves from where it arrived.
+    Inbound,
+    /// The timetable's platform plan.
+    Booked,
+}
+
+/// The platform to show, what it rests on and, for `likely`, its basis.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ResolvedPlatform {
+    pub platform: Option<String>,
+    pub status: BoardPlatformStatus,
+    pub basis: Option<BoardPlatformBasis>,
+}
+
+impl ResolvedPlatform {
+    fn shown(platform: String, status: BoardPlatformStatus) -> Self {
+        Self {
+            platform: Some(platform),
+            status,
+            basis: None,
+        }
+    }
+
+    fn without(status: BoardPlatformStatus) -> Self {
+        Self {
+            platform: None,
+            status,
+            basis: None,
+        }
+    }
+
+    fn likely(platform: String, basis: BoardPlatformBasis) -> Self {
+        Self {
+            platform: Some(platform),
+            status: BoardPlatformStatus::Likely,
+            basis: Some(basis),
+        }
+    }
 }
 
 /// Where a row stands.
@@ -202,40 +257,50 @@ fn clean(platform: Option<&str>) -> Option<String> {
         .map(str::to_string)
 }
 
-/// The platform to show and what it rests on. See the module docs; the
-/// hidden branch returns before it reads Darwin's platform at all.
+/// The platform to show and what it rests on. See the module docs; a
+/// hidden Darwin platform is never read at all. `inbound` is a platform
+/// [`inbound_platforms`] already vetted (never from a hidden arrival).
 #[must_use]
 pub fn resolve_platform(
     darwin: Option<DarwinPlatform<'_>>,
     ldbws: Option<&str>,
+    inbound: Option<&str>,
     booked: Option<&str>,
-    no_booked_platform: bool,
-) -> (Option<String>, BoardPlatformStatus) {
+    booked_is_prediction: bool,
+) -> ResolvedPlatform {
+    let mut hidden = false;
     if let Some(darwin) = darwin {
         if darwin.cancelled {
-            return (None, BoardPlatformStatus::None);
+            return ResolvedPlatform::without(BoardPlatformStatus::None);
         }
         if darwin.hidden {
-            return (None, BoardPlatformStatus::ToBeAnnounced);
-        }
-        if let Some(platform) = clean(darwin.platform) {
+            hidden = true;
+        } else if let Some(platform) = clean(darwin.platform) {
             let status = if darwin.confirmed {
                 BoardPlatformStatus::Confirmed
             } else {
                 BoardPlatformStatus::Expected
             };
-            return (Some(platform), status);
+            return ResolvedPlatform::shown(platform, status);
         }
     }
-    if let Some(platform) = clean(ldbws) {
-        return (Some(platform), BoardPlatformStatus::Expected);
+    if !hidden && let Some(platform) = clean(ldbws) {
+        return ResolvedPlatform::shown(platform, BoardPlatformStatus::Expected);
     }
-    if no_booked_platform {
-        return (None, BoardPlatformStatus::ToBeAnnounced);
+    if let Some(platform) = clean(inbound) {
+        return ResolvedPlatform::likely(platform, BoardPlatformBasis::Inbound);
     }
-    match clean(booked) {
-        Some(platform) => (Some(platform), BoardPlatformStatus::Booked),
-        None => (None, BoardPlatformStatus::None),
+    if let Some(platform) = clean(booked) {
+        return if hidden || booked_is_prediction {
+            ResolvedPlatform::likely(platform, BoardPlatformBasis::Booked)
+        } else {
+            ResolvedPlatform::shown(platform, BoardPlatformStatus::Booked)
+        };
+    }
+    if hidden || booked_is_prediction {
+        ResolvedPlatform::without(BoardPlatformStatus::ToBeAnnounced)
+    } else {
+        ResolvedPlatform::without(BoardPlatformStatus::None)
     }
 }
 
@@ -548,6 +613,136 @@ pub async fn booked_calls_at(
     Ok(out)
 }
 
+/// The working that forms each train, where it turns round at the station
+/// (`schedule_turnarounds`' primary key; `origin_tiploc` is the station).
+pub const TURNAROUND_SQL: &str = "\
+SELECT t.uid, t.service_date, t.prev_uid, t.prev_service_date, t.origin_tiploc \
+FROM UNNEST($1::text[], $2::date[]) AS k(uid, service_date) \
+JOIN schedule_turnarounds t ON t.service_date = k.service_date AND t.uid = k.uid \
+WHERE t.origin_tiploc = ANY($3::text[])";
+
+/// One train's inbound working, as `schedule_turnarounds` records it.
+#[derive(Debug, Clone, sqlx::FromRow)]
+pub struct Turnaround {
+    pub uid: String,
+    pub service_date: NaiveDate,
+    pub prev_uid: String,
+    pub prev_service_date: NaiveDate,
+    pub origin_tiploc: String,
+}
+
+/// What Darwin says about the inbound working's arrival here.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum InboundArrival {
+    /// A public platform: a source.
+    Platform(String),
+    /// Darwin hides it (or the location): never a source, and no other
+    /// source is consulted for this working.
+    Hidden,
+    /// The arrival is cancelled: the unit is not coming.
+    Cancelled,
+    /// Darwin has no platform for it (or no single arrival call).
+    Unknown,
+}
+
+/// The inbound working's arrival call at `origin_tiploc` among its calls at
+/// the station: the one call there with a working arrival time. Two or none
+/// is [`InboundArrival::Unknown`]: nothing safe to say.
+#[must_use]
+pub fn inbound_arrival(calls: &[BoardCall], origin_tiploc: &str) -> InboundArrival {
+    let mut arrivals = calls
+        .iter()
+        .filter(|c| c.call.tiploc == origin_tiploc && !c.call.wta.trim().is_empty());
+    let (Some(call), None) = (arrivals.next(), arrivals.next()) else {
+        return InboundArrival::Unknown;
+    };
+    if call.call.is_cancelled {
+        return InboundArrival::Cancelled;
+    }
+    if call.hidden() {
+        return InboundArrival::Hidden;
+    }
+    clean(call.call.platform.as_deref()).map_or(InboundArrival::Unknown, InboundArrival::Platform)
+}
+
+/// The platform of a TRUST arrival of the inbound working at `crs`, for a
+/// working Darwin has no platform for: it arrived within the window of the
+/// booked turnaround (as `platform_confirmation` allows) and has not been
+/// reported anywhere since.
+#[must_use]
+pub fn trust_inbound_platform(arrival: &PreviousWorkingArrival, crs: &str) -> Option<String> {
+    let earliest = arrival.departs_at
+        - chrono::Duration::minutes(i64::from(arrival.booked_turnaround_minutes))
+        - EARLY_ARRIVAL_SLACK;
+    let latest = arrival.departs_at + LATE_ARRIVAL_LIMIT;
+    let same_station = arrival.arrival_crs.trim().eq_ignore_ascii_case(crs.trim());
+    let not_moved = arrival
+        .latest_report_at
+        .is_none_or(|at| at <= arrival.arrived_at);
+    (same_station && not_moved && arrival.arrived_at >= earliest && arrival.arrived_at <= latest)
+        .then(|| clean(Some(&arrival.arrival_platform)))
+        .flatten()
+}
+
+/// For each train that turns round at the station, the platform its inbound
+/// working arrives at, never from a hidden arrival: Darwin's arrival
+/// platform, else (only when Darwin has none for it) TRUST's report that
+/// the unit arrived here. Three batched reads, none per row: the turnaround
+/// keys, the inbound workings' Darwin calls ([`DARWIN_SQL`], by the
+/// inbound uid and date) and, for those with no Darwin platform, the TRUST
+/// arrival (`platform_confirmation::previous_working_arrivals`). Each runs
+/// only when there is something to ask.
+pub async fn inbound_platforms(
+    pool: &PgPool,
+    crs: &str,
+    trains: &[(String, NaiveDate)],
+    tiplocs: &[String],
+) -> Result<HashMap<(String, NaiveDate), String>> {
+    if trains.is_empty() || tiplocs.is_empty() {
+        return Ok(HashMap::new());
+    }
+    let uids: Vec<&str> = trains.iter().map(|(uid, _)| uid.as_str()).collect();
+    let dates: Vec<NaiveDate> = trains.iter().map(|(_, date)| *date).collect();
+    let turnarounds: Vec<Turnaround> = sqlx::query_as(TURNAROUND_SQL)
+        .bind(&uids)
+        .bind(&dates)
+        .bind(tiplocs)
+        .fetch_all(pool)
+        .await?;
+    if turnarounds.is_empty() {
+        return Ok(HashMap::new());
+    }
+    let mut previous: Vec<(String, NaiveDate)> = turnarounds
+        .iter()
+        .map(|t| (t.prev_uid.clone(), t.prev_service_date))
+        .collect();
+    previous.sort_unstable();
+    previous.dedup();
+    let darwin = darwin_calls_at(pool, &previous, tiplocs).await?;
+    let mut out = HashMap::new();
+    let mut ask_trust: Vec<(String, NaiveDate)> = Vec::new();
+    for t in &turnarounds {
+        let calls = darwin
+            .get(&(t.prev_uid.clone(), t.prev_service_date))
+            .map_or(&[][..], Vec::as_slice);
+        match inbound_arrival(calls, &t.origin_tiploc) {
+            InboundArrival::Platform(platform) => {
+                out.insert((t.uid.clone(), t.service_date), platform);
+            }
+            InboundArrival::Hidden | InboundArrival::Cancelled => {}
+            InboundArrival::Unknown => ask_trust.push((t.uid.clone(), t.service_date)),
+        }
+    }
+    if !ask_trust.is_empty() {
+        for (key, arrival) in previous_working_arrivals(pool, &ask_trust).await? {
+            if let Some(platform) = trust_inbound_platform(&arrival, crs) {
+                out.insert(key, platform);
+            }
+        }
+    }
+    Ok(out)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -561,119 +756,157 @@ mod tests {
         }
     }
 
+    use BoardPlatformBasis::{Booked as ByBooking, Inbound};
+    use BoardPlatformStatus as St;
+
+    fn resolved(
+        platform: Option<&str>,
+        status: St,
+        basis: Option<BoardPlatformBasis>,
+    ) -> ResolvedPlatform {
+        ResolvedPlatform {
+            platform: platform.map(str::to_string),
+            status,
+            basis,
+        }
+    }
+
     #[test]
     fn a_confirmed_darwin_platform_is_confirmed() {
         assert_eq!(
             resolve_platform(
                 Some(darwin(Some("4"), true, false)),
                 Some("9"),
+                Some("8"),
                 Some("1"),
                 false
             ),
-            (Some("4".to_string()), BoardPlatformStatus::Confirmed)
+            resolved(Some("4"), St::Confirmed, None)
         );
     }
 
     #[test]
-    fn an_unconfirmed_darwin_platform_is_expected_and_beats_the_board_and_the_timetable() {
+    fn an_unconfirmed_darwin_platform_is_expected_and_beats_every_prediction() {
         assert_eq!(
             resolve_platform(
                 Some(darwin(Some("4"), false, false)),
                 Some("9"),
+                Some("8"),
                 Some("1"),
-                false
+                true
             ),
-            (Some("4".to_string()), BoardPlatformStatus::Expected)
+            resolved(Some("4"), St::Expected, None)
         );
     }
 
     #[test]
-    fn a_hidden_darwin_platform_is_never_shown_and_never_falls_back() {
-        // Darwin hides "7": not the board's "9", not the booked "1".
-        for no_booked in [false, true] {
+    fn a_hidden_darwin_platform_is_never_shown_and_never_beats_a_prediction() {
+        // Darwin hides "7": the answer is the independent prediction, or
+        // nothing, and never "7" (nor the station's own board "9").
+        let hidden = || Some(darwin(Some("7"), true, true));
+        assert_eq!(
+            resolve_platform(hidden(), Some("9"), Some("8"), Some("1"), false),
+            resolved(Some("8"), St::Likely, Some(Inbound))
+        );
+        assert_eq!(
+            resolve_platform(hidden(), Some("9"), None, Some("1"), false),
+            resolved(Some("1"), St::Likely, Some(ByBooking))
+        );
+        for booked_is_prediction in [false, true] {
             assert_eq!(
-                resolve_platform(
-                    Some(darwin(Some("7"), true, true)),
-                    Some("9"),
-                    Some("1"),
-                    no_booked
-                ),
-                (None, BoardPlatformStatus::ToBeAnnounced)
+                resolve_platform(hidden(), Some("9"), None, None, booked_is_prediction),
+                resolved(None, St::ToBeAnnounced, None)
             );
         }
-        // Hidden with no platform string at all is the same.
         assert_eq!(
-            resolve_platform(Some(darwin(None, false, true)), None, Some("1"), false),
-            (None, BoardPlatformStatus::ToBeAnnounced)
+            resolve_platform(Some(darwin(None, false, true)), None, None, None, false),
+            resolved(None, St::ToBeAnnounced, None)
         );
     }
 
     #[test]
-    fn a_darwin_call_with_no_platform_falls_to_the_board_then_the_timetable() {
+    fn a_darwin_call_with_no_platform_falls_to_the_board_then_the_inbound_then_the_timetable() {
         assert_eq!(
             resolve_platform(
                 Some(darwin(None, false, false)),
                 Some(" 9 "),
+                Some("8"),
                 Some("1"),
                 false
             ),
-            (Some("9".to_string()), BoardPlatformStatus::Expected)
+            resolved(Some("9"), St::Expected, None)
         );
         assert_eq!(
             resolve_platform(
                 Some(darwin(Some(" "), false, false)),
                 None,
+                Some("8"),
                 Some("1"),
                 false
             ),
-            (Some("1".to_string()), BoardPlatformStatus::Booked)
+            resolved(Some("8"), St::Likely, Some(Inbound))
+        );
+        assert_eq!(
+            resolve_platform(
+                Some(darwin(Some(" "), false, false)),
+                None,
+                None,
+                Some("1"),
+                false
+            ),
+            resolved(Some("1"), St::Booked, None)
         );
     }
 
     #[test]
-    fn without_darwin_the_board_then_the_booked_platform_then_none() {
+    fn without_darwin_the_board_then_inbound_then_booked_then_none() {
         assert_eq!(
-            resolve_platform(None, Some("9"), Some("1"), false),
-            (Some("9".to_string()), BoardPlatformStatus::Expected)
+            resolve_platform(None, Some("9"), Some("8"), Some("1"), false),
+            resolved(Some("9"), St::Expected, None)
         );
         assert_eq!(
-            resolve_platform(None, None, Some("1"), false),
-            (Some("1".to_string()), BoardPlatformStatus::Booked)
+            resolve_platform(None, None, Some(" 8 "), Some("1"), false),
+            resolved(Some("8"), St::Likely, Some(Inbound))
         );
         assert_eq!(
-            resolve_platform(None, None, None, false),
-            (None, BoardPlatformStatus::None)
+            resolve_platform(None, None, None, Some("1"), false),
+            resolved(Some("1"), St::Booked, None)
         );
         assert_eq!(
-            resolve_platform(None, None, Some(""), false),
-            (None, BoardPlatformStatus::None)
+            resolve_platform(None, None, None, None, false),
+            resolved(None, St::None, None)
+        );
+        assert_eq!(
+            resolve_platform(None, None, Some(""), Some(""), false),
+            resolved(None, St::None, None)
         );
     }
 
     #[test]
-    fn a_terminus_never_shows_a_booked_platform() {
+    fn a_listed_station_shows_its_booked_platform_as_a_labelled_prediction() {
         assert_eq!(
-            resolve_platform(None, None, Some("1"), true),
-            (None, BoardPlatformStatus::ToBeAnnounced)
+            resolve_platform(None, None, None, Some("1"), true),
+            resolved(Some("1"), St::Likely, Some(ByBooking))
         );
-        // No booked platform either: still to be announced there.
+        // Nothing derivable there: to be announced, not none.
         assert_eq!(
-            resolve_platform(None, None, None, true),
-            (None, BoardPlatformStatus::ToBeAnnounced)
+            resolve_platform(None, None, None, None, true),
+            resolved(None, St::ToBeAnnounced, None)
         );
-        // A public live platform still shows.
+        // A public live platform still wins, and so does the inbound.
         assert_eq!(
             resolve_platform(
                 Some(darwin(Some("12"), false, false)),
                 None,
+                None,
                 Some("1"),
                 true
             ),
-            (Some("12".to_string()), BoardPlatformStatus::Expected)
+            resolved(Some("12"), St::Expected, None)
         );
         assert_eq!(
-            resolve_platform(None, Some("12"), Some("1"), true),
-            (Some("12".to_string()), BoardPlatformStatus::Expected)
+            resolve_platform(None, None, Some("12"), Some("1"), true),
+            resolved(Some("12"), St::Likely, Some(Inbound))
         );
     }
 
@@ -682,8 +915,143 @@ mod tests {
         let mut cancelled = darwin(Some("4"), true, false);
         cancelled.cancelled = true;
         assert_eq!(
-            resolve_platform(Some(cancelled), Some("9"), Some("1"), false),
-            (None, BoardPlatformStatus::None)
+            resolve_platform(Some(cancelled), Some("9"), Some("8"), Some("1"), true),
+            resolved(None, St::None, None)
+        );
+    }
+
+    fn call(tiploc: &str, wta: &str, platform: Option<&str>) -> BoardCall {
+        BoardCall {
+            uid: "X".to_string(),
+            ssd: NaiveDate::from_ymd_opt(2099, 11, 4).unwrap(),
+            cancel_reason: None,
+            call: DarwinCall {
+                tiploc: tiploc.to_string(),
+                wta: wta.to_string(),
+                wtd: String::new(),
+                wtp: String::new(),
+                planned_platform: None,
+                is_cancelled: false,
+                platform: platform.map(str::to_string),
+                platform_confirmed: false,
+                platform_suppressed: false,
+                platform_cis_suppressed: false,
+                platform_basis: None,
+                arrival_et: None,
+                departure_et: None,
+                updated_at: chrono::Utc::now(),
+            },
+            departure_at: None,
+            departure_delayed: false,
+            arrival_at: None,
+            arrival_delayed: false,
+            is_suppressed: false,
+        }
+    }
+
+    #[test]
+    fn a_public_inbound_arrival_platform_is_a_source() {
+        assert_eq!(
+            inbound_arrival(&[call("EUSTON", "09:40", Some(" 12 "))], "EUSTON"),
+            InboundArrival::Platform("12".to_string())
+        );
+    }
+
+    #[test]
+    fn a_hidden_or_cancelled_inbound_arrival_is_never_a_source() {
+        let mut platsup = call("EUSTON", "09:40", Some("12"));
+        platsup.call.platform_suppressed = true;
+        assert_eq!(
+            inbound_arrival(&[platsup], "EUSTON"),
+            InboundArrival::Hidden
+        );
+        let mut cis = call("EUSTON", "09:40", Some("12"));
+        cis.call.platform_cis_suppressed = true;
+        assert_eq!(inbound_arrival(&[cis], "EUSTON"), InboundArrival::Hidden);
+        let mut location = call("EUSTON", "09:40", Some("12"));
+        location.is_suppressed = true;
+        assert_eq!(
+            inbound_arrival(&[location], "EUSTON"),
+            InboundArrival::Hidden
+        );
+        let mut cancelled = call("EUSTON", "09:40", Some("12"));
+        cancelled.call.is_cancelled = true;
+        assert_eq!(
+            inbound_arrival(&[cancelled], "EUSTON"),
+            InboundArrival::Cancelled
+        );
+    }
+
+    #[test]
+    fn an_inbound_with_no_single_arrival_call_or_platform_is_unknown() {
+        assert_eq!(inbound_arrival(&[], "EUSTON"), InboundArrival::Unknown);
+        assert_eq!(
+            inbound_arrival(&[call("EUSTON", "09:40", None)], "EUSTON"),
+            InboundArrival::Unknown
+        );
+        // A departure-only call (no working arrival) is not an arrival.
+        assert_eq!(
+            inbound_arrival(&[call("EUSTON", "", Some("3"))], "EUSTON"),
+            InboundArrival::Unknown
+        );
+        // Two arrival calls there: ambiguous.
+        assert_eq!(
+            inbound_arrival(
+                &[
+                    call("EUSTON", "09:40", Some("3")),
+                    call("EUSTON", "11:40", Some("4"))
+                ],
+                "EUSTON"
+            ),
+            InboundArrival::Unknown
+        );
+        // Another location is not the turnaround.
+        assert_eq!(
+            inbound_arrival(&[call("OTHER", "09:40", Some("3"))], "EUSTON"),
+            InboundArrival::Unknown
+        );
+    }
+
+    fn trust(
+        arrived_min: i64,
+        latest_min: Option<i64>,
+        crs: &str,
+        platform: &str,
+    ) -> PreviousWorkingArrival {
+        let departs_at: chrono::DateTime<chrono::Utc> = "2099-11-04T10:00:00Z".parse().unwrap();
+        PreviousWorkingArrival {
+            link: "inferred".to_string(),
+            departs_at,
+            booked_turnaround_minutes: 30,
+            arrival_crs: crs.to_string(),
+            arrival_platform: platform.to_string(),
+            arrived_at: departs_at + chrono::Duration::minutes(arrived_min),
+            latest_report_at: latest_min.map(|m| departs_at + chrono::Duration::minutes(m)),
+        }
+    }
+
+    #[test]
+    fn a_trust_arrival_here_in_the_window_and_not_moved_on_is_a_source() {
+        assert_eq!(
+            trust_inbound_platform(&trust(-20, Some(-20), "eus", " 5 "), "EUS"),
+            Some("5".to_string())
+        );
+        // Elsewhere, moved on since, or out of the window: nothing.
+        assert_eq!(
+            trust_inbound_platform(&trust(-20, None, "WFJ", "5"), "EUS"),
+            None
+        );
+        assert_eq!(
+            trust_inbound_platform(&trust(-20, Some(-10), "EUS", "5"), "EUS"),
+            None
+        );
+        assert_eq!(
+            trust_inbound_platform(&trust(-90, None, "EUS", "5"), "EUS"),
+            None
+        );
+        assert_eq!(
+            trust_inbound_platform(&trust(45, None, "EUS", "5"), "EUS"),
+            None
         );
     }
 
@@ -821,14 +1189,17 @@ mod tests {
     }
 
     #[test]
-    fn the_settings_default_off_with_the_six_termini() {
+    fn the_settings_default_off_with_an_empty_list() {
         let settings = Settings::default();
         assert!(!settings.enabled);
-        for crs in DEFAULT_NO_BOOKED_PLATFORM_CRS {
-            assert!(settings.no_booked_platform(crs));
-        }
-        assert!(settings.no_booked_platform(" pad "));
-        assert!(!settings.no_booked_platform("RDG"));
+        assert!(settings.no_booked_platform_crs.is_empty());
+        assert!(!settings.no_booked_platform("EUS"));
+        let listed = Settings {
+            enabled: true,
+            no_booked_platform_crs: parse_crs_list("pad").unwrap(),
+        };
+        assert!(listed.no_booked_platform(" PAD "));
+        assert!(!listed.no_booked_platform("RDG"));
     }
 
     #[test]

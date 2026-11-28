@@ -4779,9 +4779,14 @@ terminates: boolean,
  */
 operator: string | null, operatorName: string | null, headcode: string | null, 
 /**
- * Never a platform Darwin hides from the public.
+ * As on a departure: never a platform Darwin hides; `likely` is a
+ * prediction.
  */
-platform: string | null, platformStatus: StationBoardPlatformStatus, status: StationBoardStatus, delayMinutes: number | null, isCancelled: boolean, cancelReason: string | null, };
+platform: string | null, platformStatus: StationBoardPlatformStatus, 
+/**
+ * What a `likely` platform rests on; `null` for every other status.
+ */
+platformBasis: StationBoardPlatformBasis | null, status: StationBoardStatus, delayMinutes: number | null, isCancelled: boolean, cancelReason: string | null, };
 
 /**
  * One row of the board.
@@ -4805,9 +4810,17 @@ expected: string | null, expectedDayOffset: number | null, destinationCrs: strin
  */
 operator: string | null, operatorName: string | null, headcode: string | null, 
 /**
- * Never a platform Darwin hides from the public.
+ * Never a platform Darwin hides from the public for this call. With
+ * `platformStatus` `likely` it is a prediction, not an announcement:
+ * show it labelled as such.
  */
-platform: string | null, platformStatus: StationBoardPlatformStatus, status: StationBoardStatus, delayMinutes: number | null, isCancelled: boolean, cancelReason: string | null, };
+platform: string | null, platformStatus: StationBoardPlatformStatus, 
+/**
+ * What a `likely` platform rests on (`inbound`: the working that forms
+ * this service arrives there; `booked`: the timetable's plan); `null`
+ * for every other status.
+ */
+platformBasis: StationBoardPlatformBasis | null, status: StationBoardStatus, delayMinutes: number | null, isCancelled: boolean, cancelReason: string | null, };
 
 /**
  * Which board: the services leaving the station or the ones arriving.
@@ -4815,9 +4828,14 @@ platform: string | null, platformStatus: StationBoardPlatformStatus, status: Sta
 export type StationBoardKind = "departures" | "arrivals";
 
 /**
+ * What a `likely` platform rests on.
+ */
+export type StationBoardPlatformBasis = "inbound" | "booked";
+
+/**
  * What a row's `platform` rests on.
  */
-export type StationBoardPlatformStatus = "confirmed" | "expected" | "booked" | "toBeAnnounced" | "none";
+export type StationBoardPlatformStatus = "confirmed" | "expected" | "booked" | "likely" | "toBeAnnounced" | "none";
 
 /**
  * Where a row stands.
