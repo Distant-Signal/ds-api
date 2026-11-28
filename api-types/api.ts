@@ -291,6 +291,16 @@ export type CancellationSummary = { kind: CancellationKind, startsFrom: Cancella
 export type CancelledSection = { from: CancellationStop, to: CancellationStop, };
 
 /**
+ * `PUT /preferences/change-time` `{extraMinutes}`: the minutes the caller
+ * allows on top of a station's minimum change time to change trains
+ * (DS-757), 0 to 30 whole minutes (0 is none). 204; 400 for another
+ * number, a missing or unknown field or a body that is not JSON. It is
+ * applied to the caller's own journeys while `JOURNEY_TIGHT_CONNECTIONS`
+ * is on. The session user only; never logged.
+ */
+export type ChangeTimeUpdate = { extraMinutes: number, };
+
+/**
  * How sure the prediction is. Ordered: `Low < Medium < High`.
  */
 export type Confidence = "low" | "medium" | "high";
@@ -2364,7 +2374,9 @@ export type LegConnection = {
 gapMinutes: number | null, 
 /**
  * The time the change needs: the boarding station's minimum change
- * time, a fixed link's minutes plus that, or 0 staying on one train.
+ * time, a fixed link's minutes plus that, or 0 staying on one train;
+ * for the journey's owner reading with their session, plus their own
+ * extra change minutes (`extraMinutes`).
  * `null` when not known (see [`ConnectionState::Unknown`]) or when the
  * next leg is untracked (a walk or a Tube ride starts when you do).
  */
@@ -2384,7 +2396,18 @@ reliesOnLateDeparture?: LateDepartureReliance<string>,
  * the timetable has moved it). The changes after it are judged from
  * its arrival. Scheduled times, never live.
  */
-nextTimetabled?: TimetabledRide, };
+nextTimetabled?: TimetabledRide, 
+/**
+ * The traveller's own extra minutes to change trains that are in
+ * `minimumChangeMinutes` (additive, DS-757; `PUT
+ * /preferences/change-time`), so a client can say "needs M, including E
+ * extra". Absent when there is none, on a change that needs no time,
+ * and on every read but the journey owner's own session read (a group
+ * member, a share link and a delegated caller get neither it nor the
+ * extra in `minimumChangeMinutes`). Absent too with
+ * `JOURNEY_TIGHT_CONNECTIONS` off, when it is not applied.
+ */
+extraMinutes?: number, };
 
 /**
  * A train leg's Delay Repay estimate, as `GET /Journeys/{id}` serves it
@@ -3460,7 +3483,14 @@ silentPinnedLines: Array<string>,
  * (`PUT /preferences/bank-holiday-division`; regular journeys phase
  * 5). `null` until chosen, when England and Wales's are used. Additive.
  */
-bankHolidayDivision: BankHolidayDivision | null, };
+bankHolidayDivision: BankHolidayDivision | null, 
+/**
+ * The extra minutes the caller allows to change trains
+ * (`PUT /preferences/change-time`, DS-757): 0 when none. Additive.
+ * Present for the signed-in user's own session only; absent for a
+ * delegated client or a personal token, which never learn it.
+ */
+changeExtraMinutes?: number, };
 
 /**
  * `POST /JourneyTemplates/preview-dates`'s body: a recurrence not saved

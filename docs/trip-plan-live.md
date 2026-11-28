@@ -58,3 +58,9 @@ reads no `darwin_calls`.
 `TRIP_PLAN_LIVE_DARWIN_ENABLED` (default `true`) turns the Push Port fill
 off. `distant_signal_api_trip_plan_darwin_fallback_total{kind="actuals"|"forecasts"}`
 counts trains where Darwin filled something in.
+
+Not applied here: a traveller's own extra time to change trains
+(`users.change_extra_minutes`, DS-757). It shapes only the judgement of a
+saved journey for its owner ([journey-breaks.md](journey-breaks.md));
+`/Trips/plan` is anonymous and searches one cached graph, so a plan is
+unchanged by it (out of scope for now).

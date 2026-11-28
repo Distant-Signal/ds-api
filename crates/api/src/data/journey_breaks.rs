@@ -807,6 +807,7 @@ mod tests {
             state,
             relies_on_late_departure: None,
             next_timetabled: None,
+            extra_minutes: None,
         })
     }
 

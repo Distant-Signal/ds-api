@@ -151,6 +151,38 @@ fn bearer(token: &str) -> String {
     format!("Bearer {token}")
 }
 
+/// DS-757: the extra minutes to change trains are the web app's own
+/// setting; a bearer (a personal token, like a delegated client) never
+/// reads it back with `GET /preferences`.
+#[tokio::test]
+#[ignore = "requires a live database; run with `DATABASE_URL=... cargo test -p api \
+            personal_tokens_db_tests -- --ignored --test-threads=1`"]
+async fn a_token_does_not_read_the_change_time_setting() {
+    let pool = connect().await;
+    cleanup(&pool, "TEST-PTOK-CT").await;
+    let h = harness(pool.clone(), settings());
+    let raw = seed_user(&pool, "TEST-PTOK-CT1").await;
+    sqlx::query("UPDATE users SET change_extra_minutes = 10 WHERE id = 'TEST-PTOK-CT1'")
+        .execute(&pool)
+        .await
+        .unwrap();
+    let (status, body) = create(&h, &raw, &["preferences:read"]).await;
+    assert_eq!(status, StatusCode::CREATED, "{body}");
+    let auth = bearer(body["token"].as_str().unwrap());
+    let (status, _, prefs) = send(
+        &h.tokens,
+        "GET",
+        "/v1/preferences",
+        &[("authorization", &auth)],
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{prefs}");
+    assert!(prefs["data"]["pinnedLines"].is_array(), "{prefs}");
+    assert!(prefs["data"].get("changeExtraMinutes").is_none(), "{prefs}");
+    cleanup(&pool, "TEST-PTOK-CT").await;
+}
+
 #[tokio::test]
 #[ignore = "requires a live database; run with `DATABASE_URL=... cargo test -p api \
             personal_tokens_db_tests -- --ignored --test-threads=1`"]

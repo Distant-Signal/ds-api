@@ -10,6 +10,8 @@ pub mod calendar;
     reason = "test code: scenario tests read top to bottom"
 )]
 mod calendar_db_tests;
+#[cfg(test)]
+mod change_time_db_tests;
 pub mod connected_apps;
 #[cfg(test)]
 #[expect(
