@@ -155,24 +155,24 @@ fn unpublished(service_date: chrono::NaiveDate, today: chrono::NaiveDate) -> (St
 
 /// One `schedule_destination_departures` row, as both views read it.
 #[derive(Debug, sqlx::FromRow)]
-struct BoardRow {
-    train_uid: String,
-    origin_crs: String,
-    destination_crs: String,
-    true_origin_crs: Option<String>,
-    scheduled: chrono::NaiveTime,
-    day_offset: i16,
-    public_departure: Option<chrono::NaiveTime>,
-    calling_point_arrival: Option<chrono::NaiveTime>,
-    public_calling_point_arrival: Option<chrono::NaiveTime>,
-    destination_arrival: Option<chrono::NaiveTime>,
-    destination_arrival_day_offset: i16,
-    public_destination_arrival: Option<chrono::NaiveTime>,
-    operator_atoc: Option<String>,
-    headcode: Option<String>,
+pub(crate) struct BoardRow {
+    pub(crate) train_uid: String,
+    pub(crate) origin_crs: String,
+    pub(crate) destination_crs: String,
+    pub(crate) true_origin_crs: Option<String>,
+    pub(crate) scheduled: chrono::NaiveTime,
+    pub(crate) day_offset: i16,
+    pub(crate) public_departure: Option<chrono::NaiveTime>,
+    pub(crate) calling_point_arrival: Option<chrono::NaiveTime>,
+    pub(crate) public_calling_point_arrival: Option<chrono::NaiveTime>,
+    pub(crate) destination_arrival: Option<chrono::NaiveTime>,
+    pub(crate) destination_arrival_day_offset: i16,
+    pub(crate) public_destination_arrival: Option<chrono::NaiveTime>,
+    pub(crate) operator_atoc: Option<String>,
+    pub(crate) headcode: Option<String>,
 }
 
-const BOARD_COLUMNS: &str = "train_uid, origin_crs, destination_crs, true_origin_crs, scheduled, \
+pub(crate) const BOARD_COLUMNS: &str = "train_uid, origin_crs, destination_crs, true_origin_crs, scheduled, \
      day_offset, public_departure, calling_point_arrival, public_calling_point_arrival, \
      destination_arrival, destination_arrival_day_offset, public_destination_arrival, \
      operator_atoc, headcode";
@@ -214,7 +214,7 @@ impl BoardRow {
     /// as shown, with its day offset: the working arrival dated from the
     /// call's departure, then the public one from that. `None` when the
     /// call has no arrival (the train starts here).
-    fn call_arrival(&self) -> Option<(chrono::NaiveTime, i64)> {
+    pub(crate) fn call_arrival(&self) -> Option<(chrono::NaiveTime, i64)> {
         let working = self.calling_point_arrival.map(|t| {
             (
                 t,
@@ -229,7 +229,7 @@ impl BoardRow {
     }
 
     /// The arrival at the train's terminus, as shown, with its day offset.
-    fn terminus_arrival(&self) -> Option<(chrono::NaiveTime, i64)> {
+    pub(crate) fn terminus_arrival(&self) -> Option<(chrono::NaiveTime, i64)> {
         let working = self
             .destination_arrival
             .map(|t| (t, i64::from(self.destination_arrival_day_offset)));

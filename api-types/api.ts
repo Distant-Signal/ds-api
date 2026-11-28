@@ -4724,11 +4724,64 @@ export type StationBoard = { crs: string, name: string | null, serviceDate: stri
 /**
  * When this board was built, RFC 3339 UTC.
  */
-generatedAt: string, departures: Array<StationBoardDeparture>, 
+generatedAt: string, 
+/**
+ * Which board this is: the `board` asked for.
+ */
+board: StationBoardKind, 
+/**
+ * The departures board's rows; empty on the arrivals board.
+ */
+departures: Array<StationBoardDeparture>, 
+/**
+ * The arrivals board's rows; absent on the departures board.
+ */
+arrivals?: Array<StationBoardArrival>, 
 /**
  * The credits the data needs; republish them with it.
  */
 attribution: Array<TransitAttribution>, };
+
+/**
+ * One row of the arrivals board: a [`StationBoardDepartureJson`]'s fields,
+ * with the origin, and `scheduled` / `expected` the arrival.
+ */
+export type StationBoardArrival = { 
+/**
+ * The CIF train UID, for `GET /Train/by-uid/{uid}/{serviceDate}`.
+ */
+uid: string, serviceDate: string, 
+/**
+ * The booked ARRIVAL shown to the public, `HH:MM`, on day `dayOffset`
+ * (1 after the service date's midnight).
+ */
+scheduled: string, dayOffset: number, 
+/**
+ * Darwin's actual or forecast arrival, `HH:MM`; `null` with no live
+ * data.
+ */
+expected: string | null, expectedDayOffset: number | null, 
+/**
+ * Where the train started its journey.
+ */
+originCrs: string | null, originName: string | null, 
+/**
+ * Where the train ends its journey: this station's own code when it
+ * terminates here.
+ */
+destinationCrs: string | null, destinationName: string | null, 
+/**
+ * The train ends its journey at this station.
+ */
+terminates: boolean, 
+/**
+ * ATOC code.
+ */
+operator: string | null, operatorName: string | null, headcode: string | null, 
+/**
+ * Never a platform Darwin hides from the public.
+ */
+platform: string | null, platformStatus: StationBoardPlatformStatus, status: StationBoardStatus, delayMinutes: number | null, isCancelled: boolean, cancelReason: string | null, };
 
 /**
  * One row of the board.
@@ -4755,6 +4808,11 @@ operator: string | null, operatorName: string | null, headcode: string | null,
  * Never a platform Darwin hides from the public.
  */
 platform: string | null, platformStatus: StationBoardPlatformStatus, status: StationBoardStatus, delayMinutes: number | null, isCancelled: boolean, cancelReason: string | null, };
+
+/**
+ * Which board: the services leaving the station or the ones arriving.
+ */
+export type StationBoardKind = "departures" | "arrivals";
 
 /**
  * What a row's `platform` rests on.
