@@ -1929,6 +1929,16 @@ async fn get_journey_inner(
     let mut response = build_journey_detail_response(app, journey_id, is_owner).await?;
     if user.is_bearer() {
         response.share_link = None;
+        // The owner's own change time setting is theirs to read with their
+        // session (DS-757), as `GET /preferences` withholds it from a
+        // delegated caller; the judged states and times still use it.
+        for connection in response
+            .legs
+            .iter_mut()
+            .filter_map(|leg| leg.connection.as_mut()?.as_mut())
+        {
+            connection.extra_minutes = None;
+        }
     } else if !is_owner {
         response.followed_from =
             journey_follows::follow_of(&app.database, &user.user_id, journey_id)
@@ -2496,10 +2506,21 @@ async fn build_journey_detail_response(
         crate::data::timetabled_legs::resolve_all(&app.database, &timetable_keys).await;
 
     // Absent on every leg when it couldn't be worked out.
+    // The owner's own extra change minutes (DS-757) apply on the owner's
+    // read only: anyone else, a group member or a share link, must not be
+    // able to work the setting out from `minimumChangeMinutes`.
+    let extra = if is_owner {
+        crate::data::preferences::change_extra_minutes(&app.database, &summary.user_id)
+            .await
+            .map_err(internal_error("read change time setting"))?
+    } else {
+        0
+    };
     let timings = journey_feasibility::journey_timings(
         &app.database,
         &leg_inputs(&leg_rows, &leg_states, &timetables),
         now,
+        extra,
     )
     .await;
     let connections: Vec<Option<Option<journey_feasibility::LegConnection>>> = match &timings {

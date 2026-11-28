@@ -224,6 +224,26 @@ its own break (`cancelled`). The states only get worse as delay grows
   A fixed link between two stations is still charged plus the minimum change
   time, as the trip planner (`/Trips/plan`) does; this work leaves the
   planner's own rule as it is.
+- **Extra time to change (DS-757).** A traveller can allow extra minutes
+  on top (`users.change_extra_minutes`, 0 to 30, `PUT
+  /preferences/change-time`). It applies only with this switch on, to the
+  journey's owner alone, and is added to every change that needs time: the
+  minimum change time (after a walk, what is left of it), or a fixed link
+  plus the minimum change time, plus the extra. Staying on one train stays
+  free and a station that allows no interchange is still not judged. It
+  moves only what a change needs: `missed` still means the onward train has
+  left or is cancelled, so a bigger requirement opens no break; the 3 minute
+  spare is measured after the extra; a journey booked with a gap between the
+  minimum and the minimum plus the extra reads `atRisk` from the start (the
+  "booked below the minimum" rule above). The alternatives' ready time
+  carries it (and the 5 minute fallback becomes 5 plus the extra), except
+  for the traveller's own original train, which stays offered while it can
+  still be caught without the extra. Only the owner's own read of the
+  journey uses it (`connection.minimumChangeMinutes` includes it and
+  `connection.extraMinutes` names it); a group member, a share link, a
+  follower, a delegated client and a personal token read the change without
+  it, so nobody can work the setting out. `/Trips/plan` and the trip planner
+  do not apply it (anonymous, one cached graph): out of scope for now.
 - **Not done.** Hysteresis (a `tight` change returning to `atRisk` only once
   clear by a minute) needs the last state remembered, and nothing stores
   it; the times are whole minutes (a 7.5 minute delay reads 7), unchanged.

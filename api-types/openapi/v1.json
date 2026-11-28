@@ -2059,6 +2059,15 @@
       "LegConnection": {
         "description": "The change onto a leg from the one before it (`connection` on every\nleg of `GET /Journeys/{id}` after the first).",
         "properties": {
+          "extraMinutes": {
+            "description": "The traveller's own extra minutes to change trains that are in\n`minimumChangeMinutes` (additive, DS-757; `PUT\n/preferences/change-time`), so a client can say \"needs M, including E\nextra\". Absent when there is none, on a change that needs no time,\nand on every read but the journey owner's own session read (a group\nmember, a share link and a delegated caller get neither it nor the\nextra in `minimumChangeMinutes`). Absent too with\n`JOURNEY_TIGHT_CONNECTIONS` off, when it is not applied.",
+            "format": "uint32",
+            "minimum": 0,
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
           "gapMinutes": {
             "description": "Minutes from the previous leg's expected arrival (reported, else\nestimated, else timetabled) to this leg's expected departure.\nNegative when this leg leaves first. `null` when either is unknown.",
             "format": "int64",
@@ -2068,7 +2077,7 @@
             ]
           },
           "minimumChangeMinutes": {
-            "description": "The time the change needs: the boarding station's minimum change\ntime, a fixed link's minutes plus that, or 0 staying on one train.\n`null` when not known (see [`ConnectionState::Unknown`]) or when the\nnext leg is untracked (a walk or a Tube ride starts when you do).",
+            "description": "The time the change needs: the boarding station's minimum change\ntime, a fixed link's minutes plus that, or 0 staying on one train;\nfor the journey's owner reading with their session, plus their own\nextra change minutes (`extraMinutes`).\n`null` when not known (see [`ConnectionState::Unknown`]) or when the\nnext leg is untracked (a walk or a Tube ride starts when you do).",
             "format": "uint32",
             "minimum": 0,
             "type": [
@@ -3112,6 +3121,15 @@
               }
             ],
             "description": "Whose bank holidays the caller's regular journeys skip\n(`PUT /preferences/bank-holiday-division`; regular journeys phase\n5). `null` until chosen, when England and Wales's are used. Additive."
+          },
+          "changeExtraMinutes": {
+            "description": "The extra minutes the caller allows to change trains\n(`PUT /preferences/change-time`, DS-757): 0 when none. Additive.\nPresent for the signed-in user's own session only; absent for a\ndelegated client or a personal token, which never learn it.",
+            "format": "uint32",
+            "minimum": 0,
+            "type": [
+              "integer",
+              "null"
+            ]
           },
           "pinnedLines": {
             "items": {

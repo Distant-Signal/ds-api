@@ -224,6 +224,45 @@ pub async fn replace_pinned_operators(
     Ok(())
 }
 
+/// The most extra minutes a user may allow to change trains
+/// (`users.change_extra_minutes`'s CHECK).
+pub const MAX_CHANGE_EXTRA_MINUTES: u32 = 30;
+
+/// The user's extra minutes to change trains (DS-757; 0 when none, or
+/// for an unknown user). Personal: never logged with an identifier.
+pub async fn change_extra_minutes(pool: &PgPool, user_id: &str) -> Result<u32> {
+    let minutes: Option<i16> =
+        sqlx::query_scalar("SELECT change_extra_minutes FROM users WHERE id = $1")
+            .bind(user_id)
+            .fetch_optional(pool)
+            .await?;
+    Ok(minutes.map_or(0, |m| u32::try_from(m).unwrap_or(0)))
+}
+
+/// [`change_extra_minutes`] of the journey's owner: what the break logic
+/// judges that journey's changes with (0 for an unknown journey).
+pub async fn journey_owner_change_extra_minutes(pool: &PgPool, journey_id: i64) -> Result<u32> {
+    let minutes: Option<i16> = sqlx::query_scalar(
+        "SELECT u.change_extra_minutes FROM users u \
+         JOIN journeys j ON j.user_id = u.id WHERE j.id = $1",
+    )
+    .bind(journey_id)
+    .fetch_optional(pool)
+    .await?;
+    Ok(minutes.map_or(0, |m| u32::try_from(m).unwrap_or(0)))
+}
+
+/// Sets the user's extra minutes to change trains. The caller checks
+/// `0..=`[`MAX_CHANGE_EXTRA_MINUTES`].
+pub async fn set_change_extra_minutes(pool: &PgPool, user_id: &str, minutes: u32) -> Result<()> {
+    sqlx::query("UPDATE users SET change_extra_minutes = $2 WHERE id = $1")
+        .bind(user_id)
+        .bind(i16::try_from(minutes)?)
+        .execute(pool)
+        .await?;
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

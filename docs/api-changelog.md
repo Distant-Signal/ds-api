@@ -3,6 +3,43 @@
 Changes to the Distant Signal (DS) HTTP API that a client such as DS-MCP
 needs to know about. Newest first. Field names are as served (camelCase).
 
+## 2026-11-28: `PUT /public/preferences/change-time` and `changeExtraMinutes` (DS-757)
+
+Additive. Relies on ds-core v0.18.6's migration (`users.change_extra_minutes`,
+`SMALLINT NOT NULL DEFAULT 0`, 0 to 30; the migrate hook runs before this api).
+No flag: the default 0 changes nothing. `api-types/api.ts` gains
+`ChangeTimeUpdate`, `Preferences.changeExtraMinutes` and
+`LegConnection.extraMinutes`; `api-types/openapi/v1.json` gains
+`changeExtraMinutes` on the personal-token `Preferences` (never served there).
+**A client must tolerate a field it does not know.**
+
+- `PUT /public/preferences/change-time` `{"extraMinutes": 0..30}`: the whole
+  minutes the caller allows on top of a station's minimum change time. 204; 400
+  with a sentence for another number, a missing or unknown field or a body that
+  is not JSON. Cookie session only (not a delegated or personal-token route),
+  with the Origin check. The UI offers 0, 5, 10 and 15; the api takes any whole
+  number from 0 to 30.
+- `GET /public/preferences` gains `changeExtraMinutes` (0 when none) for the
+  caller's own session. It is **omitted** for a delegated client (DS-MCP) and a
+  personal token: the setting is personal and is not served to them.
+- `GET /Journeys/{id}`: `legs[].connection` gains `extraMinutes`, present only
+  on the journey owner's own session read, when the extra applies to that
+  change (it is omitted when 0, staying on one train, and for everyone else).
+  `minimumChangeMinutes` there includes it ("needs M, including E extra").
+- Applies only while `JOURNEY_TIGHT_CONNECTIONS` is on, to the owner's own
+  journeys: the change needs the extra on top; `missed` still means the onward
+  train has left or is cancelled, so it opens no break; a journey booked inside
+  the extra reads `atRisk` from the start. Alternatives offered when a change
+  breaks are searched from the buffered ready time, except the traveller's own
+  train. Anyone else reading the journey (a group member, a share link, a
+  follower, a delegated client) sees the change as before, with no
+  `extraMinutes`. `/Trips/plan` is unchanged. See
+  [journey-breaks.md](journey-breaks.md).
+- The account export's `account` gains `change_extra_minutes`.
+
+DS-MCP: no change needed. It does not receive the setting (`GET /preferences`
+is not a delegated route and its journey reads leave out `extraMinutes`).
+
 ## 2026-11-28: account continuity removed (DS-638)
 
 No route, field or schema change; `api-types/` is unchanged. Configuration

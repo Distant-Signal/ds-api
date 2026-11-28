@@ -219,6 +219,13 @@ impl Analysis {
     pub(crate) fn ready_for(&self, index: usize) -> Option<DateTime<Utc>> {
         live_ready_for(self.timings.as_ref()?, index)
     }
+
+    /// [`Self::ready_for`] without the owner's extra change minutes: when
+    /// the traveller can get to the train at the earliest, which is what
+    /// decides whether the original train can still be caught.
+    pub(crate) fn ready_unbuffered_for(&self, index: usize) -> Option<DateTime<Utc>> {
+        ready_for_with(self.timings.as_ref()?, index, false)
+    }
 }
 
 /// When the traveller can board leg `index`'s train, from the leg before
@@ -230,7 +237,21 @@ impl Analysis {
 ///
 /// An untracked previous leg falls back to its planned arrival only when
 /// no live time can be worked out for it (an earlier leg has no times).
+///
+/// With the journey owner's extra change minutes (DS-757) in the change
+/// time, and in the 5 minute fallback.
 pub(crate) fn live_ready_for(timings: &JourneyTimings, index: usize) -> Option<DateTime<Utc>> {
+    ready_for_with(timings, index, true)
+}
+
+/// [`live_ready_for`], `buffered` saying whether the owner's extra change
+/// minutes count. Not buffered, it is the earliest the traveller can be at
+/// the train at all.
+pub(crate) fn ready_for_with(
+    timings: &JourneyTimings,
+    index: usize,
+    buffered: bool,
+) -> Option<DateTime<Utc>> {
     let previous = index.checked_sub(1)?;
     let next = match timings.timings.get(index) {
         Some(LegTiming::Train(timing)) => Some(timing),
@@ -264,9 +285,13 @@ pub(crate) fn live_ready_for(timings: &JourneyTimings, index: usize) -> Option<D
         .timings
         .get(previous)
         .map_or(0, journey_feasibility::walk_minutes);
-    let change = next
-        .and_then(|next| timings.change_minutes(from_crs, arrival, next, walk))
-        .unwrap_or(5);
+    let change = if buffered {
+        next.and_then(|next| timings.change_minutes(from_crs, arrival, next, walk))
+            .unwrap_or(5 + timings.rules.extra_change_minutes)
+    } else {
+        next.and_then(|next| timings.change_minutes_unbuffered(from_crs, arrival, next, walk))
+            .unwrap_or(5)
+    };
     Some(arrival + Duration::minutes(i64::from(change)))
 }
 
@@ -334,7 +359,18 @@ pub(crate) async fn analyse(
         .collect();
     let timetables = crate::data::timetabled_legs::resolve_all(&app.database, &keys).await;
     let inputs = crate::routes::journeys::leg_inputs(&legs, &leg_states, &timetables);
-    let timings = journey_feasibility::journey_timings(&app.database, &inputs, now).await;
+    // The journey owner's own extra change minutes (DS-757), for the sweep
+    // and every caller of this alike. A failed read judges without it.
+    let extra = crate::data::preferences::journey_owner_change_extra_minutes(
+        &app.database,
+        journey_id,
+    )
+    .await
+    .unwrap_or_else(|err| {
+        tracing::warn!(error = ?err, journey_id, "could not read the owner's change time setting");
+        0
+    });
+    let timings = journey_feasibility::journey_timings(&app.database, &inputs, now, extra).await;
     let leg_ids: Vec<i64> = legs.iter().map(|leg| leg.id).collect();
     let mut conn = app.database.acquire().await?;
     let arrivals = journey_breaks::leg_arrivals(&mut conn, &leg_ids, now).await?;
@@ -624,10 +660,18 @@ pub(crate) async fn plan_suggestions(
     let timing = analysis.timing(index);
     let ready = analysis.ready_for(index);
     // The leg's own train, when the traveller can still catch it on live
-    // times (DS-638): it stays an option, as the current plan.
+    // times (DS-638): it stays an option, as the current plan. Judged on
+    // the time without the owner's extra change minutes (DS-757): a train
+    // that is tight for them but still makeable stays offered, while the
+    // other trains are offered from the buffered `ready`.
     let keep_original = ready.is_some()
         && matches!(cause, "connection" | "user_choice")
-        && original_catchable(timing, analysis.facts[index].whole_cancelled, ready, now);
+        && original_catchable(
+            timing,
+            analysis.facts[index].whole_cancelled,
+            analysis.ready_unbuffered_for(index),
+            now,
+        );
     let depart_after = match cause {
         "user_choice" => ready
             .or_else(|| timing.map(|t| t.sched_dep - Duration::minutes(60)))
@@ -2989,6 +3033,11 @@ mod live_ready_tests {
     /// Vauxhall), then the 13:01 from Vauxhall (MSN 5, the default).
     /// `delay` is the first train's.
     fn journey(delay: i64) -> JourneyTimings {
+        journey_with(delay, ConnectionRules::default())
+    }
+
+    /// [`journey`] judged with `rules`.
+    fn journey_with(delay: i64, rules: ConnectionRules) -> JourneyTimings {
         let late = Duration::minutes(delay);
         let timings = vec![
             train(
@@ -3009,11 +3058,15 @@ mod live_ready_tests {
                 [at(13, 30), at(13, 30)],
             ),
         ];
-        JourneyTimings::from_timings(
-            timings,
-            Arc::new(InterchangeData::default()),
-            ConnectionRules::default(),
-        )
+        JourneyTimings::from_timings(timings, Arc::new(InterchangeData::default()), rules)
+    }
+
+    /// The owner's rules with 5 extra change minutes (DS-757).
+    fn five_extra() -> ConnectionRules {
+        ConnectionRules {
+            tight: true,
+            extra_change_minutes: 5,
+        }
     }
 
     #[test]
@@ -3083,5 +3136,58 @@ mod live_ready_tests {
             }
             previous = Some((ready, offered));
         }
+    }
+
+    #[test]
+    fn the_owners_extra_change_minutes_move_the_ready_time() {
+        // 7 late: ready at Vauxhall 12:56, the MSN 5 and the extra 5.
+        let timings = journey_with(7, five_extra());
+        assert_eq!(live_ready_for(&timings, 4), Some(at(13, 6)));
+        // The same without the buffer: as it was.
+        assert_eq!(ready_for_with(&timings, 4, false), Some(at(13, 1)));
+        // Tight rules off: the extra is not applied, wherever it came from.
+        let off = journey_with(7, ConnectionRules::default().with_extra(5));
+        assert_eq!(live_ready_for(&off, 4), Some(at(13, 1)));
+    }
+
+    #[test]
+    fn the_five_minute_fallback_carries_the_extra() {
+        // Leg 3 is a walk, not a train: no change time to work out.
+        assert_eq!(live_ready_for(&journey(0), 3), Some(at(12, 52)));
+        let timings = journey_with(0, five_extra());
+        assert_eq!(live_ready_for(&timings, 3), Some(at(12, 57)));
+        assert_eq!(ready_for_with(&timings, 3, false), Some(at(12, 52)));
+    }
+
+    /// The original train is judged on the time without the buffer, the
+    /// alternatives on the buffered one.
+    #[test]
+    fn the_original_is_judged_without_the_buffer_and_alternatives_with_it() {
+        let now = at(12, 40);
+        let timings = journey_with(7, five_extra());
+        let LegTiming::Train(timing) = &timings.timings[4] else {
+            unreachable!()
+        };
+        // 13:01 for the traveller ready from 13:01 without the buffer: a
+        // tight change is still the plan.
+        let unbuffered = ready_for_with(&timings, 4, false);
+        let buffered = live_ready_for(&timings, 4);
+        assert!(original_catchable(Some(timing), false, unbuffered, now));
+        assert!(!original_catchable(Some(timing), false, buffered, now));
+        // Another train at 13:03 is not offered: it needs the buffered 13:06.
+        let offered = |departure| departure >= buffered.unwrap();
+        assert!(!offered(at(13, 3)));
+        assert!(offered(at(13, 6)));
+        // Past the unbuffered time the original is gone too.
+        let late = journey_with(8, five_extra());
+        let LegTiming::Train(timing) = &late.timings[4] else {
+            unreachable!()
+        };
+        assert!(!original_catchable(
+            Some(timing),
+            false,
+            ready_for_with(&late, 4, false),
+            now
+        ));
     }
 }

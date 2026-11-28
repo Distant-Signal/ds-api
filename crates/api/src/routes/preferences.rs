@@ -43,6 +43,10 @@ pub fn router() -> Router {
             axum::routing::put(put_bank_holiday_division),
         )
         .route(
+            "/preferences/change-time",
+            axum::routing::put(put_change_time),
+        )
+        .route(
             "/preferences/notifications",
             axum::routing::get(get_notification_preferences).put(put_notification_preferences),
         )
@@ -275,6 +279,13 @@ pub(crate) struct PreferencesResponse {
     #[ts(as = "Option<crate::ts_values::BankHolidayDivision>")]
     #[schemars(with = "Option<crate::ts_values::BankHolidayDivision>")]
     bank_holiday_division: Option<String>,
+    /// The extra minutes the caller allows to change trains
+    /// (`PUT /preferences/change-time`, DS-757): 0 when none. Additive.
+    /// Present for the signed-in user's own session only; absent for a
+    /// delegated client or a personal token, which never learn it.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    change_extra_minutes: Option<u32>,
 }
 
 pub(crate) async fn get_preferences(
@@ -372,13 +383,65 @@ pub(crate) async fn get_preferences(
         .await
         .map_err(internal_error)?;
 
+    // A personal setting: the session's own read only, never a bearer's.
+    let change_extra_minutes = if user.is_bearer() {
+        None
+    } else {
+        Some(
+            preferences::change_extra_minutes(&app.database, &user.user_id)
+                .await
+                .map_err(internal_error)?,
+        )
+    };
+
     Ok(Json(PreferencesResponse {
         pinned_lines,
         pinned_stations,
         pinned_operators,
         silent_pinned_lines,
         bank_holiday_division,
+        change_extra_minutes,
     }))
+}
+
+/// `PUT /preferences/change-time` `{extraMinutes}`: the minutes the caller
+/// allows on top of a station's minimum change time to change trains
+/// (DS-757), 0 to 30 whole minutes (0 is none). 204; 400 for another
+/// number, a missing or unknown field or a body that is not JSON. It is
+/// applied to the caller's own journeys while `JOURNEY_TIGHT_CONNECTIONS`
+/// is on. The session user only; never logged.
+#[derive(Debug, serde::Deserialize, ts_rs::TS)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub(crate) struct ChangeTimeUpdate {
+    // Wider than the range so that -1 or 31 is answered with the message.
+    #[ts(type = "number")]
+    extra_minutes: i64,
+}
+
+async fn put_change_time(
+    State(app): State<App>,
+    user: AuthenticatedUser,
+    body: Result<Json<ChangeTimeUpdate>, axum::extract::rejection::JsonRejection>,
+) -> Result<StatusCode, (StatusCode, String)> {
+    let Ok(Json(body)) = body else {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            "Send the extra minutes as a whole number from 0 to 30.".to_string(),
+        ));
+    };
+    let Some(minutes) = u32::try_from(body.extra_minutes)
+        .ok()
+        .filter(|minutes| *minutes <= preferences::MAX_CHANGE_EXTRA_MINUTES)
+    else {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            "Choose between 0 and 30 extra minutes.".to_string(),
+        ));
+    };
+    preferences::set_change_extra_minutes(&app.database, &user.id, minutes)
+        .await
+        .map_err(internal_error)?;
+    Ok(StatusCode::NO_CONTENT)
 }
 
 /// `PUT /preferences/bank-holiday-division` `{division}`: whose bank

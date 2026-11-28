@@ -53,6 +53,18 @@ pub struct ConnectionRules {
     ///   station's minimum change time, not both: the minutes still owed
     ///   after the walk are the minimum change time less the walk's own.
     pub tight: bool,
+    /// The traveller's own extra minutes to change trains (DS-757,
+    /// `users.change_extra_minutes`, 0..=30; default 0): added to every
+    /// change that needs time, so the time a change needs is the station's
+    /// minimum change time (after a walk, what is left of it) plus this; a
+    /// fixed link's minutes plus both. Staying on one train stays free, and
+    /// a station that allows no interchange is still not judged. It moves
+    /// only what a change needs, never when a train has gone: `missed` still
+    /// means the onward train has left or is cancelled. Honoured only with
+    /// [`Self::tight`] (a larger requirement under the old rule would read as
+    /// `missed` while the train is still there); [`journey_timings`] zeroes
+    /// it otherwise. Never in [`Self::from_env`]: it is per user.
+    pub extra_change_minutes: u32,
 }
 
 impl ConnectionRules {
@@ -61,6 +73,17 @@ impl ConnectionRules {
     pub fn from_env() -> Self {
         Self {
             tight: trip_plan_live::env_bool(TIGHT_CONNECTIONS_ENV, false),
+            extra_change_minutes: 0,
+        }
+    }
+
+    /// These rules with the traveller's `extra` minutes, or none when
+    /// [`Self::tight`] is off (see [`Self::extra_change_minutes`]).
+    #[must_use]
+    pub fn with_extra(self, extra: u32) -> Self {
+        Self {
+            extra_change_minutes: if self.tight { extra } else { 0 },
+            ..self
         }
     }
 }
@@ -69,7 +92,40 @@ static CONNECTION_RULES: LazyLock<ConnectionRules> = LazyLock::new(ConnectionRul
 
 /// The rules this process runs with.
 pub fn connection_rules() -> ConnectionRules {
+    #[cfg(test)]
+    if let Some(pinned) = PINNED_RULES.with(std::cell::Cell::get) {
+        return pinned;
+    }
     *CONNECTION_RULES
+}
+
+#[cfg(test)]
+thread_local! {
+    static PINNED_RULES: std::cell::Cell<Option<ConnectionRules>> =
+        const { std::cell::Cell::new(None) };
+}
+
+/// Pins [`connection_rules`] to `rules` on the current thread until the
+/// guard is dropped, so a db test needs no environment variable (the
+/// process-wide value is read once). Like
+/// `routes::pin_london_now_for_tests`, it holds for a current-thread
+/// runtime only.
+#[cfg(test)]
+#[must_use = "the pin is lifted as soon as the guard is dropped"]
+pub(crate) fn pin_rules_for_tests(rules: ConnectionRules) -> PinnedRules {
+    PINNED_RULES.with(|cell| cell.set(Some(rules)));
+    PinnedRules(())
+}
+
+/// Guard returned by [`pin_rules_for_tests`].
+#[cfg(test)]
+pub(crate) struct PinnedRules(());
+
+#[cfg(test)]
+impl Drop for PinnedRules {
+    fn drop(&mut self) {
+        PINNED_RULES.with(|cell| cell.set(None));
+    }
 }
 
 /// How one change between two consecutive legs stands.
@@ -136,7 +192,9 @@ pub struct LegConnection {
     /// Negative when this leg leaves first. `null` when either is unknown.
     pub gap_minutes: Option<i64>,
     /// The time the change needs: the boarding station's minimum change
-    /// time, a fixed link's minutes plus that, or 0 staying on one train.
+    /// time, a fixed link's minutes plus that, or 0 staying on one train;
+    /// for the journey's owner reading with their session, plus their own
+    /// extra change minutes (`extraMinutes`).
     /// `null` when not known (see [`ConnectionState::Unknown`]) or when the
     /// next leg is untracked (a walk or a Tube ride starts when you do).
     pub minimum_change_minutes: Option<u32>,
@@ -157,6 +215,17 @@ pub struct LegConnection {
     #[serde(skip_serializing_if = "Option::is_none")]
     #[ts(optional)]
     pub next_timetabled: Option<TimetabledRide>,
+    /// The traveller's own extra minutes to change trains that are in
+    /// `minimumChangeMinutes` (additive, DS-757; `PUT
+    /// /preferences/change-time`), so a client can say "needs M, including E
+    /// extra". Absent when there is none, on a change that needs no time,
+    /// and on every read but the journey owner's own session read (a group
+    /// member, a share link and a delegated caller get neither it nor the
+    /// extra in `minimumChangeMinutes`). Absent too with
+    /// `JOURNEY_TIGHT_CONNECTIONS` off, when it is not applied.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub extra_minutes: Option<u32>,
 }
 
 /// A ride of a timetabled leg, by its scheduled times.
@@ -283,6 +352,14 @@ fn classify(
     }
 }
 
+/// The traveller's extra minutes in a change needing `required`: none under
+/// the old rule, none for 0 owed (staying aboard), as a change that needs
+/// time always holds at least the extra.
+fn extra_in(rules: ConnectionRules, required: u32) -> Option<u32> {
+    (rules.tight && rules.extra_change_minutes > 0 && required >= rules.extra_change_minutes)
+        .then_some(rules.extra_change_minutes)
+}
+
 /// The MSN at `tiploc`, `None` for no interchange (98/99).
 fn msn(interchange: &InterchangeData, tiploc: &str) -> Option<u32> {
     match schedule_query::minimum_change_time(interchange, tiploc) {
@@ -307,6 +384,13 @@ fn required_change(
         // Staying on the same train.
         return Some(0);
     }
+    // The traveller's own extra, only under the tight rules (see
+    // `ConnectionRules::extra_change_minutes`).
+    let extra = if rules.tight {
+        rules.extra_change_minutes
+    } else {
+        0
+    };
     match ready.crs.as_deref() {
         // Walked or rode in from a place: the station's MSN to reach the
         // platform, as the planners charge it at every fresh boarding.
@@ -315,12 +399,12 @@ fn required_change(
             // A walk before the change is the change's own first minutes
             // (DS-638): the larger of the two, not both.
             Some(if rules.tight {
-                msn.saturating_sub(ready.walk_minutes)
+                msn.saturating_sub(ready.walk_minutes) + extra
             } else {
                 msn
             })
         }
-        Some(_) if same_station => msn(interchange, &next.board_tiploc),
+        Some(_) if same_station => Some(msn(interchange, &next.board_tiploc)? + extra),
         Some(from_crs) => {
             let local = common::zone::london_local(ready.at);
             // Both codes are upper case (`train_leg_timing`).
@@ -332,7 +416,7 @@ fn required_change(
                 local.hour() * 60 + local.minute(),
             )?;
             let link_minutes = u32::try_from(link.minutes.max(0)).unwrap_or(0);
-            Some(link_minutes + msn(interchange, &next.board_tiploc).unwrap_or(0))
+            Some(link_minutes + msn(interchange, &next.board_tiploc).unwrap_or(0) + extra)
         }
     }
 }
@@ -408,6 +492,7 @@ fn evaluate(
         state: ConnectionState::Unknown,
         relies_on_late_departure: None,
         next_timetabled: None,
+        extra_minutes: None,
     };
     let mut out = Vec::with_capacity(legs.len());
     let mut ready_after = Vec::with_capacity(legs.len());
@@ -438,6 +523,7 @@ fn evaluate(
                         next_timetabled: taken.filter(|ride| {
                             Some(ride.departure) != *departure || Some(ride.arrival) != *arrival
                         }),
+                        extra_minutes: None,
                     },
                     None => unknown(None),
                 })
@@ -455,6 +541,7 @@ fn evaluate(
                             state: classify(gap, planned_gap, required, rules, next.departed),
                             relies_on_late_departure: late_departure_reliance(r, next, required),
                             next_timetabled: None,
+                            extra_minutes: extra_in(rules, required),
                         },
                         None => unknown(Some(gap)),
                     }
@@ -677,11 +764,12 @@ pub async fn journey_connections(
     pool: &PgPool,
     legs: &[LegInput<'_>],
     now: DateTime<Utc>,
+    extra: u32,
 ) -> Option<Vec<Option<LegConnection>>> {
     if legs.len() < 2 {
         return Some(legs.iter().map(|_| None).collect());
     }
-    journey_timings(pool, legs, now)
+    journey_timings(pool, legs, now, extra)
         .await
         .map(|timings| timings.connections)
 }
@@ -743,6 +831,31 @@ impl JourneyTimings {
         };
         required_change(&ready, next, &self.interchange, self.rules)
     }
+
+    /// [`Self::change_minutes`] without the traveller's own extra minutes
+    /// (DS-757): what the change needs of anyone. For judging whether a
+    /// train can still be caught at all, which the buffer does not decide.
+    pub fn change_minutes_unbuffered(
+        &self,
+        from_crs: Option<&str>,
+        at: DateTime<Utc>,
+        next: &TrainLegTiming,
+        walk_minutes: u32,
+    ) -> Option<u32> {
+        let ready = Ready {
+            at,
+            sched_at: at,
+            crs: from_crs.map(str::to_ascii_uppercase),
+            train: None,
+            served: true,
+            walk_minutes,
+        };
+        let rules = ConnectionRules {
+            extra_change_minutes: 0,
+            ..self.rules
+        };
+        required_change(&ready, next, &self.interchange, rules)
+    }
 }
 
 /// [`JourneyTimings`] for a journey, `None` when the interchange data
@@ -751,6 +864,7 @@ pub async fn journey_timings(
     pool: &PgPool,
     legs: &[LegInput<'_>],
     now: DateTime<Utc>,
+    extra: u32,
 ) -> Option<JourneyTimings> {
     let interchange = match interchange_data(pool).await {
         Ok(data) => data,
@@ -760,7 +874,7 @@ pub async fn journey_timings(
         }
     };
     let config = &*LIVE_CONFIG;
-    let rules = connection_rules();
+    let rules = connection_rules().with_extra(extra);
 
     // Timetable-only first, to find which trains are inside the live window.
     let resolved: Vec<Option<(&TrainInput<'_>, String, String)>> = legs
@@ -1270,7 +1384,10 @@ mod tests {
         assert!(train_leg_timing("A1", date(), &stops, "YRK", "PBO", None).is_none());
     }
 
-    const TIGHT: ConnectionRules = ConnectionRules { tight: true };
+    const TIGHT: ConnectionRules = ConnectionRules {
+        tight: true,
+        extra_change_minutes: 0,
+    };
 
     fn rank(state: ConnectionState) -> u8 {
         match state {
@@ -1476,5 +1593,142 @@ mod tests {
                 worst = rank(state);
             }
         }
+    }
+
+    fn with_extra(rules: ConnectionRules, extra: u32) -> ConnectionRules {
+        ConnectionRules {
+            extra_change_minutes: extra,
+            ..rules
+        }
+    }
+
+    #[test]
+    fn the_extra_is_carried_only_with_the_tight_rules() {
+        assert_eq!(
+            ConnectionRules::default()
+                .with_extra(10)
+                .extra_change_minutes,
+            0
+        );
+        assert_eq!(TIGHT.with_extra(10).extra_change_minutes, 10);
+        assert_eq!(TIGHT.with_extra(0), TIGHT);
+    }
+
+    /// The owner's journey (booked 12 minutes, MSN 5, a 2 minute walk last,
+    /// so 3 owed) with the traveller's extra minutes: they are added to
+    /// what the change needs, after the walk.
+    #[test]
+    fn the_owners_journey_with_extra_change_minutes() {
+        use ConnectionState::{AtRisk, Missed, Ok, Tight};
+        let on = |delay, extra| {
+            onward_judgement(&owner_journey(delay, true, false), with_extra(TIGHT, extra))
+        };
+        assert_eq!(on(0, 0), (12, 3, Ok));
+        // 5 extra: 8 needed, 4 to spare booked.
+        assert_eq!(on(0, 5), (12, 8, Ok));
+        assert_eq!(on(1, 5), (11, 8, Ok));
+        assert_eq!(on(4, 5), (8, 8, AtRisk));
+        assert_eq!(on(5, 5), (7, 8, Tight));
+        // 10 extra: 13 needed against the 12 booked. Booked below what
+        // they need, so at risk from the start (the existing rule), tight
+        // once it is any worse, and missed only once the train has gone.
+        assert_eq!(on(0, 10), (12, 13, AtRisk));
+        assert_eq!(on(1, 10), (11, 13, Tight));
+        let gone = onward_judgement(&owner_journey(1, true, true), with_extra(TIGHT, 10));
+        assert_eq!(gone, (11, 13, Missed));
+        // A Tube ride last: all 5, and the extra on top.
+        let tube = onward_judgement(&owner_journey(0, false, false), with_extra(TIGHT, 5));
+        assert_eq!(tube, (12, 10, Ok));
+    }
+
+    #[test]
+    fn extra_minutes_are_ignored_with_the_switch_off() {
+        let off = ConnectionRules::default();
+        for delay in 0..=30 {
+            for extra in [5, 30] {
+                assert_eq!(
+                    onward_judgement(&owner_journey(delay, true, false), with_extra(off, extra)),
+                    onward_judgement(&owner_journey(delay, true, false), off),
+                    "{delay} late, {extra} extra"
+                );
+            }
+        }
+    }
+
+    /// More extra never improves a change, at any delay, and what the change
+    /// needs rises by exactly the extra (tight) or not at all (off).
+    #[test]
+    fn more_extra_never_improves_a_change_and_adds_exactly_itself() {
+        for last_walk in [true, false] {
+            for (rules, applies) in [(ConnectionRules::default(), false), (TIGHT, true)] {
+                for delay in 0..=30 {
+                    let base = onward_judgement(&owner_journey(delay, last_walk, false), rules);
+                    let mut worst = rank(base.2);
+                    for extra in 1..=30 {
+                        let (gap, required, state) = onward_judgement(
+                            &owner_journey(delay, last_walk, false),
+                            with_extra(rules, extra),
+                        );
+                        assert_eq!(gap, base.0);
+                        assert_eq!(required, base.1 + if applies { extra } else { 0 });
+                        assert!(
+                            rank(state) >= worst,
+                            "improved at {delay} late, {extra} extra, {rules:?}"
+                        );
+                        worst = rank(state);
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn extra_minutes_are_added_at_a_station_and_on_a_fixed_link_but_not_aboard() {
+        let rules = with_extra(TIGHT, 4);
+        let needs = |legs: &[LegTiming]| {
+            let connection = evaluate_connections(legs, &interchange(), rules)
+                .pop()
+                .flatten()
+                .expect("a connection");
+            (connection.minimum_change_minutes, connection.extra_minutes)
+        };
+        // At a station: the MSN 5 and the extra.
+        let station = [
+            train("A1", ("KGX", "KNGX"), "YRK", 480, 480, 600, 600, true),
+            train("B1", ("YRK", "YORK"), "EDB", 615, 615, 760, 760, true),
+        ];
+        assert_eq!(needs(&station), (Some(9), Some(4)));
+        // A fixed link: its 6 minutes, the MSN 5 and the extra.
+        let link = [
+            train("A1", ("SHF", "SHEFFLD"), "STP", 480, 480, 600, 600, true),
+            train("B1", ("KGX", "KNGX"), "YRK", 615, 615, 730, 730, true),
+        ];
+        assert_eq!(needs(&link), (Some(15), Some(4)));
+        // Staying aboard needs nothing, extra included.
+        let aboard = [
+            train("A1", ("KGX", "KNGX"), "YRK", 480, 480, 600, 610, true),
+            train("A1", ("YRK", "YORK"), "EDB", 602, 612, 760, 770, true),
+        ];
+        assert_eq!(needs(&aboard), (Some(0), None));
+        // A station that allows no interchange is still not judged.
+        let stand = [
+            train("A1", ("SHF", "SHEFFLD"), "XBS", 480, 480, 600, 600, true),
+            train("B1", ("XBS", "BUSSTND"), "EDB", 615, 615, 760, 760, true),
+        ];
+        assert_eq!(needs(&stand), (None, None));
+        // The serialised connection names the extra only when there is one.
+        let with = evaluate_connections(&station, &interchange(), rules)[1]
+            .clone()
+            .unwrap();
+        assert_eq!(serde_json::to_value(&with).unwrap()["extraMinutes"], 4);
+        let without = evaluate_connections(&station, &interchange(), TIGHT)[1]
+            .clone()
+            .unwrap();
+        assert!(
+            serde_json::to_value(&without)
+                .unwrap()
+                .get("extraMinutes")
+                .is_none()
+        );
     }
 }
