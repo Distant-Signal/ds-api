@@ -3,6 +3,22 @@
 Changes to the Distant Signal (DS) HTTP API that a client such as DS-MCP
 needs to know about. Newest first. Field names are as served (camelCase).
 
+## 2026-11-28: `GET /public/stations/{crs}/board?board=arrivals` (DS-765)
+
+Additive, behind the same `STATION_BOARD_ENABLED` switch as the board. The
+query gains `board` (`departures`, the default, or `arrivals`; anything else
+is a `400`). The response gains `board` (the echo), and, only for
+`board=arrivals`, an `arrivals` array of `StationBoardArrival` rows
+(`api-types/api.ts`: `StationBoardArrival`, `StationBoardKind`): `scheduled`
+and `expected` are the public and Darwin's actual or forecast arrival, with
+`originCrs`, `originName`, `destinationCrs`, `destinationName` and
+`terminates` (the train ends at this station); `departures` is then an empty
+array. A departures response (the default) is unchanged apart from `board`.
+Services that start at the station are not arrivals; a train Darwin reports
+as arrived is dropped. The platform rules are the departures board's, except
+that the station's own LDBWS board (departures only) is not used. No
+migration, no grant, no change to `api-types/openapi/v1.json`.
+
 ## 2026-11-28: `PUT /public/preferences/change-time` and `changeExtraMinutes` (DS-757)
 
 Additive. Relies on ds-core v0.18.6's migration (`users.change_extra_minutes`,
@@ -39,6 +55,7 @@ No flag: the default 0 changes nothing. `api-types/api.ts` gains
 
 DS-MCP: no change needed. It does not receive the setting (`GET /preferences`
 is not a delegated route and its journey reads leave out `extraMinutes`).
+
 
 ## 2026-11-28: account continuity removed (DS-638)
 

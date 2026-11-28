@@ -1,13 +1,15 @@
 # Station board
 
-`GET /public/stations/{crs}/board` is a station's next departures: the
-published timetable with Darwin's live times and platforms laid over it. It
-is the api half of a logged-out station board; the website's page is a later
-change. It is off by default (`STATION_BOARD_ENABLED`) and answers `404` while
+`GET /public/stations/{crs}/board` is a station's next departures, or with
+`board=arrivals` its next arrivals: the published timetable with Darwin's live
+times and platforms laid over it. It is the api half of a logged-out station
+board; the website's page is a later change. It is off by default
+(`STATION_BOARD_ENABLED`, one switch for both boards) and answers `404` while
 off.
 
-It is a new route. `GET /public/trains/search`, `/public/stations/{crs}/departures`
-and `/public/stations/{crs}/schedule-departures` are unchanged.
+`GET /public/trains/search`, `/public/stations/{crs}/departures`,
+`/public/stations/{crs}/schedule-departures` and `/public/trains/arrivals` are
+unchanged.
 
 ## Request
 
@@ -16,10 +18,11 @@ and `/public/stations/{crs}/schedule-departures` are unchanged.
 | `limit` | Rows, 1 to 30 (default 8). A larger value is clamped; `0` or a non-number is a `400`. |
 | `date` | A London service date (`YYYY-MM-DD`), within the range `GET /public/trains/search` accepts (`400` otherwise). Default today. |
 | `operator` | Comma-separated ATOC codes, validated as the train search does (`400` for a malformed or unknown code). |
+| `board` | `departures` (the default, the board as it always was) or `arrivals` (any case; anything else is a `400`). |
 
-Departures only. The arrivals view of the timetable is
-`GET /public/trains/arrivals`. Unknown query keys are ignored, so a
-cache-buster works. `404` when the station has no timetable data for the day.
+Unknown query keys are ignored, so a cache-buster works. `404` when the
+station has no timetable data for the day (for `arrivals`, as a calling point
+or as a terminus).
 
 ## Response
 
@@ -59,6 +62,7 @@ cache-buster works. `404` when the station has no timetable data for the day.
 }
 ```
 
+- `board` echoes which board this is.
 - `scheduled` is the public (booked) departure shown to passengers, `HH:MM`,
   on day `dayOffset` (1 after the service date's midnight) of `serviceDate`.
   `expected` is Darwin's actual or forecast departure with its own
@@ -68,6 +72,67 @@ cache-buster works. `404` when the station has no timetable data for the day.
   (its `serviceDate` is then yesterday and its `dayOffset` is 1).
 - `attribution` is the credit the data needs; republish it with the data.
 - `Cache-Control: public, s-maxage=20, stale-while-revalidate=30`.
+
+### The arrivals board (`board=arrivals`)
+
+The same response, with the rows in `arrivals` (and `departures` an empty
+array; on the departures board `arrivals` is absent, so a departures response
+gains only `board`):
+
+```json
+{
+  "crs": "PAD",
+  "name": "London Paddington",
+  "serviceDate": "2026-11-28",
+  "generatedAt": "2026-11-28T10:00:07Z",
+  "board": "arrivals",
+  "departures": [],
+  "arrivals": [
+    {
+      "uid": "G12345",
+      "serviceDate": "2026-11-28",
+      "scheduled": "10:06",
+      "dayOffset": 0,
+      "expected": "10:09",
+      "expectedDayOffset": 0,
+      "originCrs": "BRI",
+      "originName": "Bristol Temple Meads",
+      "destinationCrs": "PAD",
+      "destinationName": "London Paddington",
+      "terminates": true,
+      "operator": "GW",
+      "operatorName": "Great Western Railway",
+      "headcode": "1A23",
+      "platform": null,
+      "platformStatus": "toBeAnnounced",
+      "status": "delayed",
+      "delayMinutes": 3,
+      "isCancelled": false,
+      "cancelReason": null
+    }
+  ],
+  "attribution": [ ... ]
+}
+```
+
+- `scheduled` and `expected` are the public (booked) and Darwin's actual or
+  forecast **arrival** (`dayOffset` and `expectedDayOffset` as above).
+- `originCrs` / `originName` are where the train started; `destinationCrs` /
+  `destinationName` where it ends, and `terminates` says that is this
+  station (`destinationCrs` is then the station's own code). A station that
+  only some of a train's journey passes has the train as an arrival at its
+  call, with `terminates: false`.
+- Rows are services that arrive here: a call a passenger can get off at
+  (pick-up-only calls are not) and every train that ends here. A service that
+  only starts here has no arrival and is not on the board.
+- The window mirrors the departures board: from 15 minutes before now (a late
+  train stays on it), and a train Darwin reports as arrived (an actual
+  arrival) is dropped, as a departed train is on the departures board.
+  Just after London midnight the previous service date's trains still arriving
+  appear with `serviceDate` yesterday and `dayOffset` 1.
+- `status`, `delayMinutes`, `platform` and `platformStatus` use the values
+  below, read from Darwin's arrival (`arrival_at`, `arrival_et`,
+  "delayed, time unknown" for the arrival) and the booked arrival.
 
 ### `status`
 
@@ -100,7 +165,10 @@ For each row, first match wins:
    a booked platform, and the hidden platform string is never read past the
    check, so it cannot reach the JSON (the DB tests search the whole body for
    it).
-3. **The station's own LDBWS board** (`station_samples`), for rows with
+3. **The station's own LDBWS board** (`station_samples`; **departures board
+   only**: it holds the station's departures, and its arrivals board is kept
+   for tracked trains alone, so the arrivals board skips this step), for rows
+   with
    neither of the above, when the board is no more than 10 minutes old and
    exactly one board row and exactly one timetable row share the headcode,
    the shown time and the destination: `expected`. LDBWS's `serviceID` is a
@@ -137,7 +205,8 @@ a platform Darwin says is not for the public is never served.
 
 ## How the board is read
 
-Four reads, whatever the size, none per row:
+Four reads, whatever the size, none per row (the departures board; the
+arrivals board's differences follow):
 
 1. **Timetable rows**: `search_schedule_calling_point_departures`, the read
    behind the train search and `schedule-departures`: a bounded range scan of
@@ -164,6 +233,48 @@ scan of `darwin_calls` or `darwin_services`).
 Rows that have left (a Darwin actual departure) or are no longer due (the
 forecast, else the booked time, is before the current minute) are dropped
 before the cut to `limit`. Rows are ordered by their shown booked time.
+
+## How the arrivals board is read
+
+The Darwin, booked-platform and TIPLOC reads are the same (a visit is picked
+by its working **arrival** minute, `darwin_calls.wta` and
+`schedule_calling_points_full.booked_arrival`, else the only call at the
+station); there is no LDBWS read. The timetable read is its own, over the same
+table, `schedule_destination_departures`, which has one row per
+departure-bearing calling point of each train (so a train's last stop, where it
+ends, has no row of its own):
+
+- **Calls**: `service_date`, `origin_crs` (the calling point), with an arrival
+  (`calling_point_arrival` or its public time) and `can_alight`. A `UNION ALL`
+  of two bands, as the departures search reads them: day-0 rows, a range scan
+  of `schedule_destination_departures_calling_point_idx` (`service_date`,
+  `origin_crs`, `scheduled`) from the first working time that can hold a row on
+  the board (a call's arrival is never after its own departure, and a public
+  time sits within an hour of the working one, so `scheduled >= from - 1h`
+  loses none), and the rows past the date's midnight. For today the previous
+  service date's after-midnight rows are read too. The cost is the rest of the
+  station's day, not `limit + 40`: up to roughly a thousand index entries at
+  the busiest stations. A train's own origin row has no arrival, so a service
+  that starts here is never an arrival.
+- **Termini**: the trains that end at the station (`destination_crs`),
+  `DISTINCT ON (train_uid)`, over the primary key's `(service_date,
+  destination_crs)` prefix. **This is the expensive half**: no index leads
+  with the arrival time, so it reads every departure-bearing call of every
+  train that ends here that day (about 10,000 rows for the busiest
+  destination in the sizing of the table's migration) and filters on the
+  arrival in the heap. It is the shape `GET /public/trains/arrivals` already
+  uses (there with no time bound at all), and it runs once per distinct board
+  URL per 20 s behind the cache. If that proves too heavy, the smallest fix
+  is a ds-core index on `(service_date, destination_crs,
+  destination_arrival_day_offset, destination_arrival)` (a partial index
+  `WHERE destination_arrival IS NOT NULL` is enough), after which this read
+  becomes a bounded range scan; it is not needed to ship the board, and this
+  change adds none.
+
+The rows are then sorted by the arrival shown, cut to `limit + 40` and given
+Darwin's and the booked data in the same batched reads as the departures
+board. A DB test runs `EXPLAIN` on the two timetable reads with sequential
+scans disabled and asserts the indexes above.
 
 ## Abuse and load
 

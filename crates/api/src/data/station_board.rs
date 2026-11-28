@@ -23,6 +23,12 @@
 //!
 //! **Status** ([`live_status`]): `booked` means no live data, so a board
 //! never claims `onTime` without a Darwin forecast or actual to say so.
+//!
+//! **Arrivals** (`board=arrivals`, [`BoardKind::Arrivals`]): the same
+//! rules over a call's arrival: Darwin's `arrival_at` / `arrival_et`, the
+//! working arrival (`wta`) to pick the visit and the CIF booked arrival.
+//! The LDBWS step (3) is departures-only: `station_samples` holds the
+//! departures board and the arrivals board is read only for tracked trains.
 
 use std::collections::{BTreeSet, HashMap};
 use std::sync::OnceLock;
@@ -156,6 +162,29 @@ pub enum BoardStatus {
     Booked,
 }
 
+/// Which board: the services leaving the station or the ones arriving.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, ts_rs::TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(rename = "StationBoardKind")]
+pub enum BoardKind {
+    #[default]
+    Departures,
+    Arrivals,
+}
+
+impl BoardKind {
+    /// The `board` query value: `departures` or `arrivals`, any case; `None`
+    /// for anything else.
+    #[must_use]
+    pub fn parse(raw: &str) -> Option<Self> {
+        match raw.trim().to_ascii_lowercase().as_str() {
+            "departures" => Some(Self::Departures),
+            "arrivals" => Some(Self::Arrivals),
+            _ => None,
+        }
+    }
+}
+
 /// What Darwin says about the platform of one call.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct DarwinPlatform<'a> {
@@ -214,10 +243,12 @@ pub fn resolve_platform(
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct DarwinTimes {
     pub cancelled: bool,
-    /// The actual departure, else the forecast, as minutes of the day.
+    /// The actual time of the event the board shows (departure, or arrival
+    /// on the arrivals board), else the forecast, as minutes of the day.
     pub expected_minute: Option<u32>,
-    /// The actual departure is known: the train has left.
-    pub departed: bool,
+    /// The actual time is known: the train has left (arrived, on the
+    /// arrivals board).
+    pub gone: bool,
     /// Darwin's "delayed, time unknown".
     pub delayed_unknown: bool,
 }
@@ -347,6 +378,8 @@ pub struct BoardCall {
     pub call: DarwinCall,
     pub departure_at: Option<String>,
     pub departure_delayed: bool,
+    pub arrival_at: Option<String>,
+    pub arrival_delayed: bool,
     pub is_suppressed: bool,
 }
 
@@ -368,15 +401,28 @@ impl BoardCall {
         }
     }
 
+    /// What Darwin says about the call's time on `kind`'s board: the
+    /// departure, or the arrival.
     #[must_use]
-    pub fn times(&self) -> DarwinTimes {
-        let actual = self.departure_at.as_deref().and_then(darwin_minute);
+    pub fn times(&self, kind: BoardKind) -> DarwinTimes {
+        let (actual, forecast, delayed_unknown) = match kind {
+            BoardKind::Departures => (
+                self.departure_at.as_deref(),
+                self.call.departure_et.as_deref(),
+                self.departure_delayed,
+            ),
+            BoardKind::Arrivals => (
+                self.arrival_at.as_deref(),
+                self.call.arrival_et.as_deref(),
+                self.arrival_delayed,
+            ),
+        };
+        let actual = actual.and_then(darwin_minute);
         DarwinTimes {
             cancelled: self.call.is_cancelled,
-            expected_minute: actual
-                .or_else(|| self.call.departure_et.as_deref().and_then(darwin_minute)),
-            departed: actual.is_some(),
-            delayed_unknown: self.departure_delayed,
+            expected_minute: actual.or_else(|| forecast.and_then(darwin_minute)),
+            gone: actual.is_some(),
+            delayed_unknown,
         }
     }
 }
@@ -387,6 +433,7 @@ pub struct BookedCall {
     pub uid: String,
     pub service_date: NaiveDate,
     pub booked_departure: Option<NaiveTime>,
+    pub booked_arrival: Option<NaiveTime>,
     pub platform: Option<String>,
 }
 
@@ -428,7 +475,8 @@ s AS ( \
 SELECT s.uid, s.ssd, s.cancel_reason, c.tiploc, c.wta, c.wtd, c.wtp, c.planned_platform, \
        c.is_cancelled, c.platform, c.platform_confirmed, c.platform_suppressed, \
        c.platform_cis_suppressed, c.platform_basis, c.arrival_et, c.departure_et, \
-       c.updated_at, c.departure_at, c.departure_delayed, c.is_suppressed \
+       c.updated_at, c.departure_at, c.departure_delayed, c.arrival_at, c.arrival_delayed, \
+       c.is_suppressed \
 FROM s \
 JOIN darwin_calls c ON c.rid = s.rid AND c.tiploc = ANY($3::text[]) \
 CROSS JOIN LATERAL (SELECT max(x.schedule_ts) AS newest FROM darwin_calls x WHERE x.rid = s.rid) n \
@@ -437,7 +485,7 @@ WHERE n.newest IS NULL OR GREATEST(c.schedule_ts, c.ts_ts) >= n.newest";
 /// The booked calls at the station's TIPLOCs for each `(uid, service_date)`
 /// (`schedule_calling_points_full`'s primary key).
 pub const BOOKED_SQL: &str = "\
-SELECT p.uid, p.service_date, p.booked_departure, p.platform \
+SELECT p.uid, p.service_date, p.booked_departure, p.booked_arrival, p.platform \
 FROM UNNEST($1::text[], $2::date[]) AS k(uid, service_date) \
 JOIN schedule_calling_points_full p ON p.service_date = k.service_date AND p.uid = k.uid \
 WHERE p.tiploc = ANY($3::text[])";
@@ -643,7 +691,7 @@ mod tests {
         DarwinTimes {
             cancelled: false,
             expected_minute: expected,
-            departed: false,
+            gone: false,
             delayed_unknown: false,
         }
     }
