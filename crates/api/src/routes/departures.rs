@@ -308,7 +308,7 @@ fn cut_board(mut rows: Vec<Value>) -> Vec<Value> {
 /// for today, the same instant a day later on the clock for yesterday (its
 /// after-midnight rows have `dayOffset >= 1`), the start of the day for a
 /// later date. A board never lists a departure that has gone.
-fn board_depart_from(
+pub(crate) fn board_depart_from(
     service_date: chrono::NaiveDate,
     today: chrono::NaiveDate,
     now: chrono::NaiveTime,

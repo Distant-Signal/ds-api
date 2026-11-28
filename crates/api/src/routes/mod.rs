@@ -91,6 +91,7 @@ pub mod regular_plan;
 pub mod reliability;
 pub mod schedule_rows;
 pub mod stanox_crs;
+pub mod station_board;
 pub mod station_stats;
 pub mod tfl_stop_page;
 pub mod tfl_stops;
@@ -227,6 +228,7 @@ pub fn public_router() -> Router {
         .merge(groups::router())
         .merge(station_stats::router())
         .merge(departures::router())
+        .merge(station_board::router())
         .merge(calendar::router())
         .merge(feeds::router())
         .merge(stanox_crs::router())

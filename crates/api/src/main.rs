@@ -255,6 +255,11 @@ fn config_defaults() -> ds_runtime::service_args::ConfigDefaults {
         .env(data::webhooks::WEBHOOKS_ENABLED_ENV, Some("false"))
         .env(data::recently_deleted::ENABLED_ENV, Some("false"))
         .env(api::auth::logout_everywhere::ENABLED_ENV, Some("false"))
+        .env(data::station_board::ENABLED_ENV, Some("false"))
+        .env(
+            data::station_board::NO_BOOKED_PLATFORM_CRS_ENV,
+            Some(&data::station_board::DEFAULT_NO_BOOKED_PLATFORM_CRS.join(",")),
+        )
         .env(api::auth::logout_everywhere::END_SESSION_URL_ENV, None)
         .env(
             data::recently_deleted::RETENTION_DAYS_ENV,
@@ -340,6 +345,18 @@ async fn server_main() -> anyhow::Result<()> {
         enabled = data::journey_feasibility::connection_rules().tight,
         "tight connections ({})",
         data::journey_feasibility::TIGHT_CONNECTIONS_ENV
+    );
+
+    // STATION_BOARD_ENABLED (default off) and
+    // STATION_BOARD_NO_BOOKED_PLATFORM_CRS (default VIC,EUS,PAD,KGX,MYB,STP;
+    // a bad code fails startup). See `data::station_board`.
+    let station_board = data::station_board::init_from_env()?;
+    tracing::info!(
+        enabled = station_board.enabled,
+        no_booked_platform_crs = ?station_board.no_booked_platform_crs,
+        "public station board ({}, {})",
+        data::station_board::ENABLED_ENV,
+        data::station_board::NO_BOOKED_PLATFORM_CRS_ENV
     );
 
     let calendar_feed = data::calendar_feed::init_from_env();
