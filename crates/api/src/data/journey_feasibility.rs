@@ -34,8 +34,46 @@ use crate::data::trip_planning::{self, GraphCache};
 /// is at risk once delays have eaten into it (spec §5.1).
 pub const AT_RISK_SLACK_MINUTES: i64 = 3;
 
+/// The env switch for the tight-connection rules ([`ConnectionRules`]).
+pub const TIGHT_CONNECTIONS_ENV: &str = "JOURNEY_TIGHT_CONNECTIONS";
+
+/// Rules that change how a saved journey's changes are judged, each off by
+/// default: with every one off, the judgement is exactly the earlier one.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct ConnectionRules {
+    /// `JOURNEY_TIGHT_CONNECTIONS` (default false), DS-638:
+    ///
+    /// - a change below the time it needs, onto a train that has not left
+    ///   (no actual departure from the boarding stop, in TRUST or the Push
+    ///   Port) and is not cancelled, is [`ConnectionState::Tight`], not
+    ///   `missed`: it is `missed` only once that train has gone. The break
+    ///   logic then opens no `connection_missed` break for it;
+    /// - after a walk between two trains (a leg with transit mode `walk`),
+    ///   the time the change needs is the larger of that walk and the
+    ///   station's minimum change time, not both: the minutes still owed
+    ///   after the walk are the minimum change time less the walk's own.
+    pub tight: bool,
+}
+
+impl ConnectionRules {
+    /// Reads [`TIGHT_CONNECTIONS_ENV`] (an unreadable value is the
+    /// default, off).
+    pub fn from_env() -> Self {
+        Self {
+            tight: trip_plan_live::env_bool(TIGHT_CONNECTIONS_ENV, false),
+        }
+    }
+}
+
+static CONNECTION_RULES: LazyLock<ConnectionRules> = LazyLock::new(ConnectionRules::from_env);
+
+/// The rules this process runs with.
+pub fn connection_rules() -> ConnectionRules {
+    *CONNECTION_RULES
+}
+
 /// How one change between two consecutive legs stands.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, ts_rs::TS, schemars::JsonSchema)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, ts_rs::TS)]
 #[serde(rename_all = "camelCase")]
 pub enum ConnectionState {
     /// Enough time to change, with room to spare (or none was needed).
@@ -43,12 +81,49 @@ pub enum ConnectionState {
     /// Delays leave less than [`AT_RISK_SLACK_MINUTES`] to spare, or the
     /// change was booked below the minimum change time and is no worse.
     AtRisk,
-    /// The next leg leaves before the traveller can get to it.
+    /// Only with `JOURNEY_TIGHT_CONNECTIONS` (additive, DS-638): the
+    /// traveller is not expected to get to the next train before it leaves,
+    /// but it has not left yet (and is not cancelled), so the change may
+    /// still work: the gap is under the time the change needs, whatever the
+    /// slack, even a negative estimated one. Not a break, no push. Becomes
+    /// `missed` once the train has departed.
+    Tight,
+    /// The next leg leaves before the traveller can get to it (with
+    /// `JOURNEY_TIGHT_CONNECTIONS`: and has left).
     Missed,
     /// Not judged: a time is unknown, a train is cancelled at either end of
     /// the change, the station allows no interchange (MSN 98 or 99), or no
     /// fixed link joins two different stations.
     Unknown,
+}
+
+/// Declared as an extensible enum (`x-extensible-enum`, not a `oneOf` of
+/// constants): `tight` was added after the other four, and the `OpenAPI`
+/// breaking-change check rejects a new value in a closed one. A client
+/// treats a value it does not know as `atRisk`.
+impl schemars::JsonSchema for ConnectionState {
+    fn schema_name() -> std::borrow::Cow<'static, str> {
+        "ConnectionState".into()
+    }
+
+    fn json_schema(_: &mut schemars::SchemaGenerator) -> schemars::Schema {
+        schemars::json_schema!({
+            "type": "string",
+            "description": "How one change between two consecutive legs stands. The set may \
+                gain values: treat an unknown one as `atRisk`. `ok`: enough time to change, \
+                with room to spare (or none was needed). `atRisk`: delays leave less than \
+                3 minutes to spare, or the change was booked below the minimum change time \
+                and is no worse. `tight` (only with JOURNEY_TIGHT_CONNECTIONS): the traveller \
+                is not expected to get to the next train before it leaves, but it has not \
+                left yet and is not cancelled, so the change may still work; not a break. \
+                `missed`: the next leg leaves before the traveller can get to it (with \
+                JOURNEY_TIGHT_CONNECTIONS: and has left). `unknown`: not judged: a time is \
+                unknown, a train is cancelled at either end of the change, the station \
+                allows no interchange (MSN 98 or 99), or no fixed link joins two different \
+                stations.",
+            "x-extensible-enum": ["ok", "atRisk", "tight", "missed", "unknown"]
+        })
+    }
 }
 
 /// The change onto a leg from the one before it (`connection` on every
@@ -106,6 +181,9 @@ pub struct TrainLegTiming {
     pub live_arr: DateTime<Utc>,
     /// The train still calls at both ends of the leg.
     pub served: bool,
+    /// The train has left the boarding stop: an actual departure, from
+    /// TRUST or the Push Port (never an estimate).
+    pub departed: bool,
 }
 
 /// One leg as [`evaluate_connections`] sees it.
@@ -120,6 +198,8 @@ pub enum LegTiming {
         departure: Option<DateTime<Utc>>,
         arrival: Option<DateTime<Utc>>,
         rides: Vec<TimetabledRide>,
+        /// The leg's transit mode is `walk`.
+        walk: bool,
     },
     /// A train leg with no train picked yet, or whose calls aren't known.
     Unknown,
@@ -135,6 +215,22 @@ struct Ready {
     /// The train ridden there, to tell staying aboard from a change.
     train: Option<(String, NaiveDate)>,
     served: bool,
+    /// Minutes of the walk that brought the traveller here (the planned
+    /// length of a `walk` leg just before), else 0.
+    walk_minutes: u32,
+}
+
+/// The planned minutes of `leg`, when it is a plain walk (no timetable).
+pub fn walk_minutes(leg: &LegTiming) -> u32 {
+    match leg {
+        LegTiming::Untracked {
+            departure: Some(departure),
+            arrival: Some(arrival),
+            rides,
+            walk: true,
+        } if rides.is_empty() => u32::try_from((*arrival - *departure).num_minutes()).unwrap_or(0),
+        _ => 0,
+    }
 }
 
 fn whole_minutes(from: DateTime<Utc>, to: DateTime<Utc>) -> i64 {
@@ -142,21 +238,43 @@ fn whole_minutes(from: DateTime<Utc>, to: DateTime<Utc>) -> i64 {
 }
 
 /// The state of a change with `gap` minutes available, `planned_gap` on
-/// the timetable, needing `required`.
-fn classify(gap: i64, planned_gap: i64, required: u32) -> ConnectionState {
-    if gap < 0 {
-        return ConnectionState::Missed;
-    }
+/// the timetable, needing `required`. `onward_gone`: the train it changes
+/// onto has left or is cancelled; it matters only to
+/// [`ConnectionRules::tight`], which keeps a change that cannot be made
+/// [`ConnectionState::Tight`] until then.
+fn classify(
+    gap: i64,
+    planned_gap: i64,
+    required: u32,
+    rules: ConnectionRules,
+    onward_gone: bool,
+) -> ConnectionState {
     let slack = gap - i64::from(required);
     let planned_slack = planned_gap - i64::from(required);
-    if !trip_plan_live::interchange_feasible(gap, 0, required) {
-        // Booked below the minimum and no worse than booked: tight, as it
-        // always was. Otherwise delays have broken it.
-        return if planned_slack < 0 && slack >= planned_slack {
-            ConnectionState::AtRisk
-        } else {
-            ConnectionState::Missed
-        };
+    if rules.tight {
+        if gap < 0 || !trip_plan_live::interchange_feasible(gap, 0, required) {
+            return if onward_gone {
+                ConnectionState::Missed
+            } else if gap >= 0 && planned_slack < 0 && slack >= planned_slack {
+                // Booked below the minimum and no worse than booked.
+                ConnectionState::AtRisk
+            } else {
+                ConnectionState::Tight
+            };
+        }
+    } else {
+        if gap < 0 {
+            return ConnectionState::Missed;
+        }
+        if !trip_plan_live::interchange_feasible(gap, 0, required) {
+            // Booked below the minimum and no worse than booked: tight, as it
+            // always was. Otherwise delays have broken it.
+            return if planned_slack < 0 && slack >= planned_slack {
+                ConnectionState::AtRisk
+            } else {
+                ConnectionState::Missed
+            };
+        }
     }
     if slack < AT_RISK_SLACK_MINUTES && slack < planned_slack {
         ConnectionState::AtRisk
@@ -179,6 +297,7 @@ fn required_change(
     ready: &Ready,
     next: &TrainLegTiming,
     interchange: &InterchangeData,
+    rules: ConnectionRules,
 ) -> Option<u32> {
     let same_station = ready
         .crs
@@ -191,7 +310,16 @@ fn required_change(
     match ready.crs.as_deref() {
         // Walked or rode in from a place: the station's MSN to reach the
         // platform, as the planners charge it at every fresh boarding.
-        None => msn(interchange, &next.board_tiploc),
+        None => {
+            let msn = msn(interchange, &next.board_tiploc)?;
+            // A walk before the change is the change's own first minutes
+            // (DS-638): the larger of the two, not both.
+            Some(if rules.tight {
+                msn.saturating_sub(ready.walk_minutes)
+            } else {
+                msn
+            })
+        }
         Some(_) if same_station => msn(interchange, &next.board_tiploc),
         Some(from_crs) => {
             let local = common::zone::london_local(ready.at);
@@ -261,8 +389,9 @@ fn ride_taken(
 pub fn evaluate_connections(
     legs: &[LegTiming],
     interchange: &InterchangeData,
+    rules: ConnectionRules,
 ) -> Vec<Option<LegConnection>> {
-    evaluate(legs, interchange).0
+    evaluate(legs, interchange, rules).0
 }
 
 /// [`evaluate_connections`], and when the traveller is ready after each
@@ -271,6 +400,7 @@ pub fn evaluate_connections(
 fn evaluate(
     legs: &[LegTiming],
     interchange: &InterchangeData,
+    rules: ConnectionRules,
 ) -> (Vec<Option<LegConnection>>, Vec<Option<DateTime<Utc>>>) {
     let unknown = |gap_minutes: Option<i64>| LegConnection {
         gap_minutes,
@@ -293,6 +423,7 @@ fn evaluate(
                     departure,
                     arrival,
                     rides,
+                    ..
                 },
             ) => {
                 let taken = departure.and_then(|d| ride_taken(rides, d, Some(r.at)));
@@ -317,11 +448,11 @@ fn evaluate(
                 Some(if !r.served || !next.served {
                     unknown(Some(gap))
                 } else {
-                    match required_change(r, next, interchange) {
+                    match required_change(r, next, interchange, rules) {
                         Some(required) => LegConnection {
                             gap_minutes: Some(gap),
                             minimum_change_minutes: Some(required),
-                            state: classify(gap, planned_gap, required),
+                            state: classify(gap, planned_gap, required, rules, next.departed),
                             relies_on_late_departure: late_departure_reliance(r, next, required),
                             next_timetabled: None,
                         },
@@ -339,11 +470,13 @@ fn evaluate(
                 crs: Some(t.alight_crs.clone()),
                 train: Some((t.uid.clone(), t.date)),
                 served: t.served,
+                walk_minutes: 0,
             }),
             LegTiming::Untracked {
                 departure: Some(departure),
                 arrival: Some(arrival),
                 rides,
+                ..
             } => {
                 let at = ride_taken(rides, *departure, ready.as_ref().map(|r| r.at)).map_or_else(
                     || {
@@ -358,6 +491,7 @@ fn evaluate(
                     crs: None,
                     train: None,
                     served: true,
+                    walk_minutes: walk_minutes(leg),
                 })
             }
             // No times: nothing to start the next leg from.
@@ -470,6 +604,8 @@ pub fn train_leg_timing(
         sched_arr: instant(alight.sched_arr)?,
         live_arr: instant(alight.live_arr.or(alight.sched_arr))?,
         served: board.served && alight.served,
+        departed: live
+            .is_some_and(|live| live.departed_from(&board.tiploc, board.work_arr, board.work_dep)),
     })
 }
 
@@ -489,6 +625,8 @@ pub enum LegInput<'a> {
         /// A timetabled leg's rides (DS-237), in departure order; empty
         /// otherwise.
         rides: Vec<TimetabledRide>,
+        /// The leg's transit mode is `walk`.
+        walk: bool,
     },
 }
 
@@ -561,18 +699,24 @@ pub struct JourneyTimings {
     /// timetabled leg's re-timed one.
     pub ready_after: Vec<Option<DateTime<Utc>>>,
     pub interchange: Arc<InterchangeData>,
+    pub rules: ConnectionRules,
 }
 
 impl JourneyTimings {
     /// The timings of `timings`' legs judged against `interchange`: their
     /// connections and when the traveller is ready after each.
-    pub fn from_timings(timings: Vec<LegTiming>, interchange: Arc<InterchangeData>) -> Self {
-        let (connections, ready_after) = evaluate(&timings, &interchange);
+    pub fn from_timings(
+        timings: Vec<LegTiming>,
+        interchange: Arc<InterchangeData>,
+        rules: ConnectionRules,
+    ) -> Self {
+        let (connections, ready_after) = evaluate(&timings, &interchange, rules);
         Self {
             timings,
             connections,
             ready_after,
             interchange,
+            rules,
         }
     }
 
@@ -580,11 +724,14 @@ impl JourneyTimings {
     /// `from_crs` (`None`: from a place, after a walk or a Tube ride) on
     /// another train: the station's minimum change time, or a fixed link
     /// plus that between two stations. `None` when it can't be judged.
+    /// `walk_minutes`: the walk that ended at `at` ([`walk_minutes`]), 0
+    /// for none.
     pub fn change_minutes(
         &self,
         from_crs: Option<&str>,
         at: DateTime<Utc>,
         next: &TrainLegTiming,
+        walk_minutes: u32,
     ) -> Option<u32> {
         let ready = Ready {
             at,
@@ -592,8 +739,9 @@ impl JourneyTimings {
             crs: from_crs.map(str::to_ascii_uppercase),
             train: None,
             served: true,
+            walk_minutes,
         };
-        required_change(&ready, next, &self.interchange)
+        required_change(&ready, next, &self.interchange, self.rules)
     }
 }
 
@@ -612,6 +760,7 @@ pub async fn journey_timings(
         }
     };
     let config = &*LIVE_CONFIG;
+    let rules = connection_rules();
 
     // Timetable-only first, to find which trains are inside the live window.
     let resolved: Vec<Option<(&TrainInput<'_>, String, String)>> = legs
@@ -646,7 +795,14 @@ pub async fn journey_timings(
     let mut lives: HashMap<(NaiveDate, String), TrainLive> = HashMap::new();
     for (date, uids) in wanted {
         let uids: Vec<String> = uids.into_iter().take(config.max_trains).collect();
-        match trip_plan_live::fetch_train_lives(pool, date, &uids, config, now).await {
+        // With the tight rules a train that has left is told by the Push
+        // Port too, not TRUST alone.
+        let read = if rules.tight {
+            trip_plan_live::fetch_train_lives_with_darwin(pool, date, &uids, config, now).await
+        } else {
+            trip_plan_live::fetch_train_lives(pool, date, &uids, config, now).await
+        };
+        match read {
             Ok(found) => {
                 lives.extend(found.into_iter().map(|(uid, live)| ((date, uid), live)));
             }
@@ -665,12 +821,14 @@ pub async fn journey_timings(
                     departure,
                     arrival,
                     rides,
+                    walk,
                 },
                 _,
             ) => LegTiming::Untracked {
                 departure: *departure,
                 arrival: *arrival,
                 rides: rides.clone(),
+                walk: *walk,
             },
             (LegInput::Train { .. }, Some((train, board, alight))) => train_leg_timing(
                 train.uid,
@@ -684,7 +842,7 @@ pub async fn journey_timings(
             (LegInput::Train { .. }, None) => LegTiming::Unknown,
         })
         .collect();
-    Some(JourneyTimings::from_timings(timings, interchange))
+    Some(JourneyTimings::from_timings(timings, interchange, rules))
 }
 
 #[cfg(test)]
@@ -744,13 +902,14 @@ mod tests {
             sched_arr: at(sched_arr),
             live_arr: at(live_arr),
             served,
+            departed: false,
         })
     }
 
     type Judged = Option<(Option<i64>, Option<u32>, ConnectionState)>;
 
     fn states(legs: &[LegTiming]) -> Vec<Judged> {
-        evaluate_connections(legs, &interchange())
+        evaluate_connections(legs, &interchange(), ConnectionRules::default())
             .into_iter()
             .map(|c| c.map(|c| (c.gap_minutes, c.minimum_change_minutes, c.state)))
             .collect()
@@ -834,7 +993,7 @@ mod tests {
             train("A1", ("KGX", "KNGX"), "YRK", 480, 480, 600, 600, true),
             train("B1", ("YRK", "YORK"), "EDB", 603, 615, 760, 772, true),
         ];
-        let connection = evaluate_connections(&legs, &interchange())[1]
+        let connection = evaluate_connections(&legs, &interchange(), ConnectionRules::default())[1]
             .clone()
             .unwrap();
         assert_eq!(connection.state, ConnectionState::Ok);
@@ -858,7 +1017,7 @@ mod tests {
             train("A1", ("KGX", "KNGX"), "YRK", 480, 480, 600, 612, true),
             train("B1", ("YRK", "YORK"), "EDB", 615, 625, 760, 770, true),
         ];
-        let connections = evaluate_connections(&legs, &interchange());
+        let connections = evaluate_connections(&legs, &interchange(), ConnectionRules::default());
         let connection = connections[1].as_ref().unwrap();
         // 12 late in: on time, the 10:15 would be missed, so it IS flagged.
         assert!(connection.relies_on_late_departure.is_some());
@@ -866,7 +1025,7 @@ mod tests {
             train("A1", ("KGX", "KNGX"), "YRK", 480, 480, 600, 600, true),
             train("B1", ("YRK", "YORK"), "EDB", 615, 625, 760, 770, true),
         ];
-        let connections = evaluate_connections(&legs, &interchange());
+        let connections = evaluate_connections(&legs, &interchange(), ConnectionRules::default());
         let connection = connections[1].as_ref().unwrap();
         assert_eq!(connection.state, ConnectionState::Ok);
         assert_eq!(connection.relies_on_late_departure, None);
@@ -880,7 +1039,7 @@ mod tests {
             train("A1", ("KGX", "KNGX"), "YRK", 480, 480, 600, 610, true),
             train("A1", ("YRK", "YORK"), "EDB", 602, 612, 760, 770, true),
         ];
-        let connections = evaluate_connections(&legs, &interchange());
+        let connections = evaluate_connections(&legs, &interchange(), ConnectionRules::default());
         assert_eq!(
             connections[1].as_ref().unwrap().relies_on_late_departure,
             None
@@ -966,6 +1125,7 @@ mod tests {
                 departure: Some(at(605)),
                 arrival: Some(at(620)),
                 rides: Vec::new(),
+                walk: false,
             },
             train("B1", ("EUS", "EUSTON"), "MAN", 628, 628, 760, 760, true),
         ];
@@ -991,6 +1151,7 @@ mod tests {
                     arrival: at(620 + 5 * n),
                 })
                 .collect(),
+            walk: false,
         }
     }
 
@@ -1013,7 +1174,7 @@ mod tests {
                 Some((Some(3), Some(5), ConnectionState::Missed)),
             ]
         );
-        let connections = evaluate_connections(&legs, &interchange());
+        let connections = evaluate_connections(&legs, &interchange(), ConnectionRules::default());
         assert_eq!(
             connections[1].as_ref().unwrap().next_timetabled,
             Some(TimetabledRide {
@@ -1022,7 +1183,7 @@ mod tests {
             }),
             "the ride taken, not the planned one"
         );
-        let (_, ready) = evaluate(&legs, &interchange());
+        let (_, ready) = evaluate(&legs, &interchange(), ConnectionRules::default());
         assert_eq!(ready[1], Some(at(630)));
     }
 
@@ -1033,7 +1194,7 @@ mod tests {
             timetabled_tube(),
             train("B1", ("EUS", "EUSTON"), "MAN", 633, 633, 760, 760, true),
         ];
-        let connections = evaluate_connections(&legs, &interchange());
+        let connections = evaluate_connections(&legs, &interchange(), ConnectionRules::default());
         let onto_tube = connections[1].as_ref().unwrap();
         assert_eq!(onto_tube.gap_minutes, Some(5));
         assert_eq!(
@@ -1056,7 +1217,7 @@ mod tests {
             timetabled_tube(),
             train("B1", ("EUS", "EUSTON"), "MAN", 700, 700, 760, 760, true),
         ];
-        let (connections, ready) = evaluate(&legs, &interchange());
+        let (connections, ready) = evaluate(&legs, &interchange(), ConnectionRules::default());
         assert_eq!(ready[1], Some(at(675)));
         assert_eq!(connections[1].as_ref().unwrap().next_timetabled, None);
     }
@@ -1107,5 +1268,213 @@ mod tests {
 
         // Not calling at the destination after the origin: no timing.
         assert!(train_leg_timing("A1", date(), &stops, "YRK", "PBO", None).is_none());
+    }
+
+    const TIGHT: ConnectionRules = ConnectionRules { tight: true };
+
+    fn rank(state: ConnectionState) -> u8 {
+        match state {
+            ConnectionState::Ok => 0,
+            ConnectionState::AtRisk => 1,
+            ConnectionState::Tight => 2,
+            ConnectionState::Missed => 3,
+            ConnectionState::Unknown => unreachable!("classify never answers unknown"),
+        }
+    }
+
+    /// The change from the owner's journey: booked 12 minutes, 5 needed;
+    /// `delay` minutes late takes that many off the gap.
+    fn classified(delay: i64, rules: ConnectionRules, gone: bool) -> ConnectionState {
+        classify(12 - delay, 12, 5, rules, gone)
+    }
+
+    #[test]
+    fn a_change_that_cannot_be_made_is_tight_until_its_train_has_gone() {
+        use ConnectionState::{AtRisk, Missed, Ok, Tight};
+        let on = |delay| classified(delay, TIGHT, false);
+        assert_eq!(on(0), Ok);
+        assert_eq!(on(4), Ok);
+        // 7 late: 5 minutes of gap for the 5 needed, nothing to spare.
+        assert_eq!(on(5), AtRisk);
+        assert_eq!(on(7), AtRisk);
+        // 8 and 9 late: under the 5 needed, but the train is still there.
+        assert_eq!(on(8), Tight);
+        assert_eq!(on(9), Tight);
+        // Past its estimated departure, with no departure reported: still tight.
+        for delay in 13..=30 {
+            assert_eq!(on(delay), Tight, "{delay} late");
+        }
+        // Gone (left, or cancelled): missed, whatever the gap.
+        for delay in 8..=30 {
+            assert_eq!(classified(delay, TIGHT, true), Missed, "{delay} late");
+        }
+        // A train that left is still not missed while the gap covers it.
+        assert_eq!(classified(7, TIGHT, true), AtRisk);
+        assert_eq!(classified(0, TIGHT, true), Ok);
+    }
+
+    #[test]
+    fn with_the_switch_off_the_judgement_is_as_it_was() {
+        use ConnectionState::{AtRisk, Missed, Ok};
+        let off = |delay| classified(delay, ConnectionRules::default(), false);
+        assert_eq!(off(0), Ok);
+        assert_eq!(off(7), AtRisk);
+        // Under the needed time is missed, the train gone or not.
+        for delay in 8..=30 {
+            assert_eq!(off(delay), Missed, "{delay} late");
+            assert_eq!(
+                classified(delay, ConnectionRules::default(), true),
+                Missed,
+                "{delay} late"
+            );
+        }
+    }
+
+    #[test]
+    fn a_change_booked_below_the_minimum_stays_at_risk_not_tight_while_no_worse() {
+        // Booked 3 against 5 needed: at risk as it always was, and tight
+        // only once it gets worse than booked.
+        let on = |gap| classify(gap, 3, 5, TIGHT, false);
+        assert_eq!(on(3), ConnectionState::AtRisk);
+        assert_eq!(on(2), ConnectionState::Tight);
+        assert_eq!(on(-1), ConnectionState::Tight);
+        assert_eq!(classify(2, 3, 5, TIGHT, true), ConnectionState::Missed);
+    }
+
+    #[test]
+    fn more_delay_never_improves_a_change() {
+        for rules in [ConnectionRules::default(), TIGHT] {
+            for planned_gap in [-3, 0, 3, 5, 12, 20] {
+                for required in [0, 3, 5, 8] {
+                    for gone_from in [0, 6, 10, 40] {
+                        let mut worst = 0;
+                        for delay in 0..=40_i64 {
+                            let state = classify(
+                                planned_gap - delay,
+                                planned_gap,
+                                required,
+                                rules,
+                                delay >= gone_from,
+                            );
+                            assert!(
+                                rank(state) >= worst,
+                                "improved at {delay} late: planned {planned_gap}, needs {required}, gone from {gone_from}, {rules:?}"
+                            );
+                            worst = rank(state);
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    /// The owner's journey (2026-11-28): a train into Euston 12:27, a walk of
+    /// 3, a Tube ride of 17 and a walk of 2 (12:49 at Vauxhall), then the
+    /// 13:01 from Vauxhall, MSN 5. `delay` is the first train's;
+    /// `last_walk` whether the last leg is a walk (else a Tube ride).
+    fn owner_journey(delay: u32, last_walk: bool, departed: bool) -> Vec<LegTiming> {
+        let untracked = |from: u32, minutes: u32, walk: bool| LegTiming::Untracked {
+            departure: Some(at(from)),
+            arrival: Some(at(from + minutes)),
+            rides: Vec::new(),
+            walk,
+        };
+        let mut onward = train("L5", ("VXH", "VAUXHLM"), "WAT", 781, 781, 810, 810, true);
+        if let LegTiming::Train(t) = &mut onward {
+            t.departed = departed;
+        }
+        vec![
+            train(
+                "L1",
+                ("MAN", "MNCRPIC"),
+                "EUS",
+                600,
+                600,
+                747,
+                747 + delay,
+                true,
+            ),
+            untracked(747, 3, true),
+            untracked(750, 17, false),
+            untracked(767, 2, last_walk),
+            onward,
+        ]
+    }
+
+    fn onward_judgement(legs: &[LegTiming], rules: ConnectionRules) -> (i64, u32, ConnectionState) {
+        let connection = evaluate_connections(legs, &interchange(), rules)
+            .pop()
+            .flatten()
+            .expect("a connection");
+        (
+            connection.gap_minutes.expect("a gap"),
+            connection.minimum_change_minutes.expect("a requirement"),
+            connection.state,
+        )
+    }
+
+    #[test]
+    fn the_owners_journey_is_as_it_was_with_the_switch_off() {
+        let off = |delay| {
+            onward_judgement(
+                &owner_journey(delay, true, false),
+                ConnectionRules::default(),
+            )
+        };
+        assert_eq!(off(0), (12, 5, ConnectionState::Ok));
+        assert_eq!(off(7), (5, 5, ConnectionState::AtRisk));
+        assert_eq!(off(8), (4, 5, ConnectionState::Missed));
+        assert_eq!(off(9), (3, 5, ConnectionState::Missed));
+    }
+
+    #[test]
+    fn a_walk_before_the_change_is_not_charged_on_top_of_the_minimum_change_time() {
+        let on =
+            |delay, last_walk| onward_judgement(&owner_journey(delay, last_walk, false), TIGHT);
+        // The last leg is a 2 minute walk: 3 of the 5 minutes are still owed.
+        assert_eq!(on(0, true), (12, 3, ConnectionState::Ok));
+        assert_eq!(on(7, true), (5, 3, ConnectionState::AtRisk));
+        assert_eq!(on(9, true), (3, 3, ConnectionState::AtRisk));
+        assert_eq!(on(10, true), (2, 3, ConnectionState::Tight));
+        // A Tube ride last is not the change itself: all 5 are owed.
+        assert_eq!(on(7, false), (5, 5, ConnectionState::AtRisk));
+        assert_eq!(on(8, false), (4, 5, ConnectionState::Tight));
+        assert_eq!(on(9, false), (3, 5, ConnectionState::Tight));
+        // The train has left: missed.
+        let gone = |delay| onward_judgement(&owner_journey(delay, false, true), TIGHT).2;
+        assert_eq!(gone(8), ConnectionState::Missed);
+        assert_eq!(gone(7), ConnectionState::AtRisk);
+    }
+
+    #[test]
+    fn a_walk_longer_than_the_minimum_change_time_owes_nothing_more() {
+        let legs = |walk_minutes: u32| {
+            vec![
+                train("A1", ("KGX", "KNGX"), "YRK", 480, 480, 600, 600, true),
+                LegTiming::Untracked {
+                    departure: Some(at(600)),
+                    arrival: Some(at(600 + walk_minutes)),
+                    rides: Vec::new(),
+                    walk: true,
+                },
+                train("B1", ("YRK", "YORK"), "EDB", 620, 620, 700, 700, true),
+            ]
+        };
+        let (_, off, _) = onward_judgement(&legs(8), ConnectionRules::default());
+        let (_, on, _) = onward_judgement(&legs(8), TIGHT);
+        assert_eq!((off, on), (5, 0));
+        assert_eq!(onward_judgement(&legs(2), TIGHT).1, 3);
+    }
+
+    #[test]
+    fn more_delay_never_improves_the_owners_journey() {
+        for rules in [ConnectionRules::default(), TIGHT] {
+            let mut worst = 0;
+            for delay in 0..=30 {
+                let state = onward_judgement(&owner_journey(delay, true, false), rules).2;
+                assert!(rank(state) >= worst, "improved at {delay} late, {rules:?}");
+                worst = rank(state);
+            }
+        }
     }
 }

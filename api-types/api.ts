@@ -344,7 +344,7 @@ export type ConnectedAppsData = { grants: Array<ConnectedAppGrant>, available: A
 /**
  * How one change between two consecutive legs stands.
  */
-export type ConnectionState = "ok" | "atRisk" | "missed" | "unknown";
+export type ConnectionState = "ok" | "atRisk" | "tight" | "missed" | "unknown";
 
 export type CreateGrantRequest = { scopes: Array<ConnectedAppScope>, confirmationToken: string, };
 

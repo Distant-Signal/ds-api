@@ -194,6 +194,40 @@ train had done when the traveller said so: `before_departure`, `departed`
 or `arrived`. DS does not remember a miss when no other train is taken (no
 leg-level missed record): the leg stays as booked.
 
+## Tight connections (`JOURNEY_TIGHT_CONNECTIONS`)
+
+Off by default (DS-638); off, a change below the time it needs is `missed`
+and opens a `connection_missed` break, as before. On:
+
+| Change | Onward train | State |
+|---|---|---|
+| gap >= needed, spare >= 3 min (or no worse than booked) | any | `ok` |
+| gap >= needed, spare under 3 min and less than booked | any | `atRisk` |
+| gap under needed (or negative) | not left, not cancelled | `tight` |
+| gap under needed | left (actual departure in TRUST or the Push Port) | `missed` |
+
+Booked below the minimum and no worse than booked stays `atRisk`. A
+cancelled onward train is not judged here (`unknown`): the cancellation is
+its own break (`cancelled`). The states only get worse as delay grows
+(tested).
+
+- **Breaks.** `detect` opens `connection_missed` for `missed` only. A
+  `tight` change opens none, so the notifier (which reads break rows and
+  needs no change) sends nothing; an open break whose change is now `tight`
+  is ended as recovered by the existing path, and at most one break stays
+  open per journey. "I missed this train" still counts a `tight` change as
+  the railway's fault (the change did not work on live times).
+- **Walk and the minimum change time.** After a leg with `transitMode`
+  `walk`, the change needs the minimum change time less the walk's planned
+  minutes: the larger of the two, not both. The shifted ready time already
+  contains the walk. The alternatives' ready time uses the same figure.
+  A fixed link between two stations is still charged plus the minimum change
+  time, as the trip planner (`/Trips/plan`) does; this work leaves the
+  planner's own rule as it is.
+- **Not done.** Hysteresis (a `tight` change returning to `atRisk` only once
+  clear by a minute) needs the last state remembered, and nothing stores
+  it; the times are whole minutes (a 7.5 minute delay reads 7), unchanged.
+
 ## Metrics
 
 | Metric | Labels |

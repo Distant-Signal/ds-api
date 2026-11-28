@@ -223,6 +223,14 @@ fn config_defaults() -> ds_runtime::service_args::ConfigDefaults {
             "TRIP_PLAN_LIVE_SNAPSHOT_TTL_SECONDS",
             Some(&live.snapshot_ttl_seconds.to_string()),
         )
+        .env(
+            data::journey_feasibility::TIGHT_CONNECTIONS_ENV,
+            Some(
+                &data::journey_feasibility::ConnectionRules::default()
+                    .tight
+                    .to_string(),
+            ),
+        )
         .env("JOURNEY_BREAKS_ENABLED", Some(&sweep.enabled.to_string()))
         .env(
             "JOURNEY_BREAKS_INTERVAL_SECS",
@@ -323,6 +331,13 @@ async fn server_main() -> anyhow::Result<()> {
         "live-only train stops fallbacks ({}, {})",
         data::live_stops::DARWIN_ENABLED_ENV,
         data::live_stops::TRUST_ENABLED_ENV
+    );
+
+    // JOURNEY_TIGHT_CONNECTIONS (default off): see `data::journey_feasibility`.
+    tracing::info!(
+        enabled = data::journey_feasibility::connection_rules().tight,
+        "tight connections ({})",
+        data::journey_feasibility::TIGHT_CONNECTIONS_ENV
     );
 
     let calendar_feed = data::calendar_feed::init_from_env();

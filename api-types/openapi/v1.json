@@ -323,28 +323,14 @@
         "type": "string"
       },
       "ConnectionState": {
-        "description": "How one change between two consecutive legs stands.",
-        "oneOf": [
-          {
-            "const": "ok",
-            "description": "Enough time to change, with room to spare (or none was needed).",
-            "type": "string"
-          },
-          {
-            "const": "atRisk",
-            "description": "Delays leave less than [`AT_RISK_SLACK_MINUTES`] to spare, or the\nchange was booked below the minimum change time and is no worse.",
-            "type": "string"
-          },
-          {
-            "const": "missed",
-            "description": "The next leg leaves before the traveller can get to it.",
-            "type": "string"
-          },
-          {
-            "const": "unknown",
-            "description": "Not judged: a time is unknown, a train is cancelled at either end of\nthe change, the station allows no interchange (MSN 98 or 99), or no\nfixed link joins two different stations.",
-            "type": "string"
-          }
+        "description": "How one change between two consecutive legs stands. The set may gain values: treat an unknown one as `atRisk`. `ok`: enough time to change, with room to spare (or none was needed). `atRisk`: delays leave less than 3 minutes to spare, or the change was booked below the minimum change time and is no worse. `tight` (only with JOURNEY_TIGHT_CONNECTIONS): the traveller is not expected to get to the next train before it leaves, but it has not left yet and is not cancelled, so the change may still work; not a break. `missed`: the next leg leaves before the traveller can get to it (with JOURNEY_TIGHT_CONNECTIONS: and has left). `unknown`: not judged: a time is unknown, a train is cancelled at either end of the change, the station allows no interchange (MSN 98 or 99), or no fixed link joins two different stations.",
+        "type": "string",
+        "x-extensible-enum": [
+          "ok",
+          "atRisk",
+          "tight",
+          "missed",
+          "unknown"
         ]
       },
       "DelayBasis": {
