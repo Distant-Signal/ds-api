@@ -648,6 +648,17 @@ fn candidate(planned: &Planned, legs: &[SuggestionLeg]) -> Option<Candidate> {
     })
 }
 
+/// Whether the first train of `legs` leaves before `earliest`: the
+/// traveller cannot be there, so the connection rule calls it missed.
+fn leaves_before(legs: &[SuggestionLeg], earliest: DateTime<Utc>) -> bool {
+    legs.iter()
+        .find_map(|leg| match leg {
+            SuggestionLeg::Train { departure, .. } => Some(*departure),
+            SuggestionLeg::Untracked { .. } => None,
+        })
+        .is_some_and(|departure| departure < earliest)
+}
+
 /// Everything [`build_set`] needs besides the plans.
 #[derive(Debug, Clone)]
 pub struct SetInputs {
@@ -661,6 +672,11 @@ pub struct SetInputs {
     /// The train being replaced (UID, date): never offered as its own
     /// alternative.
     pub exclude_train: Option<(String, NaiveDate)>,
+    /// When the traveller can first board (the live ready time plus the
+    /// change time): an alternative whose first train leaves earlier is
+    /// missed on the connection rule and never offered (DS-638). `None`
+    /// when the traveller is not coming from an earlier leg.
+    pub earliest_departure: Option<DateTime<Utc>>,
     pub context: Context,
     pub now: DateTime<Utc>,
 }
@@ -722,6 +738,12 @@ pub fn build_set(
             continue;
         };
         if candidate.departure < inputs.depart_after - Duration::minutes(1) {
+            continue;
+        }
+        if inputs
+            .earliest_departure
+            .is_some_and(|earliest| leaves_before(&legs, earliest))
+        {
             continue;
         }
         seen.push(key);
@@ -790,9 +812,11 @@ pub fn build_set(
 
 #[cfg(test)]
 mod tests {
-    use chrono::NaiveDate;
+    use chrono::{DateTime, NaiveDate, TimeZone, Utc};
 
-    use super::{Planned, candidate, planned_transfer_mode, transfer_mode};
+    use super::{
+        Planned, SuggestionLeg, candidate, leaves_before, planned_transfer_mode, transfer_mode,
+    };
     use crate::data::tfl_stops::TflStopSummary;
     use crate::data::trip_planning_itinerary::{PlannedItinerary, PlannedLeg};
 
@@ -942,5 +966,50 @@ mod tests {
         )
         .expect("candidate");
         assert_eq!((walk.tube_or_bus_transfers, walk.walk_minutes), (0, 12));
+    }
+
+    fn train_leg(departure: DateTime<Utc>) -> SuggestionLeg {
+        SuggestionLeg::Train {
+            train_uid: "C1".to_owned(),
+            service_date: NaiveDate::from_ymd_opt(2026, 11, 2).expect("date"),
+            origin_crs: Some("VXH".to_owned()),
+            origin_name: None,
+            destination_crs: Some("WAT".to_owned()),
+            destination_name: None,
+            departure,
+            arrival: departure + chrono::Duration::minutes(30),
+            scheduled_departure: departure,
+            scheduled_arrival: departure + chrono::Duration::minutes(30),
+            operator: None,
+            operator_name: None,
+            platform: None,
+            cancelled: false,
+            relies_on_late_departure: None,
+        }
+    }
+
+    fn walk() -> SuggestionLeg {
+        SuggestionLeg::Untracked {
+            transit_mode: "walk".to_owned(),
+            origin_name: None,
+            destination_name: None,
+            line_name: None,
+            origin_stop_id: None,
+            destination_stop_id: None,
+            planned_departure: DateTime::<Utc>::MIN_UTC,
+            planned_arrival: DateTime::<Utc>::MIN_UTC,
+        }
+    }
+
+    #[test]
+    fn a_train_leaving_before_the_traveller_can_board_is_dropped_on_the_minute() {
+        let ready = Utc.with_ymd_and_hms(2026, 11, 2, 13, 2, 0).unwrap();
+        let at = |minute: u32| Utc.with_ymd_and_hms(2026, 11, 2, 13, minute, 0).unwrap();
+        // One minute early is already missed (no one-minute grace).
+        assert!(leaves_before(&[train_leg(at(1))], ready));
+        assert!(!leaves_before(&[train_leg(at(2))], ready));
+        // Only the first train counts, after any walk.
+        assert!(leaves_before(&[walk(), train_leg(at(1))], ready));
+        assert!(!leaves_before(&[walk()], ready));
     }
 }

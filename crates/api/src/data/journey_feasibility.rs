@@ -564,6 +564,18 @@ pub struct JourneyTimings {
 }
 
 impl JourneyTimings {
+    /// The timings of `timings`' legs judged against `interchange`: their
+    /// connections and when the traveller is ready after each.
+    pub fn from_timings(timings: Vec<LegTiming>, interchange: Arc<InterchangeData>) -> Self {
+        let (connections, ready_after) = evaluate(&timings, &interchange);
+        Self {
+            timings,
+            connections,
+            ready_after,
+            interchange,
+        }
+    }
+
     /// The minutes a change onto train leg `next` needs when arriving from
     /// `from_crs` (`None`: from a place, after a walk or a Tube ride) on
     /// another train: the station's minimum change time, or a fixed link
@@ -672,13 +684,7 @@ pub async fn journey_timings(
             (LegInput::Train { .. }, None) => LegTiming::Unknown,
         })
         .collect();
-    let (connections, ready_after) = evaluate(&timings, &interchange);
-    Some(JourneyTimings {
-        timings,
-        connections,
-        ready_after,
-        interchange,
-    })
+    Some(JourneyTimings::from_timings(timings, interchange))
 }
 
 #[cfg(test)]
