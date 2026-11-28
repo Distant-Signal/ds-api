@@ -3,6 +3,33 @@
 Changes to the Distant Signal (DS) HTTP API that a client such as DS-MCP
 needs to know about. Newest first. Field names are as served (camelCase).
 
+## 2026-11-28: `GET /public/stations/{crs}/board`, behind `STATION_BOARD_ENABLED` (DS-638)
+
+Additive. A new route; `api-types/api.ts` gains `StationBoard`,
+`StationBoardDeparture`, `StationBoardPlatformStatus` and `StationBoardStatus`.
+No migration, no grant, no change to `api-types/openapi/v1.json`. Existing
+routes are unchanged.
+
+Off by default: with `STATION_BOARD_ENABLED` unset or `false` the route answers
+`404`. With it on, it answers a station's next departures (`limit` 1 to 30,
+default 8; optional `date` and `operator`) from the published timetable with
+Darwin's live times and platforms: per row `scheduled`, `expected`,
+`destinationCrs`/`destinationName`, `operator`, `platform`, `platformStatus`
+(`confirmed`, `expected`, `booked`, `toBeAnnounced`, `none`), `status`
+(`cancelled`, `delayed`, `onTime`, `booked`), `delayMinutes`, `isCancelled`,
+`cancelReason`, and the body's `attribution`. **A client must tolerate a
+`platformStatus` or `status` it does not know.**
+
+- A platform Darwin hides from the public is never served: the row is
+  `toBeAnnounced`, with no fallback to a booked platform.
+- At the stations in `STATION_BOARD_NO_BOOKED_PLATFORM_CRS` (default
+  `VIC,EUS,PAD,KGX,MYB,STP`) a booked platform is never served either.
+- `status: booked` means no live data: a row is never `onTime` without Darwin's
+  word.
+- `Cache-Control: public, s-maxage=20, stale-while-revalidate=30`.
+
+See [station-board.md](station-board.md).
+
 ## 2026-11-28: `POST /auth/logout-everywhere` and `logoutEverywhereEnabled`, behind `LOGOUT_EVERYWHERE_ENABLED` (DS-638)
 
 Additive. `api-types/api.ts` gains `LogoutEverywhereResponse` and the

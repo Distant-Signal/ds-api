@@ -48,6 +48,18 @@ shapes.
 [actual-vs-estimated-times.md](actual-vs-estimated-times.md) lists which time
 fields are actual, estimated or booked.
 
+## Station board (api route, off by default)
+
+The api also has `GET /public/stations/{crs}/board`: a station's next
+departures with live times and platforms, behind `STATION_BOARD_ENABLED`
+(`404` while off). It is the api's own shape (an object, not TfL's array) and
+is not one of the routes the site's proxy lists above until the website uses
+it. Its credit is the body's `attribution`; it is cached 20 s. A platform
+Darwin hides from the public is never served, and at the London termini a
+booked platform never is. Platforms from Darwin are treated as permitted for
+logged-out display (the owner's decision, 2026-11-28). See
+[station-board.md](station-board.md).
+
 ## Attribution
 
 Each response is a bare JSON array, as TfL's is, so the credits travel on

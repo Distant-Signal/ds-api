@@ -126,6 +126,7 @@ fn visit_roots(v: &mut Collector) {
     v.visit::<crate::routes::station_stats::StationOperatorSampleStatsJson>();
     v.visit::<crate::render::StationDepartureJson>();
     v.visit::<crate::render::ScheduleDepartureJson>();
+    v.visit::<crate::routes::station_board::StationBoardResponse>();
     // Lines.
     v.visit::<crate::routes::lines::LineSummary>();
     v.visit::<crate::routes::lines::CustomLineDetail>();

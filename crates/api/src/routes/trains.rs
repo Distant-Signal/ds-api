@@ -565,7 +565,7 @@ fn normalize_date(
 }
 
 /// Parses a caller-supplied `"YYYY-MM-DD"`, with no window check.
-fn parse_date(raw: &str) -> Result<chrono::NaiveDate, (StatusCode, String)> {
+pub(crate) fn parse_date(raw: &str) -> Result<chrono::NaiveDate, (StatusCode, String)> {
     chrono::NaiveDate::parse_from_str(raw.trim(), "%Y-%m-%d").map_err(|_| {
         (
             StatusCode::BAD_REQUEST,
@@ -611,7 +611,7 @@ fn searchable_range(
 /// published timetable (see `searchable_range`). The `400` names the
 /// searchable range and the published one, so a client can correct the
 /// date without a second call.
-async fn check_search_date(
+pub(crate) async fn check_search_date(
     app: &App,
     date: chrono::NaiveDate,
     today: chrono::NaiveDate,
@@ -724,7 +724,7 @@ pub(crate) struct TrainSearchOperator {
 }
 
 /// Validates and uppercases a CRS code.
-fn normalize_crs(label: &str, raw: &str) -> Result<String, (StatusCode, String)> {
+pub(crate) fn normalize_crs(label: &str, raw: &str) -> Result<String, (StatusCode, String)> {
     let trimmed = raw.trim();
     if trimmed.len() != 3 || !trimmed.chars().all(|c| c.is_ascii_alphabetic()) {
         return Err((
@@ -911,7 +911,9 @@ fn parse_day_offset(
 /// Parses `operator=`: comma-separated ATOC codes, trimmed, uppercased and
 /// deduplicated, empty entries dropped. `None` when nothing is left (no
 /// filter). A malformed code is a `400`.
-fn parse_operators(raw: Option<&str>) -> Result<Option<Vec<String>>, (StatusCode, String)> {
+pub(crate) fn parse_operators(
+    raw: Option<&str>,
+) -> Result<Option<Vec<String>>, (StatusCode, String)> {
     let mut codes: Vec<String> = Vec::new();
     for entry in raw.unwrap_or_default().split(',') {
         if entry.trim().is_empty() {
@@ -931,7 +933,7 @@ fn parse_operators(raw: Option<&str>) -> Result<Option<Vec<String>>, (StatusCode
 /// train in the published timetable on one of `service_dates` (2026-10-22):
 /// `tocs` lacks some codes the timetable carries (`TW`, `QC`, `LF` on
 /// 2026-10-22), and their trains must stay filterable.
-async fn check_known_operators(
+pub(crate) async fn check_known_operators(
     app: &App,
     codes: &[String],
     service_dates: &[chrono::NaiveDate],

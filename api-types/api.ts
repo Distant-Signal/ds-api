@@ -4688,6 +4688,55 @@ deletedJourneyIds: Array<number>, deletedJourneyCount: number, };
 export type StationAccessibility = { stationAccessibility?: JsonValue, staffAssistance?: JsonValue, toiletsAndChanging?: JsonValue, lifts?: JsonValue, transportLinks?: JsonValue, cycling?: JsonValue, carParks?: JsonValue, dropOffPickUp?: JsonValue, platformFacilities?: JsonValue, stationFacilities?: JsonValue, helpAndSupport?: JsonValue, loungesAndWaiting?: JsonValue, };
 
 /**
+ * The body of the route.
+ */
+export type StationBoard = { crs: string, name: string | null, serviceDate: string, 
+/**
+ * When this board was built, RFC 3339 UTC.
+ */
+generatedAt: string, departures: Array<StationBoardDeparture>, 
+/**
+ * The credits the data needs; republish them with it.
+ */
+attribution: Array<TransitAttribution>, };
+
+/**
+ * One row of the board.
+ */
+export type StationBoardDeparture = { 
+/**
+ * The CIF train UID, for `GET /Train/by-uid/{uid}/{serviceDate}`.
+ */
+uid: string, serviceDate: string, 
+/**
+ * The booked time shown to the public, `HH:MM`, on day `dayOffset`
+ * (1 after the service date's midnight).
+ */
+scheduled: string, dayOffset: number, 
+/**
+ * Darwin's actual or forecast time, `HH:MM`; `null` with no live data.
+ */
+expected: string | null, expectedDayOffset: number | null, destinationCrs: string | null, destinationName: string | null, 
+/**
+ * ATOC code.
+ */
+operator: string | null, operatorName: string | null, headcode: string | null, 
+/**
+ * Never a platform Darwin hides from the public.
+ */
+platform: string | null, platformStatus: StationBoardPlatformStatus, status: StationBoardStatus, delayMinutes: number | null, isCancelled: boolean, cancelReason: string | null, };
+
+/**
+ * What a row's `platform` rests on.
+ */
+export type StationBoardPlatformStatus = "confirmed" | "expected" | "booked" | "toBeAnnounced" | "none";
+
+/**
+ * Where a row stands.
+ */
+export type StationBoardStatus = "cancelled" | "delayed" | "onTime" | "booked";
+
+/**
  * `GET /JourneyTemplates/station-buffer`'s response.
  */
 export type StationBufferPrefill = { minutes: number | null, };

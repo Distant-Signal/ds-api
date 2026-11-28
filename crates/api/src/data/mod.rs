@@ -68,6 +68,7 @@ pub mod retention;
 pub mod schedule_matching;
 pub mod schedule_services;
 pub mod secret_box_backfill;
+pub mod station_board;
 pub mod station_groups;
 pub mod station_skip;
 pub mod station_stats;
