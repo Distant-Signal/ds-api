@@ -479,7 +479,7 @@ pub fn retain_allowed_groups(groups: &[String], allowlist: &[String]) -> Vec<Str
 
 /// Suffix of `distant_signal_api_login_missing_name_claims_total`: one per
 /// login (new or returning user) whose claims gave neither a name nor a
-/// username ([`upsert_user_in`]). Registered at 0 by
+/// username ([`upsert_user`]). Registered at 0 by
 /// `routes::auth::register_user_metrics`.
 pub const MISSING_NAME_CLAIMS_METRIC: &str = "api_login_missing_name_claims_total";
 
@@ -519,19 +519,6 @@ pub const MISSING_NAME_CLAIMS_METRIC: &str = "api_login_missing_name_claims_tota
 /// `created` comes from `xmax = 0`, true only for a row this statement
 /// `INSERTed` (an `ON CONFLICT DO UPDATE` sets `xmax` to this transaction).
 pub async fn upsert_user(pool: &PgPool, identity: &OidcIdentity) -> Result<User> {
-    let mut conn = pool.acquire().await?;
-    upsert_user_in(&mut conn, identity, None).await
-}
-
-/// [`upsert_user`] on `conn` (the account continuity login runs it in its
-/// transaction, `data::account_continuity`), also storing `discord_id`
-/// when it is `Some`. `None` leaves the stored `users.discord_id` as it
-/// is, so a login without the claim never clears one loaded earlier.
-pub async fn upsert_user_in(
-    conn: &mut sqlx::PgConnection,
-    identity: &OidcIdentity,
-    discord_id: Option<&str>,
-) -> Result<User> {
     let name = non_blank(identity.name.as_deref());
     let username = non_blank(identity.preferred_username.as_deref());
     if name.is_none() && username.is_none() {
@@ -545,13 +532,12 @@ pub async fn upsert_user_in(
             .increment(1);
     }
     let row = sqlx::query_as::<_, User>(
-        "INSERT INTO users (id, name, username, groups, discord_id, created_at, last_login_at) \
-         VALUES ($1, $2, $3, $4, $5, NOW(), NOW()) \
+        "INSERT INTO users (id, name, username, groups, created_at, last_login_at) \
+         VALUES ($1, $2, $3, $4, NOW(), NOW()) \
          ON CONFLICT (id) DO UPDATE SET \
             name = COALESCE(EXCLUDED.name, users.name), \
             username = COALESCE(EXCLUDED.username, users.username), \
             groups = EXCLUDED.groups, \
-            discord_id = COALESCE(EXCLUDED.discord_id, users.discord_id), \
             last_login_at = NOW() \
          RETURNING id, name, username, (xmax = 0) AS created",
     )
@@ -559,8 +545,7 @@ pub async fn upsert_user_in(
     .bind(name)
     .bind(username)
     .bind(&identity.groups)
-    .bind(discord_id)
-    .fetch_one(&mut *conn)
+    .fetch_one(pool)
     .await?;
     Ok(row)
 }
@@ -1629,6 +1614,61 @@ mod db_tests {
         fn make_writer(&'a self) -> Self::Writer {
             self.clone()
         }
+    }
+
+    /// Account continuity is removed: a login is keyed on its `sub` alone,
+    /// never re-keys an existing account, and neither reads nor writes
+    /// `users.discord_id`. The column still exists until the ds-core
+    /// migration that drops it, so this checks it stays NULL when it is
+    /// there, and passes unchanged once it is gone.
+    #[tokio::test]
+    #[ignore = "requires a live database; run with `cargo test -p api \
+                a_login_is_keyed_on_sub_alone_and_leaves_discord_id_null -- --ignored`"]
+    async fn a_login_is_keyed_on_sub_alone_and_leaves_discord_id_null() {
+        const OLD: &str = "TEST-USER-NO-REKEY-OLD";
+        const NEW: &str = "TEST-USER-NO-REKEY-NEW";
+        let pool = name_test_pool(&[OLD, NEW]).await;
+        let old = upsert_user(&pool, &named(OLD, Some("Old Rider"), Some("old-rider")))
+            .await
+            .expect("first login");
+        assert!(old.created);
+
+        let new = upsert_user(&pool, &named(NEW, Some("Old Rider"), Some("old-rider")))
+            .await
+            .expect("login under a new sub");
+        assert!(new.created, "a new sub is a new account, not a re-key");
+        assert_eq!(new.id, NEW);
+        let again = upsert_user(&pool, &named(OLD, Some("Old Rider"), Some("old-rider")))
+            .await
+            .expect("the old sub logs in again");
+        assert!(!again.created);
+        let ids: Vec<String> =
+            sqlx::query_scalar("SELECT id FROM users WHERE id = ANY($1) ORDER BY id")
+                .bind(vec![OLD, NEW])
+                .fetch_all(&pool)
+                .await
+                .expect("read the accounts");
+        assert_eq!(ids, vec![NEW.to_string(), OLD.to_string()]);
+
+        let has_column: bool = sqlx::query_scalar(
+            "SELECT EXISTS (SELECT 1 FROM information_schema.columns \
+             WHERE table_schema = 'public' AND table_name = 'users' \
+               AND column_name = 'discord_id')",
+        )
+        .fetch_one(&pool)
+        .await
+        .expect("look for the column");
+        if has_column {
+            let set: i64 = sqlx::query_scalar(
+                "SELECT COUNT(*) FROM users WHERE id = ANY($1) AND discord_id IS NOT NULL",
+            )
+            .bind(vec![OLD, NEW])
+            .fetch_one(&pool)
+            .await
+            .expect("count stored Discord ids");
+            assert_eq!(set, 0, "login must leave users.discord_id NULL");
+        }
+        clear_name_test_users(&pool, &[OLD, NEW]).await;
     }
 
     /// 2026-11-06: `ds-sso` briefly sent no name claims, and every login

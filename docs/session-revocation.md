@@ -297,7 +297,7 @@ values below; nothing about a user is ever a label.
 | `rejected` | `invalidated` | The row exists but its user's `sessions_invalidated_at` is later than the row's `created_at`. Revocation deletes the rows in the same transaction, so this needs a race (a login committing during a revocation); expect it to stay at 0 |
 | `extended` | `slide` | A due session's expiry slid forward (at most once per `SESSION_EXTEND_THROTTLE_HOURS`) |
 | `extend_failed` | `db_error` | The slide failed; the request went on and the next due request retries |
-| `revoked` | `backchannel`, `admin`, `revoke_others`, `user_logout`, `logout_everywhere`, `account_deletion`, `login_replaced`, `rekey`, `expiry_sweep` | Session rows were deleted. `login_replaced`: a login ended the session its browser carried. `rekey`: account continuity re-keyed the account. `expiry_sweep`: the api's sweep deleted lapsed rows (counted once per sweep that deleted any; the `apiMaintenance` cron job has no metrics listener, so its sweeps are not counted) |
+| `revoked` | `backchannel`, `admin`, `revoke_others`, `user_logout`, `logout_everywhere`, `account_deletion`, `login_replaced`, `expiry_sweep` | Session rows were deleted. `login_replaced`: a login ended the session its browser carried. `expiry_sweep`: the api's sweep deleted lapsed rows (counted once per sweep that deleted any; the `apiMaintenance` cron job has no metrics listener, so its sweeps are not counted) |
 | `backchannel_rejected` | `invalid_token`, `unknown_user`, `other` | A back-channel logout that ended nothing: the token failed validation (or named only a `sid`), the token was valid but names no user here (answered 200), or the request had no usable `logout_token` or was too large |
 
 `distant_signal_api_sessions_deleted_total{reason}`: session rows deleted,
@@ -345,8 +345,7 @@ It is a pseudonym, not anonymisation: the hash is unsalted, so anyone with the
 list of user ids can recompute it. That is accepted because the ids are opaque
 identity-provider subjects, the tag is truncated, and it stays in the log. An
 account deletion is logged without a pseudonym, as the deletion's own line is.
-The older audit lines (`backchannel_logout`, `admin_session_revoke`,
-`account_rekeyed`) name the account id as before; this change does not touch
+The older audit lines (`backchannel_logout`, `admin_session_revoke`) name the account id as before; this change does not touch
 them.
 
 ### Why did this user get logged out?
