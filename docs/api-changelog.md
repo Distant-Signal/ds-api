@@ -56,6 +56,33 @@ No flag: the default 0 changes nothing. `api-types/api.ts` gains
 DS-MCP: no change needed. It does not receive the setting (`GET /preferences`
 is not a delegated route and its journey reads leave out `extraMinutes`).
 
+## 2026-11-28: station board `likely` platform and `platformBasis` (DS-766)
+
+Additive. `GET /public/stations/{crs}/board` rows (departures and arrivals) gain `platformBasis`
+(`"inbound"`, `"booked"` or `null`), and `platformStatus` gains `likely`;
+`api-types/api.ts` gains `StationBoardPlatformBasis` and widens
+`StationBoardPlatformStatus`. No migration, no grant, no change to
+`api-types/openapi/v1.json`. The route is still behind `STATION_BOARD_ENABLED`.
+
+`likely` is a prediction from independent data, never Darwin's word, and a
+client must show it labelled as not announced. `platformBasis` says what it
+rests on: `inbound` (the working that forms the service arrives at that
+platform at this station: stock normally leaves from where it arrived) or
+`booked` (the timetable's plan). It is `null` for every other status.
+`likely` replaces what used to be `toBeAnnounced` where Darwin hides the
+call's platform but a prediction exists; the hidden Darwin value itself is
+still never served, and a hidden inbound arrival is never a source.
+`toBeAnnounced` now means Darwin hides it (or the station is listed, below)
+and nothing independent predicts one. `booked` is unchanged (a timetable
+platform with no Darwin word, not hidden). Any platform Darwin announces
+(`confirmed`, `expected`) takes over automatically, so a row can change from
+`likely` to a different platform when the real one is announced.
+
+Configuration: `STATION_BOARD_NO_BOOKED_PLATFORM_CRS` now defaults to empty
+(it was `VIC,EUS,PAD,KGX,MYB,STP`). A listed station shows its booked
+platform as `likely` with basis `booked` instead of withholding it; set it to
+a list for that, blank for none. ds-deploy's chart default for
+`api.stationBoard.noBookedPlatformCrs` should change to match.
 
 ## 2026-11-28: account continuity removed (DS-638)
 

@@ -18,7 +18,11 @@
 //! station's TIPLOCs and the names. The station's LDBWS board
 //! (`station_samples`, a departures board) is read only for the departures
 //! board, and only when some row has no Darwin platform and no Darwin word
-//! that it is hidden.
+//! that it is hidden. For the departures with no public platform of their own,
+//! the inbound working's arrival platform is read in batches too
+//! (`data::station_board::inbound_platforms`: the turnaround keys, the
+//! inbound's Darwin calls and, when Darwin has none, TRUST's arrival), giving
+//! a labelled `likely` platform.
 
 use std::collections::HashMap;
 use std::sync::{Arc, LazyLock};
@@ -34,7 +38,7 @@ use sqlx::PgPool;
 
 use crate::app::{App, Router};
 use crate::data::station_board::{
-    self, BoardCall, BoardKind, BoardPlatformStatus, BoardStatus, BookedCall,
+    self, BoardCall, BoardKind, BoardPlatformBasis, BoardPlatformStatus, BoardStatus, BookedCall,
     LDBWS_MAX_AGE_MINUTES, LdbwsKey, Settings,
 };
 use crate::data::{journey_alternatives, queries, train_reasons};
@@ -109,9 +113,15 @@ pub(crate) struct StationBoardDepartureJson {
     operator: Option<String>,
     operator_name: Option<String>,
     headcode: Option<String>,
-    /// Never a platform Darwin hides from the public.
+    /// Never a platform Darwin hides from the public for this call. With
+    /// `platformStatus` `likely` it is a prediction, not an announcement:
+    /// show it labelled as such.
     platform: Option<String>,
     platform_status: BoardPlatformStatus,
+    /// What a `likely` platform rests on (`inbound`: the working that forms
+    /// this service arrives there; `booked`: the timetable's plan); `null`
+    /// for every other status.
+    platform_basis: Option<BoardPlatformBasis>,
     status: BoardStatus,
     delay_minutes: Option<u32>,
     is_cancelled: bool,
@@ -148,9 +158,12 @@ pub(crate) struct StationBoardArrivalJson {
     operator: Option<String>,
     operator_name: Option<String>,
     headcode: Option<String>,
-    /// Never a platform Darwin hides from the public.
+    /// As on a departure: never a platform Darwin hides; `likely` is a
+    /// prediction.
     platform: Option<String>,
     platform_status: BoardPlatformStatus,
+    /// What a `likely` platform rests on; `null` for every other status.
+    platform_basis: Option<BoardPlatformBasis>,
     status: BoardStatus,
     delay_minutes: Option<u32>,
     is_cancelled: bool,
@@ -370,6 +383,15 @@ fn is_today(row: &BoardRow, today: NaiveDate) -> bool {
 struct Live<'a> {
     darwin: Option<&'a BoardCall>,
     booked: Option<&'a BookedCall>,
+}
+
+/// Whether Darwin has no public platform for the call: no call, a blank
+/// one or a hidden one, and the call is not cancelled.
+fn has_no_public_platform(darwin: Option<&BoardCall>) -> bool {
+    darwin.is_none_or(|call| {
+        let view = call.platform_view();
+        !view.cancelled && (view.hidden || view.platform.is_none_or(|p| p.trim().is_empty()))
+    })
 }
 
 /// The LDBWS platform for the rows that can still use one, by position
@@ -706,8 +728,9 @@ async fn build_board(
         BoardKind::Arrivals => HashMap::new(),
     };
 
-    let no_booked = settings.no_booked_platform(&station);
-    let mut kept: Vec<(usize, StationBoardDepartureJson)> = Vec::new();
+    // The rows still on the board, cut to `limit`: only these ask for a
+    // prediction.
+    let mut on_board: Vec<usize> = Vec::new();
     for (index, (row, live)) in rows.iter().zip(&live).enumerate() {
         let times = live.darwin.map(|call| call.times(kind));
         let status = station_board::live_status(times, row.shown_total);
@@ -721,9 +744,37 @@ async fn build_board(
         if gone || past {
             continue;
         }
-        let (platform, platform_status) = station_board::resolve_platform(
+        on_board.push(index);
+        if on_board.len() >= usize::try_from(query.limit).unwrap_or(usize::MAX) {
+            break;
+        }
+    }
+    // Predictions from the inbound working, for the departures with no
+    // platform of their own (a hidden one included). An arrival's platform
+    // is where it arrives, so the arrivals board has none.
+    let needs_prediction: Vec<(String, NaiveDate)> = match kind {
+        BoardKind::Departures => on_board
+            .iter()
+            .filter(|&&i| !from_board.contains_key(&i) && has_no_public_platform(live[i].darwin))
+            .map(|&i| (rows[i].uid.clone(), rows[i].service_date))
+            .collect(),
+        BoardKind::Arrivals => Vec::new(),
+    };
+    let inbound =
+        station_board::inbound_platforms(pool, &station, &needs_prediction, &tiplocs).await?;
+
+    let no_booked = settings.no_booked_platform(&station);
+    let mut kept: Vec<(usize, StationBoardDepartureJson)> = Vec::new();
+    for index in on_board {
+        let (row, live) = (&rows[index], &live[index]);
+        let times = live.darwin.map(|call| call.times(kind));
+        let status = station_board::live_status(times, row.shown_total);
+        let resolved = station_board::resolve_platform(
             live.darwin.map(BoardCall::platform_view),
             from_board.get(&index).map(String::as_str),
+            inbound
+                .get(&(row.uid.clone(), row.service_date))
+                .map(String::as_str),
             live.booked.and_then(|c| c.platform.as_deref()),
             no_booked,
         );
@@ -744,8 +795,9 @@ async fn build_board(
                 operator: row.operator.clone(),
                 operator_name: None,
                 headcode: row.headcode.clone(),
-                platform,
-                platform_status,
+                platform: resolved.platform,
+                platform_status: resolved.status,
+                platform_basis: resolved.basis,
                 status: status.status,
                 delay_minutes: status.delay_minutes,
                 is_cancelled,
@@ -757,9 +809,6 @@ async fn build_board(
                     .map(str::to_string),
             },
         ));
-        if kept.len() >= usize::try_from(query.limit).unwrap_or(usize::MAX) {
-            break;
-        }
     }
 
     let mut codes: Vec<String> = vec![station.clone()];
@@ -850,6 +899,7 @@ impl StationBoardArrivalJson {
             headcode: row.headcode,
             platform: row.platform,
             platform_status: row.platform_status,
+            platform_basis: row.platform_basis,
             status: row.status,
             delay_minutes: row.delay_minutes,
             is_cancelled: row.is_cancelled,
@@ -1112,40 +1162,64 @@ mod tests {
         cancelled.call.is_cancelled = true;
         let status = station_board::live_status(Some(cancelled.times(BoardKind::Arrivals)), 604);
         assert_eq!(status.status, BoardStatus::Cancelled);
+        let resolved = station_board::resolve_platform(
+            Some(cancelled.platform_view()),
+            None,
+            None,
+            Some("1"),
+            false,
+        );
         assert_eq!(
-            station_board::resolve_platform(
-                Some(cancelled.platform_view()),
-                None,
-                Some("1"),
-                false
-            ),
+            (resolved.platform, resolved.status),
             (None, BoardPlatformStatus::None)
         );
     }
 
     #[test]
-    fn the_arrivals_platform_follows_the_departures_precedence_including_termini() {
+    fn the_arrivals_platform_follows_the_departures_precedence() {
+        let resolve = |darwin: Option<&BoardCall>, booked, listed| {
+            let resolved = station_board::resolve_platform(
+                darwin.map(BoardCall::platform_view),
+                None,
+                None,
+                booked,
+                listed,
+            );
+            (resolved.platform, resolved.status, resolved.basis)
+        };
         // Darwin's public platform first.
         let live = call(Some("10:04"), None);
         assert_eq!(
-            station_board::resolve_platform(Some(live.platform_view()), None, Some("1"), true),
-            (Some("4".to_string()), BoardPlatformStatus::Confirmed)
+            resolve(Some(&live), Some("1"), true),
+            (Some("4".to_string()), BoardPlatformStatus::Confirmed, None)
         );
-        // Hidden: to be announced, never the booked one.
+        // Hidden: the timetable's platform as a prediction, never Darwin's.
         let mut hidden = call(Some("10:04"), None);
         hidden.call.platform_suppressed = true;
         assert_eq!(
-            station_board::resolve_platform(Some(hidden.platform_view()), None, Some("1"), false),
-            (None, BoardPlatformStatus::ToBeAnnounced)
+            resolve(Some(&hidden), Some("1"), false),
+            (
+                Some("1".to_string()),
+                BoardPlatformStatus::Likely,
+                Some(BoardPlatformBasis::Booked)
+            )
         );
-        // No Darwin: booked, except at a terminus.
         assert_eq!(
-            station_board::resolve_platform(None, None, Some("1"), false),
-            (Some("1".to_string()), BoardPlatformStatus::Booked)
+            resolve(Some(&hidden), None, false),
+            (None, BoardPlatformStatus::ToBeAnnounced, None)
+        );
+        // No Darwin: booked, or a prediction at a listed station.
+        assert_eq!(
+            resolve(None, Some("1"), false),
+            (Some("1".to_string()), BoardPlatformStatus::Booked, None)
         );
         assert_eq!(
-            station_board::resolve_platform(None, None, Some("1"), true),
-            (None, BoardPlatformStatus::ToBeAnnounced)
+            resolve(None, Some("1"), true),
+            (
+                Some("1".to_string()),
+                BoardPlatformStatus::Likely,
+                Some(BoardPlatformBasis::Booked)
+            )
         );
     }
 }
@@ -1509,9 +1583,8 @@ mod db_tests {
         );
         let board: Value = serde_json::from_str(&text).unwrap();
 
-        // The hidden platforms are nowhere in the answer, nor the booked
-        // platforms they would have fallen back to.
-        for hidden in ["9Z", "9Y", "3B", "3C"] {
+        // Darwin's hidden platforms are nowhere in the answer.
+        for hidden in ["9Z", "9Y"] {
             assert!(!text.contains(hidden), "{hidden} leaked: {text}");
         }
 
@@ -1554,16 +1627,19 @@ mod db_tests {
         assert_eq!(expected["delayMinutes"], 4);
         assert_eq!(expected["expected"], "10:14");
 
-        for uid in ["ZB0003", "ZB0004"] {
+        // Hidden by Darwin: the timetable's platform, labelled a prediction.
+        for (uid, booked) in [("ZB0003", "3B"), ("ZB0004", "3C")] {
             let hidden = row(&board, uid);
-            assert_eq!(hidden["platform"], Value::Null, "{uid}");
-            assert_eq!(hidden["platformStatus"], "toBeAnnounced", "{uid}");
+            assert_eq!(hidden["platform"], booked, "{uid}");
+            assert_eq!(hidden["platformStatus"], "likely", "{uid}");
+            assert_eq!(hidden["platformBasis"], "booked", "{uid}");
         }
         assert_eq!(row(&board, "ZB0003")["status"], "onTime");
 
         let booked = row(&board, "ZB0005");
         assert_eq!(booked["platform"], "6");
         assert_eq!(booked["platformStatus"], "booked");
+        assert_eq!(booked["platformBasis"], Value::Null);
         assert_eq!(booked["status"], "booked");
         assert_eq!(booked["expected"], Value::Null);
         assert_eq!(booked["delayMinutes"], Value::Null);
@@ -1592,7 +1668,7 @@ mod db_tests {
 
     #[sqlx::test(migrator = "ds_store::migrate::MIGRATOR")]
     #[ignore = "needs DATABASE_URL (a role that can create databases)"]
-    async fn a_location_suppressed_call_never_shows_a_platform(pool: PgPool) {
+    async fn a_location_suppressed_call_never_shows_its_own_platform(pool: PgPool) {
         let _now = crate::routes::pin_london_now_for_tests(ten_oclock());
         station(&pool).await;
         timetable(&pool, DATE, "ZB0030", "10:05:00", 0, None, Some("3D")).await;
@@ -1610,26 +1686,37 @@ mod db_tests {
         .await;
         let router = router(pool, enabled(&[]));
         let (board, text) = board(&router, "/stations/ZBA/board").await;
-        assert!(!text.contains("9X") && !text.contains("3D"), "{text}");
-        assert_eq!(row(&board, "ZB0030")["platformStatus"], "toBeAnnounced");
+        assert!(!text.contains("9X"), "{text}");
+        let departure = row(&board, "ZB0030");
+        assert_eq!(departure["platform"], "3D");
+        assert_eq!(departure["platformStatus"], "likely");
+        assert_eq!(departure["platformBasis"], "booked");
     }
 
     #[sqlx::test(migrator = "ds_store::migrate::MIGRATOR")]
     #[ignore = "needs DATABASE_URL (a role that can create databases)"]
-    async fn a_terminus_never_shows_a_booked_platform(pool: PgPool) {
+    async fn a_listed_station_shows_its_booked_platform_only_as_a_prediction(pool: PgPool) {
         let _now = crate::routes::pin_london_now_for_tests(ten_oclock());
         seed_board(&pool).await;
         let router = router(pool, enabled(&["ZBA"]));
         let (board, text) = board(&router, "/stations/ZBA/board?limit=30").await;
-        // The booked platforms of the rows with no live platform: 6, 7, 3B...
-        for uid in ["ZB0005", "ZB0006", "ZB0008", "ZB0009"] {
+        for (uid, platform) in [("ZB0005", "6"), ("ZB0008", "7")] {
+            let departure = row(&board, uid);
+            assert_eq!(departure["platform"], platform, "{uid}");
+            assert_eq!(departure["platformStatus"], "likely", "{uid}");
+            assert_eq!(departure["platformBasis"], "booked", "{uid}");
+        }
+        // Nothing derivable: to be announced.
+        for uid in ["ZB0006", "ZB0009"] {
             let departure = row(&board, uid);
             assert_eq!(departure["platform"], Value::Null, "{uid}");
             assert_eq!(departure["platformStatus"], "toBeAnnounced", "{uid}");
+            assert_eq!(departure["platformBasis"], Value::Null, "{uid}");
         }
-        assert!(!text.contains("3B") && !text.contains("3C"), "{text}");
-        // A public live platform still shows.
+        assert!(!text.contains("9Z") && !text.contains("9Y"), "{text}");
+        // A public live platform still shows, unlabelled.
         assert_eq!(row(&board, "ZB0001")["platform"], "4");
+        assert_eq!(row(&board, "ZB0001")["platformStatus"], "confirmed");
         assert_eq!(row(&board, "ZB0002")["platform"], "5");
     }
 
@@ -1656,7 +1743,8 @@ mod db_tests {
         assert_eq!(departure["platform"], "6L");
         assert_eq!(departure["platformStatus"], "expected");
         // A hidden Darwin platform is not overridden by the board.
-        assert_eq!(row(&fresh, "ZB0003")["platformStatus"], "toBeAnnounced");
+        assert_eq!(row(&fresh, "ZB0003")["platformStatus"], "likely");
+        assert_eq!(row(&fresh, "ZB0003")["platform"], "3B");
 
         // An old board says nothing.
         sqlx::query("UPDATE station_samples SET polled_at = $1")
@@ -2097,10 +2185,7 @@ mod db_tests {
         assert_eq!(board["board"], "arrivals");
         assert_eq!(board["departures"], serde_json::json!([]));
         assert_eq!(board["serviceDate"], DATE);
-        assert!(
-            !text.contains("9Z") && !text.contains("3B") && !text.contains("6L"),
-            "{text}"
-        );
+        assert!(!text.contains("9Z") && !text.contains("6L"), "{text}");
 
         // Gone (arrived), pick-up only, starting here and long past are
         // not on it; the late one and the terminating ones are.
@@ -2149,8 +2234,9 @@ mod db_tests {
         assert_eq!(hidden["originCrs"], "ZQO");
         assert_eq!(hidden["destinationCrs"], CRS);
         assert_eq!(hidden["scheduled"], "10:30");
-        assert_eq!(hidden["platform"], Value::Null);
-        assert_eq!(hidden["platformStatus"], "toBeAnnounced");
+        assert_eq!(hidden["platform"], "3B");
+        assert_eq!(hidden["platformStatus"], "likely");
+        assert_eq!(hidden["platformBasis"], "booked");
         assert_eq!(hidden["status"], "onTime");
 
         let ends = arrival(&board, "ZA0008");
@@ -2167,17 +2253,20 @@ mod db_tests {
 
     #[sqlx::test(migrator = "ds_store::migrate::MIGRATOR")]
     #[ignore = "needs DATABASE_URL (a role that can create databases)"]
-    async fn a_terminus_never_shows_a_booked_platform_on_the_arrivals_board(pool: PgPool) {
+    async fn a_listed_station_shows_its_booked_platform_only_as_a_prediction_on_the_arrivals_board(
+        pool: PgPool,
+    ) {
         let _now = crate::routes::pin_london_now_for_tests(ten_oclock());
         seed_arrivals(&pool).await;
         let router = router(pool, enabled(&["ZBA"]));
         let (board, text) = board(&router, "/stations/ZBA/board?board=arrivals&limit=30").await;
         for uid in ["ZA0005", "ZA0007", "ZA0008"] {
             let row = arrival(&board, uid);
-            assert_eq!(row["platform"], Value::Null, "{uid}");
-            assert_eq!(row["platformStatus"], "toBeAnnounced", "{uid}");
+            assert_eq!(row["platformStatus"], "likely", "{uid}");
+            assert_eq!(row["platformBasis"], "booked", "{uid}");
+            assert!(row["platform"].is_string(), "{uid}");
         }
-        assert!(!text.contains("3B"), "{text}");
+        assert!(!text.contains("9Z"), "{text}");
         // A public live platform still shows.
         assert_eq!(arrival(&board, "ZA0001")["platform"], "4");
     }
@@ -2317,6 +2406,237 @@ mod db_tests {
         assert_eq!(arrival(&board, "ZA0021")["dayOffset"], 0);
     }
 
+    /// A turnaround: `uid` is formed by `prev_uid`, at [`TIPLOC`].
+    async fn turnaround(pool: &PgPool, uid: &str, prev_uid: &str, link: &str) {
+        sqlx::query(
+            "INSERT INTO schedule_turnarounds \
+                (service_date, uid, prev_service_date, prev_uid, booked_turnaround_minutes, \
+                 link, origin_tiploc, platform, departs_at) \
+             VALUES ($1, $2, $1, $3, 30, $4, $5, NULL, $6)",
+        )
+        .bind(date(DATE))
+        .bind(uid)
+        .bind(prev_uid)
+        .bind(link)
+        .bind(TIPLOC)
+        .bind(ten_oclock() + chrono::Duration::minutes(30))
+        .execute(pool)
+        .await
+        .unwrap();
+    }
+
+    /// The inbound working's Darwin arrival call here.
+    async fn inbound(pool: &PgPool, prev_uid: &str, call: Darwin<'_>) {
+        darwin(
+            pool,
+            DATE,
+            prev_uid,
+            "",
+            Darwin {
+                wta: "10:20",
+                ..call
+            },
+        )
+        .await;
+    }
+
+    #[sqlx::test(migrator = "ds_store::migrate::MIGRATOR")]
+    #[ignore = "needs DATABASE_URL (a role that can create databases)"]
+    async fn a_terminus_departure_is_likely_to_leave_from_its_inbound_platform(pool: PgPool) {
+        let _now = crate::routes::pin_london_now_for_tests(ten_oclock());
+        station(&pool).await;
+        // Darwin hides the outbound platform (and "9Z" must never appear);
+        // the unit arrives at platform 12 (confirmed), the timetable says 3B.
+        timetable(&pool, DATE, "ZB0040", "10:30:00", 0, None, Some("3B")).await;
+        darwin(
+            &pool,
+            DATE,
+            "ZB0040",
+            "10:30",
+            Darwin {
+                platform: Some("9Z"),
+                platform_suppressed: true,
+                ..Darwin::default()
+            },
+        )
+        .await;
+        turnaround(&pool, "ZB0040", "ZB0140", "association").await;
+        inbound(
+            &pool,
+            "ZB0140",
+            Darwin {
+                platform: Some("12"),
+                confirmed: true,
+                ..Darwin::default()
+            },
+        )
+        .await;
+        // No Darwin call at all for the outbound; the inbound is expected at 11.
+        timetable(&pool, DATE, "ZB0041", "10:35:00", 0, None, Some("3E")).await;
+        turnaround(&pool, "ZB0041", "ZB0141", "inferred").await;
+        inbound(
+            &pool,
+            "ZB0141",
+            Darwin {
+                platform: Some("11"),
+                ..Darwin::default()
+            },
+        )
+        .await;
+        // The inbound's arrival platform is hidden: not a source (not even
+        // as a hint), so the booked prediction is all there is.
+        timetable(&pool, DATE, "ZB0042", "10:40:00", 0, None, Some("3F")).await;
+        turnaround(&pool, "ZB0042", "ZB0142", "association").await;
+        inbound(
+            &pool,
+            "ZB0142",
+            Darwin {
+                platform: Some("8Q"),
+                confirmed: true,
+                platform_suppressed: true,
+                ..Darwin::default()
+            },
+        )
+        .await;
+        // The inbound's location is suppressed too.
+        timetable(&pool, DATE, "ZB0043", "10:45:00", 0, None, None).await;
+        turnaround(&pool, "ZB0043", "ZB0143", "association").await;
+        inbound(
+            &pool,
+            "ZB0143",
+            Darwin {
+                platform: Some("8R"),
+                location_suppressed: true,
+                ..Darwin::default()
+            },
+        )
+        .await;
+        // The inbound is cancelled: the unit is not coming.
+        timetable(&pool, DATE, "ZB0044", "10:50:00", 0, None, None).await;
+        turnaround(&pool, "ZB0044", "ZB0144", "association").await;
+        inbound(
+            &pool,
+            "ZB0144",
+            Darwin {
+                platform: Some("8S"),
+                cancelled: true,
+                ..Darwin::default()
+            },
+        )
+        .await;
+        // A cancelled outbound gets no platform, whatever its inbound says.
+        timetable(&pool, DATE, "ZB0045", "10:55:00", 0, None, Some("2")).await;
+        darwin(
+            &pool,
+            DATE,
+            "ZB0045",
+            "10:55",
+            Darwin {
+                cancelled: true,
+                ..Darwin::default()
+            },
+        )
+        .await;
+        turnaround(&pool, "ZB0045", "ZB0145", "association").await;
+        inbound(
+            &pool,
+            "ZB0145",
+            Darwin {
+                platform: Some("10"),
+                confirmed: true,
+                ..Darwin::default()
+            },
+        )
+        .await;
+        // The outbound's own public Darwin platform beats its inbound.
+        timetable(&pool, DATE, "ZB0046", "11:00:00", 0, None, Some("2")).await;
+        darwin(
+            &pool,
+            DATE,
+            "ZB0046",
+            "11:00",
+            Darwin {
+                platform: Some("6"),
+                confirmed: true,
+                ..Darwin::default()
+            },
+        )
+        .await;
+        turnaround(&pool, "ZB0046", "ZB0146", "association").await;
+        inbound(
+            &pool,
+            "ZB0146",
+            Darwin {
+                platform: Some("10"),
+                confirmed: true,
+                ..Darwin::default()
+            },
+        )
+        .await;
+
+        let router = router(pool, enabled(&["ZBA"]));
+        let (board, text) = board(&router, "/stations/ZBA/board?limit=30").await;
+        // No suppressed platform string reaches the body.
+        for hidden in ["9Z", "8Q", "8R", "8S"] {
+            assert!(!text.contains(hidden), "{hidden} leaked: {text}");
+        }
+        let hidden_outbound = row(&board, "ZB0040");
+        assert_eq!(hidden_outbound["platform"], "12");
+        assert_eq!(hidden_outbound["platformStatus"], "likely");
+        assert_eq!(hidden_outbound["platformBasis"], "inbound");
+        let no_darwin = row(&board, "ZB0041");
+        assert_eq!(no_darwin["platform"], "11");
+        assert_eq!(no_darwin["platformStatus"], "likely");
+        assert_eq!(no_darwin["platformBasis"], "inbound");
+        // A hidden inbound arrival is not a source.
+        let hidden_inbound = row(&board, "ZB0042");
+        assert_eq!(hidden_inbound["platform"], "3F");
+        assert_eq!(hidden_inbound["platformBasis"], "booked");
+        for uid in ["ZB0043", "ZB0044"] {
+            let departure = row(&board, uid);
+            assert_eq!(departure["platform"], Value::Null, "{uid}");
+            assert_eq!(departure["platformStatus"], "toBeAnnounced", "{uid}");
+        }
+        let cancelled = row(&board, "ZB0045");
+        assert_eq!(cancelled["platform"], Value::Null);
+        assert_eq!(cancelled["platformStatus"], "none");
+        let announced = row(&board, "ZB0046");
+        assert_eq!(announced["platform"], "6");
+        assert_eq!(announced["platformStatus"], "confirmed");
+        assert_eq!(announced["platformBasis"], Value::Null);
+    }
+
+    /// Outside the list the inbound still predicts, and with no hidden call
+    /// the timetable platform stays `booked`.
+    #[sqlx::test(migrator = "ds_store::migrate::MIGRATOR")]
+    #[ignore = "needs DATABASE_URL (a role that can create databases)"]
+    async fn the_inbound_platform_predicts_at_any_station_and_booked_stays_booked(pool: PgPool) {
+        let _now = crate::routes::pin_london_now_for_tests(ten_oclock());
+        station(&pool).await;
+        timetable(&pool, DATE, "ZB0050", "10:30:00", 0, None, Some("3")).await;
+        turnaround(&pool, "ZB0050", "ZB0150", "association").await;
+        inbound(
+            &pool,
+            "ZB0150",
+            Darwin {
+                platform: Some("2"),
+                ..Darwin::default()
+            },
+        )
+        .await;
+        timetable(&pool, DATE, "ZB0051", "10:35:00", 0, None, Some("4")).await;
+        let router = router(pool, enabled(&[]));
+        let (board, _) = board(&router, "/stations/ZBA/board").await;
+        let predicted = row(&board, "ZB0050");
+        assert_eq!(predicted["platform"], "2");
+        assert_eq!(predicted["platformStatus"], "likely");
+        assert_eq!(predicted["platformBasis"], "inbound");
+        let booked = row(&board, "ZB0051");
+        assert_eq!(booked["platform"], "4");
+        assert_eq!(booked["platformStatus"], "booked");
+        assert_eq!(booked["platformBasis"], Value::Null);
+    }
+
     /// The reads use the indexes the module docs name: `EXPLAIN` with
     /// sequential scans disabled, so a predicate that could not use an index
     /// would show a `Seq Scan` on the big tables.
@@ -2359,6 +2679,16 @@ mod db_tests {
         assert!(
             booked_plan.contains("schedule_calling_points_full_pkey"),
             "{booked_plan}"
+        );
+
+        let turnaround_sql = station_board::TURNAROUND_SQL
+            .replace("$1", "ARRAY['ZB0001']")
+            .replace("$2", "ARRAY['2099-11-04']")
+            .replace("$3", "ARRAY['ZBATIP']");
+        let turnaround_plan = plan(&pool, &turnaround_sql).await;
+        assert!(
+            turnaround_plan.contains("schedule_turnarounds_pkey"),
+            "{turnaround_plan}"
         );
 
         let tiploc_plan = plan(&pool, &TIPLOCS_SQL.replace("$1", "'ZBA'")).await;
