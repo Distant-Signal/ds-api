@@ -32,7 +32,7 @@ The delete route has three guards:
 
 The response clears the session cookie. The frontend then clears the chat's browser-only data: the MCP OAuth tokens and the Anthropic key in `localStorage`.
 
-Neither route touches the user's account on the login service (the Authentik that issues their OIDC `sub`: `ds-sso` after the cut-over in [connected-apps.md](connected-apps.md), "Account continuity") or their Discord account. The UI tells the user to close those separately; the privacy notice tells them to email the operator to have the login service account deleted.
+Neither route touches the user's account on the login service (the Authentik that issues their OIDC `sub`: `ds-sso` after the 2026-11 cut-over, [connected-apps.md](connected-apps.md), "Account continuity (removed)") or their Discord account. The UI tells the user to close those separately; the privacy notice tells them to email the operator to have the login service account deleted.
 
 ## How deletion works
 
@@ -55,7 +55,7 @@ The inactive-account sweep (below) uses the same function.
 
 | Table | Personal data | On account deletion | Retention while the account exists | Export |
 |---|---|---|---|---|
-| `users` | OIDC subject id, name and username (refreshed from the ID token at each login; a login without them keeps the stored ones), IdP groups (no email: the legacy column is dropped by `20261026090000_drop_users_email.sql`), the Discord account id (`discord_id`: loaded once from the previous login service's export for the `ds-sso` cut-over, then refreshed from the ID token on every login while `SSO_DISCORD_ID_CLAIM` is set; used only to match an account whose `sub` changed, never logged: [connected-apps.md](connected-apps.md), "Account continuity"), created and last-login times, the usage-analytics choice (`analytics_opt_in`, off by default), the bank holiday division regular journeys skip (`bank_holiday_division`, England and Wales when unset) | Deleted | Kept while the account exists. Optional inactive-account deletion is **off by default** (`INACTIVE_ACCOUNT_RETENTION_DAYS`). | `account` |
+| `users` | OIDC subject id, name and username (refreshed from the ID token at each login; a login without them keeps the stored ones), IdP groups (no email: the legacy column is dropped by `20261026090000_drop_users_email.sql`), created and last-login times, the usage-analytics choice (`analytics_opt_in`, off by default), the bank holiday division regular journeys skip (`bank_holiday_division`, England and Wales when unset) | Deleted | Kept while the account exists. Optional inactive-account deletion is **off by default** (`INACTIVE_ACCOUNT_RETENTION_DAYS`). | `account` |
 | `sessions` | Hashed session token, sign-in time, expiry | Cascade | Deleted when expired, hourly: 14 days without use (`session_ttl_days`), and at most 90 days after sign-in (`session_max_age_days`) | `sessions` (without id or token) |
 | `oidc_login_state` | PKCE verifier, nonce, CSRF state, return path. Not linked to a user. | n/a | Deleted after 15 minutes | n/a |
 | `push_subscriptions` | Push endpoint URL, encryption keys, timestamps (including the last push delivered), a device label worked out from the browser's User-Agent ("Chrome on Android"; the header itself is not kept) | Cascade | Deleted when the push service reports it gone, beyond 20 per user, or when the user has not logged in **and** the subscription has not been renewed for `STALE_PUSH_SUBSCRIPTION_DAYS` (365) | `pushSubscriptions` (without keys) |
@@ -140,15 +140,14 @@ Public login moves from the primary Authentik (`sso.example.com`,
 which also runs the operator's own infrastructure) to `ds-sso`, an
 Authentik used only for DS (Ranma-Config `docs/specs/ds-public-auth-idp.md`;
 the cut-over is in [connected-apps.md](connected-apps.md), "Account
-continuity"). It is run by Ranma-Config, not by the DS chart, and DS reads
+continuity (removed)"). It is run by Ranma-Config, not by the DS chart, and DS reads
 only what its ID token carries. For a Discord login it holds a user with
 the Discord account id (the source connection), username and display
 name, and its event logs (login IP addresses among them), kept for the
 privacy notice's `SSO_LOG_RETENTION` (`frontend/lib/legal.ts` in
-Distant-Signal/distant-signal). The cut-over copies, once, each DS
-account's Discord account id from the primary's Discord source
-connections into `users.discord_id`; the export file is deleted once it
-is loaded. Deleting a DS account leaves the `ds-sso` user: the operator
+Distant-Signal/distant-signal). DS no longer stores a Discord account id
+(`users.discord_id` is not read or written, and ds-core clears and then
+drops it). Deleting a DS account leaves the `ds-sso` user: the operator
 deletes it on request (the privacy notice says to email).
 
 ## Schedule feed SFTP server logs

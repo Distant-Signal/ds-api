@@ -11,10 +11,6 @@ fn parse_toml_path<T: DeserializeOwned>(path: &'_ str) -> Result<T> {
 }
 
 #[derive(Debug, clap::Parser)]
-#[expect(
-    clippy::struct_excessive_bools,
-    reason = "each bool is an independent on/off env switch"
-)]
 pub struct ServiceArguments {
     #[arg(short, long, env, default_value = "0.0.0.0:8080")]
     pub bind_url: String,
@@ -149,43 +145,6 @@ pub struct ServiceArguments {
     /// this now falls back from. docs/superpowers/specs/2026-08-31-dynamic-post-login-redirect-design.md.
     #[arg(long, env)]
     pub sso_post_login_redirect_url: String,
-
-    /// Account continuity across a change of identity provider
-    /// (docs/connected-apps.md, "Account continuity"): the ID-token claim
-    /// that carries the user's Discord id (snowflake), taken by the
-    /// provider from its Discord source connection. When set, a login
-    /// whose `sub` has no account yet takes over the account with that
-    /// `users.discord_id` (re-keyed to the new `sub`), and every login
-    /// stores the claim in `users.discord_id`. EMPTY BY DEFAULT: off.
-    #[arg(long, env, default_value = "")]
-    pub sso_discord_id_claim: String,
-
-    /// Account continuity, staff: the ID-token claim that carries the
-    /// user's `sub` at the previous (primary) identity provider, which is
-    /// their existing `users.id`. When set, a login whose `sub` has no
-    /// account yet takes over the account whose id is that claim. EMPTY BY
-    /// DEFAULT: off.
-    #[arg(long, env, default_value = "")]
-    pub sso_primary_sub_claim: String,
-
-    /// Account continuity, stricter match (docs/connected-apps.md,
-    /// "Account continuity"): when true, a login re-keys on the primary
-    /// sub only if the matched account's stored Discord id equals the
-    /// token's Discord id claim. A primary-sub match with no Discord id on
-    /// one or both sides is refused (the login creates a new account, and
-    /// `distant_signal_api_account_rekey_refused_total` counts it). FALSE
-    /// BY DEFAULT: the documented staff migration matches by primary sub
-    /// alone, and staff accounts carry no Discord id.
-    #[arg(long, env, default_value_t = false)]
-    pub account_continuity_require_strong_match: bool,
-
-    /// Account continuity, strict revocation: when true, a re-key also
-    /// revokes the account's personal API tokens and delegated grants
-    /// (connected apps), not only its other sessions. FALSE BY DEFAULT: the
-    /// tokens and grants belong to the person, who keeps them across a
-    /// change of identity provider.
-    #[arg(long, env, default_value_t = false)]
-    pub account_continuity_revoke_tokens_on_rekey: bool,
 
     /// Session idle timeout in days: a SLIDING expiry. Sign-in stamps
     /// `sessions.expires_at = NOW() + this`, and
@@ -509,16 +468,6 @@ pub const STORED_GROUPS_EXTRA_ENV: &str = "OIDC_STORED_GROUPS_EXTRA";
 pub const DEFAULT_STORED_GROUPS_EXTRA: &str = "";
 
 impl ServiceArguments {
-    /// The account continuity claim names (`SSO_DISCORD_ID_CLAIM`,
-    /// `SSO_PRIMARY_SUB_CLAIM`); see
-    /// [`crate::auth::oidc::ContinuityClaimNames`]. Checked at startup.
-    pub fn continuity_claim_names(&self) -> Result<crate::auth::oidc::ContinuityClaimNames> {
-        crate::auth::oidc::ContinuityClaimNames::new(
-            &self.sso_discord_id_claim,
-            &self.sso_primary_sub_claim,
-        )
-    }
-
     /// The `IdP` groups a login may store on `users.groups`; see
     /// [`STORED_GROUPS_EXTRA_ENV`].
     pub fn stored_group_allowlist(&self) -> Vec<String> {

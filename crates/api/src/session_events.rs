@@ -262,8 +262,6 @@ pub enum RevokeReason {
     AccountDeletion,
     /// A login replaced the session its browser carried.
     LoginReplaced,
-    /// Account continuity re-keyed the account to a new subject.
-    Rekey,
     /// The periodic sweep of expired rows (not a user-visible logout: those
     /// sessions had already lapsed).
     ExpirySweep,
@@ -279,13 +277,12 @@ impl RevokeReason {
             Self::LogoutEverywhere => "logout_everywhere",
             Self::AccountDeletion => "account_deletion",
             Self::LoginReplaced => "login_replaced",
-            Self::Rekey => "rekey",
             Self::ExpirySweep => "expiry_sweep",
         }
     }
 }
 
-const ALL_REVOKE_REASONS: [RevokeReason; 9] = [
+const ALL_REVOKE_REASONS: [RevokeReason; 8] = [
     RevokeReason::Backchannel,
     RevokeReason::Admin,
     RevokeReason::RevokeOthers,
@@ -293,7 +290,6 @@ const ALL_REVOKE_REASONS: [RevokeReason; 9] = [
     RevokeReason::LogoutEverywhere,
     RevokeReason::AccountDeletion,
     RevokeReason::LoginReplaced,
-    RevokeReason::Rekey,
     RevokeReason::ExpirySweep,
 ];
 

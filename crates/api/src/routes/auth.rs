@@ -27,7 +27,6 @@ pub fn register_user_metrics() {
         users::MISSING_NAME_CLAIMS_METRIC
     ))
     .increment(0);
-    crate::data::account_continuity::register_metrics();
 }
 
 pub fn router() -> Router {
@@ -348,19 +347,12 @@ async fn callback(
         }
     }
 
-    // Checked at startup (`AppState::init`), so an error here can't happen;
-    // treated as continuity off all the same.
-    let continuity_names = app.config.continuity_claim_names().unwrap_or_else(|err| {
-        tracing::error!(error = ?err, "invalid account continuity claim names; treating as off");
-        auth::oidc::ContinuityClaimNames::default()
-    });
     let exchange_result = app
         .oidc
         .exchange_code(
             code,
             openidconnect::PkceCodeVerifier::new(stored.pkce_verifier),
             &openidconnect::Nonce::new(stored.nonce),
-            &continuity_names,
         )
         .await;
     // The refresh token is deliberately dropped rather than persisted:
@@ -378,7 +370,6 @@ async fn callback(
 
     let auth::oidc::ExchangedLogin {
         identity,
-        continuity: continuity_claims,
         refresh_token: _refresh_token,
         auth_time,
     } = exchanged;
@@ -424,16 +415,8 @@ async fn callback(
     identity.groups =
         users::retain_allowed_groups(&identity.groups, &app.config.stored_group_allowlist());
 
-    let upserted = if continuity_names.enabled() {
-        continuity_login(&app, &identity, &continuity_claims).await
-    } else {
-        users::upsert_user(&app.database, &identity).await.map(Some)
-    };
-    let user = match upserted {
-        Ok(Some(u)) => u,
-        Ok(None) => {
-            return (StatusCode::CONFLICT, "login failed").into_response();
-        }
+    let user = match users::upsert_user(&app.database, &identity).await {
+        Ok(u) => u,
         Err(err) => {
             if let Some(unavailable) = crate::unavailable::response_for(&err) {
                 return unavailable.into_response();
@@ -519,82 +502,6 @@ async fn callback(
         .expect("cookie header value is always valid ASCII"),
     );
     response
-}
-
-/// The callback's upsert with account continuity on
-/// (`data::account_continuity`): logs an audit line and counts each
-/// re-key, each declined re-key and each conflict. `Ok(None)` when a
-/// conflict refuses the login.
-///
-/// The audit line names the account ids (`users.id`, an opaque subject)
-/// and never the Discord id.
-async fn continuity_login(
-    app: &App,
-    identity: &auth::oidc::OidcIdentity,
-    claims: &auth::oidc::ContinuityClaims,
-) -> anyhow::Result<Option<users::User>> {
-    use crate::data::account_continuity::{self as continuity, Outcome};
-
-    let options = continuity::Options {
-        require_strong_match: app.config.account_continuity_require_strong_match,
-        revoke_tokens_on_rekey: app.config.account_continuity_revoke_tokens_on_rekey,
-    };
-    let login = continuity::login(&app.database, identity, claims, &options).await?;
-    if let Outcome::Rekeyed { from, matched_by } = &login.outcome {
-        tracing::warn!(
-            audit = true,
-            event = "account_rekeyed",
-            from_user_id = %from,
-            to_user_id = %identity.sub,
-            matched_by = matched_by.label(),
-            sessions_revoked = login.revoked.sessions,
-            tokens_revoked = login.revoked.tokens,
-            grants_revoked = login.revoked.grants,
-            "account continuity: re-keyed an existing account to the login's new sub"
-        );
-        metrics::counter!(
-            ds_runtime::metrics::metric_name(continuity::REKEYS_METRIC),
-            "matched_by" => matched_by.label()
-        )
-        .increment(1);
-        // The re-key ended the previous holder's sessions (before the
-        // callback creates this login's session).
-        crate::session_events::record_revoked(
-            crate::session_events::RevokeReason::Rekey,
-            Some(&identity.sub),
-            login.revoked.sessions,
-        );
-    }
-    if let Some(refusal) = login.refused {
-        tracing::warn!(
-            audit = true,
-            event = "account_rekey_refused",
-            reason = refusal.label(),
-            user_id = %identity.sub,
-            "account continuity: declined a weak re-key; the login creates a new account"
-        );
-        metrics::counter!(
-            ds_runtime::metrics::metric_name(continuity::REFUSED_METRIC),
-            "reason" => refusal.label()
-        )
-        .increment(1);
-    }
-    if let Some(conflict) = login.conflict {
-        tracing::error!(
-            audit = true,
-            event = "account_continuity_conflict",
-            kind = conflict.label(),
-            user_id = %identity.sub,
-            login_refused = conflict.refuses_login(),
-            "account continuity: refused a re-key; the accounts need a manual merge"
-        );
-        metrics::counter!(
-            ds_runtime::metrics::metric_name(continuity::CONFLICTS_METRIC),
-            "kind" => conflict.label()
-        )
-        .increment(1);
-    }
-    Ok(login.user)
 }
 
 async fn logout(State(app): State<App>, headers: axum::http::HeaderMap) -> Response {

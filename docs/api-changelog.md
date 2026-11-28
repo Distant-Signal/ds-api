@@ -3,6 +3,25 @@
 Changes to the Distant Signal (DS) HTTP API that a client such as DS-MCP
 needs to know about. Newest first. Field names are as served (camelCase).
 
+## 2026-11-28: account continuity removed (DS-638)
+
+No route, field or schema change; `api-types/` is unchanged. Configuration
+removed: `SSO_DISCORD_ID_CLAIM`, `SSO_PRIMARY_SUB_CLAIM`,
+`ACCOUNT_CONTINUITY_REQUIRE_STRONG_MATCH` and
+`ACCOUNT_CONTINUITY_REVOKE_TOKENS_ON_REKEY` (and the chart values
+`api.sso.discordIdClaim` and `api.sso.primarySubClaim`). A deployment that
+still sets them starts normally; the api ignores environment variables it
+does not declare. Behaviour: a login is keyed on the ID token's `sub` alone
+and never re-keys an existing account, whatever other claims the token
+carries; the api neither reads nor writes `users.discord_id`, so a
+database that has the column (nullable) or not both work. Gone with it: the
+`account_rekeyed`, `account_rekey_refused` and `account_continuity_conflict`
+audit lines, the `distant_signal_api_account_rekeys_total`,
+`distant_signal_api_account_rekey_refused_total` and
+`distant_signal_api_account_continuity_conflicts_total` metrics, the
+`409` a continuity conflict could answer at login, and the `rekey` value of
+the session revocation `reason` label. DS-MCP: no change.
+
 ## 2026-11-28: `GET /public/stations/{crs}/board`, behind `STATION_BOARD_ENABLED` (DS-638)
 
 Additive. A new route; `api-types/api.ts` gains `StationBoard`,
